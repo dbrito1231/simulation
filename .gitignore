@@ -1,3 +1,7 @@
+# OS and editor
+.DS_Store
+.cursor/
+
 # Python-generated files
 __pycache__/
 *.py[oc]
