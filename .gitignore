@@ -1,6 +1,6 @@
 # OS and editor
 .DS_Store
-.cursor/
+.cursor/debug*.log
 
 # Python-generated files
 __pycache__/
