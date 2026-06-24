@@ -1,0 +1,1335 @@
+<!-- HOW TO RUN:
+  1. Start server.py first
+  2. Open http://127.0.0.1:5001 in Chrome or Firefox
+  3. No build step needed
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>AI Simulation World</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #1b1b1b; font-family: system-ui, sans-serif; }
+  #wrap {
+    display: flex;
+    width: 1280px;
+    margin: 0 auto;
+    position: relative;
+  }
+  #canvasWrap { position: relative; flex-shrink: 0; }
+  #world {
+    display: block;
+    background: #000;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  #pauseBtn {
+    position: absolute; top: 10px; left: 10px;
+    padding: 6px 14px; font: 13px sans-serif;
+    background: #333; color: #fff; border: 1px solid #666;
+    border-radius: 4px; cursor: pointer; z-index: 10;
+  }
+  #pauseBtn:hover { background: #444; }
+  #sidebar {
+    width: 280px;
+    height: 720px;
+    background: #14141c;
+    color: #ddd;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-left: 1px solid #2a2a35;
+  }
+  #sidebar h1 {
+    margin: 0;
+    padding: 16px 16px 8px;
+    font-size: 16px;
+    color: #fff;
+  }
+  #lmStatus {
+    padding: 0 16px 12px;
+    font-size: 12px;
+    color: #ccc;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid #2a2a35;
+  }
+  #lmStatus .dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  #lmStatus .hint { display: block; font-size: 10px; color: #999; margin-top: 4px; }
+  .panel-section {
+    padding: 10px 16px;
+    border-bottom: 1px solid #2a2a35;
+  }
+  .panel-section h2 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: #fff;
+  }
+  #civPanel { font-size: 11px; line-height: 1.5; }
+  #civPanel .civ-row { margin-bottom: 4px; }
+  #civPanel .civ-label { color: #999; }
+  #civPanel .civ-value { color: #e3c87e; }
+  #civPanel .progress-bar {
+    height: 6px;
+    background: #2a2a35;
+    border-radius: 3px;
+    margin-top: 4px;
+    overflow: hidden;
+  }
+  #civPanel .progress-fill {
+    height: 100%;
+    background: #4CAF50;
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+  #agentList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    font-size: 11px;
+    max-height: 140px;
+    overflow-y: auto;
+  }
+  #agentList li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 0;
+  }
+  #agentList .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  #conversationLog {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding-bottom: 0;
+  }
+  #convList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    flex: 1;
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  #convList li {
+    padding: 4px 0;
+    border-bottom: 1px solid #22222c;
+    word-break: break-word;
+  }
+  #convList .from { color: #7ec8e3; font-weight: 600; }
+  #convList .arrow { color: #888; }
+  #convList .to { color: #e3a87e; font-weight: 600; }
+  #convList .msg { color: #bbb; }
+  #activityLog {
+    max-height: 100px;
+    padding-bottom: 12px;
+  }
+  #actList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    max-height: 70px;
+    font-size: 10px;
+    color: #999;
+  }
+  #actList li { padding: 2px 0; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="canvasWrap">
+    <canvas id="world" width="1000" height="720"></canvas>
+    <button id="pauseBtn">Pause</button>
+  </div>
+  <aside id="sidebar">
+    <h1>AI Simulation World</h1>
+    <div id="lmStatus">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusLabel">LM Studio: offline</span>
+    </div>
+    <section class="panel-section" id="civPanel">
+      <h2>Civilization</h2>
+      <div class="civ-row"><span class="civ-label">Level:</span> <span class="civ-value" id="civLevel">1</span></div>
+      <div class="civ-row"><span class="civ-label">Structures:</span> <span class="civ-value" id="civStructures">0</span></div>
+      <div class="civ-row"><span class="civ-label">Project:</span> <span class="civ-value" id="civProject">none</span></div>
+      <div class="civ-row" id="civProgressRow" style="display:none">
+        <span class="civ-label">Progress:</span> <span class="civ-value" id="civProgress">—</span>
+        <div class="progress-bar"><div class="progress-fill" id="civProgressBar" style="width:0%"></div></div>
+      </div>
+      <div class="civ-row"><span class="civ-label">Resources:</span> <span class="civ-value" id="civResources">3</span></div>
+      <div class="civ-row"><span class="civ-label">Custom builds:</span> <span class="civ-value" id="civCustomBuilds">0</span></div>
+      <div class="civ-row" id="civPendingRow" style="display:none">
+        <span class="civ-label">Pending:</span>
+        <div id="civPending"></div>
+      </div>
+    </section>
+    <section class="panel-section">
+      <h2>Agents</h2>
+      <ul id="agentList"></ul>
+    </section>
+    <section class="panel-section" id="conversationLog">
+      <h2>Conversations</h2>
+      <ul id="convList"></ul>
+    </section>
+    <section class="panel-section" id="activityLog">
+      <h2>Activity</h2>
+      <ul id="actList"></ul>
+    </section>
+  </aside>
+</div>
+<script src="sprites.js"></script>
+<script>
+"use strict";
+
+const canvas = document.getElementById("world");
+const ctx = canvas.getContext("2d");
+ctx.imageSmoothingEnabled = false;
+
+const WORLD_W = 1000;
+const WORLD_H = 720;
+
+const ZONE_CENTERS = {
+  farm:    { x: 500, y: 120 },
+  forest:  { x: 820, y: 140 },
+  village: { x: 550, y: 360 },
+  market:  { x: 600, y: 400 },
+  beach:   { x: 230, y: 360 },
+  cave:    { x: 820, y: 580 },
+  ocean:   { x: 80,  y: 360 }
+};
+
+const ZONE_BOUNDS = {
+  farm:    { x1: 390, y1: 50,  x2: 630, y2: 210 },
+  forest:  { x1: 710, y1: 50,  x2: 950, y2: 250 },
+  village: { x1: 430, y1: 290, x2: 690, y2: 450 },
+  market:  { x1: 565, y1: 365, x2: 655, y2: 435 },
+  beach:   { x1: 160, y1: 50,  x2: 310, y2: 670 },
+  cave:    { x1: 730, y1: 530, x2: 930, y2: 670 },
+  ocean:   { x1: 20,  y1: 50,  x2: 140, y2: 670 }
+};
+
+const PROJECT_TEMPLATES = {
+  house:     { name: "House",     needs: { wood: 3, food: 1 }, visualStyle: "house" },
+  farm_plot: { name: "Farm Plot", needs: { wood: 2, food: 2 }, visualStyle: "farm_plot" },
+  workshop:  { name: "Workshop",  needs: { wood: 4, gold: 2 }, visualStyle: "workshop" },
+  wall:      { name: "Wall",      needs: { wood: 2, gold: 1 }, visualStyle: "wall" }
+};
+
+const PROJECT_ORDER = ["house", "farm_plot", "workshop", "wall"];
+
+// Base resources always available. Custom resources are merged in on approve_blueprint.
+const BASE_RESOURCES = {
+  food: { name: "Food", gatherZone: "farm",   color: "#4CAF50" },
+  wood: { name: "Wood", gatherZone: "forest", color: "#795548" },
+  gold: { name: "Gold", gatherZone: "cave",   color: "#FFC107" }
+};
+
+const VALID_GATHER_ZONES = new Set(
+  ["farm", "forest", "village", "market", "beach", "cave", "ocean"]
+);
+const VALID_VISUAL_STYLES = new Set(
+  ["house", "farm_plot", "workshop", "wall", "generic"]
+);
+const SLUG_RE = /^[a-z][a-z0-9_]{1,24}$/;
+const MAX_PENDING_BLUEPRINTS = 5;
+const MAX_APPROVED_CUSTOM = 15;
+const MAX_CUSTOM_RESOURCES = 10;
+
+const ROLE_SKILLS = {
+  farmer:     "gathers food from the farm",
+  trader:     "trades resources at the market",
+  builder:    "starts and completes build projects",
+  guard:      "patrols the village",
+  gatherer:   "gathers wood from the forest",
+  fisher:     "gathers food from the beach",
+  healer:     "supports villagers in the village",
+  miner:      "gathers gold from the cave",
+  scout:      "explores and scouts the forest",
+  blacksmith: "crafts at the market workshop",
+  explorer:   "explores distant zones",
+  elder:      "guides the village and starts projects"
+};
+
+const civilization = {
+  level: 1,
+  structures: [],
+  activeProject: null,
+  completedProjects: 0,
+  nextStructureId: 1,
+  resourceRegistry: { ...BASE_RESOURCES },
+  projectRegistry: { ...PROJECT_TEMPLATES },
+  pendingBlueprints: [],
+  rejectedBlueprintIds: new Set()
+};
+
+function customResourceCount() {
+  return Object.keys(civilization.resourceRegistry).filter(
+    (id) => !BASE_RESOURCES[id]
+  ).length;
+}
+
+function customProjectIds() {
+  return Object.keys(civilization.projectRegistry).filter(
+    (id) => civilization.projectRegistry[id].custom
+  );
+}
+
+// Map a zone to every resource id gatherable there (base + custom).
+function getZoneResources(zone) {
+  const ids = [];
+  for (const [id, def] of Object.entries(civilization.resourceRegistry)) {
+    if (def.gatherZone === zone) ids.push(id);
+  }
+  return ids;
+}
+
+// Client-side blueprint validation (defense in depth; server validates first).
+function validateBlueprint(bp) {
+  if (!bp || typeof bp !== "object") return false;
+  if (civilization.pendingBlueprints.length >= MAX_PENDING_BLUEPRINTS) return false;
+  if (customProjectIds().length >= MAX_APPROVED_CUSTOM) return false;
+
+  const id = bp.id;
+  if (typeof id !== "string" || !SLUG_RE.test(id)) return false;
+  if (PROJECT_TEMPLATES[id] || civilization.projectRegistry[id]) return false;
+  if (civilization.pendingBlueprints.some((p) => p.id === id)) return false;
+
+  if (typeof bp.name !== "string" || bp.name.length < 1 || bp.name.length > 32) return false;
+
+  const newResources = bp.new_resources || [];
+  if (!Array.isArray(newResources) || newResources.length > 3) return false;
+  const newIds = new Set();
+  for (const r of newResources) {
+    if (!r || typeof r !== "object") return false;
+    if (typeof r.id !== "string" || !SLUG_RE.test(r.id)) return false;
+    if (BASE_RESOURCES[r.id]) return false;
+    if (civilization.resourceRegistry[r.id] || newIds.has(r.id)) return false;
+    if (typeof r.name !== "string" || r.name.length < 1 || r.name.length > 32) return false;
+    if (r.gather_zone != null && !VALID_GATHER_ZONES.has(r.gather_zone)) return false;
+    newIds.add(r.id);
+  }
+  if (customResourceCount() + newIds.size > MAX_CUSTOM_RESOURCES) return false;
+
+  const needs = bp.needs;
+  if (!needs || typeof needs !== "object") return false;
+  const needKeys = Object.keys(needs);
+  if (needKeys.length < 1 || needKeys.length > 8) return false;
+  for (const key of needKeys) {
+    const known = civilization.resourceRegistry[key] || newIds.has(key) || BASE_RESOURCES[key];
+    if (!known) return false;
+    const amt = needs[key];
+    if (!Number.isInteger(amt) || amt < 1 || amt > 5) return false;
+  }
+
+  const vs = bp.visual_style || "generic";
+  if (!VALID_VISUAL_STYLES.has(vs)) return false;
+  return true;
+}
+
+const AVAILABLE_ACTIONS = [
+  "move_to_farm", "move_to_market", "move_to_forest", "move_to_beach",
+  "move_to_village", "move_to_cave", "move_to_agent",
+  "collect_resource", "talk_to_nearby", "trade_resource",
+  "start_project", "contribute_resources", "build_structure",
+  "propose_blueprint", "approve_blueprint", "reject_blueprint",
+  "change_role", "rest"
+];
+
+const AGENT_DEFS = [
+  { id: 1,  name: "Aria",  role: "farmer",     personality: "hardworking and cautious",   color: "#4CAF50", zone: "farm" },
+  { id: 2,  name: "Marco", role: "trader",     personality: "sociable and opportunistic",  color: "#FF9800", zone: "market" },
+  { id: 3,  name: "Zara",  role: "builder",    personality: "creative and methodical",     color: "#9C27B0", zone: "village" },
+  { id: 4,  name: "Rex",   role: "guard",      personality: "loyal and aggressive",        color: "#F44336", zone: "village" },
+  { id: 5,  name: "Luna",  role: "gatherer",   personality: "curious and adventurous",     color: "#2196F3", zone: "forest" },
+  { id: 6,  name: "Finn",  role: "fisher",     personality: "patient and quiet",           color: "#00BCD4", zone: "beach" },
+  { id: 7,  name: "Mia",   role: "healer",     personality: "empathetic and generous",     color: "#E91E63", zone: "village" },
+  { id: 8,  name: "Colt",  role: "miner",      personality: "stubborn and hardworking",    color: "#795548", zone: "cave" },
+  { id: 9,  name: "Ivy",   role: "scout",      personality: "fast and observant",          color: "#8BC34A", zone: "forest" },
+  { id: 10, name: "Dex",   role: "blacksmith", personality: "focused and proud",           color: "#607D8B", zone: "market" },
+  { id: 11, name: "Nova",  role: "explorer",   personality: "bold and impulsive",          color: "#FF5722", zone: "beach" },
+  { id: 12, name: "Sage",  role: "elder",      personality: "wise and slow-moving",        color: "#FFC107", zone: "village" }
+];
+
+const AGENT_NAMES = new Set(AGENT_DEFS.map((d) => d.name));
+
+function makeAgents() {
+  return AGENT_DEFS.map((def, i) => {
+    const center = ZONE_CENTERS[def.zone];
+    const ox = (i % 3 - 1) * 22;
+    const oy = (Math.floor(i / 3) % 3 - 1) * 22;
+    let speed = 2.8;
+    if (def.name === "Sage") speed = 1.4;
+    if (def.name === "Ivy" || def.name === "Nova") speed = 3.6;
+    return {
+      id: def.id,
+      name: def.name,
+      role: def.role,
+      personality: def.personality,
+      color: def.color,
+      x: center.x + ox, y: center.y + oy,
+      targetX: center.x + ox, targetY: center.y + oy,
+      speed: speed,
+      memory: [],
+      resources: { food: 2, wood: 0, gold: 0 },
+      relationships: {},
+      currentZone: def.zone,
+      message: null,
+      messageTimer: 0,
+      thinkTimer: 0,
+      thinkInterval: 300,
+      isThinking: false,
+      lastAction: null,
+      lastReasoning: null,
+      consecutiveTalks: 0,
+      pendingThink: false
+    };
+  });
+}
+
+const agents = makeAgents();
+
+agents.forEach((a, i) => {
+  a.thinkInterval = 360 + i * 60;
+  a.thinkTimer = i * 30;
+  a.idleFrames = 0;
+  setAgentTarget(a, a.currentZone);
+});
+
+function getZone(x, y) {
+  if (x >= 560 && x <= 660 && y >= 360 && y <= 440) return "market";
+  if (x >= 0 && x <= 150) return "ocean";
+  if (x >= 150 && x <= 320) return "beach";
+  if (x >= 380 && x <= 640 && y >= 40 && y <= 220) return "farm";
+  if (x >= 700 && x <= 960 && y >= 40 && y <= 260) return "forest";
+  if (x >= 420 && x <= 700 && y >= 280 && y <= 460) return "village";
+  if (x >= 720 && x <= 940 && y >= 520 && y <= 680) return "cave";
+  return "path";
+}
+
+function getNearbyAgents(agent, allAgents) {
+  const near = [];
+  for (const other of allAgents) {
+    if (other === agent) continue;
+    const dx = other.x - agent.x;
+    const dy = other.y - agent.y;
+    if (Math.sqrt(dx * dx + dy * dy) <= 80) near.push(other.name);
+  }
+  return near;
+}
+
+function getNearbyAgentsDetailed(agent, allAgents) {
+  const near = [];
+  for (const other of allAgents) {
+    if (other === agent) continue;
+    const dx = other.x - agent.x;
+    const dy = other.y - agent.y;
+    if (Math.sqrt(dx * dx + dy * dy) <= 80) {
+      near.push({
+        name: other.name,
+        role: other.role,
+        food: other.resources.food || 0,
+        wood: other.resources.wood || 0,
+        gold: other.resources.gold || 0
+      });
+    }
+  }
+  return near;
+}
+
+function formatNearbyForServer(detailed) {
+  if (detailed.length === 0) return "none";
+  return detailed.map((a) =>
+    `${a.name} (${a.role}, food:${a.food} wood:${a.wood} gold:${a.gold})`
+  ).join("; ");
+}
+
+function findNearestAgent(agent) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const other of agents) {
+    if (other === agent) continue;
+    const dx = other.x - agent.x;
+    const dy = other.y - agent.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = other;
+    }
+  }
+  return best;
+}
+
+function setAgentTarget(agent, zoneName) {
+  const bounds = ZONE_BOUNDS[zoneName];
+  if (!bounds) {
+    const center = ZONE_CENTERS[zoneName];
+    if (!center) return;
+    agent.targetX = center.x;
+    agent.targetY = center.y;
+    return;
+  }
+  agent.targetX = bounds.x1 + Math.random() * (bounds.x2 - bounds.x1);
+  agent.targetY = bounds.y1 + Math.random() * (bounds.y2 - bounds.y1);
+}
+
+function setAgentTargetToAgent(agent, targetName) {
+  const target = agents.find((a) => a.name === targetName);
+  if (!target) return;
+  const ox = (Math.random() - 0.5) * 60;
+  const oy = (Math.random() - 0.5) * 60;
+  agent.targetX = target.x + ox;
+  agent.targetY = target.y + oy;
+}
+
+function distanceTo(agent, other) {
+  const dx = other.x - agent.x;
+  const dy = other.y - agent.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+function moveAgent(agent) {
+  const dx = agent.targetX - agent.x;
+  const dy = agent.targetY - agent.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const moving = dist > agent.speed;
+  if (!moving) {
+    agent.x = agent.targetX;
+    agent.y = agent.targetY;
+    agent.idleFrames = (agent.idleFrames || 0) + 1;
+    if (agent.idleFrames >= 60) {
+      const wanderZone = agent.currentZone !== "path" && agent.currentZone !== "ocean"
+        ? agent.currentZone
+        : ZONE_NAMES[Math.floor(Math.random() * ZONE_NAMES.length)];
+      setAgentTarget(agent, wanderZone);
+      agent.idleFrames = 0;
+    }
+  } else {
+    agent.x += (dx / dist) * agent.speed;
+    agent.y += (dy / dist) * agent.speed;
+    agent.idleFrames = 0;
+  }
+  agent.currentZone = getZone(agent.x, agent.y);
+}
+
+function projectProgressText() {
+  if (!civilization.activeProject) return "none";
+  const p = civilization.activeProject;
+  const parts = [];
+  for (const [res, need] of Object.entries(p.needs)) {
+    const have = (p.contributed[res] || 0);
+    parts.push(`${res} ${have}/${need}`);
+  }
+  return parts.join(", ");
+}
+
+function projectProgressPercent() {
+  if (!civilization.activeProject) return 0;
+  const p = civilization.activeProject;
+  let total = 0;
+  let done = 0;
+  for (const [res, need] of Object.entries(p.needs)) {
+    total += need;
+    done += Math.min(p.contributed[res] || 0, need);
+  }
+  return total > 0 ? Math.round((done / total) * 100) : 0;
+}
+
+function isProjectComplete() {
+  if (!civilization.activeProject) return false;
+  const p = civilization.activeProject;
+  for (const [res, need] of Object.entries(p.needs)) {
+    if ((p.contributed[res] || 0) < need) return false;
+  }
+  return true;
+}
+
+function pickProjectType(target) {
+  if (target && civilization.projectRegistry[target]) return target;
+  const idx = civilization.completedProjects % PROJECT_ORDER.length;
+  return PROJECT_ORDER[idx];
+}
+
+function findStructureSpot() {
+  const spots = [
+    { x: 460, y: 330 }, { x: 510, y: 350 }, { x: 560, y: 330 },
+    { x: 600, y: 380 }, { x: 470, y: 400 }, { x: 520, y: 420 },
+    { x: 580, y: 410 }, { x: 640, y: 360 }, { x: 450, y: 360 },
+    { x: 500, y: 300 }, { x: 550, y: 400 }, { x: 610, y: 420 }
+  ];
+  for (const spot of spots) {
+    const taken = civilization.structures.some((s) =>
+      Math.abs(s.x - spot.x) < 40 && Math.abs(s.y - spot.y) < 40
+    );
+    if (!taken) return spot;
+  }
+  return {
+    x: 450 + Math.random() * 200,
+    y: 310 + Math.random() * 100
+  };
+}
+
+function checkCivilizationLevel() {
+  const newLevel = Math.floor(civilization.completedProjects / 3) + 1;
+  if (newLevel > civilization.level) {
+    civilization.level = newLevel;
+    pushActivity(`Civilization reached level ${civilization.level}!`);
+    sidebarDirty = true;
+  }
+}
+
+function roleFallbackAction(agent) {
+  const role = agent.role;
+  if (["farmer", "fisher", "gatherer"].includes(role)) {
+    const zoneMap = { farmer: "farm", fisher: "beach", gatherer: "forest" };
+    const targetZone = zoneMap[role];
+    if (agent.currentZone !== targetZone) {
+      return { action: `move_to_${targetZone}`, target: null, message: null,
+        reasoning: "Heading to gather resources. (redirected from talk)" };
+    }
+    return { action: "collect_resource", target: null, message: null,
+      reasoning: "Gathering resources. (redirected from talk)" };
+  }
+  if (role === "miner") {
+    if (agent.currentZone !== "cave") {
+      return { action: "move_to_cave", target: null, message: null,
+        reasoning: "Heading to mine. (redirected from talk)" };
+    }
+    return { action: "collect_resource", target: null, message: null,
+      reasoning: "Mining gold. (redirected from talk)" };
+  }
+  if (role === "builder") {
+    if (!civilization.activeProject) {
+      return { action: "start_project", target: "house", message: null,
+        reasoning: "Starting a build. (redirected from talk)" };
+    }
+    return { action: "contribute_resources", target: null, message: null,
+      reasoning: "Contributing to build. (redirected from talk)" };
+  }
+  if (role === "trader") {
+    const nearest = findNearestAgent(agent);
+    if (nearest) {
+      return { action: "move_to_agent", target: nearest.name, message: null,
+        reasoning: "Seeking trade partner. (redirected from talk)" };
+    }
+    return { action: "move_to_market", target: null, message: null,
+      reasoning: "Heading to market. (redirected from talk)" };
+  }
+  if (["guard", "scout", "explorer"].includes(role)) {
+    const nearest = findNearestAgent(agent);
+    if (nearest) {
+      return { action: "move_to_agent", target: nearest.name, message: null,
+        reasoning: "Moving to coordinate. (redirected from talk)" };
+    }
+    return { action: "move_to_village", target: null, message: null,
+      reasoning: "Patrolling village. (redirected from talk)" };
+  }
+  if (["healer", "elder", "blacksmith"].includes(role)) {
+    if (civilization.activeProject) {
+      return { action: "contribute_resources", target: null, message: null,
+        reasoning: "Supporting build. (redirected from talk)" };
+    }
+    if (role === "elder" && !civilization.activeProject) {
+      return { action: "start_project", target: "house", message: null,
+        reasoning: "Elder starting project. (redirected from talk)" };
+    }
+    return { action: "move_to_village", target: null, message: null,
+      reasoning: "Returning to village. (redirected from talk)" };
+  }
+  return { action: "collect_resource", target: null, message: null,
+    reasoning: "Working. (redirected from talk)" };
+}
+
+function normalizeDecision(agent, decision) {
+  if (!decision || decision.error) return decision;
+  const action = decision.action || "rest";
+  if (action !== "talk_to_nearby") return decision;
+
+  const nearby = getNearbyAgents(agent, agents);
+  const target = decision.target;
+  const message = decision.message;
+  const invalid = (
+    nearby.length === 0
+    || !target
+    || !message
+    || !AGENT_NAMES.has(target)
+    || !nearby.includes(target)
+  );
+
+  if (invalid) {
+    return roleFallbackAction(agent);
+  }
+  return decision;
+}
+
+function resolveTalkTarget(agent, decision) {
+  if (decision.target && AGENT_NAMES.has(decision.target)) {
+    return decision.target;
+  }
+  const nearby = getNearbyAgents(agent, agents);
+  return nearby.length > 0 ? nearby[0] : "everyone";
+}
+
+function drawWorld(ctx, frameTick) {
+  drawTiledWorld(ctx, WORLD_W, WORLD_H, frameTick, civilization.structures);
+}
+
+function drawResourceDots(ctx, agent, cx, cy) {
+  let dotX = cx - 18;
+  for (const [key, def] of Object.entries(civilization.resourceRegistry)) {
+    const count = Math.min(agent.resources[key] || 0, 5);
+    for (let i = 0; i < count; i++) {
+      ctx.fillStyle = def.color || "#BDBDBD";
+      ctx.fillRect(dotX, cy, 3, 3);
+      dotX += 5;
+    }
+  }
+}
+
+function drawSpeechBubble(ctx, agent) {
+  if (!agent.message) return;
+  const x = agent.x;
+  const y = agent.y;
+  const text = agent.message.length > 36
+    ? agent.message.slice(0, 35) + "\u2026"
+    : agent.message;
+  ctx.font = "10px monospace";
+  const w = Math.max(48, ctx.measureText(text).width + 14);
+  const bx = Math.round(x - w / 2);
+  const by = y - 72;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(bx, by, w, 22);
+  ctx.strokeStyle = "#111";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(bx, by, w, 22);
+  ctx.fillRect(x - 3, by + 22, 6, 4);
+  ctx.fillStyle = "#222";
+  ctx.textAlign = "center";
+  ctx.fillText(text, x, by + 15);
+}
+
+function drawAgent(ctx, agent, frameTick) {
+  drawAgentSprite(ctx, agent, frameTick);
+  ctx.fillStyle = agent.color;
+  ctx.fillRect(agent.x - 10, agent.y - 58, 20, 8);
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 7px monospace";
+  ctx.textAlign = "center";
+  ctx.fillText(agent.role.charAt(0).toUpperCase(), agent.x, agent.y - 52);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "10px monospace";
+  ctx.textAlign = "center";
+  ctx.strokeStyle = "#111";
+  ctx.lineWidth = 2;
+  ctx.strokeText(agent.name, agent.x, agent.y + 30);
+  ctx.fillText(agent.name, agent.x, agent.y + 30);
+  drawResourceDots(ctx, agent, agent.x, agent.y + 36);
+  drawSpeechBubble(ctx, agent);
+}
+
+const activityLog = [];
+const conversationLog = [];
+let lmStatus = "offline";
+let paused = false;
+let llmBusy = false;
+let llmCooldownUntil = 0;
+let lastLlmCallMs = 0;
+let sidebarDirty = true;
+let frameTick = 0;
+let lastRenderedActCount = -1;
+let lastRenderedConvCount = -1;
+const LLM_MIN_GAP_MS = 1500;
+const COMPUTE_COOLDOWN_MS = 30000;
+const thinkQueue = [];
+const ZONE_NAMES = Object.keys(ZONE_CENTERS);
+
+function persistLog(payload) {
+  try {
+    fetch("/log/event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true
+    }).catch(() => {});
+  } catch (e) {
+    // Logging must never break the simulation.
+  }
+}
+
+function pushActivity(line) {
+  activityLog.unshift(line);
+  if (activityLog.length > 30) activityLog.length = 30;
+  sidebarDirty = true;
+  persistLog({ type: "activity", message: line, frame_tick: frameTick });
+}
+
+function pushConversation(from, to, message) {
+  conversationLog.unshift({ from, to, message });
+  if (conversationLog.length > 100) conversationLog.length = 100;
+  sidebarDirty = true;
+  persistLog({ type: "conversation", from, to, message, frame_tick: frameTick });
+}
+
+function pushMemory(agent, line) {
+  agent.memory.push(line);
+  if (agent.memory.length > 5) agent.memory.shift();
+}
+
+function nudgeAlly(agent, otherName) {
+  const cur = agent.relationships[otherName];
+  if (cur === "rival") agent.relationships[otherName] = "neutral";
+  else agent.relationships[otherName] = "ally";
+}
+
+function mostAbundantResource(agent) {
+  let best = null;
+  let bestCount = 0;
+  for (const key of Object.keys(civilization.resourceRegistry)) {
+    const count = agent.resources[key] || 0;
+    if (count > bestCount) {
+      bestCount = count;
+      best = key;
+    }
+  }
+  return bestCount > 0 ? best : null;
+}
+
+function pickContributionResource(agent, decision) {
+  if (!civilization.activeProject) return null;
+  const p = civilization.activeProject;
+  if (decision.target && civilization.resourceRegistry[decision.target]) {
+    const res = decision.target;
+    if ((agent.resources[res] || 0) > 0 && (p.contributed[res] || 0) < (p.needs[res] || 0)) {
+      return res;
+    }
+  }
+  for (const res of Object.keys(p.needs)) {
+    const need = p.needs[res] || 0;
+    const have = p.contributed[res] || 0;
+    if (need > have && (agent.resources[res] || 0) > 0) return res;
+  }
+  return mostAbundantResource(agent);
+}
+
+function autoMoveTowardTarget(agent, targetName) {
+  if (!targetName || !AGENT_NAMES.has(targetName)) return;
+  const other = agents.find((a) => a.name === targetName);
+  if (!other) return;
+  if (distanceTo(agent, other) > 80) {
+    setAgentTargetToAgent(agent, targetName);
+  }
+}
+
+function applyDecision(agent, decision) {
+  const action = decision.action || "rest";
+  let summary = `${agent.name} rested`;
+  let logActivity = true;
+
+  const isTalk = action === "talk_to_nearby";
+  if (isTalk && decision.message) {
+    agent.consecutiveTalks++;
+  } else if (action !== "rest") {
+    agent.consecutiveTalks = 0;
+  }
+
+  switch (action) {
+    case "move_to_farm":
+    case "move_to_market":
+    case "move_to_forest":
+    case "move_to_beach":
+    case "move_to_village":
+    case "move_to_cave": {
+      const zone = action.replace("move_to_", "");
+      setAgentTarget(agent, zone);
+      summary = `${agent.name} heads to the ${zone}`;
+      break;
+    }
+    case "move_to_agent": {
+      if (decision.target && AGENT_NAMES.has(decision.target)) {
+        setAgentTargetToAgent(agent, decision.target);
+        summary = `${agent.name} moves toward ${decision.target}`;
+      } else {
+        const nearest = findNearestAgent(agent);
+        if (nearest) {
+          setAgentTargetToAgent(agent, nearest.name);
+          summary = `${agent.name} moves toward ${nearest.name}`;
+        }
+      }
+      break;
+    }
+    case "collect_resource": {
+      const zone = agent.currentZone;
+      let resource = null;
+      const targetDef = decision.target && civilization.resourceRegistry[decision.target];
+      if (targetDef && targetDef.gatherZone === zone) {
+        resource = decision.target;
+      } else {
+        const zoneResources = getZoneResources(zone);
+        resource = zoneResources.length > 0 ? zoneResources[0] : null;
+        if (!resource && zone === "beach" && agent.role === "fisher") resource = "food";
+      }
+      if (resource && (agent.resources[resource] || 0) < 5) {
+        agent.resources[resource] = (agent.resources[resource] || 0) + 1;
+        summary = `${agent.name} collected ${resource}`;
+      } else {
+        summary = `${agent.name} found nothing to collect`;
+      }
+      break;
+    }
+    case "talk_to_nearby": {
+      const recipient = resolveTalkTarget(agent, decision);
+      autoMoveTowardTarget(agent, recipient !== "everyone" ? recipient : decision.target);
+      if (decision.message) {
+        agent.message = decision.message;
+        agent.messageTimer = 180;
+        pushConversation(agent.name, recipient, decision.message);
+        summary = `${agent.name} talked to ${recipient}`;
+      } else {
+        summary = `${agent.name} looked for someone to talk to`;
+      }
+      break;
+    }
+    case "trade_resource": {
+      const target = agents.find((a) => a.name === decision.target);
+      if (target) autoMoveTowardTarget(agent, target.name);
+      const nearby = target && distanceTo(agent, target) <= 80;
+      const give = mostAbundantResource(agent);
+      if (nearby && give) {
+        agent.resources[give] -= 1;
+        target.resources[give] = (target.resources[give] || 0) + 1;
+        nudgeAlly(agent, target.name);
+        nudgeAlly(target, agent.name);
+        pushMemory(target, `Received ${give} from ${agent.name}`);
+        summary = `${agent.name} traded ${give} to ${target.name}`;
+      } else if (target) {
+        summary = `${agent.name} moves to trade with ${target.name}`;
+      } else {
+        summary = `${agent.name} rested`;
+      }
+      break;
+    }
+    case "start_project": {
+      if (!civilization.activeProject && (agent.role === "builder" || agent.role === "elder")) {
+        const type = pickProjectType(decision.target);
+        const tmpl = civilization.projectRegistry[type];
+        const contributed = {};
+        for (const res of Object.keys(tmpl.needs)) contributed[res] = 0;
+        civilization.activeProject = {
+          type: type,
+          name: tmpl.name,
+          needs: { ...tmpl.needs },
+          contributed: contributed,
+          visualStyle: tmpl.visualStyle || "generic"
+        };
+        summary = `${agent.name} started ${tmpl.name} project`;
+        pushActivity(summary);
+        sidebarDirty = true;
+      } else {
+        summary = `${agent.name} could not start a project`;
+      }
+      break;
+    }
+    case "contribute_resources": {
+      const res = pickContributionResource(agent, decision);
+      if (res && civilization.activeProject && (agent.resources[res] || 0) > 0) {
+        const need = civilization.activeProject.needs[res] || 0;
+        const have = civilization.activeProject.contributed[res] || 0;
+        if (have < need) {
+          agent.resources[res] -= 1;
+          civilization.activeProject.contributed[res] = have + 1;
+          summary = `${agent.name} contributed ${res} to ${civilization.activeProject.name}`;
+          pushActivity(summary);
+          sidebarDirty = true;
+        } else {
+          summary = `${agent.name} project does not need more ${res}`;
+        }
+      } else {
+        summary = `${agent.name} has nothing to contribute`;
+      }
+      break;
+    }
+    case "build_structure": {
+      if (agent.role === "builder" && civilization.activeProject && isProjectComplete()) {
+        const spot = findStructureSpot();
+        const structType = civilization.activeProject.type;
+        civilization.structures.push({
+          id: civilization.nextStructureId++,
+          type: structType,
+          x: spot.x,
+          y: spot.y,
+          visualStyle: civilization.activeProject.visualStyle || "generic",
+          name: civilization.activeProject.name
+        });
+        const builtName = civilization.activeProject.name;
+        civilization.activeProject = null;
+        civilization.completedProjects++;
+        checkCivilizationLevel();
+        summary = `${agent.name} built ${builtName} at village`;
+        pushActivity(summary);
+        sidebarDirty = true;
+      } else if (civilization.activeProject && !isProjectComplete()) {
+        summary = `${agent.name} waiting for more resources`;
+      } else {
+        summary = `${agent.name} has no project to build`;
+      }
+      break;
+    }
+    case "propose_blueprint": {
+      const bp = decision.blueprint;
+      if (bp && civilization.rejectedBlueprintIds.has(bp.id)) {
+        summary = `${agent.name}'s blueprint ${bp.id} was already rejected`;
+      } else if (validateBlueprint(bp)) {
+        const needsStr = Object.entries(bp.needs)
+          .map(([k, v]) => `${k}\u00d7${v}`).join(", ");
+        civilization.pendingBlueprints.push({
+          id: bp.id,
+          name: bp.name,
+          needs: { ...bp.needs },
+          newResources: (bp.new_resources || []).map((r) => ({
+            id: r.id,
+            name: r.name,
+            gatherZone: r.gather_zone == null ? null : r.gather_zone,
+            color: r.color || "#BDBDBD"
+          })),
+          visualStyle: bp.visual_style || "generic",
+          proposedBy: agent.name,
+          proposedAt: Date.now()
+        });
+        if (decision.message) {
+          agent.message = decision.message;
+          agent.messageTimer = 180;
+        }
+        summary = `${agent.name} proposed ${bp.name} (needs ${needsStr})`;
+        sidebarDirty = true;
+      } else {
+        summary = `${agent.name} drafted an invalid blueprint`;
+      }
+      break;
+    }
+    case "approve_blueprint": {
+      const isReviewer = agent.role === "elder" || agent.role === "builder";
+      const idx = civilization.pendingBlueprints.findIndex((p) => p.id === decision.target);
+      if (isReviewer && idx !== -1) {
+        const bp = civilization.pendingBlueprints[idx];
+        for (const r of bp.newResources) {
+          if (!civilization.resourceRegistry[r.id]) {
+            civilization.resourceRegistry[r.id] = {
+              name: r.name,
+              gatherZone: r.gatherZone,
+              color: r.color
+            };
+          }
+        }
+        civilization.projectRegistry[bp.id] = {
+          name: bp.name,
+          needs: { ...bp.needs },
+          visualStyle: bp.visualStyle,
+          custom: true
+        };
+        civilization.pendingBlueprints.splice(idx, 1);
+        if (decision.message) {
+          agent.message = decision.message;
+          agent.messageTimer = 180;
+        }
+        summary = `${agent.name} approved ${bp.name} blueprint`;
+        sidebarDirty = true;
+      } else {
+        summary = `${agent.name} could not approve that blueprint`;
+      }
+      break;
+    }
+    case "reject_blueprint": {
+      const isReviewer = agent.role === "elder" || agent.role === "builder";
+      const idx = civilization.pendingBlueprints.findIndex((p) => p.id === decision.target);
+      if (isReviewer && idx !== -1) {
+        const bp = civilization.pendingBlueprints[idx];
+        civilization.pendingBlueprints.splice(idx, 1);
+        civilization.rejectedBlueprintIds.add(bp.id);
+        summary = `${agent.name} rejected ${bp.name} blueprint`;
+        sidebarDirty = true;
+      } else {
+        summary = `${agent.name} could not reject that blueprint`;
+      }
+      break;
+    }
+    case "change_role": {
+      if (decision.new_role) {
+        agent.role = decision.new_role;
+        summary = `${agent.name} became a ${decision.new_role}`;
+        sidebarDirty = true;
+      }
+      break;
+    }
+    case "rest":
+    default:
+      summary = `${agent.name} rested`;
+      break;
+  }
+
+  agent.lastAction = action;
+  agent.lastReasoning = decision.reasoning || null;
+  pushMemory(agent, summary);
+
+  if (decision.relationship_update && typeof decision.relationship_update === "object") {
+    Object.assign(agent.relationships, decision.relationship_update);
+  }
+
+  if (logActivity) pushActivity(summary);
+}
+
+function applyRuleBasedFallback(agent) {
+  const zone = ZONE_NAMES[Math.floor(Math.random() * ZONE_NAMES.length)];
+  setAgentTarget(agent, zone);
+  pushMemory(agent, `${agent.name} wandered toward the ${zone}`);
+  pushActivity(`${agent.name} wandered toward the ${zone} (LLM fallback)`);
+}
+
+function scheduleThink(agent) {
+  if (agent.pendingThink) return;
+  agent.pendingThink = true;
+  thinkQueue.push(agent);
+  drainThinkQueue();
+}
+
+async function drainThinkQueue() {
+  if (llmBusy || thinkQueue.length === 0) return;
+  const now = Date.now();
+  if (now < llmCooldownUntil) return;
+  if (now - lastLlmCallMs < LLM_MIN_GAP_MS) return;
+  llmBusy = true;
+  const agent = thinkQueue.shift();
+  agent.pendingThink = false;
+  lastLlmCallMs = now;
+  try {
+    await thinkAgent(agent);
+  } finally {
+    llmBusy = false;
+    drainThinkQueue();
+  }
+}
+
+function recentConversationsText() {
+  if (conversationLog.length === 0) return "none";
+  return conversationLog.slice(0, 5).map((c) =>
+    `${c.from} -> ${c.to}: ${c.message}`
+  ).join(" | ");
+}
+
+async function thinkAgent(agent) {
+  agent.isThinking = true;
+  const nearbyDetailed = getNearbyAgentsDetailed(agent, agents);
+
+  let behaviorNudge = "";
+  if (agent.consecutiveTalks >= 2) {
+    behaviorNudge = "NOTE: You have chatted twice. Prioritize collect_resource, contribute_resources, or move_to_agent.";
+  }
+
+  const payload = {
+    agent_name: agent.name,
+    frame_tick: frameTick,
+    role: agent.role,
+    role_skill: ROLE_SKILLS[agent.role] || "helps the village",
+    personality: agent.personality,
+    memory: agent.memory,
+    resources: agent.resources,
+    relationships: agent.relationships,
+    nearby_agents: nearbyDetailed,
+    world_zone: getZone(agent.x, agent.y),
+    civilization_level: civilization.level,
+    structures_built: civilization.structures.length,
+    active_project: civilization.activeProject ? civilization.activeProject.name : "none",
+    project_progress: projectProgressText(),
+    known_resources: Object.entries(civilization.resourceRegistry).map(([id, def]) => ({
+      id: id,
+      gather_zone: def.gatherZone,
+      custom: !BASE_RESOURCES[id]
+    })),
+    pending_blueprints: civilization.pendingBlueprints.map((b) => ({
+      id: b.id,
+      needs: b.needs,
+      proposed_by: b.proposedBy
+    })),
+    approved_custom_projects: customProjectIds(),
+    rejected_blueprints: Array.from(civilization.rejectedBlueprintIds),
+    recent_conversations: recentConversationsText(),
+    behavior_nudge: behaviorNudge,
+    available_actions: AVAILABLE_ACTIONS
+  };
+
+  try {
+    const resp = await fetch("/agent/think", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    let decision = await resp.json();
+
+    if (decision.error === "LM Studio offline") {
+      lmStatus = "offline";
+      applyRuleBasedFallback(agent);
+    } else if (decision.error === "compute_error") {
+      lmStatus = "compute_error";
+      llmCooldownUntil = Date.now() + COMPUTE_COOLDOWN_MS;
+      applyRuleBasedFallback(agent);
+    } else if (decision.error) {
+      lmStatus = "online";
+      applyDecision(agent, { action: "rest" });
+    } else {
+      lmStatus = "online";
+      llmCooldownUntil = 0;
+      decision = normalizeDecision(agent, decision);
+      applyDecision(agent, decision);
+    }
+  } catch (e) {
+    lmStatus = "offline";
+    applyRuleBasedFallback(agent);
+  } finally {
+    agent.isThinking = false;
+    sidebarDirty = true;
+  }
+}
+
+const statusDot = document.getElementById("statusDot");
+const statusLabel = document.getElementById("statusLabel");
+const agentListEl = document.getElementById("agentList");
+const convListEl = document.getElementById("convList");
+const actListEl = document.getElementById("actList");
+const civLevelEl = document.getElementById("civLevel");
+const civStructuresEl = document.getElementById("civStructures");
+const civProjectEl = document.getElementById("civProject");
+const civProgressEl = document.getElementById("civProgress");
+const civProgressRow = document.getElementById("civProgressRow");
+const civProgressBar = document.getElementById("civProgressBar");
+const civResourcesEl = document.getElementById("civResources");
+const civCustomBuildsEl = document.getElementById("civCustomBuilds");
+const civPendingRow = document.getElementById("civPendingRow");
+const civPendingEl = document.getElementById("civPending");
+
+function renderSidebar() {
+  const statusColor = lmStatus === "online" ? "#4CAF50"
+    : lmStatus === "compute_error" ? "#FF9800" : "#F44336";
+  const label = lmStatus === "online" ? "LM Studio: online"
+    : lmStatus === "compute_error" ? "LM Studio: GPU memory error"
+    : "LM Studio: offline";
+  statusDot.style.background = statusColor;
+  statusLabel.innerHTML = label + (lmStatus === "compute_error"
+    ? '<span class="hint">Use a smaller model or Q4 quant</span>'
+    : "");
+
+  civLevelEl.textContent = civilization.level;
+  civStructuresEl.textContent = civilization.structures.length;
+  civProjectEl.textContent = civilization.activeProject
+    ? civilization.activeProject.name : "none";
+
+  if (civilization.activeProject) {
+    civProgressRow.style.display = "block";
+    civProgressEl.textContent = projectProgressText();
+    civProgressBar.style.width = projectProgressPercent() + "%";
+  } else {
+    civProgressRow.style.display = "none";
+  }
+
+  if (sidebarDirty) {
+    civResourcesEl.textContent = Object.keys(civilization.resourceRegistry).length;
+    civCustomBuildsEl.textContent = customProjectIds().length;
+    if (civilization.pendingBlueprints.length > 0) {
+      civPendingRow.style.display = "block";
+      civPendingEl.innerHTML = civilization.pendingBlueprints.slice(0, 3).map((b) =>
+        `<div class="civ-value">${escapeHtml(b.name)} <span class="civ-label">by ${escapeHtml(b.proposedBy)}</span></div>`
+      ).join("");
+    } else {
+      civPendingRow.style.display = "none";
+    }
+  }
+
+  const logsChanged = activityLog.length !== lastRenderedActCount
+    || conversationLog.length !== lastRenderedConvCount;
+
+  if (sidebarDirty) {
+    agentListEl.innerHTML = agents.map((a) =>
+      `<li><span class="dot" style="background:${a.color}"></span>${a.name} \u2014 ${a.role}</li>`
+    ).join("");
+  }
+
+  if (logsChanged || sidebarDirty) {
+    convListEl.innerHTML = conversationLog.map((c) =>
+      `<li><span class="from">${escapeHtml(c.from)}</span> <span class="arrow">\u2192</span> <span class="to">${escapeHtml(c.to)}</span>: <span class="msg">${escapeHtml(c.message)}</span></li>`
+    ).join("");
+
+    actListEl.innerHTML = activityLog.map((line) =>
+      `<li>${escapeHtml(line)}</li>`
+    ).join("");
+
+    lastRenderedActCount = activityLog.length;
+    lastRenderedConvCount = conversationLog.length;
+  }
+
+  sidebarDirty = false;
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function tick() {
+  frameTick++;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawWorld(ctx, frameTick);
+
+  for (const agent of agents) {
+    if (!paused) moveAgent(agent);
+  }
+  for (const agent of agents) {
+    drawAgent(ctx, agent, frameTick);
+  }
+
+  for (const agent of agents) {
+    if (agent.messageTimer > 0) {
+      agent.messageTimer--;
+      if (agent.messageTimer === 0) agent.message = null;
+    }
+
+    if (!paused) {
+      agent.thinkTimer--;
+      if (agent.thinkTimer <= 0 && !agent.isThinking && !agent.pendingThink) {
+        scheduleThink(agent);
+        agent.thinkTimer = agent.thinkInterval;
+      }
+    }
+  }
+
+  if (!paused && thinkQueue.length > 0 && !llmBusy) {
+    drainThinkQueue();
+  }
+
+  renderSidebar();
+  requestAnimationFrame(tick);
+}
+
+const pauseBtn = document.getElementById("pauseBtn");
+pauseBtn.addEventListener("click", () => {
+  paused = !paused;
+  pauseBtn.textContent = paused ? "Resume" : "Pause";
+});
+
+sidebarDirty = true;
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
