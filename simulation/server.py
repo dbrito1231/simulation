@@ -32,6 +32,14 @@ class SessionLogger:
         self.lm_studio_path = os.path.join(self.dir, "lm_studio.jsonl")
         for path in [self.activity_path, self.conversation_path, self.lm_studio_path]:
             open(path, "a", encoding="utf-8").close()
+        logs_root = os.path.dirname(self.dir)
+        open(os.path.join(logs_root, "conversation.jsonl"), "a", encoding="utf-8").close()
+        self.log_conversation(
+            "system",
+            "log",
+            "Conversation log started. Agent speech, directives, and talk attempts are recorded here.",
+            kind="session_start",
+        )
 
     def _append(self, path, record):
         record = {
@@ -55,11 +63,19 @@ class SessionLogger:
             "type": "activity", "message": message, "frame_tick": frame_tick,
         })
 
-    def log_conversation(self, sender, recipient, message, frame_tick=None):
-        self._append(self.conversation_path, {
-            "type": "conversation", "from": sender, "to": recipient,
-            "message": message, "frame_tick": frame_tick,
-        })
+    def log_conversation(self, sender, recipient, message, frame_tick=None,
+                         kind="speech", outcome=None):
+        record = {
+            "type": "conversation",
+            "kind": kind,
+            "from": sender,
+            "to": recipient,
+            "message": message,
+            "frame_tick": frame_tick,
+        }
+        if outcome:
+            record["outcome"] = outcome
+        self._append(self.conversation_path, record)
 
     def log_lm_exchange(self, record):
         record = {"type": "lm_studio", **record}
@@ -121,6 +137,7 @@ BLUEPRINTS (inventing new structures):
    target set to that resource id.
 
 Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
+Do not use chain-of-thought or reasoning — output the JSON object immediately.
 The JSON must match this structure exactly:
 {
   "action": "<one of the available_actions>",
@@ -300,12 +317,59 @@ def role_default_project(role):
     return ROLE_PROJECT.get((role or "").lower(), "house")
 
 
-def task_for_role(role, active_project=None):
+RESOURCE_GATHER_ROLES = {
+    "food": ("farmer", "fisher"),
+    "wood": ("gatherer",),
+    "gold": ("miner",),
+}
+
+
+def parse_project_shortfalls(project_progress):
+    """Parse 'wood 0/3, food 1/1' into [(resource, amount_still_needed), ...]."""
+    if not project_progress or project_progress in ("none", "null"):
+        return []
+    shortfalls = []
+    for part in str(project_progress).split(","):
+        match = re.match(r"(\w+)\s+(\d+)\s*/\s*(\d+)", part.strip())
+        if not match:
+            continue
+        res, have, need = match.group(1), int(match.group(2)), int(match.group(3))
+        if have < need:
+            shortfalls.append((res, need - have))
+    return shortfalls
+
+
+def pick_idle_agent_for_project(idle_agents, project_progress):
+    """Prefer idle agents whose role gathers the resource the project still needs."""
+    shortfalls = parse_project_shortfalls(project_progress)
+    if shortfalls:
+        needed_res = shortfalls[0][0]
+        preferred_roles = RESOURCE_GATHER_ROLES.get(needed_res, ())
+        for role in preferred_roles:
+            for agent in idle_agents:
+                if (agent.get("role") or "").lower() == role:
+                    return agent
+    return idle_agents[0] if idle_agents else None
+
+
+def task_for_role(role, active_project=None, project_progress=None):
     role = (role or "").lower()
+    shortfalls = parse_project_shortfalls(project_progress)
+    if shortfalls:
+        needed_res = shortfalls[0][0]
+        role_res = {"farmer": "food", "fisher": "food", "gatherer": "wood", "miner": "gold"}
+        if role_res.get(role) == needed_res:
+            return f"gather {needed_res} for the active project"
+        return f"gather or contribute {needed_res} to the active project"
     if active_project and active_project not in ("none", "null", None, ""):
         return f"gather or contribute resources to {active_project}"
     project = role_default_project(role).replace("_", " ")
     return f"prepare to start a {project} project"
+
+
+def first_shortfall_resource(agent_data):
+    shortfalls = parse_project_shortfalls(agent_data.get("project_progress"))
+    return shortfalls[0][0] if shortfalls else None
 
 
 def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
@@ -391,11 +455,14 @@ def role_fallback_action(role, agent_data):
 
     idle_agents = agent_data.get("idle_agents") or []
     if role == "elder" and idle_agents:
-        target = idle_agents[0]
-        target_name = target.get("name")
+        project_progress = agent_data.get("project_progress")
+        target = pick_idle_agent_for_project(idle_agents, project_progress)
+        target_name = target.get("name") if target else None
         if target_name:
             return {"action": "assign_task", "target": target_name,
-                    "message": task_for_role(target.get("role"), active_project),
+                    "message": task_for_role(
+                        target.get("role"), active_project, project_progress,
+                    ),
                     "new_role": None, "relationship_update": None,
                     "reasoning": "Assigning work to an idle villager."}
 
@@ -418,7 +485,8 @@ def role_fallback_action(role, agent_data):
             return {"action": "move_to_beach", "target": None, "message": None,
                     "new_role": None, "relationship_update": None,
                     "reasoning": "Heading to beach to fish."}
-        return {"action": "collect_resource", "target": None, "message": None,
+        needed = first_shortfall_resource(agent_data)
+        return {"action": "collect_resource", "target": needed, "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Gathering resources for the village."}
 
@@ -428,12 +496,14 @@ def role_fallback_action(role, agent_data):
             return {"action": "move_to_cave", "target": None, "message": None,
                     "new_role": None, "relationship_update": None,
                     "reasoning": "Heading to the cave to mine."}
-        return {"action": "collect_resource", "target": None, "message": None,
+        needed = first_shortfall_resource(agent_data) or "gold"
+        return {"action": "collect_resource", "target": needed, "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Mining gold for civilization."}
 
     if role == "builder":
-        return {"action": "contribute_resources", "target": "wood", "message": None,
+        needed = first_shortfall_resource(agent_data) or "wood"
+        return {"action": "contribute_resources", "target": needed, "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Contributing to the active project."}
 
@@ -449,7 +519,8 @@ def role_fallback_action(role, agent_data):
 
     if role in ("healer", "elder", "blacksmith"):
         if has_project:
-            return {"action": "contribute_resources", "target": None, "message": None,
+            needed = first_shortfall_resource(agent_data)
+            return {"action": "contribute_resources", "target": needed, "message": None,
                     "new_role": None, "relationship_update": None,
                     "reasoning": "Supporting the village build."}
         return {"action": "move_to_village", "target": None, "message": None,
@@ -551,8 +622,12 @@ def log_event():
             session_logger.log_activity(body.get("message", ""), frame_tick)
         elif event_type == "conversation":
             session_logger.log_conversation(
-                body.get("from", ""), body.get("to", ""),
-                body.get("message", ""), frame_tick,
+                body.get("from", ""),
+                body.get("to", ""),
+                body.get("message"),
+                frame_tick,
+                kind=body.get("kind", "speech"),
+                outcome=body.get("outcome"),
             )
         # Unknown types are ignored; logging must never break the simulation.
     except Exception:
@@ -596,6 +671,69 @@ def strip_code_fences(text):
         if cleaned.endswith("```"):
             cleaned = cleaned[: -3]
     return cleaned.strip()
+
+
+def lm_message_text(message):
+    """Return model output text; reasoning models may leave content empty."""
+    if not isinstance(message, dict):
+        return ""
+    content = (message.get("content") or "").strip()
+    if content:
+        return content
+    return (message.get("reasoning_content") or "").strip()
+
+
+def extract_json_decision(text):
+    """Parse a decision object from model output, including partial/truncated JSON."""
+    if not text or not isinstance(text, str):
+        return None
+
+    cleaned = strip_code_fences(text)
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except (ValueError, TypeError):
+        pass
+
+    start = cleaned.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    for idx in range(start, len(cleaned)):
+        char = cleaned[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    parsed = json.loads(cleaned[start:idx + 1])
+                    if isinstance(parsed, dict):
+                        return parsed
+                except (ValueError, TypeError):
+                    break
+
+    action_match = re.search(r'"action"\s*:\s*"([^"]+)"', cleaned)
+    if not action_match:
+        return None
+
+    decision = {
+        "action": action_match.group(1),
+        "target": None,
+        "message": None,
+        "new_role": None,
+        "relationship_update": None,
+        "reasoning": "Parsed from partial model response.",
+    }
+    target_match = re.search(r'"target"\s*:\s*(?:"([^"]*)"|null)', cleaned)
+    if target_match:
+        decision["target"] = target_match.group(1) or None
+    message_match = re.search(r'"message"\s*:\s*(?:"((?:[^"\\]|\\.)*)"|null)', cleaned)
+    if message_match:
+        decision["message"] = message_match.group(1) or None
+    return decision
 
 
 @app.route("/agent/think", methods=["POST"])
@@ -643,7 +781,7 @@ def agent_think():
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
-            "max_tokens": 300,
+            "max_tokens": 512,
             "temperature": 0.4,
             "stream": False,
             "thinking": {"type": "disabled", "budget_tokens": 0},
@@ -698,13 +836,15 @@ def agent_think():
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
 
         try:
-            content = lm_body["choices"][0]["message"]["content"]
+            message = lm_body["choices"][0]["message"]
         except (TypeError, KeyError, IndexError):
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
 
-        try:
-            decision = json.loads(strip_code_fences(content))
-        except (ValueError, TypeError):
+        raw_text = lm_message_text(message)
+        decision = extract_json_decision(raw_text)
+        if not decision and isinstance(message, dict):
+            decision = extract_json_decision(message.get("content") or "")
+        if not decision:
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
 
         decision = normalize_decision(decision, agent_data)

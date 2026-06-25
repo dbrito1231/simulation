@@ -155,6 +155,8 @@
   #convList .arrow { color: #888; }
   #convList .to { color: #e3a87e; font-weight: 600; }
   #convList .msg { color: #bbb; }
+  #convList .msg.muted { color: #666; font-style: italic; }
+  #convList .kind { color: #9a7ec8; font-weight: 600; }
   #activityLog {
     max-height: 160px;
     padding-bottom: 12px;
@@ -625,6 +627,34 @@ function projectProgressText() {
   return parts.join(", ");
 }
 
+function firstUnmetProjectResource() {
+  if (!civilization.activeProject) return null;
+  const p = civilization.activeProject;
+  for (const res of Object.keys(p.needs)) {
+    const need = p.needs[res] || 0;
+    const have = p.contributed[res] || 0;
+    if (have < need) return res;
+  }
+  return null;
+}
+
+function gatherZoneForResource(resId) {
+  const def = civilization.resourceRegistry[resId];
+  return def && def.gatherZone;
+}
+
+function tryContributeResource(agent, res) {
+  if (!civilization.activeProject || !res) return null;
+  const p = civilization.activeProject;
+  const need = p.needs[res] || 0;
+  const have = p.contributed[res] || 0;
+  if (have >= need || (agent.resources[res] || 0) <= 0) return null;
+  agent.resources[res] -= 1;
+  p.contributed[res] = have + 1;
+  sidebarDirty = true;
+  return `${agent.name} contributed ${res} to ${p.name}`;
+}
+
 function projectProgressPercent() {
   if (!civilization.activeProject) return 0;
   const p = civilization.activeProject;
@@ -953,11 +983,26 @@ function pushActivity(line) {
   persistLog({ type: "activity", message: line, frame_tick: frameTick });
 }
 
-function pushConversation(from, to, message) {
-  conversationLog.unshift({ from, to, message });
+function pushCommunication(kind, from, to, message, outcome) {
+  const entry = { kind, from, to, message };
+  if (outcome) entry.outcome = outcome;
+  conversationLog.unshift(entry);
   if (conversationLog.length > 100) conversationLog.length = 100;
   sidebarDirty = true;
-  persistLog({ type: "conversation", from, to, message, frame_tick: frameTick });
+  const payload = {
+    type: "conversation",
+    kind,
+    from,
+    to,
+    message,
+    frame_tick: frameTick,
+  };
+  if (outcome) payload.outcome = outcome;
+  persistLog(payload);
+}
+
+function pushConversation(from, to, message) {
+  pushCommunication("speech", from, to, message);
 }
 
 function pushMemory(agent, line) {
@@ -998,7 +1043,7 @@ function pickContributionResource(agent, decision) {
     const have = p.contributed[res] || 0;
     if (need > have && (agent.resources[res] || 0) > 0) return res;
   }
-  return mostAbundantResource(agent);
+  return null;
 }
 
 function autoMoveTowardTarget(agent, targetName) {
@@ -1050,9 +1095,12 @@ function applyDecision(agent, decision) {
     case "collect_resource": {
       const zone = agent.currentZone;
       let resource = null;
+      const unmet = firstUnmetProjectResource();
       const targetDef = decision.target && civilization.resourceRegistry[decision.target];
       if (targetDef && targetDef.gatherZone === zone) {
         resource = decision.target;
+      } else if (unmet && gatherZoneForResource(unmet) === zone) {
+        resource = unmet;
       } else {
         const zoneResources = getZoneResources(zone);
         resource = zoneResources.length > 0 ? zoneResources[0] : null;
@@ -1062,7 +1110,21 @@ function applyDecision(agent, decision) {
         agent.resources[resource] = (agent.resources[resource] || 0) + 1;
         summary = `${agent.name} collected ${resource}`;
       } else {
-        summary = `${agent.name} found nothing to collect`;
+        const contribRes = pickContributionResource(agent, { target: unmet });
+        const contributed = tryContributeResource(agent, contribRes);
+        if (contributed) {
+          summary = contributed;
+        } else if (unmet && gatherZoneForResource(unmet)) {
+          const gatherZone = gatherZoneForResource(unmet);
+          if (agent.currentZone !== gatherZone) {
+            setAgentTarget(agent, gatherZone);
+            summary = `${agent.name} heads to gather ${unmet}`;
+          } else {
+            summary = `${agent.name} found nothing to collect`;
+          }
+        } else {
+          summary = `${agent.name} found nothing to collect`;
+        }
       }
       break;
     }
@@ -1075,6 +1137,7 @@ function applyDecision(agent, decision) {
         pushConversation(agent.name, recipient, decision.message);
         summary = `${agent.name} talked to ${recipient}`;
       } else {
+        pushCommunication("talk_attempt", agent.name, recipient, null, "no_message");
         summary = `${agent.name} looked for someone to talk to`;
       }
       break;
@@ -1108,19 +1171,22 @@ function applyDecision(agent, decision) {
         break;
       }
       const res = pickContributionResource(agent, decision);
-      if (res && (agent.resources[res] || 0) > 0) {
-        const need = civilization.activeProject.needs[res] || 0;
-        const have = civilization.activeProject.contributed[res] || 0;
-        if (have < need) {
-          agent.resources[res] -= 1;
-          civilization.activeProject.contributed[res] = have + 1;
-          summary = `${agent.name} contributed ${res} to ${civilization.activeProject.name}`;
-          sidebarDirty = true;
-        } else {
-          summary = `${agent.name} project does not need more ${res}`;
-        }
+      const contributed = tryContributeResource(agent, res);
+      if (contributed) {
+        summary = contributed;
       } else {
-        summary = `${agent.name} has nothing to contribute`;
+        const unmet = firstUnmetProjectResource();
+        const gatherZone = unmet && gatherZoneForResource(unmet);
+        if (unmet && gatherZone && agent.currentZone !== gatherZone) {
+          setAgentTarget(agent, gatherZone);
+          summary = `${agent.name} heads to gather ${unmet}`;
+        } else if (unmet && gatherZone && agent.currentZone === gatherZone
+            && (agent.resources[unmet] || 0) < 5) {
+          agent.resources[unmet] = (agent.resources[unmet] || 0) + 1;
+          summary = `${agent.name} collected ${unmet}`;
+        } else {
+          summary = `${agent.name} has nothing to contribute`;
+        }
       }
       break;
     }
@@ -1234,6 +1300,7 @@ function applyDecision(agent, decision) {
       if (agent.role === "elder" && target && isIdle(target) && decision.message) {
         target.assignedTask = decision.message;
         civilization.directive = `Elder ${agent.name} directs: ${target.name} should ${decision.message}.`;
+        pushCommunication("directive", agent.name, target.name, decision.message);
         summary = `Elder ${agent.name} tasked ${target.name}: ${decision.message}`;
         sidebarDirty = true;
       } else {
@@ -1464,9 +1531,15 @@ function renderSidebar() {
 
   if (logsChanged || sidebarDirty) {
     const convScroll = convListEl.scrollTop;
-    convListEl.innerHTML = conversationLog.map((c) =>
-      `<li><span class="from">${escapeHtml(c.from)}</span> <span class="arrow">\u2192</span> <span class="to">${escapeHtml(c.to)}</span>: <span class="msg">${escapeHtml(c.message)}</span></li>`
-    ).join("");
+    convListEl.innerHTML = conversationLog.map((c) => {
+      const kindLabel = c.kind && c.kind !== "speech"
+        ? `<span class="kind">[${escapeHtml(c.kind)}]</span> `
+        : "";
+      const msg = c.message
+        ? `<span class="msg">${escapeHtml(c.message)}</span>`
+        : (c.outcome ? `<span class="msg muted">(${escapeHtml(c.outcome)})</span>` : "");
+      return `<li>${kindLabel}<span class="from">${escapeHtml(c.from)}</span> <span class="arrow">\u2192</span> <span class="to">${escapeHtml(c.to)}</span>${msg ? ": " + msg : ""}</li>`;
+    }).join("");
     convListEl.scrollTop = convScroll;
 
     actListEl.innerHTML = activityLog.map((line) =>
