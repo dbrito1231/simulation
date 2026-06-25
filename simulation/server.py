@@ -30,6 +30,8 @@ class SessionLogger:
         self.activity_path = os.path.join(self.dir, "activity.jsonl")
         self.conversation_path = os.path.join(self.dir, "conversation.jsonl")
         self.lm_studio_path = os.path.join(self.dir, "lm_studio.jsonl")
+        for path in [self.activity_path, self.conversation_path, self.lm_studio_path]:
+            open(path, "a", encoding="utf-8").close()
 
     def _append(self, path, record):
         record = {
@@ -37,9 +39,13 @@ class SessionLogger:
             "session_id": self.session_id,
             **record,
         }
+        line = json.dumps(record, ensure_ascii=False) + "\n"
         try:
             with open(path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                fh.write(line)
+            global_path = os.path.join(os.path.dirname(self.dir), os.path.basename(path))
+            with open(global_path, "a", encoding="utf-8") as fh:
+                fh.write(line)
         except OSError:
             # Logging must never break the simulation.
             pass
@@ -72,26 +78,41 @@ SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,24}$")
 MAX_PENDING_BLUEPRINTS = 5
 MAX_APPROVED_CUSTOM = 15
 MAX_CUSTOM_RESOURCES = 10
+ROLE_PROJECT = {
+    "elder": "house",
+    "healer": "house",
+    "farmer": "farm_plot",
+    "fisher": "farm_plot",
+    "gatherer": "farm_plot",
+    "miner": "workshop",
+    "blacksmith": "workshop",
+    "trader": "workshop",
+    "builder": "house",
+    "guard": "wall",
+    "scout": "wall",
+    "explorer": "wall",
+}
 
 SYSTEM_PROMPT = """You are an autonomous agent in a pixel-art village simulation.
 Your shared goal: help the village grow into a civilization by gathering resources,
 contributing to build projects, and coordinating with others.
 
 RULES (follow exactly):
+MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to give that agent a specific job. The elder leads by keeping everyone busy.
 1. NEVER use talk_to_nearby if Agents near you is "none".
 2. If talk_to_nearby, message and target MUST both be set to a nearby agent name.
 3. Prefer collect_resource, contribute_resources, start_project, build_structure,
    or move_to_* over idle talk.
 4. Talk is for coordination (request resources, announce builds)—not small talk.
-5. Builders start projects when none active; everyone contributes when a project needs resources.
+5. Any agent may start_project when none is active; everyone contributes and builds as resources allow.
 
 BLUEPRINTS (inventing new structures):
 6. Any agent may use propose_blueprint to invent a new structure type. Include a
    "blueprint" object (see schema below). Optionally bundle up to 3 new gatherable
    resources inside "new_resources".
-7. Only an elder or builder may approve_blueprint or reject_blueprint. The "target"
+7. Only the elder may approve_blueprint or reject_blueprint. The "target"
    must be the id of a blueprint listed in Pending blueprints.
-8. Elders/builders should review Pending blueprints before starting a vanilla project
+8. The elder should review Pending blueprints before starting a vanilla project
    when proposals are waiting.
 9. Only propose resources that have a gather_zone (one of: farm, forest, village,
    market, beach, cave, ocean) so villagers can collect them, or set gather_zone to
@@ -150,6 +171,8 @@ Civilization level: {civilization_level}
 Structures built: {structures_built}
 Active project: {active_project}
 Project progress: {project_progress}
+Civilization directive: {directive}
+Idle agents needing a task: {idle_agents}
 Known resources: {known_resources}
 Pending blueprints: {pending_blueprints}
 Approved custom builds: {approved_custom_projects}
@@ -258,6 +281,33 @@ def format_rejected_blueprints(rejected):
     return ", ".join(ids) if ids else "none"
 
 
+def format_idle_agents(idle_agents):
+    """Format idle agents for the elder prompt."""
+    if not idle_agents or not isinstance(idle_agents, list):
+        return "none"
+    parts = []
+    for agent in idle_agents:
+        if not isinstance(agent, dict):
+            continue
+        name = agent.get("name")
+        role = agent.get("role")
+        if name:
+            parts.append(f"{name} ({role or 'unknown'})")
+    return "; ".join(parts) if parts else "none"
+
+
+def role_default_project(role):
+    return ROLE_PROJECT.get((role or "").lower(), "house")
+
+
+def task_for_role(role, active_project=None):
+    role = (role or "").lower()
+    if active_project and active_project not in ("none", "null", None, ""):
+        return f"gather or contribute resources to {active_project}"
+    project = role_default_project(role).replace("_", " ")
+    return f"prepare to start a {project} project"
+
+
 def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
                        custom_resource_count, rejected_ids=None):
     """Validate a proposed blueprint. Returns (ok: bool, reason: str|None)."""
@@ -334,10 +384,25 @@ def role_fallback_action(role, agent_data):
     has_project = active_project and active_project not in ("none", "null", None, "")
 
     pending_ids = agent_data.get("pending_blueprint_ids") or []
-    if role in ("elder", "builder") and pending_ids:
+    if role == "elder" and pending_ids:
         return {"action": "approve_blueprint", "target": pending_ids[0], "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Reviewing a pending blueprint proposal."}
+
+    idle_agents = agent_data.get("idle_agents") or []
+    if role == "elder" and idle_agents:
+        target = idle_agents[0]
+        target_name = target.get("name")
+        if target_name:
+            return {"action": "assign_task", "target": target_name,
+                    "message": task_for_role(target.get("role"), active_project),
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Assigning work to an idle villager."}
+
+    if not has_project:
+        return {"action": "start_project", "target": role_default_project(role), "message": None,
+                "new_role": None, "relationship_update": None,
+                "reasoning": "Starting a role-appropriate build project."}
 
     if role in ("farmer", "fisher", "gatherer"):
         zone = agent_data.get("world_zone", "")
@@ -368,10 +433,6 @@ def role_fallback_action(role, agent_data):
                 "reasoning": "Mining gold for civilization."}
 
     if role == "builder":
-        if not has_project:
-            return {"action": "start_project", "target": "house", "message": None,
-                    "new_role": None, "relationship_update": None,
-                    "reasoning": "Starting a new build project."}
         return {"action": "contribute_resources", "target": "wood", "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Contributing to the active project."}
@@ -430,9 +491,19 @@ def normalize_decision(decision, agent_data):
         role = (agent_data.get("role") or "").lower()
         target = decision.get("target")
         pending_ids = agent_data.get("pending_blueprint_ids") or []
-        if role not in ("elder", "builder") or not target or target not in pending_ids:
+        if role != "elder" or not target or target not in pending_ids:
             fallback = role_fallback_action(agent_data.get("role"), agent_data)
             fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid blueprint action)").strip()
+            return fallback
+        return decision
+
+    if action == "assign_task":
+        role = (agent_data.get("role") or "").lower()
+        target = decision.get("target")
+        idle_names = [a.get("name") for a in agent_data.get("idle_agents") or [] if isinstance(a, dict)]
+        if role != "elder" or not target or target not in idle_names or not decision.get("message"):
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid task assignment)").strip()
             return fallback
         return decision
 
@@ -489,6 +560,32 @@ def log_event():
     return ("", 204)
 
 
+def build_agent_data(data, nearby_formatted, known_resources, pending_blueprints,
+                     approved_custom_projects, rejected_blueprints):
+    """Assemble agent context used by normalize_decision and role_fallback_action."""
+    agent_data = dict(data)
+    agent_data["nearby_agents"] = nearby_formatted
+    agent_data["known_resource_ids"] = [
+        r.get("id") for r in known_resources if isinstance(r, dict) and r.get("id")
+    ]
+    agent_data["custom_resource_count"] = sum(
+        1 for r in known_resources if isinstance(r, dict) and r.get("custom")
+    )
+    agent_data["pending_blueprint_ids"] = [
+        b.get("id") for b in pending_blueprints if isinstance(b, dict) and b.get("id")
+    ]
+    agent_data["approved_blueprint_ids"] = [
+        str(a) for a in approved_custom_projects if a
+    ]
+    agent_data["rejected_blueprint_ids"] = [
+        str(r) for r in rejected_blueprints if r
+    ]
+    agent_data["idle_agents"] = [
+        a for a in data.get("idle_agents") or [] if isinstance(a, dict) and a.get("name")
+    ]
+    return agent_data
+
+
 def strip_code_fences(text):
     """Remove markdown ```json ... ``` fences if present."""
     cleaned = text.strip()
@@ -513,6 +610,7 @@ def agent_think():
         pending_blueprints = data.get("pending_blueprints") or []
         approved_custom_projects = data.get("approved_custom_projects") or []
         rejected_blueprints = data.get("rejected_blueprints") or []
+        idle_agents = data.get("idle_agents") or []
 
         user_prompt = USER_PROMPT_TEMPLATE.format(
             agent_name=data.get("agent_name"),
@@ -528,6 +626,8 @@ def agent_think():
             structures_built=data.get("structures_built", 0),
             active_project=data.get("active_project", "none"),
             project_progress=data.get("project_progress", "none"),
+            directive=data.get("directive", "none"),
+            idle_agents=format_idle_agents(idle_agents),
             known_resources=format_known_resources(known_resources),
             pending_blueprints=format_pending_blueprints(pending_blueprints),
             approved_custom_projects=format_approved_custom(approved_custom_projects),
@@ -546,10 +646,15 @@ def agent_think():
             "max_tokens": 300,
             "temperature": 0.4,
             "stream": False,
+            "thinking": {"type": "disabled", "budget_tokens": 0},
         }
 
         agent_name = data.get("agent_name")
         frame_tick = data.get("frame_tick")
+        agent_data = build_agent_data(
+            data, nearby_formatted, known_resources, pending_blueprints,
+            approved_custom_projects, rejected_blueprints,
+        )
 
         def log_lm(latency_ms, response=None, http_status=None, decision=None, error=None):
             session_logger.log_lm_exchange({
@@ -562,6 +667,12 @@ def agent_think():
                 "decision": decision,
                 "error": error,
             })
+
+        def bad_response_fallback(latency_ms, response=None, http_status=None):
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            log_lm(latency_ms, response=response, http_status=http_status,
+                   decision=fallback, error="bad_response")
+            return jsonify(fallback)
 
         start = datetime.now()
         try:
@@ -577,46 +688,25 @@ def agent_think():
         try:
             lm_body = resp.json()
         except ValueError:
-            log_lm(latency_ms, http_status=http_status, error="bad_response")
-            return jsonify({"error": "bad_response", "action": "rest"})
+            return bad_response_fallback(latency_ms, http_status=http_status)
 
         if isinstance(lm_body, dict) and lm_body.get("error"):
             err = str(lm_body.get("error"))
             if "compute error" in err.lower():
                 log_lm(latency_ms, response=lm_body, http_status=http_status, error="compute_error")
                 return jsonify({"error": "compute_error", "action": "rest"})
-            log_lm(latency_ms, response=lm_body, http_status=http_status, error="bad_response")
-            return jsonify({"error": "bad_response", "action": "rest"})
+            return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
 
         try:
             content = lm_body["choices"][0]["message"]["content"]
         except (TypeError, KeyError, IndexError):
-            log_lm(latency_ms, response=lm_body, http_status=http_status, error="bad_response")
-            return jsonify({"error": "bad_response", "action": "rest"})
+            return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
 
         try:
             decision = json.loads(strip_code_fences(content))
         except (ValueError, TypeError):
-            log_lm(latency_ms, response=lm_body, http_status=http_status, error="bad_response")
-            return jsonify({"error": "bad_response", "action": "rest"})
+            return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
 
-        agent_data = dict(data)
-        agent_data["nearby_agents"] = nearby_formatted
-        agent_data["known_resource_ids"] = [
-            r.get("id") for r in known_resources if isinstance(r, dict) and r.get("id")
-        ]
-        agent_data["custom_resource_count"] = sum(
-            1 for r in known_resources if isinstance(r, dict) and r.get("custom")
-        )
-        agent_data["pending_blueprint_ids"] = [
-            b.get("id") for b in pending_blueprints if isinstance(b, dict) and b.get("id")
-        ]
-        agent_data["approved_blueprint_ids"] = [
-            str(a) for a in approved_custom_projects if a
-        ]
-        agent_data["rejected_blueprint_ids"] = [
-            str(r) for r in rejected_blueprints if r
-        ]
         decision = normalize_decision(decision, agent_data)
 
         log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=None)

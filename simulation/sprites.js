@@ -860,6 +860,18 @@ function drawAgentSprite(ctx, agent, frameTick) {
   }
 }
 
+function drawZoneLabel(ctx, text, x, y) {
+  ctx.font = "bold 14px monospace";
+  ctx.textAlign = "center";
+  const w = ctx.measureText(text).width + 14;
+  ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
+  ctx.fillRect(Math.round(x - w / 2), y - 13, w, 18);
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.35)";
+  ctx.strokeRect(Math.round(x - w / 2), y - 13, w, 18);
+  ctx.fillStyle = "#fff7d6";
+  ctx.fillText(text, x, y + 1);
+}
+
 function drawTiledWorld(ctx, worldW, worldH, frameTick, structures) {
   const foamOffset = Math.floor(frameTick / 8) % 16;
 
@@ -902,18 +914,18 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures) {
   drawRocks(ctx, 900, 620);
   drawRocks(ctx, 740, 650);
 
-  // Village houses (static scenery)
-  drawHouse(ctx, 440, 300);
-  drawHouse(ctx, 490, 320);
-  drawHouse(ctx, 620, 300);
-  drawHouse(ctx, 440, 410);
+  // Village houses (static scenery), kept away from player-built structure spots.
+  drawHouse(ctx, 690, 300);
+  drawHouse(ctx, 690, 410);
 
   // Market stall
   drawMarketStall(ctx, 568, 368);
-  ctx.fillStyle = C.ma;
-  ctx.font = "bold 14px monospace";
-  ctx.textAlign = "center";
-  ctx.fillText("MARKET", 610, 358);
+  drawZoneLabel(ctx, "MARKET", 610, 358);
+  drawZoneLabel(ctx, "FARM", 500, 64);
+  drawZoneLabel(ctx, "FOREST", 820, 64);
+  drawZoneLabel(ctx, "VILLAGE", 550, 292);
+  drawZoneLabel(ctx, "BEACH", 235, 72);
+  drawZoneLabel(ctx, "CAVE", 820, 542);
 
   // Cave entrance
   drawCaveEntrance(ctx, 830, 600);

@@ -1,23 +1,23 @@
 # SPEC 04 — Agents (Sprites, State, Movement)
 
-**Build target.** Adds the 12 agents to `index.html`: drawn, then moving with rule-based logic. No LLM yet. Gate: GATE D.
+**Build target.** Adds a configurable active roster to `index.html`: drawn, then moving with rule-based logic. No LLM yet. Gate: GATE D.
 
-## The 12 agents (exactly these — no more, no fewer)
+## The 8 active agents by default
+
+The simulation defaults to 8 active agents to improve local LLM throughput and reduce canvas clutter. A URL override may raise the active count for experiments, but the default roster must include the builder and elder.
 
 | # | Name | Start Role | Personality | Body Color |
 |---|------|-----------|-------------|-----------|
-| 1 | Aria | farmer | hardworking, cautious | `#4CAF50` |
-| 2 | Marco | trader | sociable, opportunistic | `#FF9800` |
-| 3 | Zara | builder | creative, methodical | `#9C27B0` |
-| 4 | Rex | guard | loyal, aggressive | `#F44336` |
-| 5 | Luna | gatherer | curious, adventurous | `#2196F3` |
-| 6 | Finn | fisher | patient, quiet | `#00BCD4` |
-| 7 | Mia | healer | empathetic, generous | `#E91E63` |
-| 8 | Colt | miner | stubborn, hardworking | `#795548` |
-| 9 | Ivy | scout | fast, observant | `#8BC34A` |
-| 10 | Dex | blacksmith | focused, proud | `#607D8B` |
-| 11 | Nova | explorer | bold, impulsive | `#FF5722` |
-| 12 | Sage | elder | wise, slow-moving | `#FFC107` |
+| 1 | Zara | builder | creative, methodical | `#9C27B0` |
+| 2 | Sage | elder | wise, slow-moving | `#FFC107` |
+| 3 | Aria | farmer | hardworking, cautious | `#4CAF50` |
+| 4 | Luna | gatherer | curious, adventurous | `#2196F3` |
+| 5 | Marco | trader | sociable, opportunistic | `#FF9800` |
+| 6 | Colt | miner | stubborn, hardworking | `#795548` |
+| 7 | Finn | fisher | patient, quiet | `#00BCD4` |
+| 8 | Mia | healer | empathetic, generous | `#E91E63` |
+
+Inactive by default but available through roster overrides: Rex (guard), Ivy (scout), Dex (blacksmith), and Nova (explorer).
 
 ## Original sprite art (do NOT use the uploaded character image)
 
@@ -56,17 +56,18 @@ Write one reusable function: `drawAgent(ctx, agent)`.
   thinkInterval: 300,
   isThinking: false,
   lastAction: null,
-  lastReasoning: null
+  lastReasoning: null,
+  assignedTask: null
 }
 ```
 
 ## Starting positions
 
-Spawn agents spread across zones (not all in one spot). Suggested: Aria→farm, Marco→market, Rex→village, Luna→forest, Finn→beach, Colt→cave, Sage→village, others spread across remaining zone centers. Use `ZONE_CENTERS` from Spec 03.
+Spawn active agents spread across zones (not all in one spot). Suggested: Aria→farm, Marco→market, Zara→village, Luna→forest, Finn→beach, Colt→cave, Sage→village, Mia→village. Use `ZONE_CENTERS` from Spec 03.
 
 ## Special personality note
 
-Sage (elder) is slow: set `speed: 0.6`. Ivy (scout) and Nova (explorer) are fast: `speed: 1.8`.
+Sage (elder) is slow: set `speed: 0.6`, but give Sage a shorter think interval so the leader acts often. Ivy (scout) and Nova (explorer) are fast when included through a roster override.
 
 ## Helper functions to write
 
@@ -82,7 +83,7 @@ So GATE D is testable without LM Studio, give each agent simple placeholder beha
 
 ## Gate D pass condition
 
-- All 12 agents drawn as distinct sprites with names and role badges.
+- The default 8 active agents are drawn as distinct sprites with names and role badges.
 - Agents move smoothly between zones (rule-based).
 - Speech bubble and resource-bar drawing code exists (even if unused yet).
 - No console errors. No LLM calls yet.
