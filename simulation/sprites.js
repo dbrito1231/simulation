@@ -12,8 +12,12 @@ function tileFromStrings(rows, colorMap) {
         i += 1;
         continue;
       }
+      const three = row.slice(i, i + 3);
       const two = row.slice(i, i + 2);
-      if (colorMap[two] !== undefined) {
+      if (colorMap[three] !== undefined) {
+        cells.push(colorMap[three]);
+        i += 3;
+      } else if (colorMap[two] !== undefined) {
         cells.push(colorMap[two]);
         i += 2;
       } else if (colorMap[row[i]] !== undefined) {
@@ -30,7 +34,7 @@ function tileFromStrings(rows, colorMap) {
 
 function drawPixelGrid(ctx, originX, originY, grid, scale, flipX) {
   const h = grid.length;
-  const w = grid[0].length;
+  const w = grid.reduce((max, row) => Math.max(max, row.length), 0);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const color = grid[y][x];
@@ -84,6 +88,7 @@ const C = {
   f1: "#7ec850", f2: "#6eb840", f3: "#5ea830", fd: "#4a8828",
   fr1: "#2d6a2d", fr2: "#245a24", fr3: "#1a4a1a",
   v1: "#d4a96a", v2: "#c4995a", v3: "#b4894a",
+  ts1: "#8a6a3a", ts2: "#6b4423",
   m1: "#c8874a", m2: "#b8773a", m3: "#a8672a", ma: "#ffae5e",
   cv1: "#555555", cv2: "#454545", cv3: "#353535", cv4: "#1a1a1a",
   k: "#111111", w: "#ffffff", br: "#8a5a2b", brd: "#5c3a1a",
@@ -285,21 +290,21 @@ function drawRocks(ctx, x, y) {
 const STRUCTURE_GRIDS = {
   house: tileFromStrings([
     "..brdbrdbrdbrd..",
-    ".brdbrdbrdbrdbrd.",
+    "brdbrdbrdbrdbrdbrdbrdbrd",
     "brbrbrbrbrbrbrbr",
-    "brw..brbr..wbrbr",
-    "brw..brbr..wbrbr",
+    "brwbrbrbrbrwbr",
+    "brwbrbrbrbrwbr",
     "brbrbrbrbrbrbrbr",
     "brbrbrbrbrbrbrbr",
     "brbrbrbrbrbrbrbr",
   ], C),
   farm_plot: tileFromStrings([
-    "fdfdfdfdfdfdfdfd",
-    "f1f1f1f1f1f1f1f1",
-    "fdfdfdfdfdfdfdfd",
-    "f1f1f1f1f1f1f1f1",
-    "fdfdfdfdfdfdfdfd",
-    "f1f1f1f1f1f1f1f1",
+    "ts2ts1ts2ts1ts2ts1ts2ts1",
+    "ts1ts2ts1ts2ts1ts2ts1ts2",
+    "ts2f3ts2f3ts2f3ts2f3",
+    "f3ts2f3ts2f3ts2f3ts2",
+    "ts1ts2ts1ts2ts1ts2ts1ts2",
+    "ts2ts1ts2ts1ts2ts1ts2ts1",
   ], C),
   wall: tileFromStrings([
     "cv1cv1cv1cv1cv1cv1",
@@ -311,7 +316,7 @@ const STRUCTURE_GRIDS = {
   ], C),
   workshop: tileFromStrings([
     "..brdbrdbrdbrd..",
-    ".brdbrdbrdbrdbrd.",
+    "brdbrdbrdbrdbrdbrdbrdbrd",
     "brbrbrbrbrbrbrbr",
     "brmamamamamabrbr",
     "brm1m1m1m1m1brbr",

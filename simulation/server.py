@@ -114,7 +114,7 @@ Your shared goal: help the village grow into a civilization by gathering resourc
 contributing to build projects, and coordinating with others.
 
 RULES (follow exactly):
-MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to give that agent a specific job. The elder leads by keeping everyone busy.
+MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to give that agent a specific job. The elder leads by keeping everyone busy. Idle agents are listed least-recently-tasked first; prefer the one marked "longest idle" unless a resource shortfall clearly calls for a different role — don't keep assigning work to the same one or two agents.
 1. NEVER use talk_to_nearby if Agents near you is "none".
 2. If talk_to_nearby, message and target MUST both be set to a nearby agent name.
 3. Prefer collect_resource, contribute_resources, start_project, build_structure,
@@ -135,6 +135,8 @@ BLUEPRINTS (inventing new structures):
    null for trade-only resources (these cannot be collected).
 10. To gather a custom resource, move to its gather_zone and use collect_resource with
    target set to that resource id.
+11. Don't repeat a message you or another agent already said recently (see Recent
+   village conversations) — vary your wording each time you talk.
 
 Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
 Do not use chain-of-thought or reasoning — output the JSON object immediately.
@@ -167,7 +169,7 @@ EXAMPLE (builder, project needs wood):
 {"action":"contribute_resources","target":"wood","message":null,"new_role":null,"relationship_update":null,"reasoning":"Donating wood to the active build."}
 
 EXAMPLE (trader, Marco nearby):
-{"action":"talk_to_nearby","target":"Marco","message":"I have food for the house project.","new_role":null,"relationship_update":null,"reasoning":"Coordinating trade for the build."}
+{"action":"talk_to_nearby","target":"Marco","message":"Could you spare any wood? I'll trade you food for it.","new_role":null,"relationship_update":null,"reasoning":"Coordinating trade for the build."}
 
 EXAMPLE (gatherer proposing a library + paper):
 {"action":"propose_blueprint","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"The village needs knowledge storage.","blueprint":{"id":"library","name":"Library","needs":{"wood":4,"paper":2},"new_resources":[{"id":"paper","name":"Paper","gather_zone":"forest","color":"#E8D5B7"}],"visual_style":"house"}}
@@ -299,7 +301,9 @@ def format_rejected_blueprints(rejected):
 
 
 def format_idle_agents(idle_agents):
-    """Format idle agents for the elder prompt."""
+    """Format idle agents for the elder prompt. Ordered least-recently-tasked
+    first; the first entry is tagged so the elder spreads work fairly instead
+    of always picking the same agent."""
     if not idle_agents or not isinstance(idle_agents, list):
         return "none"
     parts = []
@@ -308,8 +312,9 @@ def format_idle_agents(idle_agents):
             continue
         name = agent.get("name")
         role = agent.get("role")
+        tag = ", longest idle" if agent.get("longest_idle") else ""
         if name:
-            parts.append(f"{name} ({role or 'unknown'})")
+            parts.append(f"{name} ({role or 'unknown'}{tag})")
     return "; ".join(parts) if parts else "none"
 
 

@@ -27,6 +27,17 @@ pip install flask flask-cors requests
 ## Run
 
 1. Start LM Studio and load a model. The server expects the OpenAI-compatible API at `http://localhost:1234`.
+
+   > **Context length vs. parallel slots:** the app queues up to `MAX_CONCURRENT_LLM`
+   > (3, see `simulation/index.html`) requests at once, and each request's prompt is
+   > ~1500 tokens. LM Studio divides its configured context length across its
+   > parallel slots, so if `context length ÷ parallel slots` is smaller than that,
+   > you'll see `"Context size has been exceeded"` errors under load (the app
+   > recovers gracefully, but agents lose a turn). Set LM Studio's context length to
+   > at least `1600 × parallel slots` (e.g. 8K context for 4 slots), and make sure
+   > LM Studio's parallel-slot/concurrency setting is at least 3. If you can't raise
+   > the context length, lower `MAX_CONCURRENT_LLM` in `simulation/index.html` instead.
+
 2. Start the simulation server:
 
 ```bash

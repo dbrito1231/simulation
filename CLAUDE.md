@@ -14,6 +14,7 @@ uv run python simulation/server.py   # start server, then open http://127.0.0.1:
 ```
 
 - LM Studio must be running at `http://localhost:1234` with a model loaded (OpenAI-compatible API). Without it, every agent decision falls back to `rest` and the status dot goes red, but the server stays up.
+- **LM Studio context length vs. parallel slots:** the app queues up to `MAX_CONCURRENT_LLM` (3) requests at once, each ~1500 prompt tokens. LM Studio splits its configured context length across its parallel slots — if `context length ÷ parallel slots` is under ~1600, expect `"Context size has been exceeded"` errors in bursts under concurrent load (handled gracefully via `bad_response_fallback`, but the agent loses a turn). Set LM Studio's context length to at least `1600 × parallel slots`, or lower `MAX_CONCURRENT_LLM` instead.
 - The server (not the browser) serves `index.html` and `sprites.js`, so open `http://127.0.0.1:5001` — do **not** open `index.html` as a file (the spec text predates this; trust the running setup).
 - Port is **5001** on purpose (macOS AirPlay squats on 5000).
 - Roster size override for experiments: `http://127.0.0.1:5001/?agents=12` (default 8; the builder and elder are always included).
@@ -49,3 +50,5 @@ The `specs/` directory is the original 6-gate build plan and is partly **superse
 ## Logs
 
 Each server run writes to `simulation/logs/<timestamp>/` (gitignored): `activity.jsonl` (world events), `conversation.jsonl` (agent dialogue), `lm_studio.jsonl` (full LLM request/response/decision per call). These are the primary debugging surface — read `lm_studio.jsonl` to see what the model actually returned and which fallback fired.
+
+`simulation/logs/lm_studio_server.log`, if present, is LM Studio's *own* server log (not written by this app) — useful for diagnosing model-side issues like context-window/parallel-slot sizing, since it shows token usage and per-slot context checkpoints that `lm_studio.jsonl` doesn't.

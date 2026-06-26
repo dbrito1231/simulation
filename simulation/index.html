@@ -484,7 +484,8 @@ function makeAgents() {
       consecutiveTalks: 0,
       pendingThink: false,
       assignedTask: null,
-      idleCycles: 0
+      idleCycles: 0,
+      lastTaskedFrame: null
     };
   });
 }
@@ -744,7 +745,13 @@ function isIdle(agent) {
 }
 
 function idleAgentsForElder() {
-  return agents.filter(isIdle);
+  // Least-recently-tasked first, so the elder (and its deterministic fallback)
+  // don't keep handing work to the same agents.
+  return agents.filter(isIdle).sort((a, b) => {
+    const av = a.lastTaskedFrame == null ? -Infinity : a.lastTaskedFrame;
+    const bv = b.lastTaskedFrame == null ? -Infinity : b.lastTaskedFrame;
+    return av - bv;
+  });
 }
 
 function taskForAgent(agent) {
@@ -944,6 +951,21 @@ function drawStructureWithShadow(structure) {
   ctx.ellipse(structure.x + 18, structure.y + 34, 24, 7, 0, 0, Math.PI * 2);
   ctx.fill();
   drawStructure(ctx, structure);
+  drawStructureLabel(ctx, structure);
+}
+
+function drawStructureLabel(ctx, structure) {
+  const label = structure.name || structure.type;
+  ctx.font = "9px monospace";
+  ctx.textAlign = "center";
+  const labelW = Math.ceil(ctx.measureText(label).width + 8);
+  const cx = structure.x + 8;
+  const labelX = Math.round(cx - labelW / 2);
+  const labelY = structure.y + 18;
+  ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
+  ctx.fillRect(labelX, labelY, labelW, 12);
+  ctx.fillStyle = "#fff7d6";
+  ctx.fillText(label, cx, labelY + 9);
 }
 
 const activityLog = [];
@@ -1093,6 +1115,10 @@ function applyDecision(agent, decision) {
       break;
     }
     case "collect_resource": {
+      if (!civilization.activeProject) {
+        summary = startProjectFor(agent, decision.target) || `${agent.name} could not start a project`;
+        break;
+      }
       const zone = agent.currentZone;
       let resource = null;
       const unmet = firstUnmetProjectResource();
@@ -1299,6 +1325,7 @@ function applyDecision(agent, decision) {
       const target = agents.find((a) => a.name === decision.target);
       if (agent.role === "elder" && target && isIdle(target) && decision.message) {
         target.assignedTask = decision.message;
+        target.lastTaskedFrame = frameTick;
         civilization.directive = `Elder ${agent.name} directs: ${target.name} should ${decision.message}.`;
         pushCommunication("directive", agent.name, target.name, decision.message);
         summary = `Elder ${agent.name} tasked ${target.name}: ${decision.message}`;
@@ -1383,7 +1410,7 @@ async function thinkAgent(agent) {
   agent.isThinking = true;
   const nearbyDetailed = getNearbyAgentsDetailed(agent, agents);
   const idleAgents = agent.role === "elder"
-    ? idleAgentsForElder().map((a) => ({ name: a.name, role: a.role }))
+    ? idleAgentsForElder().map((a, i) => ({ name: a.name, role: a.role, longest_idle: i === 0 }))
     : [];
 
   const nudges = [];

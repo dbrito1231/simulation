@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "simulation-server",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "simulation/server.py"],
+      "port": 5001
+    }
+  ]
+}
