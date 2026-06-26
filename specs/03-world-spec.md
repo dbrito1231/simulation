@@ -15,10 +15,13 @@ Top-of-file comment (include verbatim):
 ```html
 <!-- HOW TO RUN:
   1. Start server.py first
-  2. Open this file directly in Chrome or Firefox
+  2. Open http://127.0.0.1:5001 in Chrome or Firefox
   3. No build step needed
 -->
 ```
+
+> Note: the page is served by Flask (`GET /`), not opened from a `file://` URL —
+> the relative `fetch("/agent/think")` only resolves over `http://`.
 
 ## Zones (draw exactly these — no more, no fewer)
 

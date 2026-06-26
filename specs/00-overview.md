@@ -7,9 +7,9 @@ Build a real-time, browser-based AI simulation world where a **local LLM acts as
 ## Core Idea
 
 - A top-down pixel-art world is rendered in the browser.
-- 12 agents live in the world, each with its own role, memory, relationships, and resources.
+- A roster of agents lives in the world (8 active by default, up to 12 via the `?agents=N` override), each with its own role, memory, relationships, and resources.
 - Each agent's decisions come from a local LLM served by LM Studio.
-- Agents act independently and in real time — moving, talking, trading, collecting resources, and changing roles over time.
+- Agents act independently and in real time — moving, talking, trading, collecting resources, contributing to shared build projects, proposing new structures, and changing roles over time.
 
 ## Reference: Project Sid
 
@@ -22,7 +22,7 @@ This project is inspired by the "Project Sid" research paper (many-agent simulat
 | Memory | Each agent remembers its last 5 actions |
 | Collective behavior | Agents trade resources and form bonds over time |
 
-We deliberately keep this **far simpler** than Project Sid — no constitutions, no voting, no religion, no 500-agent scale. Just 12 agents proving the core loop works.
+We deliberately keep this **far simpler** than Project Sid — no constitutions, no voting, no religion, no 500-agent scale. Just a handful of agents proving the core loop works, with a lightweight build/blueprint pipeline so the village can visibly grow.
 
 ## What "behaving like a human" means here
 
