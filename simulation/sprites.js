@@ -336,10 +336,31 @@ function colorFromId(id) {
   return `hsl(${hue}, 55%, 55%)`;
 }
 
+// Built structures render larger than agent sprites (agents are 16x16 cells
+// at scale 2 = 32x32px) so a house reads as a building, not a doll-sized prop.
+const STRUCTURE_SCALE = 5;
+
+function getStructureGrid(structure) {
+  let grid = STRUCTURE_GRIDS[structure.type];
+  if (!grid && structure.visualStyle && structure.visualStyle !== "generic") {
+    grid = STRUCTURE_GRIDS[structure.visualStyle];
+  }
+  return grid || null;
+}
+
+// Pixel footprint of a structure's sprite, used by index.html to place the
+// shadow and name label regardless of grid size or fallback type.
+function getStructureRenderSize(structure) {
+  const grid = getStructureGrid(structure);
+  if (!grid) return { width: 8 * STRUCTURE_SCALE, height: 8 * STRUCTURE_SCALE };
+  const width = grid.reduce((max, row) => Math.max(max, row.length), 0) * STRUCTURE_SCALE;
+  return { width, height: grid.length * STRUCTURE_SCALE };
+}
+
 // Fallback for custom blueprints with no built-in sprite: a simple block
 // with the structure's first letter in a deterministic accent color.
 function drawGenericStructure(ctx, x, y, label, accentColor) {
-  const scale = 2;
+  const scale = STRUCTURE_SCALE;
   const size = 8 * scale;
   ctx.fillStyle = accentColor;
   ctx.fillRect(x, y, size, size);
@@ -358,13 +379,9 @@ function drawGenericStructure(ctx, x, y, label, accentColor) {
 }
 
 function drawStructure(ctx, structure) {
-  const scale = 2;
-  let grid = STRUCTURE_GRIDS[structure.type];
-  if (!grid && structure.visualStyle && structure.visualStyle !== "generic") {
-    grid = STRUCTURE_GRIDS[structure.visualStyle];
-  }
+  const grid = getStructureGrid(structure);
   if (grid) {
-    drawPixelGrid(ctx, structure.x, structure.y, grid, scale, false);
+    drawPixelGrid(ctx, structure.x, structure.y, grid, STRUCTURE_SCALE, false);
     return;
   }
   drawGenericStructure(

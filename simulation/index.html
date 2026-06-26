@@ -684,21 +684,23 @@ function pickProjectType(target) {
 }
 
 function findStructureSpot() {
+  // Spaced for the larger built-structure sprites (up to ~40x40px tall, plus
+  // their ~14px name-label band) and clear of the market square
+  // (x560-660, y360-440) so buildings don't overlap it or each other.
   const spots = [
-    { x: 460, y: 330 }, { x: 510, y: 350 }, { x: 560, y: 330 },
-    { x: 600, y: 380 }, { x: 470, y: 400 }, { x: 520, y: 420 },
-    { x: 580, y: 410 }, { x: 640, y: 360 }, { x: 450, y: 360 },
-    { x: 500, y: 300 }, { x: 550, y: 400 }, { x: 610, y: 420 }
+    { x: 440, y: 300 }, { x: 495, y: 300 }, { x: 550, y: 300 },
+    { x: 605, y: 300 }, { x: 650, y: 300 },
+    { x: 440, y: 360 }, { x: 495, y: 360 }
   ];
   for (const spot of spots) {
     const taken = civilization.structures.some((s) =>
-      Math.abs(s.x - spot.x) < 40 && Math.abs(s.y - spot.y) < 40
+      Math.abs(s.x - spot.x) < 40 && Math.abs(s.y - spot.y) < 50
     );
     if (!taken) return spot;
   }
   return {
-    x: 450 + Math.random() * 200,
-    y: 310 + Math.random() * 100
+    x: 440 + Math.random() * 200,
+    y: 300 + Math.random() * 100
   };
 }
 
@@ -946,22 +948,23 @@ function drawAgent(ctx, agent, frameTick) {
 }
 
 function drawStructureWithShadow(structure) {
+  const size = getStructureRenderSize(structure);
   ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
   ctx.beginPath();
-  ctx.ellipse(structure.x + 18, structure.y + 34, 24, 7, 0, 0, Math.PI * 2);
+  ctx.ellipse(structure.x + size.width / 2, structure.y + size.height, size.width * 0.55, 7, 0, 0, Math.PI * 2);
   ctx.fill();
   drawStructure(ctx, structure);
-  drawStructureLabel(ctx, structure);
+  drawStructureLabel(ctx, structure, size);
 }
 
-function drawStructureLabel(ctx, structure) {
+function drawStructureLabel(ctx, structure, size) {
   const label = structure.name || structure.type;
   ctx.font = "9px monospace";
   ctx.textAlign = "center";
   const labelW = Math.ceil(ctx.measureText(label).width + 8);
-  const cx = structure.x + 8;
+  const cx = structure.x + size.width / 2;
   const labelX = Math.round(cx - labelW / 2);
-  const labelY = structure.y + 18;
+  const labelY = structure.y + size.height + 2;
   ctx.fillStyle = "rgba(0, 0, 0, 0.62)";
   ctx.fillRect(labelX, labelY, labelW, 12);
   ctx.fillStyle = "#fff7d6";
