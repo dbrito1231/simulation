@@ -120,6 +120,10 @@ DECISION_ACTIONS = [
     "start_project", "contribute_resources", "build_structure",
     "propose_blueprint", "approve_blueprint", "reject_blueprint",
     "assign_task", "change_role", "rest",
+    # Survival (#2) and crafting (#4) actions. The client gates these by flag,
+    # but the schema enum is a fixed superset (normalize_decision filters).
+    "heal_agent",
+    "craft_item", "propose_recipe", "approve_recipe", "reject_recipe",
 ]
 
 # Loose shape only; validate_blueprint() stays the authority on blueprint detail.
@@ -144,6 +148,15 @@ DECISION_SCHEMA = {
                 "needs": {"type": "object"},
                 "new_resources": {"type": "array"},
                 "visual_style": {"type": "string"},
+            },
+        },
+        "recipe": {
+            "type": ["object", "null"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "inputs": {"type": "object"},
+                "station": {"type": ["string", "null"]},
             },
         },
     },
@@ -206,6 +219,18 @@ BLUEPRINTS (inventing new structures):
 11. Don't repeat a message you or another agent already said recently (see Recent
    village conversations) — vary your wording each time you talk.
 
+SURVIVAL:
+12. You have Hunger and Health. You auto-eat your own food when hungry, so keep food
+   on hand. If Hunger reaches 0 your Health drops; at 0 Health you collapse and cannot
+   act until revived. Use heal_agent (target a nearby hurt/collapsed villager; any role
+   may, healers heal more) to restore their health.
+
+CRAFTING (recipe tree):
+13. Some advanced builds need crafted goods. Use craft_item with target set to the item
+   id; you must be in the recipe's station zone and hold its inputs.
+14. Any agent may propose_recipe to invent a new crafted good (include a "recipe"
+   object). Only the elder may approve_recipe / reject_recipe a pending recipe by id.
+
 Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
 Do not use chain-of-thought or reasoning — output the JSON object immediately.
 The JSON must match this structure exactly:
@@ -230,6 +255,14 @@ BLUEPRINT object schema (only for propose_blueprint):
   "visual_style": "house"                // house | farm_plot | workshop | wall | generic
 }
 
+RECIPE object schema (only for propose_recipe):
+{
+  "id": "rope",                          // ^[a-z][a-z0-9_]{1,24}$, not a duplicate
+  "name": "Rope",                        // 1-32 chars
+  "inputs": {"herbs": 2},                // 1-6 entries, each amount 1-5
+  "station": "workshop"                  // farm|forest|village|market|beach|cave, or null
+}
+
 EXAMPLE (farmer, no one nearby):
 {"action":"collect_resource","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"I should gather food for the village."}
 
@@ -251,6 +284,7 @@ Your skill: {role_skill}
 Your personality: {personality}
 Recent memory: {memory}
 Resources: {resources}
+Hunger: {hunger}/100  Health: {health}/100
 Relationships: {relationships}
 Agents near you: {nearby_agents}
 Current zone: {world_zone}
@@ -261,7 +295,9 @@ Project progress: {project_progress}
 Civilization directive: {directive}
 Idle agents needing a task: {idle_agents}
 Known resources: {known_resources}
+Known recipes (craft_item targets): {known_recipes}
 Pending blueprints: {pending_blueprints}
+Pending recipes: {pending_recipes}
 Approved custom builds: {approved_custom_projects}
 Rejected blueprints (do NOT re-propose these ids): {rejected_blueprints}
 Recent village conversations: {recent_conversations}
@@ -349,6 +385,36 @@ def format_pending_blueprints(pending):
         needs_str = ", ".join(f"{k} {v}" for k, v in needs.items())
         by = b.get("proposed_by", "?")
         parts.append(f"{b.get('id', '?')} by {by} (needs {needs_str})")
+    return "; ".join(parts) if parts else "none"
+
+
+def format_known_recipes(recipes):
+    """Format craftable recipes, e.g. 'tools <- wood 2, stone 1 @workshop'."""
+    if not recipes or not isinstance(recipes, list):
+        return "none"
+    parts = []
+    for r in recipes:
+        if not isinstance(r, dict):
+            continue
+        inputs = r.get("inputs") or {}
+        ins = ", ".join(f"{k} {v}" for k, v in inputs.items())
+        station = r.get("station")
+        at = f" @{station}" if station else ""
+        parts.append(f"{r.get('id', '?')} <- {ins}{at}")
+    return "; ".join(parts) if parts else "none"
+
+
+def format_pending_recipes(pending):
+    """Format pending recipe proposals for the elder."""
+    if not pending or not isinstance(pending, list):
+        return "none"
+    parts = []
+    for r in pending:
+        if not isinstance(r, dict):
+            continue
+        inputs = r.get("inputs") or {}
+        ins = ", ".join(f"{k} {v}" for k, v in inputs.items())
+        parts.append(f"{r.get('id', '?')} by {r.get('proposed_by', '?')} (inputs {ins})")
     return "; ".join(parts) if parts else "none"
 
 
@@ -856,6 +922,8 @@ def agent_think():
             role_skill=data.get("role_skill", ""),
             personality=data.get("personality"),
             memory=data.get("memory"),
+            hunger=data.get("hunger", 100),
+            health=data.get("health", 100),
             resources=data.get("resources"),
             relationships=data.get("relationships"),
             nearby_agents=nearby_formatted,
@@ -867,7 +935,9 @@ def agent_think():
             directive=data.get("directive", "none"),
             idle_agents=format_idle_agents(idle_agents),
             known_resources=format_known_resources(known_resources),
+            known_recipes=format_known_recipes(data.get("known_recipes") or []),
             pending_blueprints=format_pending_blueprints(pending_blueprints),
+            pending_recipes=format_pending_recipes(data.get("pending_recipes") or []),
             approved_custom_projects=format_approved_custom(approved_custom_projects),
             rejected_blueprints=format_rejected_blueprints(rejected_blueprints),
             recent_conversations=data.get("recent_conversations", "none"),

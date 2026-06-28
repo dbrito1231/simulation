@@ -37,6 +37,14 @@ Browser collects agent + civilization state → `POST /agent/think` → server p
 
 `start_project` → agents `collect_resource` → `contribute_resources` → builder `build_structure` once funded → structure placed, `completedProjects++`, civilization level checked. On top of this sits a **blueprint flow**: agents `propose_blueprint` for new structure/resource types, the **elder approves/rejects**, approved blueprints merge into the live registries. The elder (Sage) is the singular leader — it assigns tasks to idle agents and approves blueprints. Earlier the pipeline stalled because the LLM never spontaneously chose `start_project`; the fixes (any role can start projects, elder-driven task assignment, prompt nudges, deterministic fallbacks) live in `.cursor/plans/fix_build_progression.plan.md`.
 
+### Mineflayer-inspired mechanics (feature-flagged constants near the top of index.html)
+
+Three additive systems, each toggled by a `const` flag so behavior can be A/B compared. New actions are kept in sync between `AVAILABLE_ACTIONS` (index.html) and `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT` (server.py).
+
+- **`SURVIVAL_ENABLED` (#2)** — agents have `hunger`/`health`; `updateSurvival()` (frame-gated by `SURVIVAL_TICK_FRAMES`) drains hunger, then health when starving, and **auto-eats** held food (the food consumption sink). At 0 health an agent is `incapacitated` (skips move/think, greyed sprite) until revived. New action **`heal_agent`** restores health (healers heal 2×); any agent can also feed a collapsed neighbour. No permanent death — collapse is recoverable.
+- **`CRAFTING_ENABLED` (#4)** — a `RECIPES` registry produces non-gatherable crafted goods (`planks`/`bricks`/`tools`, `gatherZone:null`) via **`craft_item`** at a station zone. Advanced builds (e.g. the `granary`) require crafted goods → gather→craft→build chain. Agents extend the tree via **`propose_recipe`** / elder **`approve_recipe`**/`reject_recipe`, mirroring the blueprint flow (`pendingRecipes`, `validateRecipe`).
+- **`USE_GOALS` (#1)** — the LLM picks an action; `goalForDecision()` turns gather/deliver/craft/build into a persistent `agent.goal`, and `stepGoal()` runs it deterministically every `GOAL_STEP_FRAMES` (with a `ttl` cap) **without an LLM call**, consulting the model again only when the goal completes or blocks. Cuts LLM load and improves coherence.
+
 ## Specs vs. reality
 
 The `specs/` directory is the original 6-gate build plan and is partly **superseded**. Where it conflicts with the running code, prefer the code and the plans in `.cursor/plans/`:

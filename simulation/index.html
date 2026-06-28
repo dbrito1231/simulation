@@ -172,6 +172,7 @@
   }
   #agentList .agent-main { color: #ddd; }
   #agentList .agent-status { display: block; color: #8a8a99; font-size: 11px; }
+  #agentList .agent-vitals { color: #c0867e; white-space: nowrap; }
   #conversationLog {
     flex: 1.4;
     display: flex;
@@ -260,6 +261,10 @@
         <span class="civ-label">Custom builds:</span> <span class="civ-value" id="civCustomBuilds">0</span>
         <div id="civCustomList"></div>
       </div>
+      <div class="civ-row" id="civRecipeRow" style="display:none">
+        <span class="civ-label">Recipes:</span> <span class="civ-value" id="civRecipeCount">0</span>
+        <div id="civRecipeList"></div>
+      </div>
       <div class="civ-row"><span class="civ-label">Collect success:</span> <span class="civ-value" id="civCollectRate">—</span></div>
       <div class="civ-row" id="civPendingRow" style="display:none">
         <span class="civ-label">Pending:</span>
@@ -328,6 +333,13 @@ const ZONE_BOUNDS = {
   ocean:   { x1: 30,   y1: 120, x2: 180,  y2: 880 }
 };
 
+// --- Mineflayer-inspired feature flags (all additive; toggle to compare). ---
+// Declared before the registries below so the crafting toggle is in scope when
+// those data structures are built (avoids a temporal-dead-zone init error).
+const SURVIVAL_ENABLED = true;   // hunger/health/auto-eat/healer (#2)
+const CRAFTING_ENABLED = true;   // recipe tree + craft_item (#4)
+const USE_GOALS = true;          // deterministic multi-tick goals (#1)
+
 const PROJECT_TEMPLATES = {
   house:     { name: "House",     needs: { wood: 3, stone: 1, food: 1, fish: 1 }, visualStyle: "house" },
   farm_plot: { name: "Farm Plot", needs: { wood: 2, food: 1, herbs: 1, water: 1 }, visualStyle: "farm_plot" },
@@ -336,6 +348,16 @@ const PROJECT_TEMPLATES = {
 };
 
 const PROJECT_ORDER = ["house", "farm_plot", "workshop", "wall"];
+
+// Crafting (#4): an advanced build that requires crafted goods, added only when
+// the flag is on so base-game behavior is unchanged. Chain: gather wood/stone →
+// craft planks/bricks at the workshop → build the Granary.
+if (CRAFTING_ENABLED) {
+  PROJECT_TEMPLATES.granary = {
+    name: "Granary", needs: { planks: 2, bricks: 2, food: 1 }, visualStyle: "house"
+  };
+  PROJECT_ORDER.push("granary");
+}
 
 // Role maps are all derived from the shared ROLES source (roles.json, loaded via
 // roles.js) so the client and server never drift. ROLES is defined in roles.js.
@@ -361,6 +383,20 @@ const BASE_RESOURCES = {
   water: { name: "Water", gatherZone: "village", color: "#03A9F4" }
 };
 
+// Crafted goods (#4): produced only via RECIPES, never gathered (gatherZone null).
+const CRAFTED_RESOURCES = CRAFTING_ENABLED ? {
+  planks: { name: "Planks", gatherZone: null, color: "#C19A6B", crafted: true },
+  bricks: { name: "Bricks", gatherZone: null, color: "#B7410E", crafted: true },
+  tools:  { name: "Tools",  gatherZone: null, color: "#90A4AE", crafted: true }
+} : {};
+
+// Live recipe registry (seed + agent-proposed). Mutable: approve_recipe adds keys.
+const RECIPES = CRAFTING_ENABLED ? {
+  planks: { name: "Planks", inputs: { wood: 1 },          station: "workshop" },
+  bricks: { name: "Bricks", inputs: { stone: 2 },         station: "workshop" },
+  tools:  { name: "Tools",  inputs: { wood: 2, stone: 1 }, station: "workshop" }
+} : {};
+
 const VALID_GATHER_ZONES = new Set(
   ["farm", "forest", "village", "market", "beach", "cave", "ocean"]
 );
@@ -378,6 +414,17 @@ const COLLECT_CAP = 20;
 // Frame-tick thresholds for "nothing has happened in a while" nudges.
 const STALL_THRESHOLD = 600;
 const BLUEPRINT_STALL_THRESHOLD = 1800;
+
+// --- Survival tuning (frame-based; SURVIVAL_TICK_FRAMES gates the slow loop) ---
+const SURVIVAL_TICK_FRAMES = 30; // apply survival math every N rendered frames
+const HUNGER_RATE = 1;           // hunger lost per survival tick
+const HEALTH_RATE = 2;           // health lost per survival tick while starving
+const HEALTH_REGEN = 1;          // health regained per survival tick while fed
+const EAT_THRESHOLD = 55;        // auto-eat when hunger drops below this
+const FOOD_RESTORE = 35;         // hunger restored per food eaten
+const HEAL_AMOUNT = 25;          // health restored per heal_agent action
+const MAX_CUSTOM_RECIPES = 12;
+const GOAL_STEP_FRAMES = 45;     // frames between deterministic goal steps (#1)
 
 // Each role's primary specialty resource (first in its specialty list), used to
 // nudge agents back toward their specialty instead of wandering. Derived from ROLES.
@@ -398,10 +445,12 @@ const civilization = {
   activeProject: null,
   completedProjects: 0,
   nextStructureId: 1,
-  resourceRegistry: { ...BASE_RESOURCES },
+  resourceRegistry: { ...BASE_RESOURCES, ...CRAFTED_RESOURCES },
   projectRegistry: { ...PROJECT_TEMPLATES },
   pendingBlueprints: [],
   rejectedBlueprintIds: new Set(),
+  pendingRecipes: [],
+  rejectedRecipeIds: new Set(),
   directive: null,
   lastProjectContributionFrame: 0,
   lastBlueprintActivityFrame: 0,
@@ -411,7 +460,7 @@ const civilization = {
 
 function customResourceCount() {
   return Object.keys(civilization.resourceRegistry).filter(
-    (id) => !BASE_RESOURCES[id]
+    (id) => !BASE_RESOURCES[id] && !CRAFTED_RESOURCES[id]
   ).length;
 }
 
@@ -419,6 +468,103 @@ function customProjectIds() {
   return Object.keys(civilization.projectRegistry).filter(
     (id) => civilization.projectRegistry[id].custom
   );
+}
+
+// --- Crafting (#4): craft_item + agent-proposable recipes ---
+function craftItem(agent, recipeId) {
+  const recipe = recipeId && RECIPES[recipeId];
+  if (!recipe) {
+    // No/unknown target: craft something the agent can afford here.
+    const station = agent.currentZone;
+    const affordable = Object.entries(RECIPES).find(([id, r]) =>
+      (!r.station || r.station === station) && hasInputs(agent, r.inputs));
+    if (!affordable) return `${agent.name} has nothing to craft`;
+    return craftItem(agent, affordable[0]);
+  }
+  if (recipe.station && agent.currentZone !== recipe.station) {
+    setAgentTarget(agent, recipe.station);
+    return `${agent.name} heads to the ${recipe.station} to craft ${recipeId}`;
+  }
+  if (!hasInputs(agent, recipe.inputs)) {
+    const missing = Object.keys(recipe.inputs)
+      .filter((r) => (agent.resources[r] || 0) < recipe.inputs[r]);
+    return `${agent.name} lacks ${missing.join(", ")} to craft ${recipeId}`;
+  }
+  for (const [r, n] of Object.entries(recipe.inputs)) agent.resources[r] -= n;
+  agent.resources[recipeId] = (agent.resources[recipeId] || 0) + 1;
+  sidebarDirty = true;
+  return `${agent.name} crafted ${recipeId}`;
+}
+
+function hasInputs(agent, inputs) {
+  return Object.entries(inputs).every(([r, n]) => (agent.resources[r] || 0) >= n);
+}
+
+function customRecipeCount() {
+  return Object.keys(RECIPES).filter((id) => !["planks", "bricks", "tools"].includes(id)).length;
+}
+
+// Client-side recipe validation (mirrors the server; defense in depth).
+function validateRecipe(rc) {
+  if (!CRAFTING_ENABLED || !rc || typeof rc !== "object") return false;
+  if (civilization.pendingRecipes.length >= MAX_PENDING_BLUEPRINTS) return false;
+  if (customRecipeCount() >= MAX_CUSTOM_RECIPES) return false;
+  if (typeof rc.id !== "string" || !SLUG_RE.test(rc.id)) return false;
+  if (RECIPES[rc.id] || civilization.resourceRegistry[rc.id]) return false;
+  if (civilization.pendingRecipes.some((p) => p.id === rc.id)) return false;
+  if (civilization.rejectedRecipeIds.has(rc.id)) return false;
+  if (typeof rc.name !== "string" || rc.name.length < 1 || rc.name.length > 32) return false;
+  const inputs = rc.inputs;
+  if (!inputs || typeof inputs !== "object") return false;
+  const keys = Object.keys(inputs);
+  if (keys.length < 1 || keys.length > 6) return false;
+  for (const k of keys) {
+    if (!civilization.resourceRegistry[k]) return false;
+    const v = inputs[k];
+    if (!Number.isInteger(v) || v < 1 || v > 5) return false;
+  }
+  if (rc.station != null && !VALID_GATHER_ZONES.has(rc.station)) return false;
+  return true;
+}
+
+function proposeRecipe(agent, rc) {
+  if (rc && civilization.rejectedRecipeIds.has(rc.id)) {
+    return `${agent.name}'s recipe ${rc.id} was already rejected`;
+  }
+  if (!validateRecipe(rc)) return `${agent.name} drafted an invalid recipe`;
+  civilization.pendingRecipes.push({
+    id: rc.id,
+    name: rc.name,
+    inputs: { ...rc.inputs },
+    station: rc.station == null ? null : rc.station,
+    color: rc.color || "#BCAAA4",
+    proposedBy: agent.name
+  });
+  civilization.lastBlueprintActivityFrame = frameTick;
+  sidebarDirty = true;
+  const needsStr = Object.entries(rc.inputs).map(([k, v]) => `${k}×${v}`).join(", ");
+  return `${agent.name} proposed recipe ${rc.name} (needs ${needsStr})`;
+}
+
+function reviewRecipe(agent, action, targetId, message) {
+  if (agent.role !== "elder") return `${agent.name} could not review that recipe`;
+  const idx = civilization.pendingRecipes.findIndex((p) => p.id === targetId);
+  if (idx === -1) return `${agent.name} could not review that recipe`;
+  const rc = civilization.pendingRecipes[idx];
+  civilization.pendingRecipes.splice(idx, 1);
+  civilization.lastBlueprintActivityFrame = frameTick;
+  if (message) { agent.message = message; agent.messageTimer = 180; }
+  sidebarDirty = true;
+  if (action === "reject_recipe") {
+    civilization.rejectedRecipeIds.add(rc.id);
+    return `${agent.name} rejected the ${rc.name} recipe`;
+  }
+  // Approve: register the crafted-good resource + the live recipe.
+  civilization.resourceRegistry[rc.id] = {
+    name: rc.name, gatherZone: null, color: rc.color, crafted: true
+  };
+  RECIPES[rc.id] = { name: rc.name, inputs: { ...rc.inputs }, station: rc.station };
+  return `${agent.name} approved the ${rc.name} recipe`;
 }
 
 // Map a zone to every resource id gatherable there (base + custom).
@@ -479,7 +625,9 @@ const AVAILABLE_ACTIONS = [
   "collect_resource", "talk_to_nearby", "trade_resource",
   "start_project", "contribute_resources", "build_structure",
   "propose_blueprint", "approve_blueprint", "reject_blueprint",
-  "assign_task", "change_role", "rest"
+  "assign_task", "change_role", "rest",
+  ...(SURVIVAL_ENABLED ? ["heal_agent"] : []),
+  ...(CRAFTING_ENABLED ? ["craft_item", "propose_recipe", "approve_recipe", "reject_recipe"] : [])
 ];
 
 const AGENT_DEFS = [
@@ -557,7 +705,11 @@ function makeAgents() {
       idleCycles: 0,
       lastTaskedFrame: null,
       lastContributedFrame: null,
-      consecutiveIdleMoves: 0
+      consecutiveIdleMoves: 0,
+      hunger: 80,
+      health: 100,
+      incapacitated: false,
+      goal: null
     };
   });
 }
@@ -688,6 +840,45 @@ function moveAgent(agent) {
     agent.idleFrames = 0;
   }
   agent.currentZone = getZone(agent.x, agent.y);
+}
+
+// --- Survival (#2): hunger/health drain, auto-eat, recoverable collapse ---
+function updateSurvival(agent) {
+  if (!SURVIVAL_ENABLED) return;
+  // Auto-eat (deterministic, no LLM): the food consumption sink.
+  if (agent.hunger < EAT_THRESHOLD && (agent.resources.food || 0) > 0) {
+    agent.resources.food -= 1;
+    agent.hunger = Math.min(100, agent.hunger + FOOD_RESTORE);
+    pushActivity(`${agent.name} ate food`);
+    sidebarDirty = true;
+  }
+  agent.hunger = Math.max(0, agent.hunger - HUNGER_RATE);
+  if (agent.hunger <= 0) {
+    agent.health = Math.max(0, agent.health - HEALTH_RATE);
+  } else if (!agent.incapacitated) {
+    agent.health = Math.min(100, agent.health + HEALTH_REGEN);
+  }
+  if (agent.health <= 0 && !agent.incapacitated) {
+    agent.incapacitated = true;
+    agent.goal = null;
+    pushActivity(`${agent.name} collapsed from starvation`);
+    sidebarDirty = true;
+  } else if (agent.incapacitated && agent.health > 0) {
+    agent.incapacitated = false;
+    pushActivity(`${agent.name} recovered`);
+    sidebarDirty = true;
+  }
+}
+
+// Nearest agent who most needs help (collapsed first, then lowest health).
+function neediestNearby(agent) {
+  const nearby = getNearbyAgents(agent, agents)
+    .map((name) => agents.find((a) => a.name === name))
+    .filter((a) => a && (a.incapacitated || a.health < 60));
+  if (nearby.length === 0) return null;
+  nearby.sort((a, b) =>
+    (b.incapacitated - a.incapacitated) || (a.health - b.health));
+  return nearby[0];
 }
 
 function projectProgressText() {
@@ -1030,8 +1221,31 @@ function drawSpeechBubble(ctx, agent) {
   ctx.fillText(text, x, by + 15);
 }
 
+function drawHealthBar(ctx, agent) {
+  if (!SURVIVAL_ENABLED) return;
+  if (agent.health >= 100 && !agent.incapacitated) return;
+  const w = 24, h = 3;
+  const bx = Math.round(agent.x - w / 2);
+  const by = Math.round(agent.y - 30);
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(bx - 1, by - 1, w + 2, h + 2);
+  const frac = Math.max(0, Math.min(1, agent.health / 100));
+  ctx.fillStyle = frac > 0.5 ? "#4CAF50" : frac > 0.2 ? "#FFC107" : "#F44336";
+  ctx.fillRect(bx, by, Math.round(w * frac), h);
+}
+
 function drawAgent(ctx, agent, frameTick) {
   drawAgentSprite(ctx, agent, frameTick);
+  if (agent.incapacitated) {
+    // Grey out collapsed agents and tag them.
+    ctx.fillStyle = "rgba(60, 60, 70, 0.55)";
+    ctx.fillRect(agent.x - 12, agent.y - 26, 24, 30);
+    ctx.fillStyle = "#fff";
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("☠", agent.x, agent.y - 14);
+  }
+  drawHealthBar(ctx, agent);
   const label = `${agent.role.charAt(0).toUpperCase()}·${agent.name}`;
   ctx.font = "10px monospace";
   ctx.textAlign = "center";
@@ -1303,6 +1517,19 @@ function applyDecision(agent, decision) {
       }
       break;
     }
+    case "craft_item": {
+      summary = craftItem(agent, decision.target);
+      break;
+    }
+    case "propose_recipe": {
+      summary = proposeRecipe(agent, decision.recipe);
+      break;
+    }
+    case "approve_recipe":
+    case "reject_recipe": {
+      summary = reviewRecipe(agent, action, decision.target, decision.message);
+      break;
+    }
     case "start_project": {
       summary = startProjectFor(agent, decision.target) || `${agent.name} could not start a project`;
       break;
@@ -1451,6 +1678,41 @@ function applyDecision(agent, decision) {
       }
       break;
     }
+    case "heal_agent": {
+      // Restore a hurt/collapsed neighbour's health. Healer's mechanic, but
+      // any role may do it (the healer is just nudged/faster toward it).
+      let patient = decision.target && agents.find((a) => a.name === decision.target);
+      if (!patient || (patient.health >= 100 && !patient.incapacitated)) {
+        patient = neediestNearby(agent);
+      }
+      if (!patient) {
+        summary = `${agent.name} found no one to heal`;
+        break;
+      }
+      if (distanceTo(agent, patient) > 80) {
+        autoMoveTowardTarget(agent, patient.name);
+        summary = `${agent.name} moves to help ${patient.name}`;
+        break;
+      }
+      const boost = agent.role === "healer" ? HEAL_AMOUNT * 2 : HEAL_AMOUNT;
+      patient.health = Math.min(100, patient.health + boost);
+      // A collapsed agent also needs food to climb back above 0 hunger; share some.
+      if (patient.incapacitated && (agent.resources.food || 0) > 0) {
+        agent.resources.food -= 1;
+        patient.resources.food = (patient.resources.food || 0) + 1;
+        patient.hunger = Math.min(100, patient.hunger + FOOD_RESTORE);
+      }
+      // Revive immediately rather than waiting for the next survival tick.
+      if (patient.incapacitated && patient.health > 0) {
+        patient.incapacitated = false;
+        pushActivity(`${patient.name} was revived by ${agent.name}`);
+      }
+      nudgeAlly(agent, patient.name);
+      pushMemory(patient, `Healed by ${agent.name}`);
+      summary = `${agent.name} healed ${patient.name}`;
+      sidebarDirty = true;
+      break;
+    }
     case "rest":
     default:
       summary = `${agent.name} rested`;
@@ -1470,6 +1732,50 @@ function applyDecision(agent, decision) {
   }
 
   if (logActivity) pushActivity(summary);
+  return summary;
+}
+
+// --- Behavior goals (#1): the LLM picks a goal; this runs it deterministically
+// across ticks so the slow model is consulted only at decision points. ---
+function goalForDecision(decision) {
+  if (!USE_GOALS || !decision) return null;
+  switch (decision.action) {
+    case "collect_resource":    return { kind: "gather",  target: decision.target, ttl: 8 };
+    case "contribute_resources":return { kind: "deliver", target: decision.target, ttl: 6 };
+    case "craft_item":          return { kind: "craft",   target: decision.target, ttl: 6 };
+    case "build_structure":     return { kind: "build",   target: null,            ttl: 6 };
+    default:                    return null;  // talk/move/propose/heal/etc. stay LLM-only
+  }
+}
+
+// Run one deterministic step of the active goal. Returns true to keep the goal
+// (skip the LLM next tick), false when it completes/blocks (hand back to the LLM).
+function stepGoal(agent) {
+  const g = agent.goal;
+  if (!g) return false;
+  if (agent.incapacitated) { agent.goal = null; return false; }
+  g.ttl -= 1;
+  if (g.ttl < 0) { agent.goal = null; return false; }
+
+  if ((g.kind === "gather" || g.kind === "deliver" || g.kind === "build")
+      && !civilization.activeProject) { agent.goal = null; return false; }
+  if (g.kind === "gather" && !firstUnmetProjectResource()) { agent.goal = null; return false; }
+
+  const actionByKind = {
+    gather: "collect_resource", deliver: "contribute_resources",
+    craft: "craft_item", build: "build_structure",
+  };
+  const action = actionByKind[g.kind];
+  if (!action) { agent.goal = null; return false; }
+  const summary = applyDecision(agent, {
+    action, target: g.target, message: null, reasoning: `goal:${g.kind}`,
+  });
+  // Terminal outcomes that mean the goal is finished or stuck.
+  if (/has nothing to contribute|found nothing|nothing to craft|lacks |built |could not/.test(summary || "")) {
+    agent.goal = null;
+    return false;
+  }
+  return true;
 }
 
 function applyRuleBasedFallback(agent) {
@@ -1564,6 +1870,16 @@ async function thinkAgent(agent) {
       && frameTick - civilization.lastBlueprintActivityFrame > BLUEPRINT_STALL_THRESHOLD) {
     nudges.push("NOTE: No new blueprint activity in a while. Consider propose_blueprint if you have an idea.");
   }
+  if (SURVIVAL_ENABLED) {
+    if (agent.hunger < EAT_THRESHOLD && (agent.resources.food || 0) === 0) {
+      nudges.push("NOTE: You are hungry and have no food. Gather food from the farm (or fish at the beach) before you starve.");
+    }
+    const collapsed = agents.find((a) => a.incapacitated);
+    if (collapsed && collapsed.name !== agent.name) {
+      const verb = agent.role === "healer" ? "Go heal_agent" : "Bring food or heal_agent";
+      nudges.push(`NOTE: ${collapsed.name} has collapsed. ${verb} to revive them.`);
+    }
+  }
   const behaviorNudge = nudges.join(" ");
 
   const payload = {
@@ -1574,6 +1890,8 @@ async function thinkAgent(agent) {
     personality: agent.personality,
     memory: agent.memory,
     resources: agent.resources,
+    hunger: agent.hunger,
+    health: agent.health,
     relationships: agent.relationships,
     nearby_agents: nearbyDetailed,
     world_zone: getZone(agent.x, agent.y),
@@ -1592,6 +1910,12 @@ async function thinkAgent(agent) {
       id: b.id,
       needs: b.needs,
       proposed_by: b.proposedBy
+    })),
+    known_recipes: CRAFTING_ENABLED ? Object.entries(RECIPES).map(([id, r]) => ({
+      id: id, inputs: r.inputs, station: r.station
+    })) : [],
+    pending_recipes: civilization.pendingRecipes.map((r) => ({
+      id: r.id, inputs: r.inputs, proposed_by: r.proposedBy
     })),
     approved_custom_projects: customProjectIds(),
     rejected_blueprints: Array.from(civilization.rejectedBlueprintIds),
@@ -1623,6 +1947,7 @@ async function thinkAgent(agent) {
       llmCooldownUntil = 0;
       decision = normalizeDecision(agent, decision);
       applyDecision(agent, decision);
+      agent.goal = goalForDecision(decision);
     }
   } catch (e) {
     lmStatus = "offline";
@@ -1648,6 +1973,9 @@ const civResourcesEl = document.getElementById("civResources");
 const civResourceListEl = document.getElementById("civResourceList");
 const civCustomBuildsEl = document.getElementById("civCustomBuilds");
 const civCustomListEl = document.getElementById("civCustomList");
+const civRecipeRow = document.getElementById("civRecipeRow");
+const civRecipeCountEl = document.getElementById("civRecipeCount");
+const civRecipeListEl = document.getElementById("civRecipeList");
 const civCollectRateEl = document.getElementById("civCollectRate");
 const civPendingRow = document.getElementById("civPendingRow");
 const civPendingEl = document.getElementById("civPending");
@@ -1691,6 +2019,16 @@ function renderSidebar() {
     civCollectRateEl.textContent = civilization.collectAttempts > 0
       ? `${Math.round(100 * civilization.collectSuccesses / civilization.collectAttempts)}% (${civilization.collectSuccesses}/${civilization.collectAttempts})`
       : "—";
+    if (CRAFTING_ENABLED) {
+      const recipeIds = Object.keys(RECIPES);
+      civRecipeRow.style.display = "block";
+      civRecipeCountEl.textContent = recipeIds.length;
+      civRecipeListEl.innerHTML = recipeIds.map((id) => {
+        const r = RECIPES[id];
+        const ins = Object.entries(r.inputs).map(([k, v]) => `${k}×${v}`).join("+");
+        return `<span class="res-chip civ-value">${escapeHtml(r.name || id)} <span class="civ-label">(${escapeHtml(ins)})</span></span>`;
+      }).join("");
+    }
     if (civilization.pendingBlueprints.length > 0) {
       civPendingRow.style.display = "block";
       civPendingEl.innerHTML = civilization.pendingBlueprints.slice(0, 3).map((b) =>
@@ -1705,11 +2043,14 @@ function renderSidebar() {
     || conversationLog.length !== lastRenderedConvCount;
 
   if (sidebarDirty) {
-    agentListEl.innerHTML = agents.map((a) =>
-      `<li><span class="dot" style="background:${a.color}"></span>` +
-      `<span><span class="agent-main">${escapeHtml(a.name)} \u2014 ${escapeHtml(a.role)}</span>` +
-      `<span class="agent-status">${escapeHtml(humanizeAction(a))}</span></span></li>`
-    ).join("");
+    agentListEl.innerHTML = agents.map((a) => {
+      const vitals = SURVIVAL_ENABLED
+        ? ` <span class="agent-vitals">${a.incapacitated ? "\u2620 collapsed" : `\u2764${Math.round(a.health)} \ud83c\udf57${Math.round(a.hunger)}`}</span>`
+        : "";
+      return `<li><span class="dot" style="background:${a.color}"></span>` +
+        `<span><span class="agent-main">${escapeHtml(a.name)} \u2014 ${escapeHtml(a.role)}</span>` +
+        `<span class="agent-status">${escapeHtml(humanizeAction(a))}${vitals}</span></span></li>`;
+    }).join("");
   }
 
   if (logsChanged || sidebarDirty) {
@@ -1769,9 +2110,15 @@ const ACTION_LABELS = {
   assign_task: "assigning tasks",
   change_role: "changing role",
   move_to_agent: "approaching someone",
+  heal_agent: "healing",
+  craft_item: "crafting",
+  propose_recipe: "proposing a recipe",
+  approve_recipe: "reviewing a recipe",
+  reject_recipe: "reviewing a recipe",
   rest: "resting"
 };
 function humanizeAction(agent) {
+  if (agent.incapacitated) return "collapsed";
   if (agent.isThinking) return "thinking…";
   const a = agent.lastAction;
   if (!a) return "idle";
@@ -1829,8 +2176,11 @@ function tick() {
   ctx.clearRect(0, 0, WORLD_W, WORLD_H);
   drawWorld(ctx, frameTick);
 
+  if (!paused && SURVIVAL_ENABLED && frameTick % SURVIVAL_TICK_FRAMES === 0) {
+    for (const agent of agents) updateSurvival(agent);
+  }
   for (const agent of agents) {
-    if (!paused) moveAgent(agent);
+    if (!paused && !agent.incapacitated) moveAgent(agent);
   }
   const drawList = [
     ...civilization.structures.map((structure) => ({
@@ -1851,11 +2201,17 @@ function tick() {
       if (agent.messageTimer === 0) agent.message = null;
     }
 
-    if (!paused) {
+    if (!paused && !agent.incapacitated) {
       agent.thinkTimer--;
       if (agent.thinkTimer <= 0 && !agent.isThinking && !agent.pendingThink) {
-        scheduleThink(agent);
-        agent.thinkTimer = agent.thinkInterval;
+        if (USE_GOALS && agent.goal) {
+          // Run the active goal deterministically instead of calling the LLM.
+          const continuing = stepGoal(agent);
+          agent.thinkTimer = continuing ? GOAL_STEP_FRAMES : 1;
+        } else {
+          scheduleThink(agent);
+          agent.thinkTimer = agent.thinkInterval;
+        }
       }
     }
   }
