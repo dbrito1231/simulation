@@ -13,19 +13,29 @@
   html, body { margin: 0; padding: 0; background: #1b1b1b; font-family: system-ui, sans-serif; }
   #wrap {
     display: flex;
-    width: min(100%, 1320px);
-    margin: 0 auto;
+    width: 100%;
+    height: 100vh;
+    margin: 0;
     position: relative;
     box-sizing: border-box;
-    padding: 0 8px;
+    padding: 8px 12px;
+    gap: 8px;
   }
-  #canvasWrap { position: relative; flex: 1 1 1000px; min-width: 0; }
+  #canvasWrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+  }
   #world {
     display: block;
     background: #000;
-    width: 100%;
-    max-width: 1000px;
-    height: auto;
+    height: calc(100vh - 16px);
+    max-height: calc(100vh - 16px);
+    width: auto;
+    max-width: 100%;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
   }
@@ -54,8 +64,9 @@
     pointer-events: none;
   }
   #sidebar {
-    width: 320px;
-    height: 720px;
+    width: 360px;
+    flex-shrink: 0;
+    height: calc(100vh - 16px);
     background: #14141c;
     color: #ddd;
     display: flex;
@@ -93,10 +104,39 @@
     font-size: 13px;
     color: #fff;
   }
-  #civPanel { font-size: 11px; line-height: 1.5; }
+  #civPanel { font-size: 12px; line-height: 1.5; }
   #civPanel .civ-row { margin-bottom: 4px; }
   #civPanel .civ-label { color: #999; }
   #civPanel .civ-value { color: #e3c87e; }
+  #civPanel .civ-project-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+  }
+  #civProjectSprite {
+    width: 56px;
+    height: 56px;
+    flex-shrink: 0;
+    background: #0e0e14;
+    border: 1px solid #2a2a35;
+    border-radius: 4px;
+    image-rendering: pixelated;
+    display: none;
+  }
+  #civPanel .civ-project-info { flex: 1; min-width: 0; }
+  #civPanel #civResourceList,
+  #civPanel #civCustomList {
+    margin-top: 3px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+  }
+  #civPanel .res-chip { display: inline-flex; align-items: center; gap: 4px; color: #ccc; }
+  #civPanel .res-chip .swatch {
+    width: 9px; height: 9px; border-radius: 2px; flex-shrink: 0;
+  }
+  #civPanel #civCustomList .civ-value { color: #b6e3a0; }
   #civPanel .progress-bar {
     height: 6px;
     background: #2a2a35;
@@ -114,23 +154,26 @@
     list-style: none;
     margin: 0;
     padding: 0;
-    font-size: 11px;
-    max-height: 210px;
+    font-size: 12px;
+    max-height: 280px;
     overflow-y: auto;
   }
   #agentList li {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
-    padding: 2px 0;
+    padding: 4px 0;
   }
   #agentList .dot {
     width: 8px; height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
+    margin-top: 4px;
   }
+  #agentList .agent-main { color: #ddd; }
+  #agentList .agent-status { display: block; color: #8a8a99; font-size: 11px; }
   #conversationLog {
-    flex: 1;
+    flex: 1.4;
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -143,8 +186,8 @@
     overflow-y: auto;
     flex: 1;
     font-family: ui-monospace, monospace;
-    font-size: 11px;
-    line-height: 1.45;
+    font-size: 13px;
+    line-height: 1.55;
   }
   #convList li {
     padding: 4px 0;
@@ -158,7 +201,10 @@
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
   #activityLog {
-    max-height: 160px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 120px;
     padding-bottom: 12px;
   }
   #actList {
@@ -166,21 +212,23 @@
     margin: 0;
     padding: 0;
     overflow-y: auto;
-    max-height: 120px;
-    font-size: 10px;
-    color: #999;
+    flex: 1;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #aaa;
   }
-  #actList li { padding: 2px 0; }
+  #actList li { padding: 3px 0; }
   @media (max-width: 900px) {
-    #wrap { flex-direction: column; padding: 0; }
-    #sidebar { width: 100%; height: 360px; border-left: 0; border-top: 1px solid #2a2a35; }
+    #wrap { flex-direction: column; height: auto; padding: 0; }
+    #world { height: auto; max-height: 70vh; width: 100%; }
+    #sidebar { width: 100%; flex-shrink: 1; height: 420px; border-left: 0; border-top: 1px solid #2a2a35; }
   }
 </style>
 </head>
 <body>
 <div id="wrap">
   <div id="canvasWrap">
-    <canvas id="world" width="1000" height="720"></canvas>
+    <canvas id="world" width="1600" height="1000"></canvas>
     <button id="pauseBtn">Pause</button>
     <div id="tab-warning">Tab hidden — simulation paused. Keep this tab visible.</div>
   </div>
@@ -194,13 +242,25 @@
       <h2>Civilization</h2>
       <div class="civ-row"><span class="civ-label">Level:</span> <span class="civ-value" id="civLevel">1</span></div>
       <div class="civ-row"><span class="civ-label">Structures:</span> <span class="civ-value" id="civStructures">0</span></div>
-      <div class="civ-row"><span class="civ-label">Project:</span> <span class="civ-value" id="civProject">none</span></div>
-      <div class="civ-row" id="civProgressRow" style="display:none">
-        <span class="civ-label">Progress:</span> <span class="civ-value" id="civProgress">—</span>
-        <div class="progress-bar"><div class="progress-fill" id="civProgressBar" style="width:0%"></div></div>
+      <div class="civ-project-row">
+        <canvas id="civProjectSprite" width="80" height="80"></canvas>
+        <div class="civ-project-info">
+          <div class="civ-row"><span class="civ-label">Project:</span> <span class="civ-value" id="civProject">none</span></div>
+          <div class="civ-row" id="civProgressRow" style="display:none">
+            <span class="civ-label">Progress:</span> <span class="civ-value" id="civProgress">—</span>
+            <div class="progress-bar"><div class="progress-fill" id="civProgressBar" style="width:0%"></div></div>
+          </div>
+        </div>
       </div>
-      <div class="civ-row"><span class="civ-label">Village resources:</span> <span class="civ-value" id="civResources">0</span></div>
-      <div class="civ-row"><span class="civ-label">Custom builds:</span> <span class="civ-value" id="civCustomBuilds">0</span></div>
+      <div class="civ-row">
+        <span class="civ-label">Village resources:</span> <span class="civ-value" id="civResources">0</span>
+        <div id="civResourceList"></div>
+      </div>
+      <div class="civ-row">
+        <span class="civ-label">Custom builds:</span> <span class="civ-value" id="civCustomBuilds">0</span>
+        <div id="civCustomList"></div>
+      </div>
+      <div class="civ-row"><span class="civ-label">Collect success:</span> <span class="civ-value" id="civCollectRate">—</span></div>
       <div class="civ-row" id="civPendingRow" style="display:none">
         <span class="civ-label">Pending:</span>
         <div id="civPending"></div>
@@ -220,6 +280,7 @@
     </section>
   </aside>
 </div>
+<script src="roles.js"></script>
 <script src="sprites.js"></script>
 <script>
 "use strict";
@@ -227,14 +288,15 @@
 const canvas = document.getElementById("world");
 const ctx = canvas.getContext("2d");
 
-const WORLD_W = 1000;
-const WORLD_H = 720;
+const WORLD_W = 1600;
+const WORLD_H = 1000;
 
 function setupCanvas() {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = Math.floor(WORLD_W * dpr);
   canvas.height = Math.floor(WORLD_H * dpr);
-  canvas.style.maxWidth = WORLD_W + "px";
+  // Display size is driven by CSS (height-filled, aspect-ratio preserved); the
+  // old maxWidth = WORLD_W cap is removed so the world can scale up past 1000px.
   canvas.style.aspectRatio = `${WORLD_W} / ${WORLD_H}`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.imageSmoothingEnabled = false;
@@ -243,49 +305,43 @@ function setupCanvas() {
 setupCanvas();
 window.addEventListener("resize", setupCanvas);
 
+// World is 1600x1000. Zone rectangles below are the authoritative layout and
+// MUST agree with getZone() (hit-test), the visual fills in drawTiledWorld
+// (sprites.js), and the structure build grids in findStructureSpot().
 const ZONE_CENTERS = {
-  farm:    { x: 500, y: 120 },
-  forest:  { x: 820, y: 140 },
-  village: { x: 550, y: 360 },
-  market:  { x: 600, y: 400 },
-  beach:   { x: 230, y: 360 },
-  cave:    { x: 820, y: 580 },
-  ocean:   { x: 80,  y: 360 }
+  farm:    { x: 700,  y: 260 },
+  forest:  { x: 1280, y: 280 },
+  village: { x: 760,  y: 730 },
+  market:  { x: 1040, y: 670 },
+  beach:   { x: 310,  y: 500 },
+  cave:    { x: 1380, y: 855 },
+  ocean:   { x: 100,  y: 500 }
 };
 
 const ZONE_BOUNDS = {
-  farm:    { x1: 390, y1: 50,  x2: 630, y2: 210 },
-  forest:  { x1: 710, y1: 50,  x2: 950, y2: 250 },
-  village: { x1: 430, y1: 290, x2: 690, y2: 450 },
-  market:  { x1: 565, y1: 365, x2: 655, y2: 435 },
-  beach:   { x1: 160, y1: 50,  x2: 310, y2: 670 },
-  cave:    { x1: 730, y1: 530, x2: 930, y2: 670 },
-  ocean:   { x1: 20,  y1: 50,  x2: 140, y2: 670 }
+  farm:    { x1: 500,  y1: 110, x2: 920,  y2: 410 },
+  forest:  { x1: 1030, y1: 110, x2: 1550, y2: 450 },
+  village: { x1: 540,  y1: 560, x2: 900,  y2: 940 },
+  market:  { x1: 970,  y1: 620, x2: 1110, y2: 720 },
+  beach:   { x1: 230,  y1: 120, x2: 400,  y2: 880 },
+  cave:    { x1: 1210, y1: 750, x2: 1540, y2: 960 },
+  ocean:   { x1: 30,   y1: 120, x2: 180,  y2: 880 }
 };
 
 const PROJECT_TEMPLATES = {
-  house:     { name: "House",     needs: { wood: 3, food: 1 }, visualStyle: "house" },
-  farm_plot: { name: "Farm Plot", needs: { wood: 2, food: 2 }, visualStyle: "farm_plot" },
-  workshop:  { name: "Workshop",  needs: { wood: 4, gold: 2 }, visualStyle: "workshop" },
-  wall:      { name: "Wall",      needs: { wood: 2, gold: 1 }, visualStyle: "wall" }
+  house:     { name: "House",     needs: { wood: 3, stone: 1, food: 1, fish: 1 }, visualStyle: "house" },
+  farm_plot: { name: "Farm Plot", needs: { wood: 2, food: 1, herbs: 1, water: 1 }, visualStyle: "farm_plot" },
+  workshop:  { name: "Workshop",  needs: { wood: 3, stone: 2, gold: 1 }, visualStyle: "workshop" },
+  wall:      { name: "Wall",      needs: { stone: 3, gold: 1 }, visualStyle: "wall" }
 };
 
 const PROJECT_ORDER = ["house", "farm_plot", "workshop", "wall"];
 
-const ROLE_PROJECT = {
-  elder: "house",
-  healer: "house",
-  farmer: "farm_plot",
-  fisher: "farm_plot",
-  gatherer: "farm_plot",
-  miner: "workshop",
-  blacksmith: "workshop",
-  trader: "workshop",
-  builder: ["house", "wall"],
-  guard: "wall",
-  scout: "wall",
-  explorer: "wall"
-};
+// Role maps are all derived from the shared ROLES source (roles.json, loaded via
+// roles.js) so the client and server never drift. ROLES is defined in roles.js.
+const ROLE_PROJECT = Object.fromEntries(
+  Object.entries(ROLES).map(([role, def]) => [role, def.preferredProject])
+);
 
 function roleDefaultProject(role) {
   const pref = ROLE_PROJECT[role] || "house";
@@ -294,10 +350,15 @@ function roleDefaultProject(role) {
 }
 
 // Base resources always available. Custom resources are merged in on approve_blueprint.
+// Each maps to an existing gather zone so collect_resource works there.
 const BASE_RESOURCES = {
-  food: { name: "Food", gatherZone: "farm",   color: "#4CAF50" },
-  wood: { name: "Wood", gatherZone: "forest", color: "#795548" },
-  gold: { name: "Gold", gatherZone: "cave",   color: "#FFC107" }
+  food:  { name: "Food",  gatherZone: "farm",    color: "#4CAF50" },
+  wood:  { name: "Wood",  gatherZone: "forest",  color: "#795548" },
+  gold:  { name: "Gold",  gatherZone: "cave",    color: "#FFC107" },
+  stone: { name: "Stone", gatherZone: "cave",    color: "#9E9E9E" },
+  fish:  { name: "Fish",  gatherZone: "beach",   color: "#4FC3F7" },
+  herbs: { name: "Herbs", gatherZone: "forest",  color: "#8BC34A" },
+  water: { name: "Water", gatherZone: "village", color: "#03A9F4" }
 };
 
 const VALID_GATHER_ZONES = new Set(
@@ -310,21 +371,26 @@ const SLUG_RE = /^[a-z][a-z0-9_]{1,24}$/;
 const MAX_PENDING_BLUEPRINTS = 5;
 const MAX_APPROVED_CUSTOM = 15;
 const MAX_CUSTOM_RESOURCES = 10;
+// Per-resource carry cap. Previously hardcoded to 5 inline, which caused
+// collect_resource to silently report "found nothing" once an agent capped
+// out, even when the zone and the active project still needed more.
+const COLLECT_CAP = 20;
+// Frame-tick thresholds for "nothing has happened in a while" nudges.
+const STALL_THRESHOLD = 600;
+const BLUEPRINT_STALL_THRESHOLD = 1800;
 
-const ROLE_SKILLS = {
-  farmer:     "gathers food from the farm",
-  trader:     "trades resources at the market",
-  builder:    "starts and completes build projects",
-  guard:      "patrols the village",
-  gatherer:   "gathers wood from the forest",
-  fisher:     "gathers food from the beach",
-  healer:     "supports villagers in the village",
-  miner:      "gathers gold from the cave",
-  scout:      "explores and scouts the forest",
-  blacksmith: "crafts at the market workshop",
-  explorer:   "explores distant zones",
-  elder:      "guides the village and starts projects"
-};
+// Each role's primary specialty resource (first in its specialty list), used to
+// nudge agents back toward their specialty instead of wandering. Derived from ROLES.
+const ROLE_SPECIALTY_RESOURCE = Object.fromEntries(
+  Object.entries(ROLES)
+    .filter(([, def]) => def.specialty && def.specialty.length > 0)
+    .map(([role, def]) => [role, def.specialty[0]])
+);
+
+// role -> skill description shown to the LLM. Derived from ROLES.
+const ROLE_SKILLS = Object.fromEntries(
+  Object.entries(ROLES).map(([role, def]) => [role, def.skill])
+);
 
 const civilization = {
   level: 1,
@@ -336,7 +402,11 @@ const civilization = {
   projectRegistry: { ...PROJECT_TEMPLATES },
   pendingBlueprints: [],
   rejectedBlueprintIds: new Set(),
-  directive: null
+  directive: null,
+  lastProjectContributionFrame: 0,
+  lastBlueprintActivityFrame: 0,
+  collectAttempts: 0,
+  collectSuccesses: 0
 };
 
 function customResourceCount() {
@@ -485,7 +555,9 @@ function makeAgents() {
       pendingThink: false,
       assignedTask: null,
       idleCycles: 0,
-      lastTaskedFrame: null
+      lastTaskedFrame: null,
+      lastContributedFrame: null,
+      consecutiveIdleMoves: 0
     };
   });
 }
@@ -501,13 +573,14 @@ agents.forEach((a, i) => {
 });
 
 function getZone(x, y) {
-  if (x >= 560 && x <= 660 && y >= 360 && y <= 440) return "market";
-  if (x >= 0 && x <= 150) return "ocean";
-  if (x >= 150 && x <= 320) return "beach";
-  if (x >= 380 && x <= 640 && y >= 40 && y <= 220) return "farm";
-  if (x >= 700 && x <= 960 && y >= 40 && y <= 260) return "forest";
-  if (x >= 420 && x <= 700 && y >= 280 && y <= 460) return "village";
-  if (x >= 720 && x <= 940 && y >= 520 && y <= 680) return "cave";
+  // market is checked first because it sits inside the village rectangle.
+  if (x >= 950 && x <= 1130 && y >= 600 && y <= 740) return "market";
+  if (x >= 0 && x <= 200) return "ocean";
+  if (x >= 200 && x <= 420) return "beach";
+  if (x >= 480 && x <= 940 && y >= 90 && y <= 430) return "farm";
+  if (x >= 1010 && x <= 1570 && y >= 90 && y <= 470) return "forest";
+  if (x >= 500 && x <= 1180 && y >= 540 && y <= 960) return "village";
+  if (x >= 1190 && x <= 1570 && y >= 730 && y <= 980) return "cave";
   return "path";
 }
 
@@ -652,6 +725,8 @@ function tryContributeResource(agent, res) {
   if (have >= need || (agent.resources[res] || 0) <= 0) return null;
   agent.resources[res] -= 1;
   p.contributed[res] = have + 1;
+  agent.lastContributedFrame = frameTick;
+  civilization.lastProjectContributionFrame = frameTick;
   sidebarDirty = true;
   return `${agent.name} contributed ${res} to ${p.name}`;
 }
@@ -677,31 +752,63 @@ function isProjectComplete() {
   return true;
 }
 
+// Place the active project's structure once it is fully funded, returning a
+// summary string. Shared by the build_structure case and the contribute_resources
+// fall-through so a funded-but-unbuilt project never wastes a turn.
+function buildActiveStructure(agent) {
+  const structType = civilization.activeProject.type;
+  const spot = findStructureSpot(structType);
+  civilization.structures.push({
+    id: civilization.nextStructureId++,
+    type: structType,
+    x: spot.x,
+    y: spot.y,
+    visualStyle: civilization.activeProject.visualStyle || "generic",
+    name: civilization.activeProject.name
+  });
+  const builtName = civilization.activeProject.name;
+  civilization.activeProject = null;
+  civilization.completedProjects++;
+  agent.lastContributedFrame = frameTick;
+  civilization.lastProjectContributionFrame = frameTick;
+  checkCivilizationLevel();
+  sidebarDirty = true;
+  const where = getZone(spot.x, spot.y);
+  const placeName = where === "path" ? "the village outskirts" : `the ${where}`;
+  return `${agent.name} built ${builtName} at ${placeName}`;
+}
+
 function pickProjectType(target) {
   if (target && civilization.projectRegistry[target]) return target;
   const idx = civilization.completedProjects % PROJECT_ORDER.length;
   return PROJECT_ORDER[idx];
 }
 
-function findStructureSpot() {
-  // Spaced for the larger built-structure sprites (up to ~40x40px tall, plus
-  // their ~14px name-label band) and clear of the market square
-  // (x560-660, y360-440) so buildings don't overlap it or each other.
-  const spots = [
-    { x: 440, y: 300 }, { x: 495, y: 300 }, { x: 550, y: 300 },
-    { x: 605, y: 300 }, { x: 650, y: 300 },
-    { x: 440, y: 360 }, { x: 495, y: 360 }
-  ];
-  for (const spot of spots) {
-    const taken = civilization.structures.some((s) =>
-      Math.abs(s.x - spot.x) < 40 && Math.abs(s.y - spot.y) < 50
-    );
-    if (!taken) return spot;
+// Per-type build region: farm plots cluster at/around the farm, every other
+// structure type packs into the village grid (left of the market square).
+// Spots are generated row-by-row from the origin and the first un-occupied one
+// is returned, so buildings tile neatly and never land randomly on top of each
+// other (random fallback was the old clutter cause).
+function buildRegionFor(type) {
+  // Row spacing (dy) must exceed the 80px overlap threshold in findStructureSpot,
+  // otherwise adjacent rows read as colliding and get pushed out of the zone.
+  if (type === "farm_plot") {
+    return { x0: 520, y0: 250, cols: 4, dx: 105, dy: 85 };
   }
-  return {
-    x: 440 + Math.random() * 200,
-    y: 300 + Math.random() * 100
-  };
+  return { x0: 560, y0: 580, cols: 4, dx: 100, dy: 95 };
+}
+
+function findStructureSpot(type) {
+  const r = buildRegionFor(type);
+  for (let i = 0; i < 240; i++) {
+    const x = r.x0 + (i % r.cols) * r.dx;
+    const y = r.y0 + Math.floor(i / r.cols) * r.dy;
+    const taken = civilization.structures.some((s) =>
+      Math.abs(s.x - x) < 70 && Math.abs(s.y - y) < 80
+    );
+    if (!taken) return { x, y };
+  }
+  return { x: r.x0, y: r.y0 };
 }
 
 function checkCivilizationLevel() {
@@ -733,6 +840,7 @@ function startProjectFor(agent, target) {
     contributed,
     visualStyle: tmpl.visualStyle || "generic"
   };
+  civilization.lastProjectContributionFrame = frameTick;
   sidebarDirty = true;
   if (agent.role === "elder") {
     civilization.directive = `Elder ${agent.name} directs: build the ${tmpl.name}; gather ${projectResourceList(tmpl)}.`;
@@ -1092,6 +1200,9 @@ function applyDecision(agent, decision) {
     agent.consecutiveTalks = 0;
   }
 
+  const isMoveOnly = action.startsWith("move_to_") || action === "rest";
+  agent.consecutiveIdleMoves = isMoveOnly ? (agent.consecutiveIdleMoves || 0) + 1 : 0;
+
   switch (action) {
     case "move_to_farm":
     case "move_to_market":
@@ -1118,25 +1229,27 @@ function applyDecision(agent, decision) {
       break;
     }
     case "collect_resource": {
+      civilization.collectAttempts++;
+      sidebarDirty = true;
       if (!civilization.activeProject) {
         summary = startProjectFor(agent, decision.target) || `${agent.name} could not start a project`;
         break;
       }
       const zone = agent.currentZone;
-      let resource = null;
       const unmet = firstUnmetProjectResource();
       const targetDef = decision.target && civilization.resourceRegistry[decision.target];
-      if (targetDef && targetDef.gatherZone === zone) {
-        resource = decision.target;
-      } else if (unmet && gatherZoneForResource(unmet) === zone) {
-        resource = unmet;
-      } else {
-        const zoneResources = getZoneResources(zone);
-        resource = zoneResources.length > 0 ? zoneResources[0] : null;
-        if (!resource && zone === "beach" && agent.role === "fisher") resource = "food";
-      }
-      if (resource && (agent.resources[resource] || 0) < 5) {
+      const zoneResources = getZoneResources(zone);
+      const candidates = [];
+      if (targetDef && targetDef.gatherZone === zone) candidates.push(decision.target);
+      if (unmet && gatherZoneForResource(unmet) === zone) candidates.push(unmet);
+      candidates.push(...zoneResources);
+      if (zoneResources.length === 0 && zone === "beach" && agent.role === "fisher") candidates.push("food");
+      // Try every resource gatherable in this zone, not just the first one,
+      // so a capped-out agent can still collect something else here.
+      const resource = candidates.find((r) => (agent.resources[r] || 0) < COLLECT_CAP) || null;
+      if (resource) {
         agent.resources[resource] = (agent.resources[resource] || 0) + 1;
+        civilization.collectSuccesses++;
         summary = `${agent.name} collected ${resource}`;
       } else {
         const contribRes = pickContributionResource(agent, { target: unmet });
@@ -1203,6 +1316,11 @@ function applyDecision(agent, decision) {
       const contributed = tryContributeResource(agent, res);
       if (contributed) {
         summary = contributed;
+      } else if (isProjectComplete()) {
+        // Fully funded but not yet built — build it instead of a dead turn.
+        // This was the dominant idle pattern for the builder (44 wasted turns
+        // logged as "has nothing to contribute" while the project sat funded).
+        summary = buildActiveStructure(agent);
       } else {
         const unmet = firstUnmetProjectResource();
         const gatherZone = unmet && gatherZoneForResource(unmet);
@@ -1210,7 +1328,7 @@ function applyDecision(agent, decision) {
           setAgentTarget(agent, gatherZone);
           summary = `${agent.name} heads to gather ${unmet}`;
         } else if (unmet && gatherZone && agent.currentZone === gatherZone
-            && (agent.resources[unmet] || 0) < 5) {
+            && (agent.resources[unmet] || 0) < COLLECT_CAP) {
           agent.resources[unmet] = (agent.resources[unmet] || 0) + 1;
           summary = `${agent.name} collected ${unmet}`;
         } else {
@@ -1223,22 +1341,7 @@ function applyDecision(agent, decision) {
       if (!civilization.activeProject) {
         summary = startProjectFor(agent, decision.target) || `${agent.name} could not start a project`;
       } else if (isProjectComplete()) {
-        const spot = findStructureSpot();
-        const structType = civilization.activeProject.type;
-        civilization.structures.push({
-          id: civilization.nextStructureId++,
-          type: structType,
-          x: spot.x,
-          y: spot.y,
-          visualStyle: civilization.activeProject.visualStyle || "generic",
-          name: civilization.activeProject.name
-        });
-        const builtName = civilization.activeProject.name;
-        civilization.activeProject = null;
-        civilization.completedProjects++;
-        checkCivilizationLevel();
-        summary = `${agent.name} built ${builtName} at village`;
-        sidebarDirty = true;
+        summary = buildActiveStructure(agent);
       } else if (civilization.activeProject && !isProjectComplete()) {
         summary = `${agent.name} waiting for more resources`;
       } else {
@@ -1271,6 +1374,7 @@ function applyDecision(agent, decision) {
           agent.message = decision.message;
           agent.messageTimer = 180;
         }
+        civilization.lastBlueprintActivityFrame = frameTick;
         summary = `${agent.name} proposed ${bp.name} (needs ${needsStr})`;
         sidebarDirty = true;
       } else {
@@ -1299,6 +1403,7 @@ function applyDecision(agent, decision) {
           custom: true
         };
         civilization.pendingBlueprints.splice(idx, 1);
+        civilization.lastBlueprintActivityFrame = frameTick;
         if (decision.message) {
           agent.message = decision.message;
           agent.messageTimer = 180;
@@ -1413,7 +1518,12 @@ async function thinkAgent(agent) {
   agent.isThinking = true;
   const nearbyDetailed = getNearbyAgentsDetailed(agent, agents);
   const idleAgents = agent.role === "elder"
-    ? idleAgentsForElder().map((a, i) => ({ name: a.name, role: a.role, longest_idle: i === 0 }))
+    ? idleAgentsForElder().map((a, i) => ({
+        name: a.name,
+        role: a.role,
+        longest_idle: i === 0,
+        contribution_debt: frameTick - (a.lastContributedFrame == null ? 0 : a.lastContributedFrame)
+      }))
     : [];
 
   const nudges = [];
@@ -1427,6 +1537,32 @@ async function thinkAgent(agent) {
   }
   if (agent.role !== "elder" && civilization.directive) {
     nudges.push(`Your leader directs: ${civilization.directive}. Prioritize it.`);
+  }
+  if (agent.consecutiveIdleMoves >= 3) {
+    nudges.push("NOTE: You have been moving without acting. Prioritize collect_resource or contribute_resources.");
+  }
+  const cappedResource = Object.entries(agent.resources)
+    .find(([, amt]) => amt >= COLLECT_CAP);
+  if (cappedResource) {
+    nudges.push(`NOTE: You are at capacity for ${cappedResource[0]} (${cappedResource[1]}/${COLLECT_CAP}). Use contribute_resources or trade_resource instead of collecting more.`);
+  }
+  const specialtyResource = ROLE_SPECIALTY_RESOURCE[agent.role];
+  if (specialtyResource && specialtyResource === firstUnmetProjectResource()) {
+    nudges.push(`NOTE: Your role specializes in ${specialtyResource}, which the active project still needs. Prioritize collect_resource.`);
+  }
+  if (agent.role === "elder" && civilization.activeProject
+      && frameTick - civilization.lastProjectContributionFrame > STALL_THRESHOLD) {
+    const stalledRes = firstUnmetProjectResource();
+    if (stalledRes) {
+      const holder = agents
+        .filter((a) => (a.resources[stalledRes] || 0) > 0)
+        .sort((a, b) => (b.resources[stalledRes] || 0) - (a.resources[stalledRes] || 0))[0];
+      nudges.push(`NOTE: No project progress in a while. ${stalledRes} is still short; ${holder ? holder.name : "no one"} is holding the most of it. Consider assign_task or contribute_resources.`);
+    }
+  }
+  if (civilization.pendingBlueprints.length < MAX_PENDING_BLUEPRINTS
+      && frameTick - civilization.lastBlueprintActivityFrame > BLUEPRINT_STALL_THRESHOLD) {
+    nudges.push("NOTE: No new blueprint activity in a while. Consider propose_blueprint if you have an idea.");
   }
   const behaviorNudge = nudges.join(" ");
 
@@ -1509,9 +1645,14 @@ const civProgressEl = document.getElementById("civProgress");
 const civProgressRow = document.getElementById("civProgressRow");
 const civProgressBar = document.getElementById("civProgressBar");
 const civResourcesEl = document.getElementById("civResources");
+const civResourceListEl = document.getElementById("civResourceList");
 const civCustomBuildsEl = document.getElementById("civCustomBuilds");
+const civCustomListEl = document.getElementById("civCustomList");
+const civCollectRateEl = document.getElementById("civCollectRate");
 const civPendingRow = document.getElementById("civPendingRow");
 const civPendingEl = document.getElementById("civPending");
+const civProjectSprite = document.getElementById("civProjectSprite");
+const civProjectSpriteCtx = civProjectSprite.getContext("2d");
 
 function renderSidebar() {
   const statusColor = lmStatus === "online" ? "#4CAF50"
@@ -1531,15 +1672,25 @@ function renderSidebar() {
 
   if (civilization.activeProject) {
     civProgressRow.style.display = "block";
-    civProgressEl.textContent = projectProgressText();
-    civProgressBar.style.width = projectProgressPercent() + "%";
+    const pct = projectProgressPercent();
+    civProgressEl.textContent = `${projectProgressText()} — ${pct}%`;
+    civProgressBar.style.width = pct + "%";
   } else {
     civProgressRow.style.display = "none";
   }
+  renderProjectSprite();
 
   if (sidebarDirty) {
     civResourcesEl.textContent = totalVillageResources();
-    civCustomBuildsEl.textContent = customProjectIds().length;
+    civResourceListEl.innerHTML = renderResourceChips(villageResourceBreakdown());
+    const customIds = customProjectIds();
+    civCustomBuildsEl.textContent = customIds.length;
+    civCustomListEl.innerHTML = customIds.map((id) =>
+      `<span class="res-chip civ-value">${escapeHtml(civilization.projectRegistry[id].name)}</span>`
+    ).join("");
+    civCollectRateEl.textContent = civilization.collectAttempts > 0
+      ? `${Math.round(100 * civilization.collectSuccesses / civilization.collectAttempts)}% (${civilization.collectSuccesses}/${civilization.collectAttempts})`
+      : "—";
     if (civilization.pendingBlueprints.length > 0) {
       civPendingRow.style.display = "block";
       civPendingEl.innerHTML = civilization.pendingBlueprints.slice(0, 3).map((b) =>
@@ -1555,7 +1706,9 @@ function renderSidebar() {
 
   if (sidebarDirty) {
     agentListEl.innerHTML = agents.map((a) =>
-      `<li><span class="dot" style="background:${a.color}"></span>${a.name} \u2014 ${a.role}</li>`
+      `<li><span class="dot" style="background:${a.color}"></span>` +
+      `<span><span class="agent-main">${escapeHtml(a.name)} \u2014 ${escapeHtml(a.role)}</span>` +
+      `<span class="agent-status">${escapeHtml(humanizeAction(a))}</span></span></li>`
     ).join("");
   }
 
@@ -1599,6 +1752,76 @@ function totalVillageResources() {
     }
   }
   return total;
+}
+
+// Friendly one-line description of what an agent is currently doing, for the
+// Agents sidebar. Reads the existing agent.lastAction / isThinking state.
+const ACTION_LABELS = {
+  collect_resource: "gathering",
+  contribute_resources: "contributing",
+  build_structure: "building",
+  start_project: "starting a project",
+  talk_to_nearby: "talking",
+  trade_resource: "trading",
+  propose_blueprint: "proposing a blueprint",
+  approve_blueprint: "reviewing a blueprint",
+  reject_blueprint: "reviewing a blueprint",
+  assign_task: "assigning tasks",
+  change_role: "changing role",
+  move_to_agent: "approaching someone",
+  rest: "resting"
+};
+function humanizeAction(agent) {
+  if (agent.isThinking) return "thinking…";
+  const a = agent.lastAction;
+  if (!a) return "idle";
+  if (a.startsWith("move_to_")) return "heading to the " + a.replace("move_to_", "");
+  return ACTION_LABELS[a] || a.replace(/_/g, " ");
+}
+
+// Per-resource village totals, summed across all agents (only resources held).
+function villageResourceBreakdown() {
+  const out = {};
+  for (const key of Object.keys(civilization.resourceRegistry)) {
+    let n = 0;
+    for (const agent of agents) n += agent.resources[key] || 0;
+    if (n > 0) out[key] = n;
+  }
+  return out;
+}
+
+function renderResourceChips(breakdown) {
+  const keys = Object.keys(breakdown);
+  if (keys.length === 0) return '<span class="civ-label">none</span>';
+  return keys.map((key) => {
+    const color = (civilization.resourceRegistry[key] || {}).color || "#BDBDBD";
+    return `<span class="res-chip"><span class="swatch" style="background:${color}"></span>${escapeHtml(key)} ${breakdown[key]}</span>`;
+  }).join("");
+}
+
+// Draw the active project's structure sprite into the civ-panel mini-canvas,
+// reusing the same grid/fallback helpers as the in-world drawStructure().
+function renderProjectSprite() {
+  const c = civProjectSpriteCtx;
+  c.clearRect(0, 0, civProjectSprite.width, civProjectSprite.height);
+  const p = civilization.activeProject;
+  if (!p) {
+    civProjectSprite.style.display = "none";
+    return;
+  }
+  civProjectSprite.style.display = "block";
+  const fake = { type: p.type, visualStyle: p.visualStyle, name: p.name };
+  const grid = getStructureGrid(fake);
+  if (grid) {
+    const gw = grid.reduce((m, row) => Math.max(m, row.length), 0);
+    const gh = grid.length;
+    const scale = Math.max(1, Math.floor(Math.min(civProjectSprite.width / gw, civProjectSprite.height / gh)));
+    const ox = Math.round((civProjectSprite.width - gw * scale) / 2);
+    const oy = Math.round((civProjectSprite.height - gh * scale) / 2);
+    drawPixelGrid(c, ox, oy, grid, scale, false);
+  } else {
+    drawGenericStructure(c, 8, 8, p.name || p.type, colorFromId(p.type));
+  }
 }
 
 function tick() {

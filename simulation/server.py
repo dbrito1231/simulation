@@ -94,20 +94,88 @@ SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,24}$")
 MAX_PENDING_BLUEPRINTS = 5
 MAX_APPROVED_CUSTOM = 15
 MAX_CUSTOM_RESOURCES = 10
-ROLE_PROJECT = {
-    "elder": "house",
-    "healer": "house",
-    "farmer": "farm_plot",
-    "fisher": "farm_plot",
-    "gatherer": "farm_plot",
-    "miner": "workshop",
-    "blacksmith": "workshop",
-    "trader": "workshop",
-    "builder": "house",
-    "guard": "wall",
-    "scout": "wall",
-    "explorer": "wall",
+# Role definitions are the single source of truth in roles.json (also served to
+# the browser as /roles.js). The server derives its role maps from it so the
+# client and server can never drift.
+_ROLES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "roles.json")
+with open(_ROLES_PATH, encoding="utf-8") as _f:
+    ROLES = json.load(_f)
+
+# role -> preferred project (string or list, mirroring the client).
+ROLE_PROJECT = {role: d["preferredProject"] for role, d in ROLES.items()}
+
+# --- Structured output (LM Studio response_format) ---
+# Constrain the model to emit a conforming JSON decision at decode time, which
+# largely eliminates the malformed-JSON fallback path. "json_schema" shapes every
+# field; "json_object" only guarantees syntactic validity; "off" disables it.
+# extract_json_decision/normalize_decision remain as defense in depth regardless.
+STRUCTURED_OUTPUT_MODE = "json_schema"
+
+# Full 19-action superset (mirrors AVAILABLE_ACTIONS in index.html). Per-agent
+# availability is still enforced by normalize_decision/role_fallback_action.
+DECISION_ACTIONS = [
+    "move_to_farm", "move_to_market", "move_to_forest", "move_to_beach",
+    "move_to_village", "move_to_cave", "move_to_agent",
+    "collect_resource", "talk_to_nearby", "trade_resource",
+    "start_project", "contribute_resources", "build_structure",
+    "propose_blueprint", "approve_blueprint", "reject_blueprint",
+    "assign_task", "change_role", "rest",
+]
+
+# Loose shape only; validate_blueprint() stays the authority on blueprint detail.
+DECISION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "action": {"type": "string", "enum": DECISION_ACTIONS},
+        "target": {"type": ["string", "null"]},
+        "message": {"type": ["string", "null"]},
+        "new_role": {"type": ["string", "null"]},
+        "relationship_update": {
+            "type": ["object", "null"],
+            "additionalProperties": {"enum": ["ally", "neutral", "rival"]},
+        },
+        "reasoning": {"type": "string"},
+        "blueprint": {
+            "type": ["object", "null"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "needs": {"type": "object"},
+                "new_resources": {"type": "array"},
+                "visual_style": {"type": "string"},
+            },
+        },
+    },
 }
+
+# Flipped off for the rest of the session if LM Studio rejects response_format.
+_structured_output_enabled = STRUCTURED_OUTPUT_MODE != "off"
+
+
+def build_response_format():
+    """The response_format payload field for the current mode, or None."""
+    if not _structured_output_enabled:
+        return None
+    if STRUCTURED_OUTPUT_MODE == "json_schema":
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": "agent_decision", "schema": DECISION_SCHEMA},
+        }
+    if STRUCTURED_OUTPUT_MODE == "json_object":
+        return {"type": "json_object"}
+    return None
+
+
+def looks_like_response_format_error(http_status, lm_body):
+    """True when LM Studio rejected the request specifically over response_format."""
+    text = ""
+    if isinstance(lm_body, dict):
+        text = str(lm_body.get("error") or lm_body)
+    if http_status == 400 or text:
+        low = text.lower()
+        return any(k in low for k in ("response_format", "json_schema", "grammar", "schema"))
+    return False
 
 SYSTEM_PROMPT = """You are an autonomous agent in a pixel-art village simulation.
 Your shared goal: help the village grow into a civilization by gathering resources,
@@ -313,19 +381,39 @@ def format_idle_agents(idle_agents):
         name = agent.get("name")
         role = agent.get("role")
         tag = ", longest idle" if agent.get("longest_idle") else ""
+        debt = agent.get("contribution_debt")
+        if isinstance(debt, (int, float)) and debt > 0:
+            tag += f", debt {int(debt)} ticks"
         if name:
             parts.append(f"{name} ({role or 'unknown'}{tag})")
     return "; ".join(parts) if parts else "none"
 
 
 def role_default_project(role):
-    return ROLE_PROJECT.get((role or "").lower(), "house")
+    pref = ROLE_PROJECT.get((role or "").lower(), "house")
+    # preferredProject may be a list (e.g. builder -> ["house", "wall"]); pick
+    # the first deterministically.
+    if isinstance(pref, list):
+        return pref[0] if pref else "house"
+    return pref
 
 
-RESOURCE_GATHER_ROLES = {
-    "food": ("farmer", "fisher"),
-    "wood": ("gatherer",),
-    "gold": ("miner",),
+# resource id -> tuple of roles that specialize in gathering it, derived by
+# inverting each role's specialty list in roles.json (captures miner -> gold+stone).
+def _build_resource_gather_roles():
+    out = {}
+    for role, d in ROLES.items():
+        for res in d.get("specialty", []):
+            out.setdefault(res, []).append(role)
+    return {res: tuple(roles) for res, roles in out.items()}
+
+
+RESOURCE_GATHER_ROLES = _build_resource_gather_roles()
+
+# role -> its primary specialty resource (first in the specialty list), used to
+# phrase task assignments. Only roles with a specialty appear.
+ROLE_PRIMARY_RESOURCE = {
+    role: d["specialty"][0] for role, d in ROLES.items() if d.get("specialty")
 }
 
 
@@ -362,8 +450,7 @@ def task_for_role(role, active_project=None, project_progress=None):
     shortfalls = parse_project_shortfalls(project_progress)
     if shortfalls:
         needed_res = shortfalls[0][0]
-        role_res = {"farmer": "food", "fisher": "food", "gatherer": "wood", "miner": "gold"}
-        if role_res.get(role) == needed_res:
+        if ROLE_PRIMARY_RESOURCE.get(role) == needed_res:
             return f"gather {needed_res} for the active project"
         return f"gather or contribute {needed_res} to the active project"
     if active_project and active_project not in ("none", "null", None, ""):
@@ -616,6 +703,14 @@ def sprites():
     return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "sprites.js")
 
 
+@app.route("/roles.js")
+def roles_js():
+    # Serve the single role source as a JS global so the browser uses the exact
+    # same data the server derives its maps from.
+    body = f"const ROLES = {json.dumps(ROLES)};"
+    return app.response_class(body, mimetype="application/javascript")
+
+
 @app.route("/log/event", methods=["POST"])
 def log_event():
     """Persist a browser-origin activity or conversation event."""
@@ -791,6 +886,9 @@ def agent_think():
             "stream": False,
             "thinking": {"type": "disabled", "budget_tokens": 0},
         }
+        response_format = build_response_format()
+        if response_format is not None:
+            payload["response_format"] = response_format
 
         agent_name = data.get("agent_name")
         frame_tick = data.get("frame_tick")
@@ -817,6 +915,8 @@ def agent_think():
                    decision=fallback, error="bad_response")
             return jsonify(fallback)
 
+        global _structured_output_enabled
+
         start = datetime.now()
         try:
             resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
@@ -831,6 +931,32 @@ def agent_think():
         try:
             lm_body = resp.json()
         except ValueError:
+            lm_body = None
+
+        # Auto-degrade: if LM Studio rejected response_format (model doesn't
+        # support structured output), disable it for the session and retry once
+        # so this turn still succeeds. Prevents a regression to all-fallback.
+        if ("response_format" in payload and _structured_output_enabled
+                and looks_like_response_format_error(http_status, lm_body)):
+            print("[server] LM Studio rejected response_format; disabling "
+                  "structured output for this session and retrying without it.")
+            _structured_output_enabled = False
+            payload.pop("response_format", None)
+            start = datetime.now()
+            try:
+                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
+            except requests.exceptions.RequestException:
+                latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+                log_lm(latency_ms, error="LM Studio offline")
+                return jsonify({"error": "LM Studio offline", "action": "rest"})
+            latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+            http_status = resp.status_code
+            try:
+                lm_body = resp.json()
+            except ValueError:
+                lm_body = None
+
+        if lm_body is None:
             return bad_response_fallback(latency_ms, http_status=http_status)
 
         if isinstance(lm_body, dict) and lm_body.get("error"):

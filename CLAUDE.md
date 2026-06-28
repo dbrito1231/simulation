@@ -22,11 +22,12 @@ uv run python simulation/server.py   # start server, then open http://127.0.0.1:
 
 ## Architecture
 
-Three files do all the work, despite [specs/01-architecture.md](specs/01-architecture.md) saying "exactly two." The split (and several other deviations) are deliberate and documented in `.cursor/plans/`.
+Three code files do all the work, despite [specs/01-architecture.md](specs/01-architecture.md) saying "exactly two", plus one shared data file. The split (and several other deviations) are deliberate and documented in `.cursor/plans/`.
 
 - **[simulation/server.py](simulation/server.py)** — Flask app. Serves the frontend, exposes `POST /agent/think` (the core decision endpoint) and `POST /log/event`. For each think request it builds a system+user prompt from the agent/civilization state, calls LM Studio, extracts JSON from the model output (handles reasoning models that emit empty `content` or code fences), then runs `normalize_decision()` + `role_fallback_action()` to reject invalid/impossible actions and substitute a sensible deterministic one. `SessionLogger` writes per-session JSONL.
 - **[simulation/index.html](simulation/index.html)** — all client state and the `requestAnimationFrame` loop. Holds the `agents` array and the central `civilization` object (active project, structures, dynamic resource/project registries, pending blueprints). `applyDecision()` is the large switch that turns an LLM decision into a world mutation. LLM calls go through a bounded-concurrency queue (`MAX_CONCURRENT_LLM = 3`, `LLM_MIN_GAP_MS = 250`) via `drainThinkQueue()` — not one-at-a-time.
 - **[simulation/sprites.js](simulation/sprites.js)** — pure Canvas drawing (terrain, zones, agents, structures). Stateless. Custom/blueprint structure types fall back to `drawGenericStructure()`.
+- **[simulation/roles.json](simulation/roles.json)** — the **single source of truth for role definitions** (`skill`, `specialty[]`, `preferredProject`, `leader`). The server loads it at startup and derives its role maps (`ROLE_PROJECT`, `RESOURCE_GATHER_ROLES`, `ROLE_PRIMARY_RESOURCE`) from it; it also serves it to the browser as `/roles.js` (a `const ROLES = {…}` global), from which the client derives `ROLE_SKILLS`/`ROLE_PROJECT`/`ROLE_SPECIALTY_RESOURCE`. Edit role data here, never in the two code files.
 
 ### Data flow
 

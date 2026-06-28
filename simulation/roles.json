@@ -1,0 +1,14 @@
+{
+  "farmer":     { "skill": "gathers food from the farm",         "specialty": ["food"],         "preferredProject": "farm_plot" },
+  "fisher":     { "skill": "gathers fish from the beach",        "specialty": ["fish"],         "preferredProject": "farm_plot" },
+  "gatherer":   { "skill": "gathers wood from the forest",       "specialty": ["wood"],         "preferredProject": "farm_plot" },
+  "miner":      { "skill": "gathers gold from the cave",         "specialty": ["gold", "stone"], "preferredProject": "workshop" },
+  "builder":    { "skill": "starts and completes build projects", "specialty": [],              "preferredProject": ["house", "wall"] },
+  "elder":      { "skill": "guides the village and starts projects", "specialty": [],           "preferredProject": "house", "leader": true },
+  "healer":     { "skill": "supports villagers in the village",  "specialty": [],               "preferredProject": "house" },
+  "trader":     { "skill": "trades resources at the market",     "specialty": [],               "preferredProject": "workshop" },
+  "guard":      { "skill": "patrols the village",                "specialty": [],               "preferredProject": "wall" },
+  "scout":      { "skill": "explores and scouts the forest",     "specialty": [],               "preferredProject": "wall" },
+  "blacksmith": { "skill": "crafts at the market workshop",      "specialty": [],               "preferredProject": "workshop" },
+  "explorer":   { "skill": "explores distant zones",             "specialty": [],               "preferredProject": "wall" }
+}

@@ -73,12 +73,12 @@ function markPathRect(x, y, w, h) {
   }
 }
 
-markPathRect(300, 350, 380, 20);
-markPathRect(490, 200, 20, 180);
-markPathRect(600, 230, 20, 150);
-markPathRect(680, 130, 150, 20);
-markPathRect(810, 250, 20, 340);
-markPathRect(600, 430, 230, 20);
+// Cosmetic connecting paths for the 1600x1000 layout (village hub to neighbors).
+markPathRect(690, 430, 24, 130);   // farm -> village
+markPathRect(520, 740, 680, 24);   // village horizontal spine
+markPathRect(1090, 470, 24, 90);   // village -> forest
+markPathRect(1180, 800, 90, 24);   // village -> cave
+markPathRect(420, 760, 120, 24);   // beach -> village
 
 const C = {
   g1: "#9bbf6a", g2: "#8aad5a", g3: "#7a9d4a",
@@ -121,9 +121,9 @@ const PATH_BLEND_FARM = makePathBlendTile(["f1", "f2", "f3", "fd"]);
 const PATH_BLEND_VILLAGE = makePathBlendTile(["v1", "v2", "v3"]);
 
 function pathBlendForZone(tx, ty) {
-  if (tx >= 380 && tx < 640 && ty >= 40 && ty < 220) return PATH_BLEND_FARM;
-  if (tx >= 420 && tx < 700 && ty >= 280 && ty < 460) return PATH_BLEND_VILLAGE;
-  if (tx >= 150 && tx < 320) return PATH_BLEND_BEACH;
+  if (tx >= 480 && tx < 940 && ty >= 90 && ty < 430) return PATH_BLEND_FARM;
+  if (tx >= 500 && tx < 1180 && ty >= 540 && ty < 960) return PATH_BLEND_VILLAGE;
+  if (tx >= 200 && tx < 420) return PATH_BLEND_BEACH;
   return PATH_BLEND_GRASS;
 }
 
@@ -187,7 +187,7 @@ function drawTree(ctx, x, y) {
     "....trtrtrtr....",
     "....trtrtrtr....",
   ], C);
-  drawPixelGrid(ctx, x - 8, y - 8, tree, 2, false);
+  drawPixelGrid(ctx, x - 12, y - 12, tree, 3, false);
 }
 
 function drawHouse(ctx, x, y) {
@@ -201,7 +201,7 @@ function drawHouse(ctx, x, y) {
     "brbrbrbrbrbrbrbr",
     "brbrbrbrbrbrbrbr",
   ], C);
-  drawPixelGrid(ctx, x, y, house, 2, false);
+  drawPixelGrid(ctx, x, y, house, 4, false);
 }
 
 function drawMarketStall(ctx, x, y) {
@@ -213,21 +213,21 @@ function drawMarketStall(ctx, x, y) {
     "m2m2m2m2m2m2m2m2",
     "m2m2m2m2m2m2m2m2",
   ], C);
-  drawPixelGrid(ctx, x, y, stall, 2, false);
+  drawPixelGrid(ctx, x, y, stall, 3, false);
 }
 
 function drawCaveEntrance(ctx, x, y) {
   ctx.fillStyle = C.cv4;
   ctx.beginPath();
-  ctx.arc(x, y, 28, Math.PI, 0, false);
+  ctx.arc(x, y, 40, Math.PI, 0, false);
   ctx.fill();
-  ctx.fillRect(x - 28, y, 56, 36);
+  ctx.fillRect(x - 40, y, 80, 50);
   ctx.fillStyle = C.k;
   ctx.beginPath();
-  ctx.arc(x, y + 4, 20, Math.PI, 0, false);
+  ctx.arc(x, y + 6, 28, Math.PI, 0, false);
   ctx.fill();
   ctx.strokeStyle = C.cv1;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 3;
   ctx.stroke();
 }
 
@@ -251,15 +251,17 @@ function drawFence(ctx, x, y) {
 }
 
 function drawDock(ctx, x, y) {
+  // A horizontal wooden jetty reaching from the beach out over the water,
+  // large enough to read clearly at map scale (12 cells wide at scale 6 = 72px).
   const dock = tileFromStrings([
-    "brbrbrbrbrbrbrbr",
-    "brbrbrbrbrbrbrbr",
-    "br..br..br..br..",
-    "brbrbrbrbrbrbrbr",
-    "wlwlwlwlwlwlwlwl",
-    "o1o2o1o2o1o2o1o2",
+    "brdbrdbrdbrdbrdbrdbrdbrdbrdbrdbrdbrd",
+    "brbrbrbrbrbrbrbrbrbrbrbr",
+    "brdkbrdkbrdkbrdkbrdkbrdk",
+    "brbrbrbrbrbrbrbrbrbrbrbr",
+    "brdbrdbrdbrdbrdbrdbrdbrdbrdbrdbrdbrd",
+    "k..k..k..k..k..k..k..k..",
   ], C);
-  drawPixelGrid(ctx, x, y, dock, 2, false);
+  drawPixelGrid(ctx, x, y, dock, 6, false);
 }
 
 function drawWell(ctx, x, y) {
@@ -271,7 +273,7 @@ function drawWell(ctx, x, y) {
     ".cv1cv1cv1cv1cv1.",
     "..cv1cv1cv1cv1..",
   ], C);
-  drawPixelGrid(ctx, x, y, well, 2, false);
+  drawPixelGrid(ctx, x, y, well, 4, false);
 }
 
 function drawRocks(ctx, x, y) {
@@ -282,7 +284,7 @@ function drawRocks(ctx, x, y) {
     ".rk2rk2rk2..",
     "..rk2rk2....",
   ], C);
-  drawPixelGrid(ctx, x - 6, y - 4, rocks, 2, false);
+  drawPixelGrid(ctx, x - 9, y - 6, rocks, 3, false);
 }
 
 // --- Agent-built structures ---
@@ -897,60 +899,64 @@ function drawZoneLabel(ctx, text, x, y) {
 function drawTiledWorld(ctx, worldW, worldH, frameTick, structures) {
   const foamOffset = Math.floor(frameTick / 8) % 16;
 
+  // Zone fills for the 1600x1000 world. These rectangles MUST match getZone()
+  // and ZONE_BOUNDS in index.html so agents stand on the tiles they gather from.
   fillRectWithTiles(ctx, 0, 0, worldW, worldH, TILE_GRASS, pathBlendForZone);
-  fillRectWithTile(ctx, 0, 0, 150, worldH, oceanTile(foamOffset));
-  fillRectWithTiles(ctx, 150, 0, 170, worldH, TILE_BEACH, pathBlendForZone);
-  fillRectWithTiles(ctx, 380, 40, 260, 180, TILE_FARM, pathBlendForZone);
-  fillRectWithTile(ctx, 700, 40, 260, 220, TILE_FOREST_FLOOR);
-  fillRectWithTiles(ctx, 420, 280, 280, 180, TILE_VILLAGE, pathBlendForZone);
-  fillRectWithTile(ctx, 560, 360, 100, 80, TILE_MARKET);
-  fillRectWithTile(ctx, 720, 520, 220, 160, TILE_CAVE);
+  fillRectWithTile(ctx, 0, 0, 200, worldH, oceanTile(foamOffset));
+  fillRectWithTiles(ctx, 200, 0, 220, worldH, TILE_BEACH, pathBlendForZone);
+  fillRectWithTiles(ctx, 480, 90, 460, 340, TILE_FARM, pathBlendForZone);
+  fillRectWithTile(ctx, 1010, 90, 560, 380, TILE_FOREST_FLOOR);
+  fillRectWithTiles(ctx, 500, 540, 680, 420, TILE_VILLAGE, pathBlendForZone);
+  fillRectWithTile(ctx, 950, 600, 180, 140, TILE_MARKET);
+  fillRectWithTile(ctx, 1190, 730, 380, 250, TILE_CAVE);
 
-  // Farm crops
-  for (let fx = 400; fx < 630; fx += 32) {
-    for (let fy = 60; fy < 200; fy += 28) {
+  // Farm crops (upper farm, leaving the lower band for built farm plots)
+  for (let fx = 500; fx < 920; fx += 34) {
+    for (let fy = 110; fy < 280; fy += 30) {
       if ((fx + fy) % 3 === 0) drawCrop(ctx, fx, fy);
     }
   }
 
   // Farm fence along southern edge
-  for (let fx = 380; fx < 640; fx += 16) {
-    drawFence(ctx, fx, 218);
+  for (let fx = 480; fx < 940; fx += 16) {
+    drawFence(ctx, fx, 424);
   }
 
   // Forest trees
   const treeSpots = [
-    [730, 80], [780, 120], [830, 75], [890, 110], [930, 160],
-    [720, 170], [770, 210], [840, 200], [900, 230], [860, 150],
+    [1060, 170], [1150, 130], [1240, 190], [1330, 140], [1420, 200], [1510, 150],
+    [1090, 290], [1190, 340], [1290, 270], [1390, 350], [1490, 300], [1540, 410],
+    [1130, 420], [1320, 430], [1480, 440],
   ];
   for (const [tx, ty] of treeSpots) drawTree(ctx, tx, ty);
 
-  // Beach dock
-  drawDock(ctx, 200, 320);
+  // Beach jetty straddling the beach/ocean line so it reads as a pier over water
+  drawDock(ctx, 150, 470);
 
-  // Village well
-  drawWell(ctx, 530, 370);
+  // Village well (in the gap between the build grid and the market square)
+  drawWell(ctx, 905, 600);
 
   // Cave rocks
-  drawRocks(ctx, 760, 540);
-  drawRocks(ctx, 900, 620);
-  drawRocks(ctx, 740, 650);
+  drawRocks(ctx, 1260, 800);
+  drawRocks(ctx, 1430, 860);
+  drawRocks(ctx, 1340, 930);
 
-  // Village houses (static scenery), kept away from player-built structure spots.
-  drawHouse(ctx, 690, 300);
-  drawHouse(ctx, 690, 410);
+  // Village houses (static scenery), placed right of the build grid (x<=860).
+  drawHouse(ctx, 985, 800);
+  drawHouse(ctx, 1085, 800);
 
   // Market stall
-  drawMarketStall(ctx, 568, 368);
-  drawZoneLabel(ctx, "MARKET", 610, 358);
-  drawZoneLabel(ctx, "FARM", 500, 64);
-  drawZoneLabel(ctx, "FOREST", 820, 64);
-  drawZoneLabel(ctx, "VILLAGE", 550, 292);
-  drawZoneLabel(ctx, "BEACH", 235, 72);
-  drawZoneLabel(ctx, "CAVE", 820, 542);
+  drawMarketStall(ctx, 975, 615);
+  drawZoneLabel(ctx, "MARKET", 1040, 590);
+  drawZoneLabel(ctx, "FARM", 700, 105);
+  drawZoneLabel(ctx, "FOREST", 1280, 105);
+  drawZoneLabel(ctx, "VILLAGE", 820, 555);
+  drawZoneLabel(ctx, "BEACH", 300, 90);
+  drawZoneLabel(ctx, "DOCK", 186, 520);
+  drawZoneLabel(ctx, "CAVE", 1380, 748);
 
   // Cave entrance
-  drawCaveEntrance(ctx, 830, 600);
+  drawCaveEntrance(ctx, 1380, 880);
 
   // Agent-built structures
   if (structures) {
