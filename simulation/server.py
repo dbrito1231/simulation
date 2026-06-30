@@ -5,9 +5,12 @@
 # 4. Open http://127.0.0.1:5001 in Chrome or Firefox
 #    (macOS AirPlay uses port 5000 and returns 403 — do not use 5000)
 
+import hashlib
 import json
+import math
 import os
 import re
+import threading
 from datetime import datetime, timezone
 
 import requests
@@ -30,7 +33,12 @@ class SessionLogger:
         self.activity_path = os.path.join(self.dir, "activity.jsonl")
         self.conversation_path = os.path.join(self.dir, "conversation.jsonl")
         self.lm_studio_path = os.path.join(self.dir, "lm_studio.jsonl")
-        for path in [self.activity_path, self.conversation_path, self.lm_studio_path]:
+        # benchmarks.jsonl (Phase 0/8): a dedicated metrics stream so Sid-like
+        # features can be measured (specialization index, rule adherence,
+        # meme adoption, memory-store size, module-activation timeline).
+        self.benchmark_path = os.path.join(self.dir, "benchmarks.jsonl")
+        for path in [self.activity_path, self.conversation_path, self.lm_studio_path,
+                     self.benchmark_path]:
             open(path, "a", encoding="utf-8").close()
         logs_root = os.path.dirname(self.dir)
         open(os.path.join(logs_root, "conversation.jsonl"), "a", encoding="utf-8").close()
@@ -81,9 +89,218 @@ class SessionLogger:
         record = {"type": "lm_studio", **record}
         self._append(self.lm_studio_path, record)
 
+    def log_benchmark(self, metric, value, frame_tick=None, detail=None):
+        record = {
+            "type": "benchmark",
+            "metric": metric,
+            "value": value,
+            "frame_tick": frame_tick,
+        }
+        if detail is not None:
+            record["detail"] = detail
+        self._append(self.benchmark_path, record)
+
 
 session_logger = SessionLogger(os.path.dirname(os.path.abspath(__file__)))
 print(f"[server] Logging session to: {session_logger.dir}")
+
+
+# --- Phase 1: in-process vector memory store (replaces ChromaDB/Docker) ---
+# CMA's shared vector store + Sid's WM/STM/LTM tiers, kept in-process to honor
+# the no-external-service ethos. Embedding is a deterministic hashing trick
+# (bag-of-tokens hashed into a fixed dimension, L2-normalized) so cosine
+# similarity == dot product. Swappable for a real embedding model / Chroma
+# later behind the identical /memory/* endpoints.
+MEMORY_DIM = 128
+MEMORY_MAX_ENTRIES = 1200       # global cap; the cleaner trims past this
+MEMORY_PERSIST_EVERY = 12       # debounce: rewrite memory.json every N stores
+_MEMORY_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Tokens that carry no salience signal, dropped before embedding.
+_MEMORY_STOPWORDS = frozenset(
+    "the a an and or to of for in on at is are was were be been has have had "
+    "i you he she it we they me him her them my your his its our their this "
+    "that with from into nothing none".split()
+)
+
+
+def _stable_hash(token):
+    """Process-stable hash so persisted vectors survive a reload."""
+    return int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16)
+
+
+def embed_text(text):
+    """Hashing-trick embedding: L2-normalized bag-of-tokens vector."""
+    vec = [0.0] * MEMORY_DIM
+    if not text:
+        return vec
+    for tok in _MEMORY_TOKEN_RE.findall(text.lower()):
+        if tok in _MEMORY_STOPWORDS:
+            continue
+        vec[_stable_hash(tok) % MEMORY_DIM] += 1.0
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm > 0:
+        vec = [v / norm for v in vec]
+    return vec
+
+
+def _cosine(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+class MemoryStore:
+    """Append-on-write / query-on-read memory with WM/STM/LTM tiers.
+
+    Thread-safe (the Flask dev server handles think requests concurrently).
+    Tier assignment is by salience + kind; the cleaner ages and prunes.
+    """
+
+    TIERS = ("working", "shortTerm", "longTerm")
+
+    def __init__(self, path):
+        self.path = path
+        self.entries = []
+        self._next_id = 1
+        self._since_persist = 0
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _tier_for(salience, kind):
+        if kind in ("summary", "autobiography"):
+            return "longTerm"
+        if salience >= 0.7:
+            return "shortTerm"
+        return "working"
+
+    def store(self, agent, text, salience=0.5, kind="event", frame_tick=None,
+              tier=None):
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            salience = max(0.0, min(1.0, float(salience)))
+        except (TypeError, ValueError):
+            salience = 0.5
+        entry = {
+            "id": self._next_id,
+            "agent": agent or "?",
+            "text": text[:280],
+            "vec": embed_text(text),
+            "salience": salience,
+            "kind": kind or "event",
+            "tier": tier or self._tier_for(salience, kind),
+            "frame_tick": frame_tick,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        with self._lock:
+            self._next_id += 1
+            self.entries.append(entry)
+            self._trim_locked()
+            self._since_persist += 1
+            should_persist = self._since_persist >= MEMORY_PERSIST_EVERY
+            if should_persist:
+                self._since_persist = 0
+        if should_persist:
+            self._persist()
+        return entry
+
+    def query(self, agent=None, text="", top_k=5, tier=None, kinds=None):
+        qv = embed_text(text)
+        kinds = set(kinds) if kinds else None
+        scored = []
+        with self._lock:
+            snapshot = list(self.entries)
+        for e in snapshot:
+            if agent and e["agent"] != agent:
+                continue
+            if tier and e["tier"] != tier:
+                continue
+            if kinds and e["kind"] not in kinds:
+                continue
+            # Cosine relevance plus a small salience/recency prior so important
+            # and fresh memories surface even on a weak text match.
+            score = _cosine(qv, e["vec"]) + 0.12 * e["salience"]
+            scored.append((score, e["id"], e))
+        scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+        return [e for _, _, e in scored[:max(1, int(top_k or 5))]]
+
+    def recent(self, agent=None, limit=8, tier=None):
+        with self._lock:
+            snapshot = list(self.entries)
+        if agent:
+            snapshot = [e for e in snapshot if e["agent"] == agent]
+        if tier:
+            snapshot = [e for e in snapshot if e["tier"] == tier]
+        return snapshot[-max(1, int(limit)):]
+
+    def _trim_locked(self):
+        """Drop the lowest-value entries once over the global cap."""
+        if len(self.entries) <= MEMORY_MAX_ENTRIES:
+            return
+        # Keep summaries/autobiography and high-salience items; evict the rest
+        # oldest-first until back under the cap.
+        def value(e):
+            keep = 1 if e["kind"] in ("summary", "autobiography") else 0
+            return (keep, e["salience"], e["id"])
+        self.entries.sort(key=value)
+        overflow = len(self.entries) - MEMORY_MAX_ENTRIES
+        self.entries = self.entries[overflow:]
+        self.entries.sort(key=lambda e: e["id"])
+
+    def clean(self):
+        """Memory Cleaner: drop exact-duplicate texts per agent (keeping the
+        most salient/newest copy), then re-trim to the cap. Deterministic and
+        cheap so it can run often without burning LLM calls."""
+        with self._lock:
+            best = {}
+            for e in self.entries:
+                key = (e["agent"], e["text"])
+                prev = best.get(key)
+                if prev is None or (e["salience"], e["id"]) > (prev["salience"], prev["id"]):
+                    best[key] = e
+            kept = sorted(best.values(), key=lambda e: e["id"])
+            removed = len(self.entries) - len(kept)
+            self.entries = kept
+            self._trim_locked()
+            self._since_persist = 0
+        # Always flush on clean so memory.json reliably exists for inspection.
+        self._persist()
+        return removed
+
+    def size(self):
+        with self._lock:
+            return len(self.entries)
+
+    def tier_counts(self):
+        counts = {t: 0 for t in self.TIERS}
+        with self._lock:
+            for e in self.entries:
+                counts[e["tier"]] = counts.get(e["tier"], 0) + 1
+        return counts
+
+    def _persist(self):
+        try:
+            with self._lock:
+                # memory.json is a per-session inspection artifact that is never
+                # read back, so omit the 128-float "vec" of each entry — it's
+                # pure bloat on disk and recomputable from the text if needed.
+                payload = {
+                    "session_id": os.path.basename(os.path.dirname(self.path)),
+                    "size": len(self.entries),
+                    "entries": [
+                        {k: v for k, v in e.items() if k != "vec"}
+                        for e in self.entries
+                    ],
+                }
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+            os.replace(tmp, self.path)
+        except OSError:
+            # Persistence must never break the simulation.
+            pass
+
+
+memory_store = MemoryStore(os.path.join(session_logger.dir, "memory.json"))
 
 # --- Blueprint validation constants ---
 GATHER_ZONES = {"farm", "forest", "village", "market", "beach", "cave", "ocean"}
@@ -124,6 +341,8 @@ DECISION_ACTIONS = [
     # but the schema enum is a fixed superset (normalize_decision filters).
     "heal_agent",
     "craft_item", "propose_recipe", "approve_recipe", "reject_recipe",
+    # CMA + Sid enhancement actions (emergent roles + collective rules/voting).
+    "switch_role", "propose_rule", "vote_rule",
 ]
 
 # Loose shape only; validate_blueprint() stays the authority on blueprint detail.
@@ -159,6 +378,17 @@ DECISION_SCHEMA = {
                 "station": {"type": ["string", "null"]},
             },
         },
+        "rule": {
+            "type": ["object", "null"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "kind": {"type": "string"},
+                "value": {"type": ["number", "string", "null"]},
+                "description": {"type": ["string", "null"]},
+            },
+        },
+        "vote": {"type": ["string", "null"]},
     },
 }
 
@@ -202,6 +432,7 @@ MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to 
    or move_to_* over idle talk.
 4. Talk is for coordination (request resources, announce builds)—not small talk.
 5. Any agent may start_project when none is active; everyone contributes and builds as resources allow.
+5b. If "Incoming messages" lists requests or directives addressed to you, act on them this turn (gather/contribute/heal/trade as asked, or reply with talk_to_nearby).
 
 BLUEPRINTS (inventing new structures):
 6. Any agent may use propose_blueprint to invent a new structure type. Include a
@@ -230,6 +461,31 @@ CRAFTING (recipe tree):
    id; you must be in the recipe's station zone and hold its inputs.
 14. Any agent may propose_recipe to invent a new crafted good (include a "recipe"
    object). Only the elder may approve_recipe / reject_recipe a pending recipe by id.
+
+SAGE PRIORITY (absolute):
+15. The elder Sage's survival overrides everything. If Sage has collapsed or is
+   critically hurt, the healer and the single nearest villager revive the elder
+   (if the healer has also collapsed, revive her first — she is the key to saving
+   Sage — then heal Sage). Other agents continue their own work; only those
+   responders abandon their task for the elder.
+
+EMERGENT ROLES:
+16. Your role is not fixed. If "Incoming messages" or a NOTE says the village
+   lacks a gatherer for a needed resource and you have no gathering specialty,
+   use switch_role with new_role set to the needed role (e.g. farmer, gatherer,
+   miner, fisher) to fill the gap. Don't switch away from a role the village
+   still needs.
+
+COLLECTIVE RULES (voting):
+17. Any agent may propose_rule to suggest a village-wide rule (include a "rule"
+   object). Others use vote_rule with target set to the rule id and "vote" set
+   to "yes" or "no". A rule that reaches a majority is enacted and enforced
+   mechanically (e.g. a resource tax on contributions funds a shared stockpile).
+
+COGNITIVE CONTROLLER:
+18. If "Module reports" are present, you are the Cognitive Controller: weigh the
+   Perception/Social/Desire/Reflection reports together and output the single
+   best decision. The reports advise you; they never replace the JSON output.
 
 Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
 Do not use chain-of-thought or reasoning — output the JSON object immediately.
@@ -263,6 +519,16 @@ RECIPE object schema (only for propose_recipe):
   "station": "workshop"                  // farm|forest|village|market|beach|cave, or null
 }
 
+RULE object schema (only for propose_rule):
+{
+  "id": "resource_tax",                  // ^[a-z][a-z0-9_]{1,24}$, not a duplicate
+  "name": "Resource Tax",                // 1-32 chars
+  "kind": "resource_tax",                // resource_tax | custom
+  "value": 1,                            // tax magnitude (0-3) for resource_tax
+  "description": "Contributors add 1 to the shared stockpile."
+}
+For vote_rule set "target" to the rule id and "vote" to "yes" or "no".
+
 EXAMPLE (farmer, no one nearby):
 {"action":"collect_resource","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"I should gather food for the village."}
 
@@ -286,6 +552,7 @@ Recent memory: {memory}
 Resources: {resources}
 Hunger: {hunger}/100  Health: {health}/100
 Relationships: {relationships}
+Your beliefs: {beliefs}
 Agents near you: {nearby_agents}
 Current zone: {world_zone}
 Civilization level: {civilization_level}
@@ -300,11 +567,50 @@ Pending blueprints: {pending_blueprints}
 Pending recipes: {pending_recipes}
 Approved custom builds: {approved_custom_projects}
 Rejected blueprints (do NOT re-propose these ids): {rejected_blueprints}
+Pending rules (vote with vote_rule): {pending_rules}
+Enacted rules: {active_rules}
 Recent village conversations: {recent_conversations}
+Incoming messages (reply or act on these): {inbox}
+Module reports (Cognitive Controller — weigh these): {module_reports}
 {behavior_nudge}
 Available actions: {available_actions}
 
 What do you do next? Respond with only the JSON."""
+
+
+def compose_memory(data):
+    """Merge the client's compacted memory slice with salient memories the
+    server retrieves from its vector store for the current situation (Phase 1).
+    """
+    client_mem = data.get("memory")
+    lines = []
+    if isinstance(client_mem, list):
+        lines = [str(x) for x in client_mem if x]
+    elif client_mem:
+        lines = [str(client_mem)]
+
+    agent_name = data.get("agent_name")
+    if agent_name and memory_store.size() > 0:
+        context = " ".join(str(x) for x in [
+            data.get("role"), data.get("world_zone"),
+            data.get("active_project"), data.get("directive"),
+            format_nearby_agents(data.get("nearby_agents")),
+        ] if x)
+        try:
+            retrieved = memory_store.query(agent=agent_name, text=context, top_k=4)
+        except Exception:
+            retrieved = []
+        seen = set(lines)
+        recalled = []
+        for e in retrieved:
+            txt = e.get("text")
+            if txt and txt not in seen:
+                seen.add(txt)
+                recalled.append(txt)
+        if recalled:
+            lines.append("(recalled: " + "; ".join(recalled) + ")")
+
+    return " | ".join(lines) if lines else "none"
 
 
 def format_nearby_agents(nearby):
@@ -432,6 +738,37 @@ def format_rejected_blueprints(rejected):
         return "none"
     ids = [str(r) for r in rejected if r]
     return ", ".join(ids) if ids else "none"
+
+
+def format_pending_rules(pending):
+    """Format pending rules with their running vote tallies."""
+    if not pending or not isinstance(pending, list):
+        return "none"
+    parts = []
+    for r in pending:
+        if not isinstance(r, dict):
+            continue
+        val = r.get("value")
+        val_str = f" value {val}" if val not in (None, "") else ""
+        parts.append(
+            f"{r.get('id', '?')} \"{r.get('name', '?')}\" ({r.get('kind', 'custom')}{val_str}; "
+            f"yes {r.get('yes', 0)}, no {r.get('no', 0)})"
+        )
+    return "; ".join(parts) if parts else "none"
+
+
+def format_active_rules(active):
+    """Format enacted rules for the prompt."""
+    if not active or not isinstance(active, list):
+        return "none"
+    parts = []
+    for r in active:
+        if not isinstance(r, dict):
+            continue
+        val = r.get("value")
+        val_str = f" {val}" if val not in (None, "") else ""
+        parts.append(f"{r.get('name', '?')} ({r.get('kind', 'custom')}{val_str})")
+    return "; ".join(parts) if parts else "none"
 
 
 def format_idle_agents(idle_agents):
@@ -736,6 +1073,16 @@ def normalize_decision(decision, agent_data):
             return fallback
         return decision
 
+    if action == "switch_role":
+        new_role = decision.get("new_role") or decision.get("target")
+        if new_role in ROLES:
+            decision["new_role"] = new_role
+            decision.pop("blueprint", None)
+            return decision
+        fallback = role_fallback_action(agent_data.get("role"), agent_data)
+        fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid role switch)").strip()
+        return fallback
+
     if action != "talk_to_nearby":
         if isinstance(decision, dict):
             decision.pop("blueprint", None)
@@ -801,6 +1148,229 @@ def log_event():
     return ("", 204)
 
 
+@app.route("/log/benchmark", methods=["POST"])
+def log_benchmark():
+    """Persist a browser-origin benchmark metric (Phase 0/8 metrics stream)."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        metric = body.get("metric")
+        if metric:
+            session_logger.log_benchmark(
+                metric,
+                body.get("value"),
+                body.get("frame_tick"),
+                body.get("detail"),
+            )
+    except Exception:
+        pass
+    return ("", 204)
+
+
+@app.route("/memory/store", methods=["POST"])
+def memory_store_endpoint():
+    """Embed + persist one or more memories (Phase 1)."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        items = body.get("entries")
+        if not isinstance(items, list):
+            items = [body]
+        stored = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            entry = memory_store.store(
+                item.get("agent"),
+                item.get("text"),
+                salience=item.get("salience", 0.5),
+                kind=item.get("kind", "event"),
+                frame_tick=item.get("frame_tick"),
+                tier=item.get("tier"),
+            )
+            if entry:
+                stored += 1
+        return jsonify({"ok": True, "stored": stored, "size": memory_store.size()})
+    except Exception:
+        return jsonify({"ok": False}), 200
+
+
+@app.route("/memory/query", methods=["POST"])
+def memory_query_endpoint():
+    """Top-k retrieval over the memory store (Phase 1)."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        results = memory_store.query(
+            agent=body.get("agent"),
+            text=body.get("text", ""),
+            top_k=body.get("top_k", 5),
+            tier=body.get("tier"),
+            kinds=body.get("kinds"),
+        )
+        return jsonify({"results": [
+            {
+                "text": e["text"],
+                "tier": e["tier"],
+                "kind": e["kind"],
+                "salience": e["salience"],
+                "frame_tick": e["frame_tick"],
+            }
+            for e in results
+        ]})
+    except Exception:
+        return jsonify({"results": []}), 200
+
+
+@app.route("/memory/summarize", methods=["POST"])
+def memory_summarize_endpoint():
+    """Summarizer loop (Phase 1, CMA E): compress an agent's recent memories
+    into one durable first-person sentence stored back into long-term memory."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        agent = body.get("agent")
+        frame_tick = body.get("frame_tick")
+        recents = memory_store.recent(agent=agent, limit=12)
+        recents = [e for e in recents if e["kind"] != "summary"]
+        if len(recents) < 4:
+            return jsonify({"ok": False, "reason": "not enough memories"})
+        joined = "; ".join(e["text"] for e in recents)
+        summary = lm_complete(
+            "You compress an agent's recent memories into ONE concise "
+            "first-person sentence capturing what matters for their future "
+            "decisions. Output only the sentence, no preamble.",
+            f"Agent {agent}'s recent memories: {joined}\nSummary:",
+            max_tokens=80, temperature=0.4,
+        )
+        if not summary:
+            return jsonify({"ok": False, "reason": "no summary"})
+        summary = summary.strip().strip('"').strip()[:200]
+        if not summary:
+            return jsonify({"ok": False, "reason": "empty summary"})
+        memory_store.store(agent, summary, salience=0.9, kind="summary",
+                           frame_tick=frame_tick, tier="longTerm")
+        session_logger.log_benchmark(
+            "memory_summary", memory_store.size(), frame_tick,
+            {"agent": agent, "summary": summary},
+        )
+        return jsonify({"ok": True, "summary": summary, "size": memory_store.size()})
+    except Exception:
+        return jsonify({"ok": False}), 200
+
+
+# PIANO modules (Phase 3): each is a small, single-sentence cognitive sub-call.
+# The Cognitive Controller (the /agent/think decision call) consumes their
+# combined output as a bottleneck and emits the one validated decision.
+MODULE_PROMPTS = {
+    "perception": "You are the Perception module of a village agent. In ONE "
+                  "sentence, state the key facts of the current situation and "
+                  "any immediate threat or opportunity. Output only the sentence.",
+    "social": "You are the Social module of a village agent. In ONE sentence, "
+              "suggest who to coordinate with and what to say or request, based "
+              "on nearby agents, relationships, and incoming messages. Output "
+              "only the sentence.",
+    "desire": "You are the Desire/Goal module of a village agent. In ONE "
+              "sentence, name the single most useful goal right now given the "
+              "village's needs and this agent's role and resources. Output only "
+              "the sentence.",
+    "reflection": "You are the Reflection module of a village agent. In ONE "
+                  "sentence, note one lesson or pattern from the agent's "
+                  "memories worth applying now. Output only the sentence.",
+}
+
+
+@app.route("/agent/module", methods=["POST"])
+def agent_module_endpoint():
+    """Run one PIANO cognitive module (Phase 3). Returns a one-sentence report."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        module = body.get("module")
+        sysp = MODULE_PROMPTS.get(module)
+        if not sysp:
+            return jsonify({"text": None}), 200
+        text = lm_complete(
+            sysp,
+            f"Agent {body.get('agent')} context: {body.get('context')}",
+            max_tokens=60, temperature=0.5,
+        )
+        if text:
+            text = text.strip().strip('"').strip()[:200]
+        session_logger.log_benchmark(
+            "module_run", 1, body.get("frame_tick"),
+            {"agent": body.get("agent"), "module": module},
+        )
+        return jsonify({"text": text})
+    except Exception:
+        return jsonify({"text": None}), 200
+
+
+@app.route("/meta/update", methods=["POST"])
+def meta_update_endpoint():
+    """Meta system (Phase 4, CMA F): build an autobiographical memory and a
+    persona directive for an agent from its self-report + memories."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        agent = body.get("agent")
+        report = body.get("report") or {}
+        frame_tick = body.get("frame_tick")
+        mems = memory_store.recent(agent=agent, limit=14)
+        joined = "; ".join(e["text"] for e in mems)
+
+        autobiography = None
+        if joined:
+            autobiography = lm_complete(
+                "Write a 1-2 sentence first-person life story for this village "
+                "agent from their memories, capturing their identity and what "
+                "they care about. Output only the story.",
+                f"Agent {agent} ({report.get('role')}). Memories: {joined}. "
+                f"Top actions: {report.get('top_actions')}. "
+                f"Beliefs: {report.get('beliefs')}.",
+                max_tokens=100, temperature=0.6,
+            )
+            if autobiography:
+                autobiography = autobiography.strip().strip('"').strip()[:300]
+                if autobiography:
+                    memory_store.store(
+                        agent, autobiography, salience=0.95,
+                        kind="autobiography", frame_tick=frame_tick,
+                        tier="longTerm",
+                    )
+
+        persona = lm_complete(
+            "From this agent's self-report, write ONE short imperative directive "
+            "(max 18 words) to guide their future behavior, reflecting who they "
+            "have become. Output only the directive.",
+            f"Agent {agent}. Role: {report.get('role')}. "
+            f"Top actions: {report.get('top_actions')}. "
+            f"Resources: {report.get('resources')}. "
+            f"Beliefs: {report.get('beliefs')}. "
+            f"Life story: {autobiography or 'n/a'}.",
+            max_tokens=40, temperature=0.6,
+        )
+        if persona:
+            persona = persona.strip().strip('"').strip()[:160]
+
+        session_logger.log_benchmark(
+            "meta_update", 1, frame_tick,
+            {"agent": agent, "persona": persona, "autobiography": autobiography},
+        )
+        return jsonify({"ok": True, "autobiography": autobiography, "persona": persona})
+    except Exception:
+        return jsonify({"ok": False}), 200
+
+
+@app.route("/memory/clean", methods=["POST"])
+def memory_clean_endpoint():
+    """Memory Cleaner loop (Phase 1, CMA E): dedupe + trim the store."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        removed = memory_store.clean()
+        session_logger.log_benchmark(
+            "memory_clean", memory_store.size(), body.get("frame_tick"),
+            {"removed": removed},
+        )
+        return jsonify({"ok": True, "removed": removed, "size": memory_store.size()})
+    except Exception:
+        return jsonify({"ok": False}), 200
+
+
 def build_agent_data(data, nearby_formatted, known_resources, pending_blueprints,
                      approved_custom_projects, rejected_blueprints):
     """Assemble agent context used by normalize_decision and role_fallback_action."""
@@ -847,6 +1417,30 @@ def lm_message_text(message):
     if content:
         return content
     return (message.get("reasoning_content") or "").strip()
+
+
+def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5):
+    """Plain-text LM Studio completion for the background cognition loops
+    (Summarizer, meta system, PIANO modules / Cognitive Controller). Returns the
+    text or None on any failure so every caller can degrade gracefully."""
+    payload = {
+        "model": "local-model",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "stream": False,
+        "thinking": {"type": "disabled", "budget_tokens": 0},
+    }
+    try:
+        resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
+        body = resp.json()
+        return lm_message_text(body["choices"][0]["message"])
+    except (requests.exceptions.RequestException, ValueError, KeyError,
+            IndexError, TypeError):
+        return None
 
 
 def extract_json_decision(text):
@@ -921,11 +1515,12 @@ def agent_think():
             role=data.get("role"),
             role_skill=data.get("role_skill", ""),
             personality=data.get("personality"),
-            memory=data.get("memory"),
+            memory=compose_memory(data),
             hunger=data.get("hunger", 100),
             health=data.get("health", 100),
             resources=data.get("resources"),
             relationships=data.get("relationships"),
+            beliefs=data.get("beliefs") or "none",
             nearby_agents=nearby_formatted,
             world_zone=data.get("world_zone"),
             civilization_level=data.get("civilization_level", 1),
@@ -940,15 +1535,27 @@ def agent_think():
             pending_recipes=format_pending_recipes(data.get("pending_recipes") or []),
             approved_custom_projects=format_approved_custom(approved_custom_projects),
             rejected_blueprints=format_rejected_blueprints(rejected_blueprints),
+            pending_rules=format_pending_rules(data.get("pending_rules") or []),
+            active_rules=format_active_rules(data.get("active_rules") or []),
             recent_conversations=data.get("recent_conversations", "none"),
+            inbox=data.get("inbox", "none"),
+            module_reports=data.get("module_reports", "none"),
             behavior_nudge=behavior_nudge,
             available_actions=data.get("available_actions"),
         )
 
+        self_prompt = (data.get("self_prompt") or "").strip()
+        system_content = SYSTEM_PROMPT
+        if self_prompt:
+            system_content = (
+                SYSTEM_PROMPT
+                + f"\n\nYOUR PERSONA (act in character): {self_prompt}"
+            )
+
         payload = {
             "model": "local-model",
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_prompt},
             ],
             "max_tokens": 512,
@@ -1058,4 +1665,13 @@ def agent_think():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5001, debug=False)
+    # Bind 0.0.0.0 so any device on the LAN can reach the sim (req #3); find this
+    # machine's LAN IP with `ipconfig` and open the URL from another device as
+    # http://<host-ip>:5001. On Windows, allow inbound TCP 5001 through the
+    # firewall (or accept the first-run prompt). threaded=True lets the request
+    # handlers run concurrently alongside the (forthcoming) SimEngine thread.
+    # NOTE: this exposes the server — including the LM Studio proxy — to the whole
+    # local network. Intended for a trusted home LAN, not a hostile network.
+    HOST = os.environ.get("SIM_HOST", "0.0.0.0")
+    PORT = int(os.environ.get("SIM_PORT", "5001"))
+    app.run(host=HOST, port=PORT, debug=False, threaded=True)

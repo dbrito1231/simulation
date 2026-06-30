@@ -74,6 +74,24 @@
     overflow: hidden;
     border-left: 1px solid #2a2a35;
   }
+  #convPanel {
+    width: 360px;
+    flex-shrink: 0;
+    height: calc(100vh - 16px);
+    background: #14141c;
+    color: #ddd;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid #2a2a35;
+  }
+  #convPanel h1 {
+    margin: 0;
+    padding: 16px 16px 12px;
+    font-size: 16px;
+    color: #fff;
+    border-bottom: 1px solid #2a2a35;
+  }
   #sidebar h1 {
     margin: 0;
     padding: 16px 16px 8px;
@@ -174,11 +192,10 @@
   #agentList .agent-status { display: block; color: #8a8a99; font-size: 11px; }
   #agentList .agent-vitals { color: #c0867e; white-space: nowrap; }
   #conversationLog {
-    flex: 1.4;
+    flex: 1 1 0;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    padding-bottom: 0;
   }
   #convList {
     list-style: none;
@@ -187,11 +204,11 @@
     overflow-y: auto;
     flex: 1;
     font-family: ui-monospace, monospace;
-    font-size: 13px;
-    line-height: 1.55;
+    font-size: 15px;
+    line-height: 1.65;
   }
   #convList li {
-    padding: 4px 0;
+    padding: 7px 0;
     border-bottom: 1px solid #22222c;
     word-break: break-word;
   }
@@ -202,10 +219,10 @@
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
   #activityLog {
-    flex: 1;
+    flex: 1 1 0;
     display: flex;
     flex-direction: column;
-    min-height: 120px;
+    min-height: 0;
     padding-bottom: 12px;
   }
   #actList {
@@ -223,11 +240,23 @@
     #wrap { flex-direction: column; height: auto; padding: 0; }
     #world { height: auto; max-height: 70vh; width: 100%; }
     #sidebar { width: 100%; flex-shrink: 1; height: 420px; border-left: 0; border-top: 1px solid #2a2a35; }
+    #convPanel { width: 100%; flex-shrink: 1; height: 520px; border-right: 0; border-top: 1px solid #2a2a35; order: 3; }
   }
 </style>
 </head>
 <body>
 <div id="wrap">
+  <aside id="convPanel">
+    <h1>Activity &amp; Chat</h1>
+    <section class="panel-section" id="conversationLog">
+      <h2>Conversations</h2>
+      <ul id="convList"></ul>
+    </section>
+    <section class="panel-section" id="activityLog">
+      <h2>Activity</h2>
+      <ul id="actList"></ul>
+    </section>
+  </aside>
   <div id="canvasWrap">
     <canvas id="world" width="1600" height="1000"></canvas>
     <button id="pauseBtn">Pause</button>
@@ -266,6 +295,14 @@
         <div id="civRecipeList"></div>
       </div>
       <div class="civ-row"><span class="civ-label">Collect success:</span> <span class="civ-value" id="civCollectRate">—</span></div>
+      <div class="civ-row" id="civRulesRow" style="display:none">
+        <span class="civ-label">Rules:</span> <span class="civ-value" id="civRuleCount">0</span>
+        <div id="civRuleList"></div>
+      </div>
+      <div class="civ-row" id="civBenchRow" style="display:none">
+        <span class="civ-label">Metrics:</span>
+        <div id="civBench"></div>
+      </div>
       <div class="civ-row" id="civPendingRow" style="display:none">
         <span class="civ-label">Pending:</span>
         <div id="civPending"></div>
@@ -274,14 +311,6 @@
     <section class="panel-section">
       <h2>Agents</h2>
       <ul id="agentList"></ul>
-    </section>
-    <section class="panel-section" id="conversationLog">
-      <h2>Conversations</h2>
-      <ul id="convList"></ul>
-    </section>
-    <section class="panel-section" id="activityLog">
-      <h2>Activity</h2>
-      <ul id="actList"></ul>
     </section>
   </aside>
 </div>
@@ -296,6 +325,12 @@ const ctx = canvas.getContext("2d");
 const WORLD_W = 1600;
 const WORLD_H = 1000;
 
+// Static-terrain render cache (perf): the world's tiled terrain never changes,
+// so it is rendered once into an offscreen canvas and blitted each frame instead
+// of re-tiling ~2M pixels per frame. Invalidated on resize; rebuilt lazily.
+let terrainCanvas = null;   // full static terrain (zones, crops, trees, dock…)
+let oceanFrames = null;     // 16 pre-rendered foam phases for the 200px ocean strip
+
 function setupCanvas() {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = Math.floor(WORLD_W * dpr);
@@ -305,6 +340,10 @@ function setupCanvas() {
   canvas.style.aspectRatio = `${WORLD_W} / ${WORLD_H}`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.imageSmoothingEnabled = false;
+  // The cache is rendered in logical (WORLD_W×WORLD_H) pixels and blitted under
+  // the DPR transform, so it survives resizes; invalidate anyway to be safe.
+  terrainCanvas = null;
+  oceanFrames = null;
 }
 
 setupCanvas();
@@ -339,6 +378,29 @@ const ZONE_BOUNDS = {
 const SURVIVAL_ENABLED = true;   // hunger/health/auto-eat/healer (#2)
 const CRAFTING_ENABLED = true;   // recipe tree + craft_item (#4)
 const USE_GOALS = true;          // deterministic multi-tick goals (#1)
+
+// --- CMA + Project Sid enhancement flags (all additive; toggle to A/B). ---
+// Cheap, high-value systems default on; the LLM-cost-multiplying ones
+// (PIANO_MODULES, META_SYSTEM) default off but are fully implemented so they
+// can be toggled on for richer cognition at the cost of throughput.
+const MEMORY_ENABLED = true;     // Phase 1: tiered memory + server vector store
+const AGENT_MESSAGING = true;    // Phase 2: in-process pub/sub message bus + inbox
+const PIANO_MODULES = false;     // Phase 3: concurrent modules + Cognitive Controller
+const META_SYSTEM = false;       // Phase 4: autobiographical memory + prompt modifier
+const EMERGENT_ROLES = true;     // Phase 5: mutable roles via switch_role
+const RULES_ENABLED = true;      // Phase 6: collective rules / voting / resource tax
+const MEMES_ENABLED = true;      // Phase 7: beliefs spreading through conversation
+const BENCHMARKS_ENABLED = true; // Phase 8: compute + log + display metrics
+
+// Frame-tick cadences for the new background loops (frame-gated like survival).
+const MEMORY_TICK_FRAMES = 1800;   // Phase 1: summarizer/cleaner consolidation
+const META_TICK_FRAMES = 2400;     // Phase 4: autobiographical/prompt-modifier pass
+const ROLE_REVIEW_FRAMES = 1200;   // Phase 5: village-need role review nudge
+const BENCHMARK_TICK_FRAMES = 600; // Phase 8: metrics sampling cadence
+const FIRST_BENCHMARK_FRAME = 60;  // take an early first sample so the Metrics
+                                   // panel populates within ~1s instead of ~10s
+const FRAME_MS = 1000 / 60;        // reference frame time for delta-time scaling
+let lastFrameMs = 0;               // performance.now() of the previous tick
 
 const PROJECT_TEMPLATES = {
   house:     { name: "House",     needs: { wood: 3, stone: 1, food: 1, fish: 1 }, visualStyle: "house" },
@@ -416,15 +478,29 @@ const STALL_THRESHOLD = 600;
 const BLUEPRINT_STALL_THRESHOLD = 1800;
 
 // --- Survival tuning (frame-based; SURVIVAL_TICK_FRAMES gates the slow loop) ---
+// Softened from the first pass (HUNGER_RATE 1, EAT_THRESHOLD 55, FOOD_RESTORE 35)
+// where collapses were routine and rarely reversed. Now hunger drains slower,
+// agents auto-eat earlier, and each meal lasts longer, so collapse is the
+// exception rather than the norm.
 const SURVIVAL_TICK_FRAMES = 30; // apply survival math every N rendered frames
-const HUNGER_RATE = 1;           // hunger lost per survival tick
+const HUNGER_RATE = 0.6;         // hunger lost per survival tick (was 1)
 const HEALTH_RATE = 2;           // health lost per survival tick while starving
-const HEALTH_REGEN = 1;          // health regained per survival tick while fed
-const EAT_THRESHOLD = 55;        // auto-eat when hunger drops below this
-const FOOD_RESTORE = 35;         // hunger restored per food eaten
+const HEALTH_REGEN = 1.5;        // health regained per survival tick while fed (was 1)
+const EAT_THRESHOLD = 65;        // auto-eat when hunger drops below this (was 55)
+const FOOD_RESTORE = 45;         // hunger restored per food eaten (was 35)
+// What counts as edible for auto-eat / feeding a collapsed neighbour. The fisher
+// gathers 'fish', not 'food', so he must be able to self-feed on his own catch.
+const EDIBLE_RESOURCES = ["food", "fish"];
 const HEAL_AMOUNT = 25;          // health restored per heal_agent action
+// Slow passive recovery for a collapsed agent even with no food/helper, so no
+// one is permanently stuck down. Assisted healing is far faster, preserving the
+// Sage-emergency stakes.
+const COLLAPSE_REGEN = 0.5;      // health/tick a collapsed agent self-recovers
+const COLLAPSE_REVIVE_HEALTH = 15; // self-revive once passive regen reaches this
 const MAX_CUSTOM_RECIPES = 12;
 const GOAL_STEP_FRAMES = 45;     // frames between deterministic goal steps (#1)
+const SAGE_CRITICAL_HEALTH = 30; // Sage-priority emergency triggers below this (#A)
+const CRAFT_STALL_THRESHOLD = 1500; // frames before a "go craft" nudge fires (#C)
 
 // Each role's primary specialty resource (first in its specialty list), used to
 // nudge agents back toward their specialty instead of wandering. Derived from ROLES.
@@ -438,6 +514,77 @@ const ROLE_SPECIALTY_RESOURCE = Object.fromEntries(
 const ROLE_SKILLS = Object.fromEntries(
   Object.entries(ROLES).map(([role, def]) => [role, def.skill])
 );
+
+// Phase 5: resource id -> roles that specialize in gathering it (inverts the
+// specialty lists), used by the village-need signal that drives switch_role.
+const RESOURCE_GATHER_ROLES = {};
+for (const [role, def] of Object.entries(ROLES)) {
+  for (const res of (def.specialty || [])) {
+    (RESOURCE_GATHER_ROLES[res] = RESOURCE_GATHER_ROLES[res] || []).push(role);
+  }
+}
+
+// Which role the village currently lacks: the gatherer for the active project's
+// first unmet resource, when no able agent is filling it. roles.json supplies
+// only the *starting* distribution — roles drift via switch_role from here.
+function villageNeededRole() {
+  if (!EMERGENT_ROLES || !civilization.activeProject) return null;
+  const unmet = firstUnmetProjectResource();
+  if (!unmet) return null;
+  const roles = RESOURCE_GATHER_ROLES[unmet];
+  if (!roles || roles.length === 0) return null;
+  const filled = agents.some((a) => roles.includes(a.role) && !a.incapacitated);
+  return filled ? null : roles[0];
+}
+
+// A "flexible" agent has no gathering specialty and isn't the leader, so it can
+// retrain into whatever the village needs without abandoning a critical post.
+function isFlexibleRole(role) {
+  return EMERGENT_ROLES && !ROLE_SPECIALTY_RESOURCE[role] && role !== "elder";
+}
+
+// Deterministic emergent-role backstop (Phase 5). Nudging the LLM to switch_role
+// never worked — the same LLM-opt-in stall that once blocked start_project — so
+// when the active build has gone without a gatherer for a needed resource, force
+// one spare agent to retrain into the needed role. Cooldown-gated to avoid
+// thrash; the LLM can still switch_role freely on its own.
+const ROLE_SWITCH_TICK_FRAMES = 120;  // how often the backstop evaluates need
+const ROLE_SWITCH_COOLDOWN = 600;     // min frames between forced switches
+// Roles with a distinct critical function the backstop never retrains away from
+// (the LLM may still move them; this only constrains the deterministic path).
+const AUTOSWITCH_PROTECTED_ROLES = new Set(["elder", "builder", "healer"]);
+
+// Pick the best spare agent to retrain into neededRole: a flexible, unprotected
+// agent not already in that role, preferring idle ones so active workers aren't
+// yanked off a task.
+function autoSwitchCandidate(neededRole) {
+  return agents
+    .filter((a) =>
+      !a.incapacitated
+      && a.role !== neededRole
+      && isFlexibleRole(a.role)
+      && !AUTOSWITCH_PROTECTED_ROLES.has(a.role))
+    .sort((a, b) => (isIdle(b) ? 1 : 0) - (isIdle(a) ? 1 : 0))[0] || null;
+}
+
+function maybeAutoSwitchRole() {
+  if (!EMERGENT_ROLES) return;
+  if (frameTick - civilization.lastRoleSwitchFrame < ROLE_SWITCH_COOLDOWN) return;
+  const neededRole = villageNeededRole();
+  if (!neededRole) return;
+  const agent = autoSwitchCandidate(neededRole);
+  if (!agent) return;
+  civilization.lastRoleSwitchFrame = frameTick;
+  agent.goal = null;  // drop any deterministic goal so the new role takes effect
+  // Route through applyDecision so the switch is logged, remembered, and counted
+  // exactly like an LLM-chosen switch_role.
+  applyDecision(agent, {
+    action: "switch_role",
+    new_role: neededRole,
+    reasoning: `The village has no one gathering ${firstUnmetProjectResource()}; `
+      + `retraining to ${neededRole} to fill the gap.`
+  });
+}
 
 const civilization = {
   level: 1,
@@ -454,8 +601,17 @@ const civilization = {
   directive: null,
   lastProjectContributionFrame: 0,
   lastBlueprintActivityFrame: 0,
+  lastCraftActivityFrame: 0,
+  lastRuleActivityFrame: 0,
+  lastRoleSwitchFrame: 0,
   collectAttempts: 0,
-  collectSuccesses: 0
+  collectSuccesses: 0,
+  // Phase 6: collective rules / voting + a shared stockpile funded by the tax.
+  rules: [],
+  pendingRules: [],
+  stockpile: {},
+  taxDue: 0,
+  taxPaid: 0
 };
 
 function customResourceCount() {
@@ -492,6 +648,7 @@ function craftItem(agent, recipeId) {
   }
   for (const [r, n] of Object.entries(recipe.inputs)) agent.resources[r] -= n;
   agent.resources[recipeId] = (agent.resources[recipeId] || 0) + 1;
+  civilization.lastCraftActivityFrame = frameTick;
   sidebarDirty = true;
   return `${agent.name} crafted ${recipeId}`;
 }
@@ -564,7 +721,160 @@ function reviewRecipe(agent, action, targetId, message) {
     name: rc.name, gatherZone: null, color: rc.color, crafted: true
   };
   RECIPES[rc.id] = { name: rc.name, inputs: { ...rc.inputs }, station: rc.station };
+  civilization.lastCraftActivityFrame = frameTick;
   return `${agent.name} approved the ${rc.name} recipe`;
+}
+
+// --- Phase 6: collective rules / voting (generalizes blueprint approval) ---
+const RULE_KINDS = new Set(["resource_tax", "custom"]);
+const MAX_PENDING_RULES = 4;
+const MAX_ACTIVE_RULES = 8;
+
+function activeAgentCount() {
+  return agents.filter((a) => !a.incapacitated).length;
+}
+
+function voteQuorum() {
+  return Math.floor(activeAgentCount() / 2) + 1;
+}
+
+function validateRule(rule) {
+  if (!RULES_ENABLED || !rule || typeof rule !== "object") return false;
+  if (civilization.pendingRules.length >= MAX_PENDING_RULES) return false;
+  if (civilization.rules.length >= MAX_ACTIVE_RULES) return false;
+  if (typeof rule.id !== "string" || !SLUG_RE.test(rule.id)) return false;
+  if (civilization.rules.some((r) => r.id === rule.id)) return false;
+  if (civilization.pendingRules.some((r) => r.id === rule.id)) return false;
+  if (typeof rule.name !== "string" || rule.name.length < 1 || rule.name.length > 32) return false;
+  const kind = rule.kind || "custom";
+  if (!RULE_KINDS.has(kind)) return false;
+  if (kind === "resource_tax") {
+    const v = Number(rule.value);
+    if (!Number.isFinite(v) || v < 0 || v > 3) return false;
+  }
+  return true;
+}
+
+function tallyAndMaybeEnact(rule) {
+  const votes = Object.values(rule.votes);
+  const yes = votes.filter((v) => v === "yes").length;
+  const no = votes.filter((v) => v === "no").length;
+  const quorum = voteQuorum();
+  if (yes >= quorum) {
+    rule.enacted = true;
+    civilization.pendingRules = civilization.pendingRules.filter((r) => r.id !== rule.id);
+    civilization.rules.push(rule);
+    civilization.lastRuleActivityFrame = frameTick;
+    sidebarDirty = true;
+    pushActivity(`Rule "${rule.name}" enacted by vote (${yes} yes)`);
+    logBenchmark("rule_enacted", civilization.rules.length, { id: rule.id, yes, no });
+    return "enacted";
+  }
+  if (no >= quorum) {
+    civilization.pendingRules = civilization.pendingRules.filter((r) => r.id !== rule.id);
+    civilization.lastRuleActivityFrame = frameTick;
+    sidebarDirty = true;
+    pushActivity(`Rule "${rule.name}" rejected by vote (${no} no)`);
+    return "rejected";
+  }
+  return "pending";
+}
+
+function proposeRule(agent, decision) {
+  if (!RULES_ENABLED) return `${agent.name} cannot propose rules`;
+  const rule = decision.rule;
+  if (!validateRule(rule)) return `${agent.name} drafted an invalid rule`;
+  const entry = {
+    id: rule.id,
+    name: rule.name,
+    kind: rule.kind || "custom",
+    value: rule.kind === "resource_tax" ? Number(rule.value) : (rule.value ?? null),
+    description: rule.description || "",
+    proposedBy: agent.name,
+    enacted: false,
+    votes: { [agent.name]: "yes" }
+  };
+  civilization.pendingRules.push(entry);
+  civilization.lastRuleActivityFrame = frameTick;
+  sidebarDirty = true;
+  pushCommunication("rule_proposal", agent.name, "everyone", `${entry.name}: ${entry.description}`);
+  // The proposer's own yes vote may already meet quorum in a tiny village.
+  tallyAndMaybeEnact(entry);
+  return `${agent.name} proposed rule "${entry.name}"`;
+}
+
+function voteOnRule(agent, decision) {
+  if (!RULES_ENABLED) return `${agent.name} cannot vote`;
+  const rule = civilization.pendingRules.find((r) => r.id === decision.target);
+  if (!rule) return `${agent.name} found no such pending rule`;
+  const vote = decision.vote === "no" ? "no" : "yes";
+  rule.votes[agent.name] = vote;
+  civilization.lastRuleActivityFrame = frameTick;
+  pushCommunication("vote", agent.name, "everyone", `${vote} on ${rule.name}`);
+  const outcome = tallyAndMaybeEnact(rule);
+  return `${agent.name} voted ${vote} on "${rule.name}"${outcome !== "pending" ? ` (${outcome})` : ""}`;
+}
+
+// The enacted resource-tax magnitude, or 0 when no tax rule is in force.
+function activeResourceTax() {
+  if (!RULES_ENABLED) return 0;
+  const rule = civilization.rules.find((r) => r.kind === "resource_tax" && r.enacted);
+  return rule ? (rule.value || 0) : 0;
+}
+
+// Enforce the resource tax mechanically on each contribution: the contributor
+// pays `tax` extra of the same resource into the shared stockpile when able.
+// Adherence (taxPaid/taxDue) is what Phase 8 measures.
+function enforceResourceTax(agent, res) {
+  const tax = activeResourceTax();
+  if (tax <= 0) return;
+  civilization.taxDue += tax;
+  const pay = Math.min(tax, agent.resources[res] || 0);
+  if (pay > 0) {
+    agent.resources[res] -= pay;
+    civilization.stockpile[res] = (civilization.stockpile[res] || 0) + pay;
+    civilization.taxPaid += pay;
+  }
+}
+
+// --- Phase 6: deterministic rules/voting backstop ---
+// propose_rule / vote_rule were never chosen by the LLM (the same opt-in stall
+// as switch_role). So, on a cooldown, the elder proposes a modest resource tax,
+// and idle agents actually cast votes so the proposal reaches a tally instead of
+// sitting forever. The LLM may still propose/vote on its own at any time.
+const RULES_TICK_FRAMES = 150;       // how often the backstop advances rules
+const RULE_PROPOSE_COOLDOWN = 1500;  // min frames between elder-proposed rules
+
+function maybeAdvanceRules() {
+  if (!RULES_ENABLED) return;
+
+  // 1) Resolve the current proposal first: one not-yet-voted able agent votes
+  //    per tick (prefer idle so workers aren't pulled off tasks). Assent to a
+  //    modest tax; dissent only to an aggressive one.
+  const pending = civilization.pendingRules[0];
+  if (pending) {
+    const eligible = agents.filter((a) =>
+      !a.incapacitated && a.role !== "elder" && !(a.name in pending.votes));
+    const voter = eligible.find(isIdle) || eligible[0];
+    if (voter) {
+      const vote = (pending.kind === "resource_tax" && (pending.value || 0) > 2) ? "no" : "yes";
+      applyDecision(voter, { action: "vote_rule", target: pending.id, vote,
+        reasoning: `Casting my vote on the proposed rule "${pending.name}".` });
+    }
+    return;  // one proposal at a time
+  }
+
+  // 2) No pending and no tax in force: the elder proposes one, on a cooldown.
+  if (activeResourceTax() > 0) return;
+  if (frameTick - civilization.lastRuleActivityFrame < RULE_PROPOSE_COOLDOWN) return;
+  const elder = agents.find((a) => a.role === "elder" && !a.incapacitated);
+  if (!elder) return;
+  applyDecision(elder, {
+    action: "propose_rule",
+    rule: { id: "resource_tax", name: "Resource Tax", kind: "resource_tax", value: 1,
+      description: "Contributors add 1 of the same resource to a shared stockpile." },
+    reasoning: "Proposing a small resource tax to build a shared village stockpile."
+  });
 }
 
 // Map a zone to every resource id gatherable there (base + custom).
@@ -627,7 +937,9 @@ const AVAILABLE_ACTIONS = [
   "propose_blueprint", "approve_blueprint", "reject_blueprint",
   "assign_task", "change_role", "rest",
   ...(SURVIVAL_ENABLED ? ["heal_agent"] : []),
-  ...(CRAFTING_ENABLED ? ["craft_item", "propose_recipe", "approve_recipe", "reject_recipe"] : [])
+  ...(CRAFTING_ENABLED ? ["craft_item", "propose_recipe", "approve_recipe", "reject_recipe"] : []),
+  ...(EMERGENT_ROLES ? ["switch_role"] : []),
+  ...(RULES_ENABLED ? ["propose_rule", "vote_rule"] : [])
 ];
 
 const AGENT_DEFS = [
@@ -688,9 +1000,12 @@ function makeAgents() {
       x: center.x + ox, y: center.y + oy,
       targetX: center.x + ox, targetY: center.y + oy,
       speed: speed,
-      memory: [],
+      memory: MEMORY_ENABLED ? { working: [], shortTerm: [], longTerm: [] } : [],
       resources: { food: 2, wood: 0, gold: 0 },
       relationships: {},
+      inbox: [],
+      beliefs: new Set(),
+      votes: {},
       currentZone: def.zone,
       message: null,
       messageTimer: 0,
@@ -709,7 +1024,10 @@ function makeAgents() {
       hunger: 80,
       health: 100,
       incapacitated: false,
-      goal: null
+      goal: null,
+      actionCounts: {},
+      persona: "",
+      modules: { perception: true, social: true, desire: true, reflection: true }
     };
   });
 }
@@ -817,11 +1135,14 @@ function distanceTo(agent, other) {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-function moveAgent(agent) {
+// scale = wall-clock delta-time multiplier (1 at 60fps) so agents cross the map
+// at a consistent real-time speed regardless of frame rate.
+function moveAgent(agent, scale = 1) {
   const dx = agent.targetX - agent.x;
   const dy = agent.targetY - agent.y;
   const dist = Math.sqrt(dx * dx + dy * dy);
-  const moving = dist > agent.speed;
+  const step = agent.speed * scale;
+  const moving = dist > step;
   if (!moving) {
     agent.x = agent.targetX;
     agent.y = agent.targetY;
@@ -835,38 +1156,55 @@ function moveAgent(agent) {
       agent.idleFrames = 0;
     }
   } else {
-    agent.x += (dx / dist) * agent.speed;
-    agent.y += (dy / dist) * agent.speed;
+    agent.x += (dx / dist) * step;
+    agent.y += (dy / dist) * step;
     agent.idleFrames = 0;
   }
   agent.currentZone = getZone(agent.x, agent.y);
 }
 
+// First edible resource id the agent currently holds (qty > 0), else null.
+function firstEdible(agent) {
+  for (const id of EDIBLE_RESOURCES) {
+    if ((agent.resources[id] || 0) > 0) return id;
+  }
+  return null;
+}
+
 // --- Survival (#2): hunger/health drain, auto-eat, recoverable collapse ---
 function updateSurvival(agent) {
   if (!SURVIVAL_ENABLED) return;
-  // Auto-eat (deterministic, no LLM): the food consumption sink.
-  if (agent.hunger < EAT_THRESHOLD && (agent.resources.food || 0) > 0) {
-    agent.resources.food -= 1;
+  // Auto-eat (deterministic, no LLM): the food consumption sink. Any edible
+  // counts (food OR fish), so the fisher self-feeds on his own catch.
+  const edible = agent.hunger < EAT_THRESHOLD ? firstEdible(agent) : null;
+  if (edible) {
+    agent.resources[edible] -= 1;
     agent.hunger = Math.min(100, agent.hunger + FOOD_RESTORE);
-    pushActivity(`${agent.name} ate food`);
+    pushActivity(`${agent.name} ate ${edible}`);
     sidebarDirty = true;
   }
   agent.hunger = Math.max(0, agent.hunger - HUNGER_RATE);
-  if (agent.hunger <= 0) {
-    agent.health = Math.max(0, agent.health - HEALTH_RATE);
-  } else if (!agent.incapacitated) {
-    agent.health = Math.min(100, agent.health + HEALTH_REGEN);
-  }
-  if (agent.health <= 0 && !agent.incapacitated) {
-    agent.incapacitated = true;
-    agent.goal = null;
-    pushActivity(`${agent.name} collapsed from starvation`);
-    sidebarDirty = true;
-  } else if (agent.incapacitated && agent.health > 0) {
-    agent.incapacitated = false;
-    pushActivity(`${agent.name} recovered`);
-    sidebarDirty = true;
+  if (agent.incapacitated) {
+    // Slow passive recovery so a collapsed agent is never permanently stuck,
+    // even with no food or helper. Assisted heal_agent revives far faster.
+    agent.health = Math.min(100, agent.health + COLLAPSE_REGEN);
+    if (agent.health >= COLLAPSE_REVIVE_HEALTH) {
+      agent.incapacitated = false;
+      pushActivity(`${agent.name} recovered`);
+      sidebarDirty = true;
+    }
+  } else {
+    if (agent.hunger <= 0) {
+      agent.health = Math.max(0, agent.health - HEALTH_RATE);
+    } else {
+      agent.health = Math.min(100, agent.health + HEALTH_REGEN);
+    }
+    if (agent.health <= 0) {
+      agent.incapacitated = true;
+      agent.goal = null;
+      pushActivity(`${agent.name} collapsed from starvation`);
+      sidebarDirty = true;
+    }
   }
 }
 
@@ -879,6 +1217,52 @@ function neediestNearby(agent) {
   nearby.sort((a, b) =>
     (b.incapacitated - a.incapacitated) || (a.health - b.health));
   return nearby[0];
+}
+
+// --- Sage-priority emergency (#A): the elder's health overrides everything. ---
+// Returns the agent every other able villager must rush to revive, or null when
+// there is no emergency. If the healer is also down she is revived first (she is
+// the key to saving Sage); once she is up the target becomes Sage.
+function sageEmergency() {
+  if (!SURVIVAL_ENABLED) return null;
+  const sage = agents.find((a) => a.role === "elder");
+  if (!sage) return null;
+  if (!sage.incapacitated && sage.health >= SAGE_CRITICAL_HEALTH) return null;
+  const healer = agents.find((a) => a.role === "healer");
+  return (healer && healer.incapacitated) ? healer : sage;
+}
+
+// The (<=2) agents who must drop everything to revive `target`: the healer (if
+// able and not herself the target) plus the single nearest able agent. Everyone
+// else keeps working — the original "all villagers rush" rule was overkill.
+function sageResponders(target) {
+  const responders = new Set();
+  const healer = agents.find((a) => a.role === "healer");
+  if (healer && !healer.incapacitated && healer !== target) {
+    responders.add(healer);
+  }
+  let nearest = null;
+  let nearestDist = Infinity;
+  for (const a of agents) {
+    if (a === target || a.incapacitated || responders.has(a)) continue;
+    const d = distanceTo(a, target);
+    if (d < nearestDist) { nearestDist = d; nearest = a; }
+  }
+  if (nearest) responders.add(nearest);
+  return responders;
+}
+
+// Deterministic emergency step: drop the agent's goal and go heal/feed the
+// target, overriding whatever the agent would otherwise do.
+function rushToHeal(agent, target) {
+  agent.goal = null;
+  if (distanceTo(agent, target) > 80) {
+    autoMoveTowardTarget(agent, target.name);
+    pushActivity(`${agent.name} rushes to save ${target.name}`);
+    return;
+  }
+  applyDecision(agent, { action: "heal_agent", target: target.name, message: null,
+    reasoning: "Sage-priority emergency." });
 }
 
 function projectProgressText() {
@@ -918,6 +1302,7 @@ function tryContributeResource(agent, res) {
   p.contributed[res] = have + 1;
   agent.lastContributedFrame = frameTick;
   civilization.lastProjectContributionFrame = frameTick;
+  enforceResourceTax(agent, res);
   sidebarDirty = true;
   return `${agent.name} contributed ${res} to ${p.name}`;
 }
@@ -1180,8 +1565,37 @@ function resolveTalkTarget(agent, decision) {
   return nearby.length > 0 ? nearby[0] : "everyone";
 }
 
+// Render the static terrain once into offscreen canvases. drawTiledWorld paints
+// in logical coordinates, so a WORLD_W×WORLD_H buffer (no DPR transform) is
+// blitted under the main ctx's DPR transform and stays crisp (imageSmoothing
+// off). The animated ocean strip is pre-rendered as 16 foam phases so animation
+// costs one drawImage/frame instead of re-tiling the strip.
+function buildTerrainCache() {
+  terrainCanvas = document.createElement("canvas");
+  terrainCanvas.width = WORLD_W;
+  terrainCanvas.height = WORLD_H;
+  const tctx = terrainCanvas.getContext("2d");
+  tctx.imageSmoothingEnabled = false;
+  drawTiledWorld(tctx, WORLD_W, WORLD_H, 0, null);
+
+  oceanFrames = [];
+  for (let phase = 0; phase < 16; phase++) {
+    const oc = document.createElement("canvas");
+    oc.width = 200;
+    oc.height = WORLD_H;
+    const octx = oc.getContext("2d");
+    octx.imageSmoothingEnabled = false;
+    fillRectWithTile(octx, 0, 0, 200, WORLD_H, oceanTile(phase));
+    oceanFrames.push(oc);
+  }
+}
+
 function drawWorld(ctx, frameTick) {
-  drawTiledWorld(ctx, WORLD_W, WORLD_H, frameTick, null);
+  if (!terrainCanvas) buildTerrainCache();
+  ctx.drawImage(terrainCanvas, 0, 0, WORLD_W, WORLD_H);
+  // Animated ocean foam overlay (the only moving terrain): blit the current phase.
+  const foamOffset = Math.floor(frameTick / 8) % 16;
+  ctx.drawImage(oceanFrames[foamOffset], 0, 0, 200, WORLD_H);
 }
 
 function drawResourceDots(ctx, agent, cx, cy) {
@@ -1305,7 +1719,7 @@ let frameTick = 0;
 let lastRenderedActCount = -1;
 let lastRenderedConvCount = -1;
 const LLM_MIN_GAP_MS = 250;
-const MAX_CONCURRENT_LLM = 3;
+const MAX_CONCURRENT_LLM = 2;
 const COMPUTE_COOLDOWN_MS = 30000;
 const thinkQueue = [];
 const ZONE_NAMES = Object.keys(ZONE_CENTERS);
@@ -1352,9 +1766,251 @@ function pushConversation(from, to, message) {
   pushCommunication("speech", from, to, message);
 }
 
-function pushMemory(agent, line) {
-  agent.memory.push(line);
-  if (agent.memory.length > 5) agent.memory.shift();
+// --- Phase 2: in-process message bus + per-agent inbox (replaces MQTT) ---
+// Every agent lives in one frame, so the "broker" is a direct delivery into the
+// recipient's inbox. Inbound messages are drained into the next think payload
+// and (subsumption-style) pre-empt a running goal so the agent re-decides.
+const INBOX_CAP = 6;
+function deliverMessage(fromName, toName, text, kind) {
+  if (!AGENT_MESSAGING || !text) return;
+  const broadcast = toName === "everyone" || toName === "all" || !toName;
+  for (const r of agents) {
+    if (r.name === fromName) continue;
+    if (!broadcast && r.name !== toName) continue;
+    r.inbox.push({ from: fromName, text, kind: kind || "message", frame: frameTick });
+    while (r.inbox.length > INBOX_CAP) r.inbox.shift();
+  }
+}
+
+function sendMessage(agent, toName, text, kind) {
+  deliverMessage(agent.name, toName, text, kind);
+}
+
+// Drain unread messages into a single prompt string and clear the inbox.
+function drainInbox(agent) {
+  if (!AGENT_MESSAGING || !agent.inbox || agent.inbox.length === 0) return "none";
+  const msgs = agent.inbox.map((m) => `${m.from} (${m.kind}): ${m.text}`).join(" | ");
+  agent.inbox = [];
+  return msgs;
+}
+
+function hasUnread(agent) {
+  return AGENT_MESSAGING && agent.inbox && agent.inbox.length > 0;
+}
+
+// --- Phase 7: cultural transmission (beliefs spread through conversation) ---
+// A seeded rumor propagates probabilistically when agents talk; Phase 8 charts
+// its adoption curve across the village over time.
+const MEMES = {
+  harvest_spirit: "The Harvest Spirit rewards those who share food"
+};
+const MEME_SEED_ID = "harvest_spirit";
+const MEME_SPREAD_PROB = 0.5;        // talk channel (deliberate, higher)
+const MEME_PROXIMITY_PROB = 0.2;     // ambient channel: co-located agents
+const MEME_TICK_FRAMES = 90;         // how often the proximity channel runs
+
+function beliefText(id) {
+  return MEMES[id] || id;
+}
+
+function seedBeliefs() {
+  if (!MEMES_ENABLED || agents.length === 0) return;
+  const origin = agents[Math.floor(Math.random() * agents.length)];
+  origin.beliefs.add(MEME_SEED_ID);
+  pushActivity(`${origin.name} began spreading a rumor: "${beliefText(MEME_SEED_ID)}"`);
+  pushCommunication("rumor", origin.name, "everyone", beliefText(MEME_SEED_ID));
+  pushMemory(origin, `I believe: ${beliefText(MEME_SEED_ID)}`);
+}
+
+// Core belief transmission, shared by every channel: the speaker may pass one
+// held belief to a recipient who doesn't already hold it. Returns the adopted
+// belief id, or null if nothing was transmitted.
+function transmitBelief(speaker, recipient, prob) {
+  if (!MEMES_ENABLED || !speaker || !speaker.beliefs || speaker.beliefs.size === 0) return null;
+  if (!recipient || recipient === speaker || !recipient.beliefs) return null;
+  if (recipient.incapacitated) return null;
+  if (Math.random() > prob) return null;
+  const held = Array.from(speaker.beliefs);
+  const belief = held[Math.floor(Math.random() * held.length)];
+  if (recipient.beliefs.has(belief)) return null;
+  recipient.beliefs.add(belief);
+  pushActivity(`${recipient.name} adopted "${beliefText(belief)}" from ${speaker.name}`);
+  pushCommunication("belief", speaker.name, recipient.name, beliefText(belief));
+  pushMemory(recipient, `Came to believe: ${beliefText(belief)}`);
+  return belief;
+}
+
+// Talk channel: a deliberate, higher-probability transmission on a successful
+// talk_to_nearby, plus an inbox note so the listener sees it.
+function maybeSpreadBeliefs(agent, recipientName, message) {
+  if (!MEMES_ENABLED || !recipientName || recipientName === "everyone") return;
+  const recipient = agents.find((a) => a.name === recipientName);
+  const belief = transmitBelief(agent, recipient, MEME_SPREAD_PROB);
+  if (belief) {
+    deliverMessage(agent.name, recipientName, `(belief shared) ${beliefText(belief)}`, "belief");
+  }
+}
+
+// Ambient/proximity channel (Phase 7 decoupling): beliefs also spread between
+// co-located agents without anyone choosing talk_to_nearby — the talk action
+// was effectively never selected, so the rumor never propagated. Runs on a tick
+// interval at a gentler probability than deliberate talk.
+function spreadBeliefsByProximity() {
+  if (!MEMES_ENABLED) return;
+  for (const speaker of agents) {
+    if (speaker.incapacitated || !speaker.beliefs || speaker.beliefs.size === 0) continue;
+    for (const name of getNearbyAgents(speaker, agents)) {
+      const recipient = agents.find((a) => a.name === name);
+      transmitBelief(speaker, recipient, MEME_PROXIMITY_PROB);
+    }
+  }
+}
+
+// Count of agents holding the seeded rumor (for the adoption-curve benchmark).
+function memeAdoptionCount() {
+  if (!MEMES_ENABLED) return 0;
+  return agents.filter((a) => a.beliefs && a.beliefs.has(MEME_SEED_ID)).length;
+}
+
+// --- Phase 8: benchmarks & metrics ---
+let lastMemorySize = 0;
+let lastBenchmarks = {};
+
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+function logBenchmark(metric, value, detail) {
+  if (!BENCHMARKS_ENABLED) return;
+  try {
+    fetch("/log/benchmark", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ metric, value, detail, frame_tick: frameTick }),
+      keepalive: true
+    }).catch(() => {});
+  } catch (e) { /* metrics must never break the sim */ }
+}
+
+// Specialization index = Shannon entropy of the role distribution. Rises as the
+// village diversifies via switch_role, falls as roles converge.
+function roleEntropy() {
+  const counts = {};
+  for (const a of agents) counts[a.role] = (counts[a.role] || 0) + 1;
+  const n = agents.length || 1;
+  let h = 0;
+  for (const k in counts) {
+    const p = counts[k] / n;
+    if (p > 0) h -= p * Math.log2(p);
+  }
+  return h;
+}
+
+// Fraction of owed resource tax actually paid into the shared stockpile.
+function ruleAdherence() {
+  if (civilization.taxDue <= 0) return null;
+  return civilization.taxPaid / civilization.taxDue;
+}
+
+function activeModuleTotal() {
+  if (!PIANO_MODULES && !META_SYSTEM) return 0;
+  return agents.reduce((s, a) =>
+    s + Object.values(a.modules || {}).filter(Boolean).length, 0);
+}
+
+function sampleBenchmarks() {
+  if (!BENCHMARKS_ENABLED) return;
+  const entropy = roleEntropy();
+  const adherence = ruleAdherence();
+  const adoption = memeAdoptionCount();
+  const adoptionRate = agents.length ? adoption / agents.length : 0;
+  const moduleTotal = activeModuleTotal();
+  lastBenchmarks = {
+    entropy, adherence, adoption, adoptionRate, moduleTotal,
+    rules: civilization.rules.length,
+    structures: civilization.structures.length,
+    level: civilization.level,
+    memory: lastMemorySize
+  };
+  // Log the role *distribution* (counts per role), not just the list, so a flat
+  // entropy reads as "roster unchanged" rather than looking like a stuck metric.
+  const roleCounts = {};
+  for (const a of agents) roleCounts[a.role] = (roleCounts[a.role] || 0) + 1;
+  logBenchmark("specialization_entropy", round2(entropy),
+    { counts: roleCounts });
+  if (adherence !== null) {
+    logBenchmark("rule_adherence", round2(adherence),
+      { paid: civilization.taxPaid, due: civilization.taxDue });
+  }
+  if (MEMES_ENABLED) {
+    logBenchmark("meme_adoption", adoption,
+      { rate: round2(adoptionRate), seed: MEME_SEED_ID, of: agents.length });
+  }
+  if (PIANO_MODULES || META_SYSTEM) {
+    logBenchmark("active_modules", moduleTotal);
+  }
+  logBenchmark("memory_store_size", lastMemorySize);
+  sidebarDirty = true;
+}
+
+// --- Phase 1: tiered memory (WM/STM/LTM) + server vector-store persistence ---
+const WORKING_MEM_CAP = 6;
+const SHORT_MEM_CAP = 12;
+const LONG_MEM_CAP = 8;
+// Salience heuristic: which events matter enough to retrieve later. Higher
+// salience also promotes an entry past the working tier into short-term memory.
+const HIGH_SALIENCE_RE = /\b(built|collapsed|revived|approved|rejected|started|proposed|tasked|reached level|became a|enacted|voted|switched)\b/i;
+const LOW_SALIENCE_RE = /\b(rested|wandered|found nothing|has nothing|heads to|moves toward|looked for)\b/i;
+
+function salienceFor(line) {
+  if (HIGH_SALIENCE_RE.test(line)) return 0.85;
+  if (LOW_SALIENCE_RE.test(line)) return 0.2;
+  return 0.5;
+}
+
+function persistMemory(agent, line, salience, kind) {
+  try {
+    fetch("/memory/store", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent: agent.name, text: line, salience, kind, frame_tick: frameTick
+      }),
+      keepalive: true
+    }).catch(() => {});
+  } catch (e) { /* memory writes must never break the sim */ }
+}
+
+function pushMemory(agent, line, kind) {
+  if (!MEMORY_ENABLED) {
+    agent.memory.push(line);
+    if (agent.memory.length > 5) agent.memory.shift();
+    return;
+  }
+  const m = agent.memory;
+  const sal = salienceFor(line);
+  m.working.push(line);
+  // Salient working memories age into short-term; the rest just fall off.
+  while (m.working.length > WORKING_MEM_CAP) {
+    const evicted = m.working.shift();
+    if (salienceFor(evicted) >= 0.7) {
+      m.shortTerm.push(evicted);
+      if (m.shortTerm.length > SHORT_MEM_CAP) m.shortTerm.shift();
+    }
+  }
+  persistMemory(agent, line, sal, kind || "event");
+}
+
+// Compacted slice for the prompt: long-term summaries first (durable identity),
+// then recent short-term, then the freshest working memories.
+function memoryForPrompt(agent) {
+  if (!MEMORY_ENABLED) return agent.memory;
+  const m = agent.memory;
+  return [
+    ...m.longTerm.slice(-3),
+    ...m.shortTerm.slice(-4),
+    ...m.working.slice(-4),
+  ];
 }
 
 function nudgeAlly(agent, otherName) {
@@ -1491,6 +2147,8 @@ function applyDecision(agent, decision) {
         agent.message = decision.message;
         agent.messageTimer = 180;
         pushConversation(agent.name, recipient, decision.message);
+        deliverMessage(agent.name, recipient, decision.message, "speech");
+        maybeSpreadBeliefs(agent, recipient, decision.message);
         summary = `${agent.name} talked to ${recipient}`;
       } else {
         pushCommunication("talk_attempt", agent.name, recipient, null, "no_message");
@@ -1663,6 +2321,10 @@ function applyDecision(agent, decision) {
         target.lastTaskedFrame = frameTick;
         civilization.directive = `Elder ${agent.name} directs: ${target.name} should ${decision.message}.`;
         pushCommunication("directive", agent.name, target.name, decision.message);
+        deliverMessage(agent.name, target.name, decision.message, "directive");
+        // Cultural transmission piggybacks on the leader's directives: an elder
+        // who holds a belief may pass it to the agent he's directing.
+        transmitBelief(agent, target, MEME_SPREAD_PROB);
         summary = `Elder ${agent.name} tasked ${target.name}: ${decision.message}`;
         sidebarDirty = true;
       } else {
@@ -1676,6 +2338,30 @@ function applyDecision(agent, decision) {
         summary = `${agent.name} became a ${decision.new_role}`;
         sidebarDirty = true;
       }
+      break;
+    }
+    case "switch_role": {
+      // Phase 5: emergent specialization. Retrain into a known role (its
+      // specialty/skill follow because every role map is keyed by role name).
+      const newRole = decision.new_role || decision.target;
+      if (EMERGENT_ROLES && newRole && ROLES[newRole] && newRole !== agent.role) {
+        const old = agent.role;
+        agent.role = newRole;
+        agent.assignedTask = null;
+        agent.idleCycles = 0;
+        summary = `${agent.name} switched role from ${old} to ${newRole}`;
+        sidebarDirty = true;
+      } else {
+        summary = `${agent.name} kept the ${agent.role} role`;
+      }
+      break;
+    }
+    case "propose_rule": {
+      summary = proposeRule(agent, decision);
+      break;
+    }
+    case "vote_rule": {
+      summary = voteOnRule(agent, decision);
       break;
     }
     case "heal_agent": {
@@ -1696,10 +2382,12 @@ function applyDecision(agent, decision) {
       }
       const boost = agent.role === "healer" ? HEAL_AMOUNT * 2 : HEAL_AMOUNT;
       patient.health = Math.min(100, patient.health + boost);
-      // A collapsed agent also needs food to climb back above 0 hunger; share some.
-      if (patient.incapacitated && (agent.resources.food || 0) > 0) {
-        agent.resources.food -= 1;
-        patient.resources.food = (patient.resources.food || 0) + 1;
+      // A collapsed agent also needs food to climb back above 0 hunger; share
+      // any edible the rescuer holds (a fisher-rescuer can feed fish).
+      const donate = patient.incapacitated ? firstEdible(agent) : null;
+      if (donate) {
+        agent.resources[donate] -= 1;
+        patient.resources[donate] = (patient.resources[donate] || 0) + 1;
         patient.hunger = Math.min(100, patient.hunger + FOOD_RESTORE);
       }
       // Revive immediately rather than waiting for the next survival tick.
@@ -1721,6 +2409,7 @@ function applyDecision(agent, decision) {
 
   agent.lastAction = action;
   agent.lastReasoning = decision.reasoning || null;
+  agent.actionCounts[action] = (agent.actionCounts[action] || 0) + 1;
   if (action !== "rest" && action !== "talk_to_nearby" && action !== "assign_task") {
     agent.assignedTask = null;
     agent.idleCycles = 0;
@@ -1820,6 +2509,152 @@ function recentConversationsText() {
   ).join(" | ");
 }
 
+// --- Phase 1: memory consolidation loop (Summarizer + Cleaner) ---
+// Frame-gated like updateSurvival. One agent is summarized per pass (round
+// robin) to spread LLM load; the cleaner runs less often (it is deterministic).
+let memoryMaintIndex = 0;
+async function runMemoryMaintenance() {
+  if (!MEMORY_ENABLED || agents.length === 0) return;
+  const agent = agents[memoryMaintIndex % agents.length];
+  memoryMaintIndex++;
+  try {
+    const resp = await fetch("/memory/summarize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent: agent.name, frame_tick: frameTick })
+    });
+    const data = await resp.json();
+    if (data && typeof data.size === "number") lastMemorySize = data.size;
+    if (data && data.ok && data.summary && agent.memory && agent.memory.longTerm) {
+      agent.memory.longTerm.push(data.summary);
+      while (agent.memory.longTerm.length > LONG_MEM_CAP) agent.memory.longTerm.shift();
+      pushActivity(`${agent.name} reflected: ${data.summary}`);
+    }
+  } catch (e) { /* maintenance must never break the sim */ }
+  if (memoryMaintIndex % 4 === 0) {
+    try {
+      const cleanResp = await fetch("/memory/clean", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ frame_tick: frameTick })
+      });
+      const cleanData = await cleanResp.json();
+      if (cleanData && typeof cleanData.size === "number") lastMemorySize = cleanData.size;
+    } catch (e) { /* ignore */ }
+  }
+}
+
+// --- Phase 4: meta system (autobiography + prompt modifier + self-activation) ---
+// A per-agent self-report of module activity + state; the server turns it into a
+// first-person life story (stored to LTM) and a short persona directive appended
+// to that agent's system prompt — CMA's "self emerges from memories" layer.
+function metaReportFor(agent) {
+  const counts = agent.actionCounts || {};
+  const top = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1]).slice(0, 4)
+    .map(([a, n]) => `${a}×${n}`).join(", ");
+  const res = Object.entries(agent.resources)
+    .filter(([, n]) => n > 0).map(([k, n]) => `${k}:${n}`).join(", ");
+  return {
+    role: agent.role,
+    top_actions: top || "none",
+    resources: res || "none",
+    health: Math.round(agent.health),
+    beliefs: MEMES_ENABLED ? Array.from(agent.beliefs).map(beliefText) : []
+  };
+}
+
+// Deterministic module self-activation/deactivation gated by the meta report:
+// a rarely-social agent stops running its (costly) social module until it has
+// mail again; reflection follows MEMORY_ENABLED.
+function updateModuleActivation(agent) {
+  if (!agent.modules) {
+    agent.modules = { perception: true, social: true, desire: true, reflection: true };
+  }
+  const counts = agent.actionCounts || {};
+  const total = Object.values(counts).reduce((a, b) => a + b, 0) || 1;
+  const talkShare = (counts["talk_to_nearby"] || 0) / total;
+  agent.modules.social = talkShare > 0.05 || hasUnread(agent);
+  agent.modules.reflection = MEMORY_ENABLED;
+  agent.modules.perception = true;
+  agent.modules.desire = true;
+}
+
+// --- Phase 3: PIANO concurrent modules feeding a Cognitive Controller ---
+const MODULE_ORDER = ["perception", "social", "desire", "reflection"];
+
+function moduleContext(agent) {
+  const nearby = formatNearbyForServer(getNearbyAgentsDetailed(agent, agents));
+  const proj = civilization.activeProject
+    ? `${civilization.activeProject.name} (${projectProgressText()})` : "none";
+  const mem = MEMORY_ENABLED ? memoryForPrompt(agent).join(" | ") : agent.memory.join(" | ");
+  const inbox = (agent.inbox || []).map((m) => `${m.from}: ${m.text}`).join("; ") || "none";
+  return `Role ${agent.role} in ${getZone(agent.x, agent.y)}. Project ${proj}. `
+    + `Resources ${JSON.stringify(agent.resources)}. Nearby ${nearby}. `
+    + `Hunger ${Math.round(agent.hunger)} Health ${Math.round(agent.health)}. `
+    + `Inbox ${inbox}. Memory ${mem || "none"}.`;
+}
+
+// Fan out the active modules on independent cadences (staggered so not every
+// module fires every think), caching results on the agent. Returns the combined
+// bottleneck string the Cognitive Controller consumes.
+async function runModules(agent) {
+  agent.moduleOutputs = agent.moduleOutputs || {};
+  agent.moduleTick = (agent.moduleTick || 0) + 1;
+  const t = agent.moduleTick;
+  const active = agent.modules || { perception: true, social: true, desire: true, reflection: true };
+  const schedule = {
+    perception: active.perception,
+    social: active.social && (t % 2 === 0),
+    desire: active.desire,
+    reflection: active.reflection && (t % 3 === 0)
+  };
+  const ctx = moduleContext(agent);
+  const jobs = [];
+  for (const mod of MODULE_ORDER) {
+    if (!schedule[mod]) continue;
+    jobs.push(
+      fetch("/agent/module", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent: agent.name, module: mod, context: ctx, frame_tick: frameTick })
+      }).then((r) => r.json()).then((d) => {
+        if (d && d.text) agent.moduleOutputs[mod] = d.text;
+      }).catch(() => {})
+    );
+  }
+  await Promise.all(jobs);
+  return MODULE_ORDER
+    .filter((m) => agent.moduleOutputs[m])
+    .map((m) => `${m}: ${agent.moduleOutputs[m]}`)
+    .join(" | ") || "none";
+}
+
+let metaMaintIndex = 0;
+async function runMetaMaintenance() {
+  if (!META_SYSTEM || agents.length === 0) return;
+  const agent = agents[metaMaintIndex % agents.length];
+  metaMaintIndex++;
+  updateModuleActivation(agent);
+  try {
+    const resp = await fetch("/meta/update", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent: agent.name, report: metaReportFor(agent), frame_tick: frameTick
+      })
+    });
+    const data = await resp.json();
+    if (!data || !data.ok) return;
+    if (data.persona) agent.persona = data.persona;
+    if (data.autobiography && agent.memory && agent.memory.longTerm) {
+      agent.memory.longTerm.push(data.autobiography);
+      while (agent.memory.longTerm.length > LONG_MEM_CAP) agent.memory.longTerm.shift();
+      pushActivity(`${agent.name}'s story: ${data.autobiography}`);
+    }
+  } catch (e) { /* meta pass must never break the sim */ }
+}
+
 async function thinkAgent(agent) {
   agent.isThinking = true;
   const nearbyDetailed = getNearbyAgentsDetailed(agent, agents);
@@ -1856,6 +2691,21 @@ async function thinkAgent(agent) {
   if (specialtyResource && specialtyResource === firstUnmetProjectResource()) {
     nudges.push(`NOTE: Your role specializes in ${specialtyResource}, which the active project still needs. Prioritize collect_resource.`);
   }
+  if (EMERGENT_ROLES) {
+    const needRole = villageNeededRole();
+    if (needRole && needRole !== agent.role && isFlexibleRole(agent.role)) {
+      nudges.push(`NOTE: No one is gathering ${firstUnmetProjectResource()}, which the build needs. Consider switch_role to ${needRole} to fill the gap.`);
+    }
+  }
+  if (RULES_ENABLED) {
+    const unvoted = civilization.pendingRules.find((r) => !(agent.name in r.votes));
+    if (unvoted) {
+      nudges.push(`NOTE: Pending rule "${unvoted.name}" (id ${unvoted.id}) needs your vote. Use vote_rule with target ${unvoted.id} and vote yes or no.`);
+    } else if (civilization.rules.length === 0 && civilization.pendingRules.length === 0
+        && frameTick - civilization.lastRuleActivityFrame > BLUEPRINT_STALL_THRESHOLD) {
+      nudges.push("NOTE: The village has no shared rules yet. Consider propose_rule (a small resource_tax builds a shared stockpile).");
+    }
+  }
   if (agent.role === "elder" && civilization.activeProject
       && frameTick - civilization.lastProjectContributionFrame > STALL_THRESHOLD) {
     const stalledRes = firstUnmetProjectResource();
@@ -1870,6 +2720,17 @@ async function thinkAgent(agent) {
       && frameTick - civilization.lastBlueprintActivityFrame > BLUEPRINT_STALL_THRESHOLD) {
     nudges.push("NOTE: No new blueprint activity in a while. Consider propose_blueprint if you have an idea.");
   }
+  if (CRAFTING_ENABLED
+      && frameTick - civilization.lastCraftActivityFrame > CRAFT_STALL_THRESHOLD) {
+    const hasWorkshop = civilization.structures.some((s) => s.type === "workshop");
+    if (agent.role === "elder" && !hasWorkshop) {
+      nudges.push("NOTE: No workshop exists yet. Direct an agent to build a Workshop so the village can craft planks, bricks, and tools for advanced builds.");
+    } else if (hasWorkshop) {
+      nudges.push("NOTE: No crafting in a while. At the workshop, craft_item (planks/bricks/tools) — advanced builds like the Granary need crafted goods.");
+    } else {
+      nudges.push("NOTE: The village should build a Workshop, then craft goods for advanced builds like the Granary.");
+    }
+  }
   if (SURVIVAL_ENABLED) {
     if (agent.hunger < EAT_THRESHOLD && (agent.resources.food || 0) === 0) {
       nudges.push("NOTE: You are hungry and have no food. Gather food from the farm (or fish at the beach) before you starve.");
@@ -1879,8 +2740,24 @@ async function thinkAgent(agent) {
       const verb = agent.role === "healer" ? "Go heal_agent" : "Bring food or heal_agent";
       nudges.push(`NOTE: ${collapsed.name} has collapsed. ${verb} to revive them.`);
     }
+    // Sage-priority emergency: coherence nudge (enforcement is deterministic).
+    // Only the designated responders (healer + nearest) are told to abandon work.
+    const em = sageEmergency();
+    if (em && em.name !== agent.name && sageResponders(em).has(agent)) {
+      nudges.push(`EMERGENCY: Elder Sage's life is the top priority — abandon your task and heal_agent ${em.name}. Nothing matters more than the elder's survival.`);
+    }
   }
   const behaviorNudge = nudges.join(" ");
+
+  // Phase 3: PIANO module fan-out feeding the Cognitive Controller (the think
+  // call below). Multiplies LLM cost, so it is flag-gated off by default.
+  let moduleReports = "none";
+  if (PIANO_MODULES) {
+    if (META_SYSTEM) updateModuleActivation(agent);
+    try {
+      moduleReports = await runModules(agent);
+    } catch (e) { moduleReports = "none"; }
+  }
 
   const payload = {
     agent_name: agent.name,
@@ -1888,11 +2765,12 @@ async function thinkAgent(agent) {
     role: agent.role,
     role_skill: ROLE_SKILLS[agent.role] || "helps the village",
     personality: agent.personality,
-    memory: agent.memory,
+    memory: memoryForPrompt(agent),
     resources: agent.resources,
     hunger: agent.hunger,
     health: agent.health,
     relationships: agent.relationships,
+    beliefs: MEMES_ENABLED ? Array.from(agent.beliefs).map(beliefText) : [],
     nearby_agents: nearbyDetailed,
     world_zone: getZone(agent.x, agent.y),
     civilization_level: civilization.level,
@@ -1919,7 +2797,22 @@ async function thinkAgent(agent) {
     })),
     approved_custom_projects: customProjectIds(),
     rejected_blueprints: Array.from(civilization.rejectedBlueprintIds),
+    pending_rules: RULES_ENABLED ? civilization.pendingRules.map((r) => ({
+      id: r.id, name: r.name, kind: r.kind, value: r.value,
+      yes: Object.values(r.votes).filter((v) => v === "yes").length,
+      no: Object.values(r.votes).filter((v) => v === "no").length,
+      proposed_by: r.proposedBy
+    })) : [],
+    active_rules: RULES_ENABLED ? civilization.rules.map((r) => ({
+      id: r.id, name: r.name, kind: r.kind, value: r.value
+    })) : [],
     recent_conversations: recentConversationsText(),
+    inbox: drainInbox(agent),
+    self_prompt: META_SYSTEM ? (agent.persona || "") : "",
+    module_reports: moduleReports,
+    active_modules: (PIANO_MODULES || META_SYSTEM) && agent.modules
+      ? Object.keys(agent.modules).filter((k) => agent.modules[k])
+      : null,
     behavior_nudge: behaviorNudge,
     available_actions: AVAILABLE_ACTIONS
   };
@@ -1931,6 +2824,17 @@ async function thinkAgent(agent) {
       body: JSON.stringify(payload)
     });
     let decision = await resp.json();
+
+    // In-flight guard (#A): if a Sage-priority emergency began while this think
+    // was in flight, only the designated responders (healer + nearest) discard
+    // their decision and rush to revive; everyone else applies normally so the
+    // village keeps working. Nothing may take precedence over the elder's life
+    // for those responders.
+    const em = sageEmergency();
+    if (em && agent !== em && !agent.incapacitated && sageResponders(em).has(agent)) {
+      rushToHeal(agent, em);
+      return;
+    }
 
     if (decision.error === "LM Studio offline") {
       lmStatus = "offline";
@@ -1977,6 +2881,11 @@ const civRecipeRow = document.getElementById("civRecipeRow");
 const civRecipeCountEl = document.getElementById("civRecipeCount");
 const civRecipeListEl = document.getElementById("civRecipeList");
 const civCollectRateEl = document.getElementById("civCollectRate");
+const civRulesRow = document.getElementById("civRulesRow");
+const civRuleCountEl = document.getElementById("civRuleCount");
+const civRuleListEl = document.getElementById("civRuleList");
+const civBenchRow = document.getElementById("civBenchRow");
+const civBenchEl = document.getElementById("civBench");
 const civPendingRow = document.getElementById("civPendingRow");
 const civPendingEl = document.getElementById("civPending");
 const civProjectSprite = document.getElementById("civProjectSprite");
@@ -2029,6 +2938,27 @@ function renderSidebar() {
         return `<span class="res-chip civ-value">${escapeHtml(r.name || id)} <span class="civ-label">(${escapeHtml(ins)})</span></span>`;
       }).join("");
     }
+    if (RULES_ENABLED && (civilization.rules.length > 0 || civilization.pendingRules.length > 0)) {
+      civRulesRow.style.display = "block";
+      civRuleCountEl.textContent = civilization.rules.length;
+      const enacted = civilization.rules.map((r) =>
+        `<span class="res-chip civ-value">${escapeHtml(r.name)}</span>`
+      ).join("");
+      const pending = civilization.pendingRules.map((r) => {
+        const yes = Object.values(r.votes).filter((v) => v === "yes").length;
+        const no = Object.values(r.votes).filter((v) => v === "no").length;
+        return `<span class="res-chip"><span class="civ-label">vote ${escapeHtml(r.id)} (${yes}/${no})</span></span>`;
+      }).join("");
+      civRuleListEl.innerHTML = enacted + pending;
+    } else {
+      civRulesRow.style.display = "none";
+    }
+
+    if (BENCHMARKS_ENABLED) {
+      civBenchRow.style.display = "block";
+      civBenchEl.innerHTML = renderBenchmarks();
+    }
+
     if (civilization.pendingBlueprints.length > 0) {
       civPendingRow.style.display = "block";
       civPendingEl.innerHTML = civilization.pendingBlueprints.slice(0, 3).map((b) =>
@@ -2109,6 +3039,9 @@ const ACTION_LABELS = {
   reject_blueprint: "reviewing a blueprint",
   assign_task: "assigning tasks",
   change_role: "changing role",
+  switch_role: "retraining",
+  propose_rule: "proposing a rule",
+  vote_rule: "voting",
   move_to_agent: "approaching someone",
   heal_agent: "healing",
   craft_item: "crafting",
@@ -2135,6 +3068,31 @@ function villageResourceBreakdown() {
     if (n > 0) out[key] = n;
   }
   return out;
+}
+
+function renderBenchmarks() {
+  const b = lastBenchmarks;
+  if (!b || Object.keys(b).length === 0) {
+    return '<span class="civ-label">sampling…</span>';
+  }
+  const chips = [];
+  chips.push(`<span class="res-chip">spec. entropy <span class="civ-value">${round2(b.entropy)}</span></span>`);
+  if (MEMES_ENABLED) {
+    chips.push(`<span class="res-chip">meme adopt <span class="civ-value">${b.adoption}/${agents.length}</span></span>`);
+  }
+  if (b.adherence !== null && b.adherence !== undefined) {
+    chips.push(`<span class="res-chip">tax adherence <span class="civ-value">${Math.round(b.adherence * 100)}%</span></span>`);
+  }
+  if (RULES_ENABLED) {
+    chips.push(`<span class="res-chip">rules <span class="civ-value">${b.rules}</span></span>`);
+  }
+  if (MEMORY_ENABLED) {
+    chips.push(`<span class="res-chip">memory <span class="civ-value">${b.memory}</span></span>`);
+  }
+  if (PIANO_MODULES || META_SYSTEM) {
+    chips.push(`<span class="res-chip">modules <span class="civ-value">${b.moduleTotal}</span></span>`);
+  }
+  return chips.join("");
 }
 
 function renderResourceChips(breakdown) {
@@ -2173,14 +3131,45 @@ function renderProjectSprite() {
 
 function tick() {
   frameTick++;
+  // Delta-time: scale movement by elapsed wall-clock so speed is frame-rate
+  // independent. Clamp to ~6 frames so a stall (e.g. backgrounded tab) doesn't
+  // teleport agents across the map on the catch-up frame.
+  const nowMs = performance.now();
+  const moveScale = lastFrameMs ? Math.min((nowMs - lastFrameMs) / FRAME_MS, 6) : 1;
+  lastFrameMs = nowMs;
   ctx.clearRect(0, 0, WORLD_W, WORLD_H);
   drawWorld(ctx, frameTick);
 
   if (!paused && SURVIVAL_ENABLED && frameTick % SURVIVAL_TICK_FRAMES === 0) {
     for (const agent of agents) updateSurvival(agent);
   }
+
+  if (!paused && MEMORY_ENABLED && frameTick % MEMORY_TICK_FRAMES === 0) {
+    runMemoryMaintenance();
+  }
+
+  if (!paused && EMERGENT_ROLES && frameTick % ROLE_SWITCH_TICK_FRAMES === 0) {
+    maybeAutoSwitchRole();
+  }
+
+  if (!paused && RULES_ENABLED && frameTick % RULES_TICK_FRAMES === 0) {
+    maybeAdvanceRules();
+  }
+
+  if (!paused && MEMES_ENABLED && frameTick % MEME_TICK_FRAMES === 0) {
+    spreadBeliefsByProximity();
+  }
+
+  if (!paused && META_SYSTEM && frameTick % META_TICK_FRAMES === 0) {
+    runMetaMaintenance();
+  }
+
+  if (!paused && BENCHMARKS_ENABLED
+      && (frameTick % BENCHMARK_TICK_FRAMES === 0 || frameTick === FIRST_BENCHMARK_FRAME)) {
+    sampleBenchmarks();
+  }
   for (const agent of agents) {
-    if (!paused && !agent.incapacitated) moveAgent(agent);
+    if (!paused && !agent.incapacitated) moveAgent(agent, moveScale);
   }
   const drawList = [
     ...civilization.structures.map((structure) => ({
@@ -2195,6 +3184,8 @@ function tick() {
     else drawAgent(ctx, item.agent, frameTick);
   }
 
+  const emTarget = sageEmergency();  // computed once per tick (#A)
+  const responders = emTarget ? sageResponders(emTarget) : null;
   for (const agent of agents) {
     if (agent.messageTimer > 0) {
       agent.messageTimer--;
@@ -2202,10 +3193,24 @@ function tick() {
     }
 
     if (!paused && !agent.incapacitated) {
+      // Sage-priority override: while the elder (or the healer needed to save
+      // him) is critical, the designated responders (healer + nearest) drop
+      // everything to revive them — no goal, no LLM, no task takes precedence.
+      // Everyone else falls through and keeps working normally.
+      if (responders && responders.has(agent)) {
+        agent.thinkTimer--;
+        if (agent.thinkTimer <= 0) {
+          rushToHeal(agent, emTarget);
+          agent.thinkTimer = GOAL_STEP_FRAMES;
+        }
+        continue;
+      }
       agent.thinkTimer--;
       if (agent.thinkTimer <= 0 && !agent.isThinking && !agent.pendingThink) {
-        if (USE_GOALS && agent.goal) {
+        if (USE_GOALS && agent.goal && !hasUnread(agent)) {
           // Run the active goal deterministically instead of calling the LLM.
+          // Subsumption (#2): an unread inbound message pre-empts the goal and
+          // forces a fresh think so the agent can react to it.
           const continuing = stepGoal(agent);
           agent.thinkTimer = continuing ? GOAL_STEP_FRAMES : 1;
         } else {
@@ -2235,6 +3240,7 @@ document.addEventListener("visibilitychange", () => {
     document.hidden ? "block" : "none";
 });
 
+seedBeliefs();
 sidebarDirty = true;
 requestAnimationFrame(tick);
 </script>

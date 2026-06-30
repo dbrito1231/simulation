@@ -41,7 +41,7 @@ Decisions run through a **bounded-concurrency queue**, not one-at-a-time:
 
 ```javascript
 const LLM_MIN_GAP_MS = 250;     // min spacing between dispatches
-const MAX_CONCURRENT_LLM = 3;   // up to 3 calls in flight
+const MAX_CONCURRENT_LLM = 2;   // up to 3 calls in flight
 ```
 
 `drainThinkQueue()` dispatches while `llmInFlight < MAX_CONCURRENT_LLM`, respecting
