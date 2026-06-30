@@ -12,11 +12,22 @@ normalize_decision, role_fallback_action, MemoryStore, lm_complete) is reused
 from server.py and injected at construction time to avoid a circular import.
 """
 
+import json
 import math
+import os
 import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+
+# Full-state persistence (Contract 3). Resolved relative to this module so it
+# lands next to server.py/sim_engine.py regardless of the launch cwd.
+STATE_VERSION = 1
+STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+AUTOSAVE_SECONDS = 10
+# Sets on the civilization that serialize to JSON arrays and back.
+_CIV_SET_KEYS = ("rejectedBlueprintIds", "rejectedRecipeIds")
 
 
 # --- Feature flags (ported from index.html consts; now server config) ---
@@ -1847,9 +1858,118 @@ class SimEngine:
     def start(self):
         self._thread = threading.Thread(target=self._run_loop, name="SimEngine", daemon=True)
         self._thread.start()
+        # Periodic full-state autosave (Contract 3). Separate daemon thread so a
+        # slow disk write never stalls the fixed-timestep tick loop.
+        self._saver = threading.Thread(target=self._save_loop, name="SimSaver", daemon=True)
+        self._saver.start()
 
     def stop(self):
         self._stop.set()
+
+    # --- full-state persistence (Contract 3) ---
+    def _save_loop(self):
+        while not self._stop.is_set():
+            # Wait first so we don't immediately overwrite a freshly restored
+            # state.json with a near-identical one before any work happens.
+            if self._stop.wait(AUTOSAVE_SECONDS):
+                break
+            self.save_state()
+
+    def _serialize_state(self):
+        """Build the Contract-3 payload. Caller must hold self.lock."""
+        c = self.civilization
+        civ = {k: v for k, v in c.items() if k not in _CIV_SET_KEYS}
+        # Deep-ish copy of nested mutables so the JSON dump can't race a mutation
+        # after the lock is released; sets -> sorted arrays.
+        civ = json.loads(json.dumps(civ, default=str))
+        for key in _CIV_SET_KEYS:
+            civ[key] = sorted(c.get(key, set()))
+        agents = []
+        for a in self.agents:
+            ad = {k: v for k, v in a.items() if k != "beliefs"}
+            ad = json.loads(json.dumps(ad, default=str))
+            ad["beliefs"] = sorted(a.get("beliefs", set()))
+            agents.append(ad)
+        memory = []
+        ms = self.d.get("memory_store")
+        if ms is not None:
+            try:
+                memory = ms.export_entries()
+            except Exception:
+                memory = []
+        return {
+            "version": STATE_VERSION,
+            "frameTick": self.frameTick,
+            "savedAt": datetime.now(timezone.utc).isoformat(),
+            "roster_size": self.roster_size,
+            "civilization": civ,
+            "agents": agents,
+            "memory": memory,
+        }
+
+    def save_state(self):
+        """Atomically write the complete world to STATE_PATH. Never raises."""
+        try:
+            with self.lock:
+                payload = self._serialize_state()
+            tmp = STATE_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+            os.replace(tmp, STATE_PATH)
+            return True
+        except Exception:
+            # Persistence must never crash the sim.
+            return False
+
+    def clear_state(self):
+        """Remove state.json so the next start cold-starts. Never raises."""
+        try:
+            if os.path.exists(STATE_PATH):
+                os.remove(STATE_PATH)
+        except Exception:
+            pass
+
+    def restore_state(self):
+        """If a valid state.json exists, rehydrate the world from it instead of
+        the cold-start roster. Returns True on a successful restore."""
+        try:
+            if not os.path.exists(STATE_PATH):
+                return False
+            with open(STATE_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            return False
+        if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+            return False
+        try:
+            with self.lock:
+                civ = dict(data.get("civilization") or {})
+                for key in _CIV_SET_KEYS:
+                    civ[key] = set(civ.get(key) or [])
+                agents = []
+                for ad in (data.get("agents") or []):
+                    a = dict(ad)
+                    a["beliefs"] = set(a.get("beliefs") or [])
+                    agents.append(a)
+                if not agents or not civ:
+                    return False
+                self.civilization = civ
+                self.agents = agents
+                self.agent_names = set(a["name"] for a in agents)
+                self.frameTick = int(data.get("frameTick") or 0)
+                rs = data.get("roster_size")
+                if rs:
+                    self.roster_size = int(rs)
+                # Rebuild the MemoryStore by re-embedding each entry's text.
+                ms = self.d.get("memory_store")
+                if ms is not None:
+                    try:
+                        ms.import_entries(data.get("memory") or [])
+                    except Exception:
+                        pass
+            return True
+        except Exception:
+            return False
 
     # --- control + snapshot (Contract 2) ---
     def pause(self):
@@ -1865,6 +1985,10 @@ class SimEngine:
             self._reset_world(roster_size if roster_size else self.roster_size)
             if roster_size:
                 self.roster_size = roster_size
+        # Replace the on-disk save so a reset truly starts fresh: clear the old
+        # snapshot, then immediately persist the fresh cold-started world.
+        self.clear_state()
+        self.save_state()
 
     def snapshot(self):
         """Consistent /state snapshot per Contract 2 (copied under lock)."""
