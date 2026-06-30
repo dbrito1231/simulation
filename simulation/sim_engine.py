@@ -1985,6 +1985,12 @@ class SimEngine:
             self._reset_world(roster_size if roster_size else self.roster_size)
             if roster_size:
                 self.roster_size = roster_size
+            ms = self.d.get("memory_store")
+            if ms is not None:
+                try:
+                    ms.clear()
+                except Exception:
+                    pass
         # Replace the on-disk save so a reset truly starts fresh: clear the old
         # snapshot, then immediately persist the fresh cold-started world.
         self.clear_state()

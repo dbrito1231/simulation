@@ -310,6 +310,15 @@ class MemoryStore:
             self._next_id = max_id + 1
             self._trim_locked()
 
+    def clear(self):
+        """Wipe all entries (used by engine.reset() so a reset starts the
+        world with no carried-over agent memories)."""
+        with self._lock:
+            self.entries = []
+            self._next_id = 1
+            self._since_persist = 0
+        self._persist()
+
     def tier_counts(self):
         counts = {t: 0 for t in self.TIERS}
         with self._lock:
