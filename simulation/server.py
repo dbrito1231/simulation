@@ -5,11 +5,13 @@
 # 4. Open http://127.0.0.1:5001 in Chrome or Firefox
 #    (macOS AirPlay uses port 5000 and returns 403 — do not use 5000)
 
+import atexit
 import hashlib
 import json
 import math
 import os
 import re
+import signal
 import threading
 from datetime import datetime, timezone
 
@@ -269,6 +271,44 @@ class MemoryStore:
     def size(self):
         with self._lock:
             return len(self.entries)
+
+    def export_entries(self):
+        """Entries WITHOUT the recomputable `vec` field, for full-state
+        persistence (Contract 3)."""
+        with self._lock:
+            return [{k: v for k, v in e.items() if k != "vec"} for e in self.entries]
+
+    def import_entries(self, rows):
+        """Rebuild the store from persisted rows, re-embedding each text.
+        Replaces all current entries (used on resume from state.json)."""
+        rebuilt = []
+        max_id = 0
+        for r in rows or []:
+            try:
+                text = (r.get("text") or "").strip()
+                if not text:
+                    continue
+                eid = int(r.get("id") or 0)
+                max_id = max(max_id, eid)
+                sal = float(r.get("salience", 0.5))
+                kind = r.get("kind") or "event"
+                rebuilt.append({
+                    "id": eid,
+                    "agent": r.get("agent") or "?",
+                    "text": text[:280],
+                    "vec": embed_text(text),
+                    "salience": max(0.0, min(1.0, sal)),
+                    "kind": kind,
+                    "tier": r.get("tier") or self._tier_for(sal, kind),
+                    "frame_tick": r.get("frame_tick"),
+                    "ts": r.get("ts") or datetime.now(timezone.utc).isoformat(),
+                })
+            except (TypeError, ValueError):
+                continue
+        with self._lock:
+            self.entries = sorted(rebuilt, key=lambda e: e["id"])
+            self._next_id = max_id + 1
+            self._trim_locked()
 
     def tier_counts(self):
         counts = {t: 0 for t in self.TIERS}
@@ -1718,6 +1758,17 @@ except ValueError:
 
 engine = _sim_engine.SimEngine(_ENGINE_DEPS, roster_size=_roster_size)
 
+# Full-state resume (Contract 3): if a valid state.json exists, rehydrate the
+# world (frameTick, civilization, agents, re-embedded memory) instead of using
+# the cold-start roster the constructor just built. Otherwise keep cold start.
+if engine.restore_state():
+    print(f"[server] resumed from state.json @ frameTick={engine.frameTick} "
+          f"(level {engine.civilization['level']}, "
+          f"{len(engine.civilization['structures'])} structures, "
+          f"memory {memory_store.size()})")
+else:
+    print("[server] cold start (no valid state.json)")
+
 
 @app.route("/state")
 def state():
@@ -1764,4 +1815,29 @@ if __name__ == "__main__":
     engine.start()
     print(f"[server] SimEngine started ({engine.roster_size} agents, "
           f"{_sim_engine.TICKS_PER_SEC} ticks/s)")
+
+    # Graceful shutdown: flush the full state to disk on exit so a restart
+    # resumes exactly. atexit covers normal exit; the signal handlers cover
+    # Ctrl-C / `kill` (which otherwise bypass atexit during app.run()).
+    _saved_once = threading.Event()
+
+    def _flush_on_exit():
+        if _saved_once.is_set():
+            return
+        _saved_once.set()
+        engine.stop()
+        engine.save_state()
+
+    atexit.register(_flush_on_exit)
+
+    def _signal_shutdown(signum, frame):
+        _flush_on_exit()
+        os._exit(0)
+
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(_sig, _signal_shutdown)
+        except (ValueError, OSError):
+            pass  # not in main thread / unsupported platform
+
     app.run(host=HOST, port=PORT, debug=False, threaded=True)
