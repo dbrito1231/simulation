@@ -916,6 +916,20 @@ def first_shortfall_resource(agent_data):
     return shortfalls[0][0] if shortfalls else None
 
 
+def held_shortfall_resource(agent_data):
+    """A project-needed resource this agent is ALREADY holding (e.g. via
+    trade), regardless of role/specialty. Catches stalls where a trader or
+    off-spec agent sits on the exact resource a build is waiting on."""
+    shortfalls = parse_project_shortfalls(agent_data.get("project_progress"))
+    if not shortfalls:
+        return None
+    held = agent_data.get("resources") or {}
+    for res, _ in shortfalls:
+        if held.get(res, 0) > 0:
+            return res
+    return None
+
+
 def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
                        custom_resource_count, rejected_ids=None):
     """Validate a proposed blueprint. Returns (ok: bool, reason: str|None)."""
@@ -1014,6 +1028,15 @@ def role_fallback_action(role, agent_data):
         return {"action": "start_project", "target": role_default_project(role), "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Starting a role-appropriate build project."}
+
+    held = held_shortfall_resource(agent_data)
+    if held:
+        # Catches any role (esp. trader/guard/scout, whose fallbacks below
+        # never contribute) sitting on a resource the build is waiting on
+        # instead of wandering past it forever.
+        return {"action": "contribute_resources", "target": held, "message": None,
+                "new_role": None, "relationship_update": None,
+                "reasoning": "Contributing a held resource the project needs."}
 
     if role in ("farmer", "fisher", "gatherer"):
         zone = agent_data.get("world_zone", "")

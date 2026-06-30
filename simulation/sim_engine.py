@@ -1153,6 +1153,41 @@ class SimEngine:
             "reasoning": f"The village has no one gathering {unmet}; "
                          f"retraining to {needed_role} to fill the gap."})
 
+    # --- stalled-contribution backstop ---
+    def _maybe_force_contribution(self):
+        """Deterministic backstop for the build-progression stall where an
+        agent (often off-spec, e.g. a trader holding traded stone) sits on a
+        resource the active project needs but the LLM never volunteers
+        contribute_resources for them. Mirrors _maybe_auto_switch_role /
+        _maybe_advance_rules: fires only after a real stall, so it never
+        preempts normal LLM-driven play."""
+        c = self.civilization
+        p = c["activeProject"]
+        if not p:
+            return
+        if self.frameTick - c["lastProjectContributionFrame"] < STALL_THRESHOLD:
+            return
+        # Check every still-needed resource, not just the first: e.g. a build
+        # stuck on "stone 0/1, food 0/1" with no stone holders but several
+        # food holders must still be able to make progress on food.
+        unmet_resources = [res for res, need in p["needs"].items()
+                            if p["contributed"].get(res, 0) < need]
+        holder = None
+        unmet = None
+        for res in unmet_resources:
+            cands = [a for a in self.agents
+                     if not a["incapacitated"] and a["resources"].get(res, 0) > 0]
+            if cands:
+                unmet = res
+                holder = max(cands, key=lambda a: a["resources"].get(res, 0))
+                break
+        if not holder:
+            return
+        holder["goal"] = None
+        self.apply_decision(holder, {
+            "action": "contribute_resources", "target": unmet,
+            "reasoning": f"Build has stalled; contributing my {unmet} to the project now."})
+
     # --- rules backstop ---
     def _maybe_advance_rules(self):
         if not RULES_ENABLED:
@@ -1809,6 +1844,8 @@ class SimEngine:
                 self._maybe_auto_switch_role()
             if RULES_ENABLED and ft % RULES_TICK_FRAMES == 0:
                 self._maybe_advance_rules()
+            if ft % RULES_TICK_FRAMES == 0:
+                self._maybe_force_contribution()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
             if BENCHMARKS_ENABLED and (ft % BENCHMARK_TICK_FRAMES == 0 or ft == FIRST_BENCHMARK_FRAME):
