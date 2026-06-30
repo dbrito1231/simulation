@@ -1496,11 +1496,14 @@ def extract_json_decision(text):
     return decision
 
 
-@app.route("/agent/think", methods=["POST"])
-def agent_think():
-    try:
-        data = request.get_json(force=True) or {}
+def run_agent_decision(data):
+    """Build the prompt, call LM Studio, and return a validated decision dict.
 
+    Shared by the HTTP /agent/think endpoint and the server-authoritative
+    SimEngine's think worker. Returns a plain dict (already normalized) — on any
+    failure it returns either an {"error": ...} dict (engine maps these to its
+    offline/compute/rest paths) or a role fallback decision."""
+    try:
         nearby_formatted = format_nearby_agents(data.get("nearby_agents"))
         behavior_nudge = data.get("behavior_nudge") or ""
 
@@ -1590,7 +1593,7 @@ def agent_think():
             fallback = role_fallback_action(agent_data.get("role"), agent_data)
             log_lm(latency_ms, response=response, http_status=http_status,
                    decision=fallback, error="bad_response")
-            return jsonify(fallback)
+            return fallback
 
         global _structured_output_enabled
 
@@ -1600,7 +1603,7 @@ def agent_think():
         except requests.exceptions.RequestException:
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
             log_lm(latency_ms, error="LM Studio offline")
-            return jsonify({"error": "LM Studio offline", "action": "rest"})
+            return {"error": "LM Studio offline", "action": "rest"}
 
         latency_ms = int((datetime.now() - start).total_seconds() * 1000)
         http_status = resp.status_code
@@ -1625,7 +1628,7 @@ def agent_think():
             except requests.exceptions.RequestException:
                 latency_ms = int((datetime.now() - start).total_seconds() * 1000)
                 log_lm(latency_ms, error="LM Studio offline")
-                return jsonify({"error": "LM Studio offline", "action": "rest"})
+                return {"error": "LM Studio offline", "action": "rest"}
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -1640,7 +1643,7 @@ def agent_think():
             err = str(lm_body.get("error"))
             if "compute error" in err.lower():
                 log_lm(latency_ms, response=lm_body, http_status=http_status, error="compute_error")
-                return jsonify({"error": "compute_error", "action": "rest"})
+                return {"error": "compute_error", "action": "rest"}
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
 
         try:
@@ -1658,10 +1661,92 @@ def agent_think():
         decision = normalize_decision(decision, agent_data)
 
         log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=None)
-        return jsonify(decision)
+        return decision
 
     except Exception:
-        return jsonify({"error": "server_error", "action": "rest"})
+        return {"error": "server_error", "action": "rest"}
+
+
+@app.route("/agent/think", methods=["POST"])
+def agent_think():
+    """Legacy HTTP think endpoint. Now unused by the server-authoritative
+    engine (which calls run_agent_decision directly), but kept functional."""
+    data = request.get_json(force=True) or {}
+    return jsonify(run_agent_decision(data))
+
+
+# --- Server-authoritative SimEngine wiring (Phases 2-6) ---
+# AVAILABLE_ACTIONS: the full action superset the engine advertises to the model
+# (mirrors AVAILABLE_ACTIONS in index.html). normalize_decision still filters.
+# Reuses the module-level lm_complete() and the MemoryStore `memory_store`
+# instance already defined above.
+AVAILABLE_ACTIONS = list(DECISION_ACTIONS)
+
+# Import the engine module whether server.py is run as a script (cwd-relative)
+# or imported as simulation.server (package-relative).
+import sys as _sys  # noqa: E402
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sim_engine as _sim_engine  # noqa: E402
+
+
+def _llm_decide(payload):
+    """Engine -> LM bridge: run the existing decision pipeline + log it."""
+    return run_agent_decision(payload)
+
+
+_ENGINE_DEPS = {
+    "ROLES": ROLES,
+    "ROLE_PROJECT": ROLE_PROJECT,
+    "ROLE_SKILLS": {role: d.get("skill", "helps the village") for role, d in ROLES.items()},
+    "ROLE_PRIMARY_RESOURCE": ROLE_PRIMARY_RESOURCE,
+    "RESOURCE_GATHER_ROLES": RESOURCE_GATHER_ROLES,
+    "AVAILABLE_ACTIONS": AVAILABLE_ACTIONS,
+    "SLUG_RE": SLUG_RE,
+    "llm_decide": _llm_decide,
+    "lm_complete": lm_complete,
+    "memory_store": memory_store,
+    "log_activity": session_logger.log_activity,
+    "log_conversation": session_logger.log_conversation,
+    "log_benchmark": session_logger.log_benchmark,
+}
+
+_roster_env = os.environ.get("SIM_AGENTS")
+try:
+    _roster_size = int(_roster_env) if _roster_env else 8
+except ValueError:
+    _roster_size = 8
+
+engine = _sim_engine.SimEngine(_ENGINE_DEPS, roster_size=_roster_size)
+
+
+@app.route("/state")
+def state():
+    """Consistent world snapshot for the thin viewer (Contract 2)."""
+    return jsonify(engine.snapshot())
+
+
+@app.route("/control/pause", methods=["POST"])
+def control_pause():
+    engine.pause()
+    return jsonify({"ok": True, "paused": True})
+
+
+@app.route("/control/resume", methods=["POST"])
+def control_resume():
+    engine.resume()
+    return jsonify({"ok": True, "paused": False})
+
+
+@app.route("/control/reset", methods=["POST"])
+def control_reset():
+    body = request.get_json(force=True, silent=True) or {}
+    agents = body.get("agents")
+    try:
+        agents = int(agents) if agents else None
+    except (TypeError, ValueError):
+        agents = None
+    engine.reset(roster_size=agents)
+    return jsonify({"ok": True, "agents": engine.roster_size})
 
 
 if __name__ == "__main__":
@@ -1674,4 +1759,9 @@ if __name__ == "__main__":
     # local network. Intended for a trusted home LAN, not a hostile network.
     HOST = os.environ.get("SIM_HOST", "0.0.0.0")
     PORT = int(os.environ.get("SIM_PORT", "5001"))
+    # Start the server-authoritative engine thread BEFORE the HTTP server so the
+    # world ticks headless regardless of any connected viewer.
+    engine.start()
+    print(f"[server] SimEngine started ({engine.roster_size} agents, "
+          f"{_sim_engine.TICKS_PER_SEC} ticks/s)")
     app.run(host=HOST, port=PORT, debug=False, threaded=True)
