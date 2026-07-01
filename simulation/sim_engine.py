@@ -44,26 +44,32 @@ MEMES_ENABLED = True
 BENCHMARKS_ENABLED = True
 
 # --- World geometry ---
+# WORLD_H was 1000; the village/farm build-out grids (see _build_region_for)
+# have no cap and no wraparound, so they eventually ran past their zone's
+# colored ground (visual overlap) and, further, past WORLD_H itself (silently
+# invisible structures below the canvas). Raised to 2700 and the village/market/
+# cave block shifted down 400px to give farm room too; index.html/sprites.js
+# WORLD_H, ZONE fills, and zone-prop coordinates below MUST be kept in sync.
 WORLD_W = 1600
-WORLD_H = 1000
+WORLD_H = 2700
 
 ZONE_CENTERS = {
     "farm": {"x": 700, "y": 260},
     "forest": {"x": 1280, "y": 280},
-    "village": {"x": 760, "y": 730},
-    "market": {"x": 1040, "y": 670},
+    "village": {"x": 760, "y": 1130},
+    "market": {"x": 1040, "y": 1070},
     "beach": {"x": 310, "y": 500},
-    "cave": {"x": 1380, "y": 855},
+    "cave": {"x": 1380, "y": 1255},
     "ocean": {"x": 100, "y": 500},
 }
 
 ZONE_BOUNDS = {
-    "farm": {"x1": 500, "y1": 110, "x2": 920, "y2": 410},
+    "farm": {"x1": 500, "y1": 110, "x2": 920, "y2": 810},
     "forest": {"x1": 1030, "y1": 110, "x2": 1550, "y2": 450},
-    "village": {"x1": 540, "y1": 560, "x2": 900, "y2": 940},
-    "market": {"x1": 970, "y1": 620, "x2": 1110, "y2": 720},
+    "village": {"x1": 540, "y1": 960, "x2": 900, "y2": 2540},
+    "market": {"x1": 970, "y1": 1020, "x2": 1110, "y2": 1120},
     "beach": {"x1": 230, "y1": 120, "x2": 400, "y2": 880},
-    "cave": {"x1": 1210, "y1": 750, "x2": 1540, "y2": 960},
+    "cave": {"x1": 1210, "y1": 1150, "x2": 1540, "y2": 1360},
     "ocean": {"x1": 30, "y1": 120, "x2": 180, "y2": 880},
 }
 ZONE_NAMES = list(ZONE_CENTERS.keys())
@@ -189,20 +195,24 @@ def _dist(ax, ay, bx, by):
 
 
 def get_zone(x, y):
-    # market is checked first because it sits inside the village rectangle.
-    if 950 <= x <= 1130 and 600 <= y <= 740:
+    # NOTE: these x-ranges are intentionally wider than ZONE_BOUNDS in places
+    # (e.g. village's x1=500 vs ZONE_BOUNDS' 540) -- market is checked first
+    # because it sits inside this function's own village rectangle. Only the
+    # y-values were shifted/extended to match the world-geometry expansion;
+    # x-ranges are unchanged from before that expansion.
+    if 950 <= x <= 1130 and 1020 <= y <= 1140:
         return "market"
     if 0 <= x <= 200:
         return "ocean"
     if 200 <= x <= 420:
         return "beach"
-    if 480 <= x <= 940 and 90 <= y <= 430:
+    if 480 <= x <= 940 and 90 <= y <= 830:
         return "farm"
     if 1010 <= x <= 1570 and 90 <= y <= 470:
         return "forest"
-    if 500 <= x <= 1180 and 540 <= y <= 960:
+    if 500 <= x <= 1180 and 940 <= y <= 2560:
         return "village"
-    if 1190 <= x <= 1570 and 730 <= y <= 980:
+    if 1190 <= x <= 1570 and 1130 <= y <= 1380:
         return "cave"
     return "path"
 
@@ -623,7 +633,7 @@ class SimEngine:
     def _build_region_for(self, type_):
         if type_ == "farm_plot":
             return {"x0": 520, "y0": 250, "cols": 4, "dx": 105, "dy": 85}
-        return {"x0": 560, "y0": 580, "cols": 4, "dx": 100, "dy": 95}
+        return {"x0": 560, "y0": 980, "cols": 4, "dx": 100, "dy": 95}
 
     def _find_structure_spot(self, type_):
         r = self._build_region_for(type_)

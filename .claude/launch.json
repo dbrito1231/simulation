@@ -6,6 +6,12 @@
       "runtimeExecutable": "uv",
       "runtimeArgs": ["run", "python", "simulation/server.py"],
       "port": 5001
+    },
+    {
+      "name": "simulation-server-verify",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set SIM_PORT=5062 && set SIM_HOST=127.0.0.1 && uv run python simulation/server.py"],
+      "port": 5062
     }
   ]
 }

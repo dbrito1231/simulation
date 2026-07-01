@@ -25,30 +25,35 @@
     position: relative;
     flex: 1 1 auto;
     min-width: 0;
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
+    /* The world (1600x2700) is taller than most viewports; scroll instead of
+       squashing it down to fit, so the expanded village/farm build area is
+       actually usable rather than shrunk to illegibility. */
+    overflow: auto;
   }
   #world {
     display: block;
     background: #000;
-    height: calc(100vh - 16px);
-    max-height: calc(100vh - 16px);
-    width: auto;
-    max-width: 100%;
+    /* Native logical size (matches WORLD_W/WORLD_H) -- no longer scaled to
+       fit the viewport. setupCanvas() keeps this in sync on resize. */
     image-rendering: pixelated;
     image-rendering: crisp-edges;
   }
-  #pauseBtn {
-    position: absolute; top: 10px; left: 10px;
+  #pauseBtn, #resetBtn {
+    /* Fixed (not absolute) so the controls stay put over the viewport while
+       the now-scrollable canvasWrap is scrolled around underneath them. */
+    position: fixed; top: 18px;
     padding: 6px 14px; font: 13px sans-serif;
     background: #333; color: #fff; border: 1px solid #666;
     border-radius: 4px; cursor: pointer; z-index: 10;
   }
-  #pauseBtn:hover { background: #444; }
+  #pauseBtn { left: 18px; }
+  #resetBtn { left: 98px; }
+  #pauseBtn:hover, #resetBtn:hover { background: #444; }
   #tab-warning {
     display: none;
-    position: absolute;
+    /* fixed (not absolute): canvasWrap now scrolls a 2700px-tall world, so
+       centering relative to its scrollable content box could land offscreen. */
+    position: fixed;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
@@ -260,6 +265,7 @@
   <div id="canvasWrap">
     <canvas id="world" width="1600" height="1000"></canvas>
     <button id="pauseBtn">Pause</button>
+    <button id="resetBtn">Reset</button>
     <div id="tab-warning">Tab hidden — simulation paused. Keep this tab visible.</div>
   </div>
   <aside id="sidebar">
@@ -331,8 +337,11 @@
 const canvas = document.getElementById("world");
 const ctx = canvas.getContext("2d");
 
+// Must match sim_engine.py's WORLD_W/WORLD_H exactly (server is authoritative;
+// these are only used for local rendering/cache sizing before the first
+// /state reply, and the mock config below).
 const WORLD_W = 1600;
-const WORLD_H = 1000;
+const WORLD_H = 2700;
 
 // Static-terrain render cache (perf): the world's tiled terrain never changes,
 // so it is rendered once into an offscreen canvas and blitted each frame instead
@@ -344,7 +353,10 @@ function setupCanvas() {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = Math.floor(WORLD_W * dpr);
   canvas.height = Math.floor(WORLD_H * dpr);
-  canvas.style.aspectRatio = `${WORLD_W} / ${WORLD_H}`;
+  // Display at native logical size (was scaled to fit the viewport height);
+  // canvasWrap now scrolls instead, so the full 1600x2700 world is usable.
+  canvas.style.width = `${WORLD_W}px`;
+  canvas.style.height = `${WORLD_H}px`;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.imageSmoothingEnabled = false;
   // The cache is rendered in logical (WORLD_W×WORLD_H) pixels and blitted under
@@ -458,7 +470,7 @@ const MOCK_STATE = {
     { kind: "speech", from: "Marco", to: "everyone", message: "Gathering food." }
   ],
   config: {
-    WORLD_W: 1600, WORLD_H: 1000,
+    WORLD_W: 1600, WORLD_H: 2700,
     flags: {
       SURVIVAL_ENABLED: true, CRAFTING_ENABLED: true, MEMES_ENABLED: true,
       RULES_ENABLED: true, MEMORY_ENABLED: true, BENCHMARKS_ENABLED: true,
@@ -508,12 +520,20 @@ function buildTerrainCache() {
   }
 }
 
+// The dock (drawn at world 150,470, 144x36) straddles the beach/ocean line, so
+// part of it falls inside the 0-200 ocean strip the foam overlay repaints every
+// frame. Re-blit those exact pixels from the static cache afterward so the
+// jetty (incl. its pilings dipping into the water) isn't erased by the animation.
+const DOCK_RECT = { x: 150, y: 470, w: 144, h: 36 };
+
 function drawWorld(ctx, frameTick) {
   if (!terrainCanvas) buildTerrainCache();
   ctx.drawImage(terrainCanvas, 0, 0, WORLD_W, WORLD_H);
   // Animated ocean foam overlay (the only moving terrain): blit the current phase.
   const foamOffset = Math.floor(frameTick / 8) % 16;
   ctx.drawImage(oceanFrames[foamOffset], 0, 0, 200, WORLD_H);
+  ctx.drawImage(terrainCanvas, DOCK_RECT.x, DOCK_RECT.y, DOCK_RECT.w, DOCK_RECT.h,
+                DOCK_RECT.x, DOCK_RECT.y, DOCK_RECT.w, DOCK_RECT.h);
 }
 
 function drawResourceDots(ctx, agent, cx, cy) {
@@ -1003,13 +1023,17 @@ pauseBtn.addEventListener("click", async () => {
   pollState();
 });
 
-// Reset: double-click the pause button is too obscure; expose via keyboard (R).
-document.addEventListener("keydown", (e) => {
-  if (e.key === "r" || e.key === "R") {
-    if (window.confirm("Reset the simulation? This restarts the village.")) {
-      postControl("/control/reset").then(pollState);
-    }
+const resetBtn = document.getElementById("resetBtn");
+function doReset() {
+  if (window.confirm("Reset the simulation? This restarts the village.")) {
+    postControl("/control/reset").then(pollState);
   }
+}
+resetBtn.addEventListener("click", doReset);
+
+// Keyboard shortcut (R) kept for convenience alongside the visible button.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "r" || e.key === "R") doReset();
 });
 
 document.addEventListener("visibilitychange", () => {

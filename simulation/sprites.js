@@ -899,16 +899,20 @@ function drawZoneLabel(ctx, text, x, y) {
 function drawTiledWorld(ctx, worldW, worldH, frameTick, structures) {
   const foamOffset = Math.floor(frameTick / 8) % 16;
 
-  // Zone fills for the 1600x1000 world. These rectangles MUST match getZone()
-  // and ZONE_BOUNDS in index.html so agents stand on the tiles they gather from.
+  // Zone fills for the 1600x2700 world. These rectangles MUST match getZone()
+  // and ZONE_BOUNDS in sim_engine.py so agents stand on the tiles they gather
+  // from. Farm's band was extended (was 340 tall) and village/market/cave were
+  // shifted down 400px + village given a much taller band, so the build-out
+  // grids (sim_engine.py _build_region_for) have real room to grow into
+  // matching ground instead of running off the map or into each other.
   fillRectWithTiles(ctx, 0, 0, worldW, worldH, TILE_GRASS, pathBlendForZone);
   fillRectWithTile(ctx, 0, 0, 200, worldH, oceanTile(foamOffset));
   fillRectWithTiles(ctx, 200, 0, 220, worldH, TILE_BEACH, pathBlendForZone);
-  fillRectWithTiles(ctx, 480, 90, 460, 340, TILE_FARM, pathBlendForZone);
+  fillRectWithTiles(ctx, 480, 90, 460, 740, TILE_FARM, pathBlendForZone);
   fillRectWithTile(ctx, 1010, 90, 560, 380, TILE_FOREST_FLOOR);
-  fillRectWithTiles(ctx, 500, 540, 680, 420, TILE_VILLAGE, pathBlendForZone);
-  fillRectWithTile(ctx, 950, 600, 180, 140, TILE_MARKET);
-  fillRectWithTile(ctx, 1190, 730, 380, 250, TILE_CAVE);
+  fillRectWithTiles(ctx, 500, 940, 680, 1720, TILE_VILLAGE, pathBlendForZone);
+  fillRectWithTile(ctx, 950, 1000, 180, 140, TILE_MARKET);
+  fillRectWithTile(ctx, 1190, 1130, 380, 250, TILE_CAVE);
 
   // Farm crops (upper farm, leaving the lower band for built farm plots)
   for (let fx = 500; fx < 920; fx += 34) {
@@ -934,29 +938,29 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures) {
   drawDock(ctx, 150, 470);
 
   // Village well (in the gap between the build grid and the market square)
-  drawWell(ctx, 905, 600);
+  drawWell(ctx, 905, 1000);
 
   // Cave rocks
-  drawRocks(ctx, 1260, 800);
-  drawRocks(ctx, 1430, 860);
-  drawRocks(ctx, 1340, 930);
+  drawRocks(ctx, 1260, 1200);
+  drawRocks(ctx, 1430, 1260);
+  drawRocks(ctx, 1340, 1330);
 
   // Village houses (static scenery), placed right of the build grid (x<=860).
-  drawHouse(ctx, 985, 800);
-  drawHouse(ctx, 1085, 800);
+  drawHouse(ctx, 985, 1200);
+  drawHouse(ctx, 1085, 1200);
 
   // Market stall
-  drawMarketStall(ctx, 975, 615);
-  drawZoneLabel(ctx, "MARKET", 1040, 590);
+  drawMarketStall(ctx, 975, 1015);
+  drawZoneLabel(ctx, "MARKET", 1040, 990);
   drawZoneLabel(ctx, "FARM", 700, 105);
   drawZoneLabel(ctx, "FOREST", 1280, 105);
-  drawZoneLabel(ctx, "VILLAGE", 820, 555);
+  drawZoneLabel(ctx, "VILLAGE", 820, 955);
   drawZoneLabel(ctx, "BEACH", 300, 90);
   drawZoneLabel(ctx, "DOCK", 186, 520);
-  drawZoneLabel(ctx, "CAVE", 1380, 748);
+  drawZoneLabel(ctx, "CAVE", 1380, 1148);
 
   // Cave entrance
-  drawCaveEntrance(ctx, 1380, 880);
+  drawCaveEntrance(ctx, 1380, 1280);
 
   // Agent-built structures
   if (structures) {
