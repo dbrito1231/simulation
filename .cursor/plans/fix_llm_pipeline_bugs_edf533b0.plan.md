@@ -6,7 +6,7 @@ todos:
     content: Add answer-extraction + scaffold rejection to lm_complete()/lm_message_text() in server.py
     status: pending
   - id: scrub-memory
-    content: Extend MemoryStore.clean() to purge scaffold-poisoned entries; clean longTerm lists
+    content: Extend MemoryStore.clean() to purge scaffold-poisoned entries; filter live longTerm lists in the engine clean step and on state restore
     status: pending
   - id: cap-memory-prompt
     content: Cap compose_memory() output to a fixed char budget
@@ -15,7 +15,7 @@ todos:
     content: Detect 'Context size has been exceeded' in run_agent_decision() and retry once with slimmed prompt; log as context_overflow
     status: pending
   - id: update-docs
-    content: Update CLAUDE.md LM Studio sizing note (~1500 to ~3400 tokens per slot)
+    content: Update CLAUDE.md LM Studio sizing note (~1500 to ~3400 tokens per slot; fix MAX_CONCURRENT_LLM 3 -> 2)
     status: pending
   - id: verify-logs
     content: Run a session and verify lm_studio.jsonl error rate, reflected memories, and prompt sizes
@@ -37,17 +37,17 @@ The two bugs are coupled: the poisoned memories are the single biggest source of
 
 **Fix — three layers:**
 
-1. **Extract the answer in `lm_complete()`**: when the text came from `reasoning_content`, take the final non-empty line/segment (the answer follows the scaffold), stripping quotes. Keep this as a helper (e.g. `extract_plain_answer(text)`) next to `lm_message_text`.
+1. **Extract the answer in `lm_complete()`**: when the text came from `reasoning_content`, take the final non-empty line/segment (the answer follows the scaffold), stripping quotes. Keep this as a helper (e.g. `extract_plain_answer(text)`) next to `lm_message_text`. Note: `lm_message_text()` doesn't currently expose *which* field the text came from — either have it return provenance, or have `lm_complete()` inspect the message dict itself to decide when extraction applies.
 2. **Validate before storing**: in `lm_complete()` (or in the summarizer), reject output containing scaffold markers — `Thinking Process`, `**Analyze`, leading `1.`/`*` bullets, or multi-line output where one sentence was requested. Return `None` on rejection so every caller already degrades gracefully (they all handle `None`).
-3. **Scrub existing poison**: extend `MemoryStore.clean()` (server.py ~line 251) to drop entries whose text matches the scaffold markers, so `memory.json` and `agent["memory"]["longTerm"]` recover on the next clean cycle. Also filter `longTerm` lists on state load if the persistence path restores them.
+3. **Scrub existing poison**: extend `MemoryStore.clean()` (server.py ~line 251) to drop entries whose text matches the scaffold markers, so `memory.json` recovers on the next clean cycle. `MemoryStore.clean()` only reaches the vector store — the live `agent["memory"]["longTerm"]` lists belong to the engine, so also filter them with the same markers in the engine's clean step (`_run_memory_maintenance()`, sim_engine.py ~line 1967). Without this, a running session keeps its poisoned `longTerm` entries indefinitely: they only roll off after 8 new summaries (`LONG_MEM_CAP`), and once the new validation starts rejecting scaffold output, no new summaries arrive. Also filter `longTerm` lists on state load — `restore_state()` (sim_engine.py ~line 2732) restores agents wholesale from `state.json`, poison included.
 
 ## Bug 2: Context overflow (HTTP 400, 48% of calls lost)
 
 Three parts, in order of impact:
 
 1. **Cap prompt inputs in `compose_memory()`** (server.py ~line 642): the memory line is unbounded today. Cap the merged memory string to a total budget (~600 chars), truncating oldest-first and the `(recalled: ...)` suffix. Bug 1's fix removes the worst offenders; this cap guards against any future bloat.
-2. **Detect and retry context overflow in `run_agent_decision()`** (server.py ~line 1742): the current code lumps the 400 `{"error": "Context size has been exceeded."}` body into `bad_response_fallback`, losing the turn. Instead, detect that error string specifically and retry once with a slimmed payload — drop the memory line, recent conversations, and the three worked EXAMPLE blocks from `SYSTEM_PROMPT` (keep rules + JSON schema; the `json_schema` response_format still shapes output). Log it as a distinct error kind (e.g. `context_overflow`) in `lm_studio.jsonl` so it's measurable.
-3. **Update the sizing docs**: CLAUDE.md's guidance says ~1,500 prompt tokens per slot; measured reality is ~3,100. Update the LM Studio note to `context length >= 3400 x parallel slots` (or lower `MAX_CONCURRENT_LLM`), so the operator-side config matches.
+2. **Detect and retry context overflow in `run_agent_decision()`** (server.py ~line 1742): the current code lumps the 400 `{"error": "Context size has been exceeded."}` body into `bad_response_fallback`, losing the turn. Instead, detect that error string specifically and retry once with a slimmed payload — drop the memory line, recent conversations, and the **five** worked EXAMPLE blocks from `SYSTEM_PROMPT` (farmer, builder, trader, gatherer-blueprint, elder-approval — server.py ~lines 591–603; slice by marker, don't assume a count) (keep rules + JSON schema; the `json_schema` response_format still shapes output). Log it as a distinct error kind (e.g. `context_overflow`) in `lm_studio.jsonl` so it's measurable.
+3. **Update the sizing docs**: CLAUDE.md's guidance says ~1,500 prompt tokens per slot; measured reality is ~3,100. Update the LM Studio note to `context length >= 3400 x parallel slots` (or lower `MAX_CONCURRENT_LLM`), so the operator-side config matches. While editing that paragraph, also fix the stale concurrency number: it says `MAX_CONCURRENT_LLM` is 3, but on this branch it is 2 (sim_engine.py ~line 284, the server-authoritative engine's think-worker pool — the note still describes the old client-side queue).
 
 ## Verification
 
