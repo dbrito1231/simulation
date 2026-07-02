@@ -49,6 +49,38 @@
   #pauseBtn { left: 18px; }
   #resetBtn { left: 98px; }
   #pauseBtn:hover, #resetBtn:hover { background: #444; }
+  #zoomInBtn, #zoomOutBtn, #zoomFitBtn {
+    /* Same fixed cluster as pause/reset, stacked into a second row so the
+       world can be zoomed out to see it as a whole (esp. on small screens)
+       or zoomed in anywhere without needing to scroll pixel-by-pixel. */
+    position: fixed; top: 54px;
+    padding: 6px 10px; font: 13px sans-serif;
+    background: #333; color: #fff; border: 1px solid #666;
+    border-radius: 4px; cursor: pointer; z-index: 10;
+  }
+  #zoomOutBtn { left: 18px; }
+  #zoomInBtn { left: 58px; }
+  #zoomFitBtn { left: 98px; width: 40px; }
+  #zoomInBtn:hover, #zoomOutBtn:hover, #zoomFitBtn:hover { background: #444; }
+  #minimap {
+    /* Fixed like the pause/reset buttons -- with districts now able to be
+       founded mid-session into the open frontier, this is the only way to
+       notice new territory came online without scrolling to find it.
+       Clickable/draggable: click or drag anywhere on it to jump the main
+       viewport there (see minimap mouse handlers below). */
+    position: fixed;
+    bottom: 18px;
+    left: 18px;
+    width: 220px;
+    height: 160px;
+    background: #0e0e14;
+    border: 1px solid #666;
+    border-radius: 4px;
+    z-index: 10;
+    cursor: pointer;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
   #tab-warning {
     display: none;
     /* fixed (not absolute): canvasWrap now scrolls a 2700px-tall world, so
@@ -173,6 +205,13 @@
     border-radius: 3px;
     transition: width 0.3s;
   }
+  #civPanel .civ-project-list-item {
+    margin-bottom: 6px;
+  }
+  #civPanel .civ-project-list-item .civ-label {
+    display: block;
+    font-size: 11px;
+  }
   #agentList {
     list-style: none;
     margin: 0;
@@ -266,6 +305,10 @@
     <canvas id="world" width="1600" height="1000"></canvas>
     <button id="pauseBtn">Pause</button>
     <button id="resetBtn">Reset</button>
+    <button id="zoomOutBtn" title="Zoom out">&minus;</button>
+    <button id="zoomInBtn" title="Zoom in">+</button>
+    <button id="zoomFitBtn" title="Fit whole world">Fit</button>
+    <canvas id="minimap" width="220" height="160"></canvas>
     <div id="tab-warning">Tab hidden — simulation paused. Keep this tab visible.</div>
   </div>
   <aside id="sidebar">
@@ -281,11 +324,8 @@
       <div class="civ-project-row">
         <canvas id="civProjectSprite" width="80" height="80"></canvas>
         <div class="civ-project-info">
-          <div class="civ-row"><span class="civ-label">Project:</span> <span class="civ-value" id="civProject">none</span></div>
-          <div class="civ-row" id="civProgressRow" style="display:none">
-            <span class="civ-label">Progress:</span> <span class="civ-value" id="civProgress">—</span>
-            <div class="progress-bar"><div class="progress-fill" id="civProgressBar" style="width:0%"></div></div>
-          </div>
+          <div class="civ-row"><span class="civ-label">Active builds:</span> <span class="civ-value" id="civProjectCount">0</span></div>
+          <div id="civProjectsList"></div>
         </div>
       </div>
       <div class="civ-row">
@@ -336,37 +376,97 @@
 
 const canvas = document.getElementById("world");
 const ctx = canvas.getContext("2d");
+const canvasWrapEl = document.getElementById("canvasWrap");
 
 // Must match sim_engine.py's WORLD_W/WORLD_H exactly (server is authoritative;
 // these are only used for local rendering/cache sizing before the first
 // /state reply, and the mock config below).
-const WORLD_W = 1600;
-const WORLD_H = 2700;
+const WORLD_W = 5200;
+const WORLD_H = 5400;
 
 // Static-terrain render cache (perf): the world's tiled terrain never changes,
 // so it is rendered once into an offscreen canvas and blitted each frame instead
 // of re-tiling ~2M pixels per frame. Invalidated on resize; rebuilt lazily.
 let terrainCanvas = null;   // full static terrain (zones, crops, trees, dock…)
-let oceanFrames = null;     // 16 pre-rendered foam phases for the 200px ocean strip
+let oceanFrames = null;     // { bounds, frames:[16 pre-rendered foam phases] } for the ocean district
 
 function setupCanvas() {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
   canvas.width = Math.floor(WORLD_W * dpr);
   canvas.height = Math.floor(WORLD_H * dpr);
-  // Display at native logical size (was scaled to fit the viewport height);
-  // canvasWrap now scrolls instead, so the full 1600x2700 world is usable.
-  canvas.style.width = `${WORLD_W}px`;
-  canvas.style.height = `${WORLD_H}px`;
+  // Backing-store resolution only; on-screen display size is controlled
+  // separately by applyZoom() below so the world can be zoomed in/out.
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.imageSmoothingEnabled = false;
   // The cache is rendered in logical (WORLD_W×WORLD_H) pixels and blitted under
   // the DPR transform, so it survives resizes; invalidate anyway to be safe.
   terrainCanvas = null;
   oceanFrames = null;
+  applyZoom();
+}
+
+// =====================================================================
+// Zoom — implemented as a pure CSS display-size multiplier on the canvas;
+// the backing store and all drawing stay in logical WORLD_W×WORLD_H space
+// (sprites.js and drawTiledWorld are completely untouched by zoom). Lets
+// the whole (now much larger) world be seen at once on small screens, or
+// zoomed in anywhere, without changing how anything is drawn.
+// =====================================================================
+let zoomLevel = 1;
+const MIN_ZOOM = 0.15;
+const MAX_ZOOM = 4;
+
+function applyZoom() {
+  canvas.style.width = `${WORLD_W * zoomLevel}px`;
+  canvas.style.height = `${WORLD_H * zoomLevel}px`;
+}
+
+// Changes zoom while keeping the world point under (anchorClientX, anchorClientY)
+// fixed on screen -- so scroll-to-zoom feels anchored at the cursor, and
+// button-triggered zoom (no cursor position) anchors on the viewport center.
+function setZoom(newZoom, anchorClientX, anchorClientY) {
+  const clamped = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, newZoom));
+  if (clamped === zoomLevel) return;
+  const rect = canvasWrapEl.getBoundingClientRect();
+  const ax = anchorClientX === undefined ? rect.left + canvasWrapEl.clientWidth / 2 : anchorClientX;
+  const ay = anchorClientY === undefined ? rect.top + canvasWrapEl.clientHeight / 2 : anchorClientY;
+  // World point currently under the anchor, using the OLD zoom level.
+  const worldX = (canvasWrapEl.scrollLeft + (ax - rect.left)) / zoomLevel;
+  const worldY = (canvasWrapEl.scrollTop + (ay - rect.top)) / zoomLevel;
+  zoomLevel = clamped;
+  applyZoom();
+  // Re-scroll so that same world point lands back under the anchor.
+  canvasWrapEl.scrollLeft = worldX * zoomLevel - (ax - rect.left);
+  canvasWrapEl.scrollTop = worldY * zoomLevel - (ay - rect.top);
+}
+
+function zoomFit() {
+  const fitZoom = Math.min(canvasWrapEl.clientWidth / WORLD_W, canvasWrapEl.clientHeight / WORLD_H);
+  setZoom(fitZoom);
 }
 
 setupCanvas();
 window.addEventListener("resize", setupCanvas);
+
+const zoomInBtn = document.getElementById("zoomInBtn");
+const zoomOutBtn = document.getElementById("zoomOutBtn");
+const zoomFitBtn = document.getElementById("zoomFitBtn");
+zoomInBtn.addEventListener("click", () => setZoom(zoomLevel * 1.25));
+zoomOutBtn.addEventListener("click", () => setZoom(zoomLevel * 0.8));
+zoomFitBtn.addEventListener("click", zoomFit);
+
+// Ctrl+scroll (or trackpad pinch, which browsers report as a ctrlKey wheel
+// event) zooms anchored at the cursor; a plain wheel keeps scrolling/panning
+// exactly as before.
+canvasWrapEl.addEventListener("wheel", (event) => {
+  if (!event.ctrlKey) return;
+  event.preventDefault();
+  // 0.0015 keeps a single physical mouse-wheel notch (deltaY ~= +/-100) to a
+  // gentle ~16% zoom step, while still accumulating smoothly for trackpad
+  // pinch gestures that fire many small-delta events per second.
+  const factor = Math.exp(-event.deltaY * 0.0015);
+  setZoom(zoomLevel * factor, event.clientX, event.clientY);
+}, { passive: false });
 
 // --- Feature flags kept for rendering decisions only (the server is the source
 // of truth; these mirror config.flags from /state and gate sidebar rows). They
@@ -418,11 +518,14 @@ const MOCK_STATE = {
   civilization: {
     level: 1,
     structures: [
-      { id: 1, type: "house", x: 600, y: 600, visualStyle: "house", name: "House" }
+      { id: 1, type: "house", x: 600, y: 600, visualStyle: "house", name: "House", districtId: "village_core" }
     ],
-    activeProject: {
-      name: "Workshop", type: "workshop",
-      progressText: "wood 2/3, stone 1/2", progressPercent: 50
+    districtProjects: {
+      village_core: { name: "Workshop", type: "workshop",
+                      progressText: "wood 2/3, stone 1/2", progressPercent: 50 },
+      farm_north: { name: "Farm Plot", type: "farm_plot",
+                   progressText: "wood 1/2, food 1/1", progressPercent: 65 },
+      farm_south: null, village_east: null, workshop_row: null
     },
     completedProjects: 1,
     resourceRegistry: {
@@ -470,11 +573,11 @@ const MOCK_STATE = {
     { kind: "speech", from: "Marco", to: "everyone", message: "Gathering food." }
   ],
   config: {
-    WORLD_W: 1600, WORLD_H: 2700,
+    WORLD_W: 5200, WORLD_H: 5400,
     flags: {
       SURVIVAL_ENABLED: true, CRAFTING_ENABLED: true, MEMES_ENABLED: true,
       RULES_ENABLED: true, MEMORY_ENABLED: true, BENCHMARKS_ENABLED: true,
-      PIANO_MODULES: false, META_SYSTEM: false
+      PIANO_MODULES: false, META_SYSTEM: false, ROADS_ENABLED: true
     }
   }
 };
@@ -483,6 +586,25 @@ let world = MOCK_STATE;
 // Per-agent previous position, so we can drive walk-cycle / facing direction
 // (drawAgentSprite reads agent.targetX/targetY) without server-supplied targets.
 const prevPos = {};
+
+// Live districts/roads (world-expansion plan): served separately from /state
+// via GET /districts.js since they're mostly-static and would otherwise bloat
+// every ~10Hz /state poll. Polled on a much slower interval (districts only
+// change when one is founded, a rare event) -- see pollDistricts() below.
+// Falls back to sprites.js's STARTER_DISTRICTS_JS/STARTER_ROAD_NODES/EDGES
+// until the first fetch resolves.
+let districtsData = { districts: [], roadNodes: {}, roadEdges: [] };
+let districtsKey = "";
+
+function getDistricts() {
+  return (districtsData.districts && districtsData.districts.length)
+    ? districtsData.districts : STARTER_DISTRICTS_JS;
+}
+
+function findDistrictBounds(kind) {
+  const d = getDistricts().find((x) => x.kind === kind);
+  return d ? d.bounds : null;
+}
 
 // =====================================================================
 // Convenience accessors — render functions below read these like the old globals.
@@ -499,29 +621,39 @@ function resourceRegistry() { return getCiv().resourceRegistry || {}; }
 // in logical coordinates, so a WORLD_W×WORLD_H buffer (no DPR transform) is
 // blitted under the main ctx's DPR transform and stays crisp (imageSmoothing
 // off). The animated ocean strip is pre-rendered as 16 foam phases so animation
-// costs one drawImage/frame instead of re-tiling the strip.
+// costs one drawImage/frame instead of re-tiling the strip. Rebuilt whenever
+// districtsKey changes (a district was founded) via pollDistricts().
 function buildTerrainCache() {
+  const districts = getDistricts();
   terrainCanvas = document.createElement("canvas");
   terrainCanvas.width = WORLD_W;
   terrainCanvas.height = WORLD_H;
   const tctx = terrainCanvas.getContext("2d");
   tctx.imageSmoothingEnabled = false;
-  drawTiledWorld(tctx, WORLD_W, WORLD_H, 0, null);
+  drawTiledWorld(tctx, WORLD_W, WORLD_H, 0, null, districts,
+                 districtsData.roadNodes, districtsData.roadEdges);
 
-  oceanFrames = [];
+  // The ocean's animated foam strip is scoped to the ocean district's own
+  // bounds (not the full world height) -- with the much larger world, a
+  // full-height strip would paint a blue stripe down through the open
+  // frontier below the starter core.
+  const oceanBounds = findDistrictBounds("ocean") || { x1: 0, y1: 120, x2: 200, y2: 880 };
+  oceanFrames = { bounds: oceanBounds, frames: [] };
+  const ow = oceanBounds.x2 - oceanBounds.x1;
+  const oh = oceanBounds.y2 - oceanBounds.y1;
   for (let phase = 0; phase < 16; phase++) {
     const oc = document.createElement("canvas");
-    oc.width = 200;
-    oc.height = WORLD_H;
+    oc.width = ow;
+    oc.height = oh;
     const octx = oc.getContext("2d");
     octx.imageSmoothingEnabled = false;
-    fillRectWithTile(octx, 0, 0, 200, WORLD_H, oceanTile(phase));
-    oceanFrames.push(oc);
+    fillRectWithTile(octx, 0, 0, ow, oh, oceanTile(phase));
+    oceanFrames.frames.push(oc);
   }
 }
 
 // The dock (drawn at world 150,470, 144x36) straddles the beach/ocean line, so
-// part of it falls inside the 0-200 ocean strip the foam overlay repaints every
+// part of it falls inside the ocean strip the foam overlay repaints every
 // frame. Re-blit those exact pixels from the static cache afterward so the
 // jetty (incl. its pilings dipping into the water) isn't erased by the animation.
 const DOCK_RECT = { x: 150, y: 470, w: 144, h: 36 };
@@ -531,9 +663,32 @@ function drawWorld(ctx, frameTick) {
   ctx.drawImage(terrainCanvas, 0, 0, WORLD_W, WORLD_H);
   // Animated ocean foam overlay (the only moving terrain): blit the current phase.
   const foamOffset = Math.floor(frameTick / 8) % 16;
-  ctx.drawImage(oceanFrames[foamOffset], 0, 0, 200, WORLD_H);
+  const ob = oceanFrames.bounds;
+  ctx.drawImage(oceanFrames.frames[foamOffset], ob.x1, ob.y1);
   ctx.drawImage(terrainCanvas, DOCK_RECT.x, DOCK_RECT.y, DOCK_RECT.w, DOCK_RECT.h,
                 DOCK_RECT.x, DOCK_RECT.y, DOCK_RECT.w, DOCK_RECT.h);
+}
+
+// Poll GET /districts.js on a slow interval -- districts/roads are
+// mostly-static and only change when _maybe_found_district() fires
+// server-side (a rare, deterministic event), so this doesn't need /state's
+// ~10Hz cadence. Rebuilds the terrain cache only when the served list
+// actually changed (a district was founded), not on every poll.
+const DISTRICTS_POLL_MS = 3000;
+async function pollDistricts() {
+  try {
+    const res = await fetch("/districts.js", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    const key = JSON.stringify((data.districts || []).map((d) => d.id));
+    if (key !== districtsKey) {
+      districtsKey = key;
+      districtsData = data;
+      terrainCanvas = null; // force buildTerrainCache() to rebuild with the new list
+    } else {
+      districtsData = data; // road graph could still have grown even if district ids didn't
+    }
+  } catch (err) { /* keep last known districts; /state polling surfaces connectivity issues */ }
 }
 
 function drawResourceDots(ctx, agent, cx, cy) {
@@ -658,10 +813,8 @@ const convListEl = document.getElementById("convList");
 const actListEl = document.getElementById("actList");
 const civLevelEl = document.getElementById("civLevel");
 const civStructuresEl = document.getElementById("civStructures");
-const civProjectEl = document.getElementById("civProject");
-const civProgressEl = document.getElementById("civProgress");
-const civProgressRow = document.getElementById("civProgressRow");
-const civProgressBar = document.getElementById("civProgressBar");
+const civProjectCountEl = document.getElementById("civProjectCount");
+const civProjectsListEl = document.getElementById("civProjectsList");
 const civResourcesEl = document.getElementById("civResources");
 const civResourceListEl = document.getElementById("civResourceList");
 const civCustomBuildsEl = document.getElementById("civCustomBuilds");
@@ -786,12 +939,12 @@ function renderBenchmarks() {
   return chips.join("");
 }
 
-// Draw the active project's structure sprite into the civ-panel mini-canvas,
-// reusing the same grid/fallback helpers as the in-world drawStructure().
-function renderProjectSprite() {
+// Draw one active project's structure sprite into the civ-panel mini-canvas
+// (the first active district build, if any), reusing the same grid/fallback
+// helpers as the in-world drawStructure().
+function renderProjectSprite(p) {
   const c = civProjectSpriteCtx;
   c.clearRect(0, 0, civProjectSprite.width, civProjectSprite.height);
-  const p = getCiv().activeProject;
   if (!p) {
     civProjectSprite.style.display = "none";
     return;
@@ -809,6 +962,28 @@ function renderProjectSprite() {
   } else {
     drawGenericStructure(c, 8, 8, p.name || p.type, colorFromId(p.type));
   }
+}
+
+// Renders the "Active builds" list -- one row per district with a non-null
+// project (the one required sidebar behavioral change of the world-expansion
+// plan: districtProjects, plural, replaces the old singular activeProject).
+function renderProjectsList() {
+  const projects = getCiv().districtProjects || {};
+  const entries = Object.entries(projects).filter(([, p]) => p);
+  civProjectCountEl.textContent = entries.length;
+  if (entries.length === 0) {
+    civProjectsListEl.innerHTML = '<div class="civ-row"><span class="civ-label">none</span></div>';
+  } else {
+    civProjectsListEl.innerHTML = entries.map(([districtId, p]) => {
+      const pct = p.progressPercent != null ? p.progressPercent : 0;
+      return `<div class="civ-row civ-project-list-item">` +
+        `<span class="civ-value">${escapeHtml(p.name)}</span> ` +
+        `<span class="civ-label">in ${escapeHtml(districtId)} — ${escapeHtml(p.progressText || "")} (${pct}%)</span>` +
+        `<div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div>` +
+        `</div>`;
+    }).join("");
+  }
+  renderProjectSprite(entries.length ? entries[0][1] : null);
 }
 
 // Cheap change-detection so we don't rebuild innerHTML every frame.
@@ -832,18 +1007,7 @@ function renderSidebar() {
 
   civLevelEl.textContent = civ.level != null ? civ.level : 1;
   civStructuresEl.textContent = (civ.structures || []).length;
-  const proj = civ.activeProject;
-  civProjectEl.textContent = proj ? proj.name : "none";
-
-  if (proj) {
-    civProgressRow.style.display = "block";
-    const pct = proj.progressPercent != null ? proj.progressPercent : 0;
-    civProgressEl.textContent = `${proj.progressText || ""} — ${pct}%`;
-    civProgressBar.style.width = pct + "%";
-  } else {
-    civProgressRow.style.display = "none";
-  }
-  renderProjectSprite();
+  renderProjectsList();
 
   // --- Civilization detail rows (change-detected) ---
   const sidebarKey = JSON.stringify([
@@ -953,6 +1117,89 @@ function renderSidebar() {
     ).join("");
   }
 }
+
+// =====================================================================
+// Minimap (Phase 6, optional polish) -- a small fixed-position canvas showing
+// district-bounds rectangles by kind (including any founded after cold
+// start), agent dots, and a viewport-outline. Pure renderer: reads only the
+// existing GET /state poll (world.agents) + the live district list
+// (getDistricts()); no engine changes. More load-bearing than in a
+// fixed-size world -- once districts can be founded mid-session, this is the
+// only way to notice new territory came online without scrolling to find it.
+// =====================================================================
+const minimapCanvas = document.getElementById("minimap");
+const minimapCtx = minimapCanvas.getContext("2d");
+const MINIMAP_KIND_COLORS = {
+  farm: "#6eb840", forest: "#245a24", village: "#c4995a", market: "#b8773a",
+  beach: "#e5d693", cave: "#454545", ocean: "#2d9ed9", workshop: "#98988a",
+};
+
+function renderMinimap() {
+  const w = minimapCanvas.width, h = minimapCanvas.height;
+  const sx = w / WORLD_W, sy = h / WORLD_H;
+  minimapCtx.fillStyle = "#0e0e14";
+  minimapCtx.fillRect(0, 0, w, h);
+
+  for (const d of getDistricts()) {
+    const b = d.bounds;
+    minimapCtx.fillStyle = MINIMAP_KIND_COLORS[d.kind] || "#777";
+    minimapCtx.fillRect(
+      Math.round(b.x1 * sx), Math.round(b.y1 * sy),
+      Math.max(1, Math.round((b.x2 - b.x1) * sx)), Math.max(1, Math.round((b.y2 - b.y1) * sy))
+    );
+  }
+
+  for (const a of getAgents()) {
+    minimapCtx.fillStyle = a.color || "#fff";
+    minimapCtx.fillRect(Math.round(a.x * sx) - 1, Math.round(a.y * sy) - 1, 2, 2);
+  }
+
+  // Viewport outline: which part of the (now much larger) world canvasWrap's
+  // scroll position is currently showing. scrollLeft/Top/clientWidth/Height
+  // are in post-zoom CSS pixels, so divide by zoomLevel to get back to
+  // logical world coordinates before applying the minimap's own sx/sy scale.
+  minimapCtx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+  minimapCtx.lineWidth = 1;
+  minimapCtx.strokeRect(
+    Math.round((canvasWrapEl.scrollLeft / zoomLevel) * sx) + 0.5,
+    Math.round((canvasWrapEl.scrollTop / zoomLevel) * sy) + 0.5,
+    Math.max(1, Math.round((canvasWrapEl.clientWidth / zoomLevel) * sx)),
+    Math.max(1, Math.round((canvasWrapEl.clientHeight / zoomLevel) * sy))
+  );
+}
+
+// Click or drag anywhere on the minimap to jump the main viewport there.
+function minimapToWorld(clientX, clientY) {
+  const rect = minimapCanvas.getBoundingClientRect();
+  const sx = WORLD_W / minimapCanvas.width, sy = WORLD_H / minimapCanvas.height;
+  const mx = ((clientX - rect.left) / rect.width) * minimapCanvas.width;
+  const my = ((clientY - rect.top) / rect.height) * minimapCanvas.height;
+  return { x: mx * sx, y: my * sy };
+}
+
+function centerViewportOn(worldX, worldY) {
+  canvasWrapEl.scrollLeft = worldX * zoomLevel - canvasWrapEl.clientWidth / 2;
+  canvasWrapEl.scrollTop = worldY * zoomLevel - canvasWrapEl.clientHeight / 2;
+}
+
+let minimapDragging = false;
+
+function navigateFromMinimapEvent(event) {
+  const { x, y } = minimapToWorld(event.clientX, event.clientY);
+  centerViewportOn(x, y);
+}
+
+minimapCanvas.addEventListener("mousedown", (event) => {
+  minimapDragging = true;
+  navigateFromMinimapEvent(event);
+  event.preventDefault();
+});
+window.addEventListener("mousemove", (event) => {
+  if (minimapDragging) navigateFromMinimapEvent(event);
+});
+// Listen on window (not just the small minimap) so dragging keeps working
+// even if the cursor briefly overshoots the minimap's bounds.
+window.addEventListener("mouseup", () => { minimapDragging = false; });
 
 // =====================================================================
 // State polling (~10 Hz). On failure we keep the last frame and flip the
@@ -1073,6 +1320,7 @@ function tick() {
   }
 
   renderSidebar();
+  renderMinimap();
   requestAnimationFrame(tick);
 }
 
@@ -1081,6 +1329,8 @@ syncPauseButton();
 requestAnimationFrame(tick);
 pollState();
 setInterval(pollState, STATE_POLL_MS);
+pollDistricts();
+setInterval(pollDistricts, DISTRICTS_POLL_MS);
 
 </script>
 </body>

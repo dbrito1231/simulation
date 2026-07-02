@@ -377,11 +377,15 @@ ROLE_PROJECT = {role: d["preferredProject"] for role, d in ROLES.items()}
 # extract_json_decision/normalize_decision remain as defense in depth regardless.
 STRUCTURED_OUTPUT_MODE = "json_schema"
 
-# Full 19-action superset (mirrors AVAILABLE_ACTIONS in index.html). Per-agent
+# Full action superset (mirrors AVAILABLE_ACTIONS in index.html). Per-agent
 # availability is still enforced by normalize_decision/role_fallback_action.
+# World-expansion plan: the fixed move_to_farm/move_to_market/etc. members were
+# replaced by a single generic move_to_district (target names a district id,
+# or a legacy kind name -- sim_engine.py's _resolve_target_district resolves
+# either). Hardcoding a move_to_X per district doesn't scale once districts
+# can be founded at runtime rather than fixed at code-authoring time.
 DECISION_ACTIONS = [
-    "move_to_farm", "move_to_market", "move_to_forest", "move_to_beach",
-    "move_to_village", "move_to_cave", "move_to_agent",
+    "move_to_district", "move_to_agent",
     "collect_resource", "talk_to_nearby", "trade_resource",
     "start_project", "contribute_resources", "build_structure",
     "propose_blueprint", "approve_blueprint", "reject_blueprint",
@@ -401,6 +405,7 @@ DECISION_SCHEMA = {
     "properties": {
         "action": {"type": "string", "enum": DECISION_ACTIONS},
         "target": {"type": ["string", "null"]},
+        "target_district": {"type": ["string", "null"]},
         "message": {"type": ["string", "null"]},
         "new_role": {"type": ["string", "null"]},
         "relationship_update": {
@@ -478,10 +483,14 @@ MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to 
 1. NEVER use talk_to_nearby if Agents near you is "none".
 2. If talk_to_nearby, message and target MUST both be set to a nearby agent name.
 3. Prefer collect_resource, contribute_resources, start_project, build_structure,
-   or move_to_* over idle talk.
+   or move_to_district over idle talk.
 4. Talk is for coordination (request resources, announce builds)—not small talk.
-5. Any agent may start_project when none is active; everyone contributes and builds as resources allow.
+5. The village has SEVERAL buildable districts at once (see Known districts) and can have up to a few concurrent
+   builds in progress. Any agent may start_project in a district that has no active build; set target_district to
+   steer which one (it defaults to your current district). contribute_resources and build_structure also accept an
+   optional target_district (defaults to your current district, or the district most in need of help).
 5b. If "Incoming messages" lists requests or directives addressed to you, act on them this turn (gather/contribute/heal/trade as asked, or reply with talk_to_nearby).
+5c. Use move_to_district with target set to a district id from Known districts (e.g. "farm_north", "village_east") to travel there. You'll automatically walk the road network to get there.
 
 BLUEPRINTS (inventing new structures):
 6. Any agent may use propose_blueprint to invent a new structure type. Include a
@@ -541,7 +550,8 @@ Do not use chain-of-thought or reasoning — output the JSON object immediately.
 The JSON must match this structure exactly:
 {
   "action": "<one of the available_actions>",
-  "target": "<agent name, zone name, project type, resource id, blueprint id, or null>",
+  "target": "<agent name, district id, project type, resource id, blueprint id, or null>",
+  "target_district": "<district id for start_project/contribute_resources/build_structure, or null to use your current district>",
   "message": "<what you say if talking, or null>",
   "new_role": "<a new role name if changing role, or null>",
   "relationship_update": {"<agent_name>": "ally|neutral|rival"} or null,
@@ -604,10 +614,12 @@ Relationships: {relationships}
 Your beliefs: {beliefs}
 Agents near you: {nearby_agents}
 Current zone: {world_zone}
+Current district: {current_district}
+Known districts (use as target_district): {known_districts}
 Civilization level: {civilization_level}
 Structures built: {structures_built}
-Active project: {active_project}
-Project progress: {project_progress}
+Active builds (by district): {active_project}
+Build progress (by district): {project_progress}
 Civilization directive: {directive}
 Idle agents needing a task: {idle_agents}
 Known resources: {known_resources}
@@ -711,6 +723,20 @@ def parse_nearby_names(nearby):
                 names.append(item)
         return names
     return []
+
+
+def format_known_districts(districts):
+    """Format the terse known_districts list (id+kind only, per the
+    prompt-token-growth caution) for the target_district hint, e.g.
+    'farm_north (farm), village_core (village)'."""
+    if not districts or not isinstance(districts, list):
+        return "none"
+    parts = []
+    for d in districts:
+        if not isinstance(d, dict) or not d.get("id"):
+            continue
+        parts.append(f"{d['id']} ({d.get('kind', '?')})")
+    return ", ".join(parts) if parts else "none"
 
 
 def format_known_resources(resources):
@@ -1041,17 +1067,17 @@ def role_fallback_action(role, agent_data):
     if role in ("farmer", "fisher", "gatherer"):
         zone = agent_data.get("world_zone", "")
         if role == "farmer" and zone != "farm":
-            return {"action": "move_to_farm", "target": None, "message": None,
+            return {"action": "move_to_district", "target": "farm", "message": None,
                     "new_role": None, "relationship_update": None,
-                    "reasoning": "Heading to farm to gather food."}
+                    "reasoning": "Heading to a farm to gather food."}
         if role == "gatherer" and zone != "forest":
-            return {"action": "move_to_forest", "target": None, "message": None,
+            return {"action": "move_to_district", "target": "forest", "message": None,
                     "new_role": None, "relationship_update": None,
-                    "reasoning": "Heading to forest to gather wood."}
+                    "reasoning": "Heading to the forest to gather wood."}
         if role == "fisher" and zone != "beach":
-            return {"action": "move_to_beach", "target": None, "message": None,
+            return {"action": "move_to_district", "target": "beach", "message": None,
                     "new_role": None, "relationship_update": None,
-                    "reasoning": "Heading to beach to fish."}
+                    "reasoning": "Heading to the beach to fish."}
         needed = first_shortfall_resource(agent_data)
         return {"action": "collect_resource", "target": needed, "message": None,
                 "new_role": None, "relationship_update": None,
@@ -1060,9 +1086,9 @@ def role_fallback_action(role, agent_data):
     if role == "miner":
         zone = agent_data.get("world_zone", "")
         if zone != "cave":
-            return {"action": "move_to_cave", "target": None, "message": None,
+            return {"action": "move_to_district", "target": "cave", "message": None,
                     "new_role": None, "relationship_update": None,
-                    "reasoning": "Heading to the cave to mine."}
+                    "reasoning": "Heading to a cave to mine."}
         needed = first_shortfall_resource(agent_data) or "gold"
         return {"action": "collect_resource", "target": needed, "message": None,
                 "new_role": None, "relationship_update": None,
@@ -1075,12 +1101,12 @@ def role_fallback_action(role, agent_data):
                 "reasoning": "Contributing to the active project."}
 
     if role == "trader":
-        return {"action": "move_to_market", "target": None, "message": None,
+        return {"action": "move_to_district", "target": "market", "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Heading to market to trade."}
 
     if role in ("guard", "scout", "explorer"):
-        return {"action": "move_to_village", "target": None, "message": None,
+        return {"action": "move_to_district", "target": "village", "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Patrolling the village."}
 
@@ -1090,7 +1116,7 @@ def role_fallback_action(role, agent_data):
             return {"action": "contribute_resources", "target": needed, "message": None,
                     "new_role": None, "relationship_update": None,
                     "reasoning": "Supporting the village build."}
-        return {"action": "move_to_village", "target": None, "message": None,
+        return {"action": "move_to_district", "target": "village", "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Returning to the village center."}
 
@@ -1598,6 +1624,8 @@ def run_agent_decision(data):
             beliefs=data.get("beliefs") or "none",
             nearby_agents=nearby_formatted,
             world_zone=data.get("world_zone"),
+            current_district=data.get("current_district", "none"),
+            known_districts=format_known_districts(data.get("known_districts") or []),
             civilization_level=data.get("civilization_level", 1),
             structures_built=data.get("structures_built", 0),
             active_project=data.get("active_project", "none"),
@@ -1806,6 +1834,28 @@ else:
 def state():
     """Consistent world snapshot for the thin viewer (Contract 2)."""
     return jsonify(engine.snapshot())
+
+
+@app.route("/districts.js")
+def districts_js():
+    """Live districts/roads for the viewer (world-expansion plan). Unlike the
+    static /roles.js precedent, this reads the engine's LIVE civilization
+    state under its lock -- like /state does -- so a district founded mid-session
+    shows up to a connected viewer on its next poll, no reload needed. Despite
+    the ".js" name (matching the plan's route naming), the body is plain JSON;
+    the viewer fetch()-polls it rather than re-injecting a <script> tag, which
+    would otherwise throw on re-declaring `const` globals every poll."""
+    with engine.lock:
+        c = engine.civilization
+        districts = [
+            {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
+             "bounds": dict(d["bounds"]),
+             "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None}
+            for did, d in c["districts"].items()
+        ]
+        road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
+        road_edges = [list(e) for e in c["roadEdges"]]
+    return jsonify({"districts": districts, "roadNodes": road_nodes, "roadEdges": road_edges})
 
 
 @app.route("/control/pause", methods=["POST"])

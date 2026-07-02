@@ -18,12 +18,16 @@ import os
 import random
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 # Full-state persistence (Contract 3). Resolved relative to this module so it
 # lands next to server.py/sim_engine.py regardless of the launch cwd.
-STATE_VERSION = 1
+# Bumped 1 -> 2 for the world-expansion plan: civilization.activeProject ->
+# districtProjects, new districts/roadNodes/roadEdges/frontierPlots. See
+# restore_state()'s migration shim for pre-v2 saves.
+STATE_VERSION = 2
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 AUTOSAVE_SECONDS = 10
 # Sets on the civilization that serialize to JSON arrays and back.
@@ -42,37 +46,176 @@ EMERGENT_ROLES = True
 RULES_ENABLED = True
 MEMES_ENABLED = True
 BENCHMARKS_ENABLED = True
+# World-expansion plan: waypoint-based road routing for general travel
+# (move_to_district / idle wander / craft-station redirects). Sage-emergency
+# rescue and short local hops (move_to_agent, trade, talk) always stay direct
+# regardless of this flag -- see _set_agent_target_to_agent. Off reverts
+# _set_agent_target to the old straight-to-random-interior-point behavior so
+# routing can be A/B compared.
+ROADS_ENABLED = True
 
 # --- World geometry ---
-# WORLD_H was 1000; the village/farm build-out grids (see _build_region_for)
-# have no cap and no wraparound, so they eventually ran past their zone's
-# colored ground (visual overlap) and, further, past WORLD_H itself (silently
-# invisible structures below the canvas). Raised to 2700 and the village/market/
-# cave block shifted down 400px to give farm room too; index.html/sprites.js
-# WORLD_H, ZONE fills, and zone-prop coordinates below MUST be kept in sync.
-WORLD_W = 1600
-WORLD_H = 2700
+# WORLD_H was 1000, then 2700 (to stop the village/farm build-out grids from
+# overflowing off-canvas). The world-expansion plan raises this again, this
+# time to add real additional terrain (districts model, below) rather than
+# just more headroom for the same 7 zones: the starter core keeps occupying
+# roughly its old ~2600x2700 footprint, and WORLD_W/WORLD_H are set generously
+# larger so the remainder is open FRONTIER territory districts can be founded
+# into later (see STARTER_DISTRICTS / _maybe_found_district). index.html's
+# WORLD_W/WORLD_H MUST be kept in sync.
+WORLD_W = 5200
+WORLD_H = 5400
 
-ZONE_CENTERS = {
-    "farm": {"x": 700, "y": 260},
-    "forest": {"x": 1280, "y": 280},
-    "village": {"x": 760, "y": 1130},
-    "market": {"x": 1040, "y": 1070},
-    "beach": {"x": 310, "y": 500},
-    "cave": {"x": 1380, "y": 1255},
-    "ocean": {"x": 100, "y": 500},
+# --- Districts: hand-authored starter core + growable frontier ---
+# STARTER_DISTRICTS is the immutable, hand-authored blueprint used ONLY to
+# seed civilization["districts"] at cold-start (_reset_world). Every runtime
+# function reads the LIVE civilization["districts"] dict, never this module
+# constant -- that's what lets _maybe_found_district() append new district
+# instances later (the open-world mechanism) without a parallel data model.
+#
+# Entry shape (frozen):
+#   {kind, tile, label, bounds:{x1,y1,x2,y2},
+#    build_grid: {x0,y0,cols,dx,dy,cap} | None, entryNode}
+# `kind` groups districts for resource/tile purposes -- two districts can
+# share a kind (two "farm" districts = two farm clusters, and later a third
+# founded one). `entryNode` names this district's "front door" in the road
+# graph (STARTER_ROAD_NODES, below). Bounds are pairwise non-overlapping
+# (enforced by _validate_districts, both at import time and after any
+# founding) and, for the 7 starter-core districts, are exactly the original
+# ZONE_BOUNDS rectangles from before this refactor, so get_zone/get_district
+# resolve identically to the pre-districts get_zone() for existing ground.
+STARTER_DISTRICTS = {
+    "farm_north": {
+        "kind": "farm", "tile": "farm", "label": "FARM",
+        "bounds": {"x1": 500, "y1": 110, "x2": 920, "y2": 810},
+        "build_grid": {"x0": 520, "y0": 250, "cols": 4, "dx": 105, "dy": 85, "cap": 30},
+        "entryNode": "farm_north_gate",
+    },
+    "forest": {
+        "kind": "forest", "tile": "forest", "label": "FOREST",
+        "bounds": {"x1": 1030, "y1": 110, "x2": 1550, "y2": 450},
+        "build_grid": None, "entryNode": "forest_gate",
+    },
+    "village_core": {
+        "kind": "village", "tile": "village", "label": "VILLAGE",
+        "bounds": {"x1": 540, "y1": 960, "x2": 900, "y2": 2540},
+        "build_grid": {"x0": 560, "y0": 980, "cols": 4, "dx": 100, "dy": 95, "cap": 30},
+        "entryNode": "village_hub",
+    },
+    "market": {
+        "kind": "market", "tile": "market", "label": "MARKET",
+        "bounds": {"x1": 970, "y1": 1020, "x2": 1110, "y2": 1120},
+        "build_grid": None, "entryNode": "market_gate",
+    },
+    "beach": {
+        "kind": "beach", "tile": "beach", "label": "BEACH",
+        "bounds": {"x1": 230, "y1": 120, "x2": 400, "y2": 880},
+        "build_grid": None, "entryNode": "beach_gate",
+    },
+    "cave_east": {
+        "kind": "cave", "tile": "cave", "label": "CAVE",
+        "bounds": {"x1": 1210, "y1": 1150, "x2": 1540, "y2": 1360},
+        "build_grid": None, "entryNode": "cave_east_gate",
+    },
+    "ocean": {
+        "kind": "ocean", "tile": "ocean", "label": None,
+        "bounds": {"x1": 30, "y1": 120, "x2": 180, "y2": 880},
+        "build_grid": None, "entryNode": "beach_gate",
+    },
+    # --- World expansion: second instances of buildable kinds, plus a new
+    # "workshop" (industrial) kind, occupying a ~1000px-wider eastern strip of
+    # the starter core (still well under half of WORLD_W/WORLD_H above) so the
+    # fixed roster has real additional ground to build a fuller civilization on.
+    "farm_south": {
+        "kind": "farm", "tile": "farm", "label": "FARM (SOUTH FIELDS)",
+        "bounds": {"x1": 1650, "y1": 110, "x2": 2050, "y2": 710},
+        "build_grid": {"x0": 1670, "y0": 250, "cols": 4, "dx": 105, "dy": 85, "cap": 30},
+        "entryNode": "farm_south_gate",
+    },
+    "village_east": {
+        "kind": "village", "tile": "village", "label": "EAST VILLAGE",
+        "bounds": {"x1": 1650, "y1": 960, "x2": 2050, "y2": 2540},
+        "build_grid": {"x0": 1670, "y0": 980, "cols": 4, "dx": 100, "dy": 95, "cap": 30},
+        "entryNode": "village_east_gate",
+    },
+    "workshop_row": {
+        "kind": "workshop", "tile": "workshop", "label": "WORKSHOP ROW",
+        "bounds": {"x1": 2100, "y1": 110, "x2": 2500, "y2": 710},
+        "build_grid": {"x0": 2120, "y0": 250, "cols": 4, "dx": 100, "dy": 90, "cap": 24},
+        "entryNode": "workshop_row_gate",
+    },
+    "cave_deep": {
+        "kind": "cave", "tile": "cave", "label": "DEEP CAVE",
+        "bounds": {"x1": 2100, "y1": 960, "x2": 2500, "y2": 1560},
+        "build_grid": None, "entryNode": "cave_deep_gate",
+    },
 }
 
-ZONE_BOUNDS = {
-    "farm": {"x1": 500, "y1": 110, "x2": 920, "y2": 810},
-    "forest": {"x1": 1030, "y1": 110, "x2": 1550, "y2": 450},
-    "village": {"x1": 540, "y1": 960, "x2": 900, "y2": 2540},
-    "market": {"x1": 970, "y1": 1020, "x2": 1110, "y2": 1120},
-    "beach": {"x1": 230, "y1": 120, "x2": 400, "y2": 880},
-    "cave": {"x1": 1210, "y1": 1150, "x2": 1540, "y2": 1360},
-    "ocean": {"x1": 30, "y1": 120, "x2": 180, "y2": 880},
+# kind -> template used by _maybe_found_district() to instantiate a brand new
+# district of that kind into a claimed frontier plot. Only kinds that are
+# actually buildable get a template -- there's no reason to found more empty
+# forest/beach/ocean/market (single-instance by design), and a founded "cave"
+# would need real per-district mining logic it doesn't have, so cave growth is
+# covered by cave_deep already existing as a second starter site instead.
+DISTRICT_KIND_TEMPLATES = {
+    "farm": {"tile": "farm", "grid": {"cols": 4, "dx": 105, "dy": 85, "cap": 30}},
+    "village": {"tile": "village", "grid": {"cols": 4, "dx": 100, "dy": 95, "cap": 30}},
+    "workshop": {"tile": "workshop", "grid": {"cols": 4, "dx": 100, "dy": 90, "cap": 24}},
 }
-ZONE_NAMES = list(ZONE_CENTERS.keys())
+
+# project type -> the district kind it must be built in (farmers build farm
+# plots in a farm district, general village builds go up in a village
+# district, and the "workshop" structure itself belongs in a workshop/
+# industrial district). Falls back to "village" for any type not listed here
+# (covers future custom blueprint project types).
+PROJECT_KIND = {"house": "village", "wall": "village", "granary": "village",
+                "farm_plot": "farm", "workshop": "village"}
+
+# --- Road network: hand-authored starter graph + growable, same runtime-
+# mutable rationale as districts (a founded district needs to extend the
+# graph, not just read a frozen one). Edges are undirected [a, b] pairs; the
+# small size (a dozen-ish nodes even after several foundings) makes recomputing
+# all-pairs shortest paths via BFS on every graph change cheap (see
+# _recompute_road_paths / ROAD_PATH_CACHE).
+STARTER_ROAD_NODES = {
+    "village_hub": {"x": 740, "y": 900},
+    "farm_north_gate": {"x": 740, "y": 820},
+    "forest_gate": {"x": 1090, "y": 460},
+    "cave_east_gate": {"x": 1270, "y": 824},
+    "beach_gate": {"x": 400, "y": 800},
+    "market_gate": {"x": 1040, "y": 1000},
+    "east_hub": {"x": 1850, "y": 900},
+    "farm_south_gate": {"x": 1850, "y": 680},
+    "village_east_gate": {"x": 1850, "y": 960},
+    "workshop_row_gate": {"x": 2300, "y": 680},
+    "cave_deep_gate": {"x": 2300, "y": 960},
+}
+STARTER_ROAD_EDGES = [
+    ["farm_north_gate", "village_hub"],
+    ["village_hub", "forest_gate"],
+    ["village_hub", "cave_east_gate"],
+    ["village_hub", "beach_gate"],
+    ["village_hub", "market_gate"],
+    ["village_hub", "east_hub"],
+    ["east_hub", "farm_south_gate"],
+    ["east_hub", "village_east_gate"],
+    ["east_hub", "workshop_row_gate"],
+    ["east_hub", "cave_deep_gate"],
+]
+
+# Frontier: a fixed-size plot grid tiling everything OUTSIDE the starter
+# core's reserved footprint. _maybe_found_district() claims one plot at a time
+# as a buildable kind fills up and keeps stalling. This is deliberately NOT a
+# fully dynamic/streaming world (the outer WORLD_W/WORLD_H bound is fixed and
+# known upfront) -- just a generous, genuinely-unclaimed interior that the
+# simulation can grow into.
+FRONTIER_PLOT_W = 500
+FRONTIER_PLOT_H = 600
+CORE_RESERVED_BOUNDS = {"x1": 0, "y1": 0, "x2": 2600, "y2": 2700}
+MAX_TOTAL_DISTRICTS = 26          # generous safety valve; see _maybe_found_district
+DISTRICT_FOUND_STALL_THRESHOLD = 900  # frames of no kind activity before founding
+
+ZONE_NAMES = ["farm", "forest", "village", "market", "beach", "cave", "ocean", "workshop"]
 
 # --- Cadences / tuning (frame-gated, ported) ---
 FRAME_MS = 1000.0 / 60.0
@@ -137,6 +280,12 @@ RULE_KINDS = {"resource_tax", "custom"}
 MAX_CONCURRENT_LLM = 2
 LLM_MIN_GAP_MS = 250
 
+# Concurrent district builds: how many districts may have an active build
+# project at once, village-wide. Start conservative -- with a fixed 8-12 agent
+# roster, spreading across too many simultaneous builds means none ever
+# finishes. Tune empirically.
+MAX_CONCURRENT_PROJECTS = 3
+
 # --- Registries (ported from index.html) ---
 PROJECT_TEMPLATES = {
     "house": {"name": "House", "needs": {"wood": 3, "stone": 1, "food": 1, "fish": 1}, "visualStyle": "house"},
@@ -172,18 +321,18 @@ SEED_RECIPES = {
 } if CRAFTING_ENABLED else {}
 
 AGENT_DEFS = [
-    {"id": 1, "name": "Aria", "role": "farmer", "personality": "hardworking and cautious", "color": "#4CAF50", "zone": "farm"},
+    {"id": 1, "name": "Aria", "role": "farmer", "personality": "hardworking and cautious", "color": "#4CAF50", "zone": "farm_north"},
     {"id": 2, "name": "Marco", "role": "trader", "personality": "sociable and opportunistic", "color": "#FF9800", "zone": "market"},
-    {"id": 3, "name": "Zara", "role": "builder", "personality": "creative and methodical", "color": "#9C27B0", "zone": "village"},
-    {"id": 4, "name": "Rex", "role": "guard", "personality": "loyal and aggressive", "color": "#F44336", "zone": "village"},
+    {"id": 3, "name": "Zara", "role": "builder", "personality": "creative and methodical", "color": "#9C27B0", "zone": "village_core"},
+    {"id": 4, "name": "Rex", "role": "guard", "personality": "loyal and aggressive", "color": "#F44336", "zone": "village_core"},
     {"id": 5, "name": "Luna", "role": "gatherer", "personality": "curious and adventurous", "color": "#2196F3", "zone": "forest"},
     {"id": 6, "name": "Finn", "role": "fisher", "personality": "patient and quiet", "color": "#00BCD4", "zone": "beach"},
-    {"id": 7, "name": "Mia", "role": "healer", "personality": "empathetic and generous", "color": "#E91E63", "zone": "village"},
-    {"id": 8, "name": "Colt", "role": "miner", "personality": "stubborn and hardworking", "color": "#795548", "zone": "cave"},
+    {"id": 7, "name": "Mia", "role": "healer", "personality": "empathetic and generous", "color": "#E91E63", "zone": "village_core"},
+    {"id": 8, "name": "Colt", "role": "miner", "personality": "stubborn and hardworking", "color": "#795548", "zone": "cave_east"},
     {"id": 9, "name": "Ivy", "role": "scout", "personality": "fast and observant", "color": "#8BC34A", "zone": "forest"},
     {"id": 10, "name": "Dex", "role": "blacksmith", "personality": "focused and proud", "color": "#607D8B", "zone": "market"},
     {"id": 11, "name": "Nova", "role": "explorer", "personality": "bold and impulsive", "color": "#FF5722", "zone": "beach"},
-    {"id": 12, "name": "Sage", "role": "elder", "personality": "wise and slow-moving", "color": "#FFC107", "zone": "village"},
+    {"id": 12, "name": "Sage", "role": "elder", "personality": "wise and slow-moving", "color": "#FFC107", "zone": "village_core"},
 ]
 ROSTER = ["Zara", "Sage", "Aria", "Luna", "Marco", "Colt", "Finn", "Mia"]
 
@@ -194,27 +343,91 @@ def _dist(ax, ay, bx, by):
     return math.sqrt(dx * dx + dy * dy)
 
 
-def get_zone(x, y):
-    # NOTE: these x-ranges are intentionally wider than ZONE_BOUNDS in places
-    # (e.g. village's x1=500 vs ZONE_BOUNDS' 540) -- market is checked first
-    # because it sits inside this function's own village rectangle. Only the
-    # y-values were shifted/extended to match the world-geometry expansion;
-    # x-ranges are unchanged from before that expansion.
-    if 950 <= x <= 1130 and 1020 <= y <= 1140:
-        return "market"
-    if 0 <= x <= 200:
-        return "ocean"
-    if 200 <= x <= 420:
-        return "beach"
-    if 480 <= x <= 940 and 90 <= y <= 830:
-        return "farm"
-    if 1010 <= x <= 1570 and 90 <= y <= 470:
-        return "forest"
-    if 500 <= x <= 1180 and 940 <= y <= 2560:
-        return "village"
-    if 1190 <= x <= 1570 and 1130 <= y <= 1380:
-        return "cave"
+def _rects_overlap(a, b):
+    return a["x1"] < b["x2"] and b["x1"] < a["x2"] and a["y1"] < b["y2"] and b["y1"] < a["y2"]
+
+
+def _validate_districts(districts):
+    """Assert no two district rectangles overlap. Callable both at module load
+    (against STARTER_DISTRICTS) and at runtime (against the live
+    civilization["districts"], re-checked after any founding) so a bad
+    hand-authored edit or a founding-logic bug fails loudly instead of
+    silently corrupting get_zone/get_district results."""
+    ids = list(districts.keys())
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            a, b = districts[ids[i]]["bounds"], districts[ids[j]]["bounds"]
+            if _rects_overlap(a, b):
+                raise AssertionError(f"district bounds overlap: {ids[i]!r} and {ids[j]!r}")
+
+
+def _validate_road_graph(nodes, edges):
+    """Assert every road node is reachable from every other (BFS from an
+    arbitrary root). Raises at module load and again after any founding, so a
+    missing/typo'd edge -- or a founding-logic bug -- fails loudly rather than
+    silently stranding a district."""
+    if not nodes:
+        return
+    adj = {n: [] for n in nodes}
+    for a, b in edges:
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+    root = next(iter(nodes))
+    seen = {root}
+    queue = deque([root])
+    while queue:
+        cur = queue.popleft()
+        for nxt in adj.get(cur, []):
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+    missing = set(nodes) - seen
+    if missing:
+        raise AssertionError(f"road graph has unreachable node(s): {sorted(missing)}")
+
+
+_validate_districts(STARTER_DISTRICTS)
+_validate_road_graph(STARTER_ROAD_NODES, STARTER_ROAD_EDGES)
+
+
+def _build_frontier_plots():
+    """Tile everything OUTSIDE the starter core's reserved footprint into a
+    fixed-size plot grid. _maybe_found_district() claims one plot at a time."""
+    plots = []
+    cols = WORLD_W // FRONTIER_PLOT_W
+    rows = WORLD_H // FRONTIER_PLOT_H
+    idx = 0
+    for r in range(rows):
+        for col in range(cols):
+            rect = {"x1": col * FRONTIER_PLOT_W, "y1": r * FRONTIER_PLOT_H,
+                    "x2": (col + 1) * FRONTIER_PLOT_W, "y2": (r + 1) * FRONTIER_PLOT_H}
+            if _rects_overlap(rect, CORE_RESERVED_BOUNDS):
+                continue
+            plots.append({"id": f"plot_{idx}", **rect, "claimed": False, "claimedBy": None})
+            idx += 1
+    return plots
+
+
+def get_zone(districts, x, y):
+    """kind at (x, y), or "path" if it's unclaimed ground (frontier or the
+    starter core's connecting paths). Back-compat: agent["currentZone"] keeps
+    meaning "kind", exactly as before districts existed."""
+    for d in districts.values():
+        b = d["bounds"]
+        if b["x1"] <= x <= b["x2"] and b["y1"] <= y <= b["y2"]:
+            return d["kind"]
     return "path"
+
+
+def get_district(districts, x, y):
+    """The specific district id at (x, y), or None. New alongside get_zone:
+    callers that need the specific instance (build-grid/road targeting) use
+    this instead of the kind-only get_zone."""
+    for did, d in districts.items():
+        b = d["bounds"]
+        if b["x1"] <= x <= b["x2"] and b["y1"] <= y <= b["y2"]:
+            return did
+    return None
 
 
 class SimEngine:
@@ -244,6 +457,7 @@ class SimEngine:
         self._inflight = set()      # agent names with a think job in flight
         self.RECIPES = {}
         self.roster_size = roster_size
+        self.ROAD_PATH_CACHE = {}   # (nodeA, nodeB) -> [node ids]; see _recompute_road_paths
         self._reset_world(roster_size)
 
     # --- roster + cold start ---
@@ -269,7 +483,9 @@ class SimEngine:
     def _make_agents(self, active_defs):
         agents = []
         for i, d in enumerate(active_defs):
-            center = ZONE_CENTERS[d["zone"]]
+            district = self.civilization["districts"][d["zone"]]
+            b = district["bounds"]
+            center = {"x": (b["x1"] + b["x2"]) / 2, "y": (b["y1"] + b["y2"]) / 2}
             ox = (i % 3 - 1) * 22
             oy = ((i // 3) % 3 - 1) * 22
             speed = 2.8
@@ -286,7 +502,8 @@ class SimEngine:
                 "memory": {"working": [], "shortTerm": [], "longTerm": []},
                 "resources": {"food": 2, "wood": 0, "gold": 0},
                 "relationships": {}, "inbox": [], "beliefs": set(), "votes": {},
-                "currentZone": d["zone"], "message": None, "messageTimer": 0,
+                "currentZone": district["kind"], "currentDistrict": d["zone"],
+                "waypoints": [], "message": None, "messageTimer": 0,
                 "thinkTimer": 0, "thinkInterval": 300, "isThinking": False,
                 "lastAction": None, "lastReasoning": None, "consecutiveTalks": 0,
                 "pendingThink": False, "assignedTask": None, "idleCycles": 0,
@@ -304,16 +521,29 @@ class SimEngine:
                 a["thinkInterval"] = 240
             a["thinkTimer"] = i * 30
             a["idleFrames"] = 0
-            self._set_agent_target(a, a["currentZone"])
+            self._set_agent_target(a, a["currentDistrict"])
         return agents
 
     def _reset_world(self, roster_size):
         self.RECIPES = {k: {"name": v["name"], "inputs": dict(v["inputs"]), "station": v["station"]}
                         for k, v in SEED_RECIPES.items()}
+        districts = json.loads(json.dumps(STARTER_DISTRICTS))
+        road_nodes = json.loads(json.dumps(STARTER_ROAD_NODES))
+        road_edges = [list(e) for e in STARTER_ROAD_EDGES]
+        district_projects = {did: None for did, d in districts.items() if d.get("build_grid")}
+        district_last_contribution = {did: 0 for did in district_projects}
         self.civilization = {
             "level": 1,
             "structures": [],
-            "activeProject": None,
+            "districts": districts,
+            "roadNodes": road_nodes,
+            "roadEdges": road_edges,
+            "frontierPlots": _build_frontier_plots(),
+            "districtProjects": district_projects,
+            "districtLastContribution": district_last_contribution,
+            "kindLastActivityFrame": {},
+            "lastDistrictFoundFrame": 0,
+            "frontierExhaustedLogged": False,
             "completedProjects": 0,
             "nextStructureId": 1,
             "resourceRegistry": {**{k: dict(v) for k, v in BASE_RESOURCES.items()},
@@ -324,7 +554,6 @@ class SimEngine:
             "pendingRecipes": [],
             "rejectedRecipeIds": set(),
             "directive": None,
-            "lastProjectContributionFrame": 0,
             "lastBlueprintActivityFrame": 0,
             "lastCraftActivityFrame": 0,
             "lastRuleActivityFrame": 0,
@@ -337,6 +566,7 @@ class SimEngine:
             "taxDue": 0,
             "taxPaid": 0,
         }
+        self._recompute_road_paths()
         active_defs = self._select_active_defs(roster_size)
         self.agent_names = set(d["name"] for d in active_defs)
         self.agents = self._make_agents(active_defs)
@@ -451,17 +681,116 @@ class SimEngine:
     def _distance_to(self, a, b):
         return _dist(a["x"], a["y"], b["x"], b["y"])
 
-    def _set_agent_target(self, agent, zone_name):
-        bounds = ZONE_BOUNDS.get(zone_name)
-        if not bounds:
-            center = ZONE_CENTERS.get(zone_name)
-            if not center:
-                return
-            agent["targetX"] = center["x"]
-            agent["targetY"] = center["y"]
+    # --- districts + roads ---
+    def _districts_of_kind(self, kind):
+        return [did for did, d in self.civilization["districts"].items() if d["kind"] == kind]
+
+    def _resolve_target_district(self, target, agent=None):
+        """Resolve a decision/movement 'target' to a concrete district id.
+        Accepts either a specific district id, or (hedge for the prompt-tuning
+        transition / any remaining kind-based call site) a kind name like
+        "farm", in which case the nearest district of that kind to `agent`
+        (or simply the first one, if no agent given) is used instead of
+        failing outright."""
+        c = self.civilization
+        if not target:
+            return None
+        if target in c["districts"]:
+            return target
+        ids = self._districts_of_kind(target)
+        if not ids:
+            return None
+        if agent is None or len(ids) == 1:
+            return ids[0]
+        best, best_d = ids[0], float("inf")
+        for did in ids:
+            b = c["districts"][did]["bounds"]
+            cx, cy = (b["x1"] + b["x2"]) / 2, (b["y1"] + b["y2"]) / 2
+            dd = _dist(agent["x"], agent["y"], cx, cy)
+            if dd < best_d:
+                best_d, best = dd, did
+        return best
+
+    def _nearest_road_node(self, x, y):
+        nodes = self.civilization["roadNodes"]
+        best, best_d = None, float("inf")
+        for nid, n in nodes.items():
+            dd = _dist(x, y, n["x"], n["y"])
+            if dd < best_d:
+                best_d, best = dd, nid
+        return best
+
+    def _recompute_road_paths(self):
+        """All-pairs shortest paths via BFS. Cheap at this graph's size (a
+        dozen-ish nodes even after several foundings) -- recomputed on cold
+        start and again after any district-founding graph change, not cached
+        as a one-time module-load constant, since the graph itself isn't one."""
+        nodes = self.civilization["roadNodes"]
+        edges = self.civilization["roadEdges"]
+        adj = {n: [] for n in nodes}
+        for a, b in edges:
+            adj.setdefault(a, []).append(b)
+            adj.setdefault(b, []).append(a)
+        cache = {}
+        for start in nodes:
+            prev = {start: None}
+            queue = deque([start])
+            while queue:
+                cur = queue.popleft()
+                for nxt in adj.get(cur, []):
+                    if nxt not in prev:
+                        prev[nxt] = cur
+                        queue.append(nxt)
+            for end in prev:
+                path = []
+                node = end
+                while node is not None:
+                    path.append(node)
+                    node = prev[node]
+                path.reverse()
+                cache[(start, end)] = path
+        self.ROAD_PATH_CACHE = cache
+
+    def _road_path_between(self, agent, dest_district_id):
+        c = self.civilization
+        dest_node = c["districts"][dest_district_id].get("entryNode")
+        origin_district = agent.get("currentDistrict")
+        origin_node = None
+        if origin_district and origin_district in c["districts"]:
+            origin_node = c["districts"][origin_district].get("entryNode")
+        if not origin_node:
+            origin_node = self._nearest_road_node(agent["x"], agent["y"])
+        if not dest_node:
+            dest_node = self._nearest_road_node(agent["x"], agent["y"])
+        if not origin_node or not dest_node or origin_node == dest_node:
+            return []
+        return self.ROAD_PATH_CACHE.get((origin_node, dest_node)) or []
+
+    def _set_agent_target(self, agent, target):
+        """Route the agent to a random interior point of the destination
+        district. When ROADS_ENABLED, travel goes via cached road-node paths
+        (agent["waypoints"]) instead of a straight line -- this is general
+        travel (idle wander, craft-station redirects, move_to_district);
+        move_to_agent/trade/talk and Sage-emergency rescue use
+        _set_agent_target_to_agent instead and always stay direct."""
+        district_id = self._resolve_target_district(target, agent)
+        if not district_id:
             return
-        agent["targetX"] = bounds["x1"] + random.random() * (bounds["x2"] - bounds["x1"])
-        agent["targetY"] = bounds["y1"] + random.random() * (bounds["y2"] - bounds["y1"])
+        bounds = self.civilization["districts"][district_id]["bounds"]
+        dest_x = bounds["x1"] + random.random() * (bounds["x2"] - bounds["x1"])
+        dest_y = bounds["y1"] + random.random() * (bounds["y2"] - bounds["y1"])
+        if not ROADS_ENABLED:
+            agent["targetX"] = dest_x
+            agent["targetY"] = dest_y
+            agent["waypoints"] = []
+            return
+        path_nodes = self._road_path_between(agent, district_id)
+        waypoints = [dict(self.civilization["roadNodes"][n]) for n in path_nodes]
+        waypoints.append({"x": dest_x, "y": dest_y})
+        agent["waypoints"] = waypoints[1:]
+        first = waypoints[0]
+        agent["targetX"] = first["x"]
+        agent["targetY"] = first["y"]
 
     def _set_agent_target_to_agent(self, agent, target_name):
         target = self._find_agent(target_name)
@@ -469,6 +798,7 @@ class SimEngine:
             return
         agent["targetX"] = target["x"] + (random.random() - 0.5) * 60
         agent["targetY"] = target["y"] + (random.random() - 0.5) * 60
+        agent["waypoints"] = []
 
     def _auto_move_toward_target(self, agent, target_name):
         if not target_name or target_name not in self.agent_names:
@@ -487,20 +817,29 @@ class SimEngine:
         if dist <= step:
             agent["x"] = agent["targetX"]
             agent["y"] = agent["targetY"]
-            agent["idleFrames"] = agent.get("idleFrames", 0) + 1
-            if agent["idleFrames"] >= 60:
-                if agent["currentZone"] not in ("path", "ocean"):
-                    wander = agent["currentZone"]
-                else:
-                    wander = random.choice(ZONE_NAMES)
-                self._set_agent_target(agent, wander)
-                agent["idleCycles"] = agent.get("idleCycles", 0) + 1
+            waypoints = agent.get("waypoints") or []
+            if waypoints:
+                nxt = waypoints.pop(0)
+                agent["targetX"] = nxt["x"]
+                agent["targetY"] = nxt["y"]
                 agent["idleFrames"] = 0
+            else:
+                agent["idleFrames"] = agent.get("idleFrames", 0) + 1
+                if agent["idleFrames"] >= 60:
+                    cur = agent.get("currentDistrict")
+                    if cur:
+                        wander = cur
+                    else:
+                        wander = random.choice(list(self.civilization["districts"].keys()))
+                    self._set_agent_target(agent, wander)
+                    agent["idleCycles"] = agent.get("idleCycles", 0) + 1
+                    agent["idleFrames"] = 0
         else:
             agent["x"] += (dx / dist) * step
             agent["y"] += (dy / dist) * step
             agent["idleFrames"] = 0
-        agent["currentZone"] = get_zone(agent["x"], agent["y"])
+        agent["currentZone"] = get_zone(self.civilization["districts"], agent["x"], agent["y"])
+        agent["currentDistrict"] = get_district(self.civilization["districts"], agent["x"], agent["y"])
 
     # --- survival ---
     def _first_edible(self, agent):
@@ -578,23 +917,102 @@ class SimEngine:
         self.apply_decision(agent, {"action": "heal_agent", "target": target["name"],
                                     "message": None, "reasoning": "Sage-priority emergency."})
 
-    # --- project helpers ---
-    def _project_progress_text(self):
-        p = self.civilization["activeProject"]
+    # --- project helpers (concurrent per-district builds) ---
+    def _touch_kind_activity(self, kind):
+        self.civilization["kindLastActivityFrame"][kind] = self.frameTick
+
+    def _active_project_districts(self):
+        return [did for did, p in self.civilization["districtProjects"].items() if p]
+
+    def _buildable_district_ids(self):
+        return [did for did, d in self.civilization["districts"].items() if d.get("build_grid")]
+
+    def _resolve_contribution_district(self, agent, target_district=None):
+        """Which district a contribute/collect/build decision should act on:
+        an explicit target_district with an active project, else the agent's
+        own district if it has one, else the most-stalled active district
+        village-wide (mirrors the old single-project "the project" default,
+        generalized to pick fairly across concurrent builds)."""
+        c = self.civilization
+        if target_district and c["districtProjects"].get(target_district):
+            return target_district
+        cur = agent.get("currentDistrict")
+        if cur and c["districtProjects"].get(cur):
+            return cur
+        actives = self._active_project_districts()
+        if not actives:
+            return None
+        actives.sort(key=lambda did: c["districtLastContribution"].get(did, 0))
+        return actives[0]
+
+    def _resolve_build_district(self, agent, type_, target_district=None):
+        """Which district a new project of `type_` should start in: an
+        explicit target_district (if it's buildable and idle), else the
+        agent's current district (if its kind matches and it's idle and
+        under cap), else the nearest matching-kind buildable district with
+        room, else the nearest matching-kind buildable district at all."""
+        c = self.civilization
+        kind = PROJECT_KIND.get(type_, "village")
+
+        def usable(did):
+            d = c["districts"].get(did)
+            return bool(d and d.get("build_grid") and d["kind"] == kind and not c["districtProjects"].get(did))
+
+        if target_district and usable(target_district):
+            return target_district
+        cur = agent.get("currentDistrict")
+        if cur and usable(cur):
+            return cur
+        candidates = [did for did in self._buildable_district_ids()
+                      if c["districts"][did]["kind"] == kind and not c["districtProjects"].get(did)]
+        if not candidates:
+            return None
+        with_room = [did for did in candidates
+                     if self._district_structure_count(did) < c["districts"][did]["build_grid"]["cap"]]
+        pool = with_room or candidates
+        return min(pool, key=lambda did: self._distance_to_district(agent, did))
+
+    def _distance_to_district(self, agent, district_id):
+        b = self.civilization["districts"][district_id]["bounds"]
+        cx, cy = (b["x1"] + b["x2"]) / 2, (b["y1"] + b["y2"]) / 2
+        return _dist(agent["x"], agent["y"], cx, cy)
+
+    def _project_progress_text(self, district_id):
+        p = self.civilization["districtProjects"].get(district_id)
         if not p:
             return "none"
-        parts = []
-        for res, need in p["needs"].items():
-            have = p["contributed"].get(res, 0)
-            parts.append(f"{res} {have}/{need}")
+        parts = [f"{res} {p['contributed'].get(res, 0)}/{need}" for res, need in p["needs"].items()]
         return ", ".join(parts)
 
-    def _first_unmet_project_resource(self):
-        p = self.civilization["activeProject"]
+    def _active_projects_brief(self):
+        actives = self._active_project_districts()
+        if not actives:
+            return "none"
+        c = self.civilization
+        return "; ".join(f"{c['districtProjects'][did]['name']} in {did}" for did in actives)
+
+    def _active_projects_progress_text(self):
+        actives = self._active_project_districts()
+        if not actives:
+            return "none"
+        return "; ".join(f"{did}: {self._project_progress_text(did)}" for did in actives)
+
+    def _first_unmet_project_resource(self, district_id):
+        p = self.civilization["districtProjects"].get(district_id) if district_id else None
         if not p:
             return None
         for res in p["needs"]:
-            if p["contributed"].get(res, 0) < (p["needs"].get(res, 0)):
+            if p["contributed"].get(res, 0) < p["needs"].get(res, 0):
+                return res
+        return None
+
+    def _first_unmet_resource_anywhere(self):
+        """First unmet resource across ANY active district project -- used by
+        the emergent-role gap-filling logic, which cares about "is anything
+        stalled village-wide" rather than one specific district."""
+        for did in self._active_project_districts():
+            res = self._first_unmet_project_resource(did)
+            if res:
                 return res
         return None
 
@@ -606,8 +1024,9 @@ class SimEngine:
         return [rid for rid, d in self.civilization["resourceRegistry"].items()
                 if d.get("gatherZone") == zone]
 
-    def _try_contribute_resource(self, agent, res):
-        p = self.civilization["activeProject"]
+    def _try_contribute_resource(self, agent, res, district_id=None):
+        district_id = district_id or self._resolve_contribution_district(agent)
+        p = self.civilization["districtProjects"].get(district_id) if district_id else None
         if not p or not res:
             return None
         need = p["needs"].get(res, 0)
@@ -617,34 +1036,35 @@ class SimEngine:
         agent["resources"][res] -= 1
         p["contributed"][res] = have + 1
         agent["lastContributedFrame"] = self.frameTick
-        self.civilization["lastProjectContributionFrame"] = self.frameTick
+        self.civilization["districtLastContribution"][district_id] = self.frameTick
+        self._touch_kind_activity(self.civilization["districts"][district_id]["kind"])
         self._enforce_resource_tax(agent, res)
-        return f"{agent['name']} contributed {res} to {p['name']}"
+        return f"{agent['name']} contributed {res} to {p['name']} ({district_id})"
 
-    def _is_project_complete(self):
-        p = self.civilization["activeProject"]
+    def _is_project_complete(self, district_id):
+        p = self.civilization["districtProjects"].get(district_id) if district_id else None
         if not p:
             return False
-        for res, need in p["needs"].items():
-            if p["contributed"].get(res, 0) < need:
-                return False
-        return True
+        return all(p["contributed"].get(res, 0) >= need for res, need in p["needs"].items())
 
-    def _build_region_for(self, type_):
-        if type_ == "farm_plot":
-            return {"x0": 520, "y0": 250, "cols": 4, "dx": 105, "dy": 85}
-        return {"x0": 560, "y0": 980, "cols": 4, "dx": 100, "dy": 95}
+    def _district_structure_count(self, district_id):
+        return sum(1 for s in self.civilization["structures"] if s.get("districtId") == district_id)
 
-    def _find_structure_spot(self, type_):
-        r = self._build_region_for(type_)
-        for i in range(240):
-            x = r["x0"] + (i % r["cols"]) * r["dx"]
-            y = r["y0"] + (i // r["cols"]) * r["dy"]
-            taken = any(abs(s["x"] - x) < 70 and abs(s["y"] - y) < 80
-                        for s in self.civilization["structures"])
+    def _find_structure_spot(self, district_id):
+        d = self.civilization["districts"].get(district_id)
+        grid = d.get("build_grid") if d else None
+        if not grid:
+            b = d["bounds"] if d else {"x1": 0, "y1": 0}
+            return {"x": b["x1"], "y": b["y1"]}
+        existing = [s for s in self.civilization["structures"] if s.get("districtId") == district_id]
+        cap = grid.get("cap", 30)
+        for i in range(cap):
+            x = grid["x0"] + (i % grid["cols"]) * grid["dx"]
+            y = grid["y0"] + (i // grid["cols"]) * grid["dy"]
+            taken = any(abs(s["x"] - x) < 70 and abs(s["y"] - y) < 80 for s in existing)
             if not taken:
                 return {"x": x, "y": y}
-        return {"x": r["x0"], "y": r["y0"]}
+        return None  # district's build grid is at capacity
 
     def _check_civilization_level(self):
         new_level = (self.civilization["completedProjects"] // 3) + 1
@@ -652,26 +1072,31 @@ class SimEngine:
             self.civilization["level"] = new_level
             self._push_activity(f"Civilization reached level {self.civilization['level']}!")
 
-    def _build_active_structure(self, agent):
+    def _build_active_structure(self, agent, district_id=None):
         c = self.civilization
-        struct_type = c["activeProject"]["type"]
-        spot = self._find_structure_spot(struct_type)
+        district_id = district_id or self._resolve_contribution_district(agent)
+        project = c["districtProjects"].get(district_id) if district_id else None
+        if not project:
+            return f"{agent['name']} has nothing to build"
+        spot = self._find_structure_spot(district_id)
+        if not spot:
+            return f"{agent['name']} finds {district_id} has no room left to build"
+        struct_type = project["type"]
         c["structures"].append({
             "id": c["nextStructureId"], "type": struct_type,
             "x": spot["x"], "y": spot["y"],
-            "visualStyle": c["activeProject"].get("visualStyle") or "generic",
-            "name": c["activeProject"]["name"],
+            "visualStyle": project.get("visualStyle") or "generic",
+            "name": project["name"], "districtId": district_id,
         })
         c["nextStructureId"] += 1
-        built_name = c["activeProject"]["name"]
-        c["activeProject"] = None
+        built_name = project["name"]
+        c["districtProjects"][district_id] = None
         c["completedProjects"] += 1
         agent["lastContributedFrame"] = self.frameTick
-        c["lastProjectContributionFrame"] = self.frameTick
+        c["districtLastContribution"][district_id] = self.frameTick
+        self._touch_kind_activity(c["districts"][district_id]["kind"])
         self._check_civilization_level()
-        where = get_zone(spot["x"], spot["y"])
-        place = "the village outskirts" if where == "path" else f"the {where}"
-        return f"{agent['name']} built {built_name} at {place}"
+        return f"{agent['name']} built {built_name} in {district_id}"
 
     def _project_resource_list(self, project):
         return " and ".join(project["needs"].keys())
@@ -682,25 +1107,31 @@ class SimEngine:
             return random.choice(pref) if pref else "house"
         return pref
 
-    def _start_project_for(self, agent, target):
+    def _start_project_for(self, agent, target, target_district=None):
         c = self.civilization
-        if c["activeProject"]:
-            return None
         type_ = target if (target and target in c["projectRegistry"]) else self._role_default_project(agent["role"])
         tmpl = c["projectRegistry"].get(type_)
         if not tmpl:
             return None
+        active_count = len(self._active_project_districts())
+        if active_count >= MAX_CONCURRENT_PROJECTS:
+            return None
+        district_id = self._resolve_build_district(agent, type_, target_district)
+        if not district_id or c["districtProjects"].get(district_id):
+            return None
         contributed = {res: 0 for res in tmpl["needs"]}
-        c["activeProject"] = {
+        c["districtProjects"][district_id] = {
             "type": type_, "name": tmpl["name"], "needs": dict(tmpl["needs"]),
             "contributed": contributed, "visualStyle": tmpl.get("visualStyle") or "generic",
+            "districtId": district_id,
         }
-        c["lastProjectContributionFrame"] = self.frameTick
+        c["districtLastContribution"][district_id] = self.frameTick
+        self._touch_kind_activity(c["districts"][district_id]["kind"])
         if agent["role"] == "elder":
-            c["directive"] = (f"Elder {agent['name']} directs: build the {tmpl['name']}; "
+            c["directive"] = (f"Elder {agent['name']} directs: build the {tmpl['name']} in {district_id}; "
                               f"gather {self._project_resource_list(tmpl)}.")
-            return f"{agent['name']} started {tmpl['name']} project. {c['directive']}"
-        return f"{agent['name']} started {tmpl['name']} project"
+            return f"{agent['name']} started {tmpl['name']} project in {district_id}. {c['directive']}"
+        return f"{agent['name']} started {tmpl['name']} project in {district_id}"
 
     def _is_idle(self, agent):
         return agent["role"] != "elder" and (
@@ -715,13 +1146,14 @@ class SimEngine:
 
     def _task_for_agent(self, agent):
         c = self.civilization
-        if c["activeProject"]:
-            ap = c["activeProject"]
+        district_id = self._resolve_contribution_district(agent)
+        ap = c["districtProjects"].get(district_id) if district_id else None
+        if ap:
             lacking = next((res for res in ap["needs"]
                             if ap["contributed"].get(res, 0) < ap["needs"][res]), None)
             if lacking:
-                return f"gather or contribute {lacking} to the {ap['name']}"
-            return f"help finish the {ap['name']}"
+                return f"gather or contribute {lacking} to the {ap['name']} in {district_id}"
+            return f"help finish the {ap['name']} in {district_id}"
         project = c["projectRegistry"].get(self._role_default_project(agent["role"])) \
             or c["projectRegistry"]["house"]
         return f"prepare to start a {project['name']} project"
@@ -1024,8 +1456,9 @@ class SimEngine:
                 best_count, best = count, key
         return best if best_count > 0 else None
 
-    def _pick_contribution_resource(self, agent, decision):
-        p = self.civilization["activeProject"]
+    def _pick_contribution_resource(self, agent, decision, district_id=None):
+        district_id = district_id or self._resolve_contribution_district(agent, decision.get("target_district"))
+        p = self.civilization["districtProjects"].get(district_id) if district_id else None
         if not p:
             return None
         target = decision.get("target")
@@ -1125,9 +1558,9 @@ class SimEngine:
         return EMERGENT_ROLES and not self._role_specialty_resource(role) and role != "elder"
 
     def _village_needed_role(self):
-        if not EMERGENT_ROLES or not self.civilization["activeProject"]:
+        if not EMERGENT_ROLES or not self._active_project_districts():
             return None
-        unmet = self._first_unmet_project_resource()
+        unmet = self._first_unmet_resource_anywhere()
         if not unmet:
             return None
         roles = self.d["RESOURCE_GATHER_ROLES"].get(unmet)
@@ -1157,7 +1590,7 @@ class SimEngine:
             return
         self.civilization["lastRoleSwitchFrame"] = self.frameTick
         agent["goal"] = None
-        unmet = self._first_unmet_project_resource()
+        unmet = self._first_unmet_resource_anywhere()
         self.apply_decision(agent, {
             "action": "switch_role", "new_role": needed_role,
             "reasoning": f"The village has no one gathering {unmet}; "
@@ -1167,36 +1600,144 @@ class SimEngine:
     def _maybe_force_contribution(self):
         """Deterministic backstop for the build-progression stall where an
         agent (often off-spec, e.g. a trader holding traded stone) sits on a
-        resource the active project needs but the LLM never volunteers
+        resource an active project needs but the LLM never volunteers
         contribute_resources for them. Mirrors _maybe_auto_switch_role /
         _maybe_advance_rules: fires only after a real stall, so it never
-        preempts normal LLM-driven play."""
+        preempts normal LLM-driven play. Generalized to loop every district
+        with an active project (not just one global project) -- same
+        stall-gated guarantee, per district."""
         c = self.civilization
-        p = c["activeProject"]
-        if not p:
+        for district_id in self._active_project_districts():
+            p = c["districtProjects"][district_id]
+            if self.frameTick - c["districtLastContribution"].get(district_id, 0) < STALL_THRESHOLD:
+                continue
+            # Check every still-needed resource, not just the first: e.g. a
+            # build stuck on "stone 0/1, food 0/1" with no stone holders but
+            # several food holders must still be able to progress on food.
+            unmet_resources = [res for res, need in p["needs"].items()
+                                if p["contributed"].get(res, 0) < need]
+            holder, unmet = None, None
+            for res in unmet_resources:
+                cands = [a for a in self.agents
+                         if not a["incapacitated"] and a["resources"].get(res, 0) > 0]
+                if cands:
+                    unmet = res
+                    holder = max(cands, key=lambda a: a["resources"].get(res, 0))
+                    break
+            if not holder:
+                continue
+            holder["goal"] = None
+            self.apply_decision(holder, {
+                "action": "contribute_resources", "target": unmet, "target_district": district_id,
+                "reasoning": f"Build has stalled in {district_id}; contributing my {unmet} to it now."})
+
+    # --- idle-district backstop (concurrent builds) ---
+    def _maybe_start_idle_district_project(self):
+        """With multiple buildable districts, nothing today encourages the
+        LLM to spread work across them -- it's plausible the model fixates on
+        one district indefinitely. Deterministically start a project in a
+        buildable, idle district that has an agent standing in it, mirroring
+        _maybe_advance_rules's shape (cooldown-gated, calls into normal state
+        mutation)."""
+        c = self.civilization
+        if len(self._active_project_districts()) >= MAX_CONCURRENT_PROJECTS:
             return
-        if self.frameTick - c["lastProjectContributionFrame"] < STALL_THRESHOLD:
+        if self.frameTick - c.get("lastIdleDistrictCheckFrame", 0) < STALL_THRESHOLD:
             return
-        # Check every still-needed resource, not just the first: e.g. a build
-        # stuck on "stone 0/1, food 0/1" with no stone holders but several
-        # food holders must still be able to make progress on food.
-        unmet_resources = [res for res, need in p["needs"].items()
-                            if p["contributed"].get(res, 0) < need]
-        holder = None
-        unmet = None
-        for res in unmet_resources:
-            cands = [a for a in self.agents
-                     if not a["incapacitated"] and a["resources"].get(res, 0) > 0]
-            if cands:
-                unmet = res
-                holder = max(cands, key=lambda a: a["resources"].get(res, 0))
-                break
-        if not holder:
+        c["lastIdleDistrictCheckFrame"] = self.frameTick
+        for district_id in self._buildable_district_ids():
+            if c["districtProjects"].get(district_id):
+                continue
+            if self._district_structure_count(district_id) >= c["districts"][district_id]["build_grid"]["cap"]:
+                continue
+            occupant = next((a for a in self.agents
+                             if not a["incapacitated"] and a.get("currentDistrict") == district_id), None)
+            if not occupant:
+                continue
+            occupant["goal"] = None
+            self.apply_decision(occupant, {
+                "action": "start_project", "target_district": district_id,
+                "reasoning": f"No build is underway in {district_id} yet; starting one so work spreads out."})
             return
-        holder["goal"] = None
-        self.apply_decision(holder, {
-            "action": "contribute_resources", "target": unmet,
-            "reasoning": f"Build has stalled; contributing my {unmet} to the project now."})
+
+    # --- district founding (the open-world mechanism) ---
+    def _kind_at_capacity(self, kind):
+        ids = [did for did, d in self.civilization["districts"].items()
+               if d["kind"] == kind and d.get("build_grid")]
+        if not ids:
+            return False
+        return all(self._district_structure_count(did) >= self.civilization["districts"][did]["build_grid"]["cap"]
+                   for did in ids)
+
+    def _claim_frontier_plot(self):
+        for plot in self.civilization["frontierPlots"]:
+            if not plot["claimed"]:
+                return plot
+        return None
+
+    def _found_district(self, kind, tmpl, plot):
+        c = self.civilization
+        n = sum(1 for d in c["districts"].values() if d["kind"] == kind) + 1
+        did = f"{kind}_{n}"
+        while did in c["districts"]:
+            n += 1
+            did = f"{kind}_{n}"
+        grid_t = tmpl["grid"]
+        bounds = {"x1": plot["x1"], "y1": plot["y1"], "x2": plot["x2"], "y2": plot["y2"]}
+        entry_node = f"{did}_gate"
+        cx, cy = (bounds["x1"] + bounds["x2"]) / 2, (bounds["y1"] + bounds["y2"]) / 2
+        nearest = self._nearest_road_node(cx, cy)
+        c["districts"][did] = {
+            "kind": kind, "tile": tmpl["tile"], "label": f"{kind.upper()} {n}",
+            "bounds": bounds,
+            "build_grid": {"x0": bounds["x1"] + 20, "y0": bounds["y1"] + 40,
+                           "cols": grid_t["cols"], "dx": grid_t["dx"], "dy": grid_t["dy"], "cap": grid_t["cap"]},
+            "entryNode": entry_node,
+        }
+        c["districtProjects"][did] = None
+        c["districtLastContribution"][did] = self.frameTick
+        plot["claimed"] = True
+        plot["claimedBy"] = did
+        c["roadNodes"][entry_node] = {"x": cx, "y": cy}
+        if nearest:
+            c["roadEdges"].append([entry_node, nearest])
+        c["lastDistrictFoundFrame"] = self.frameTick
+        self._recompute_road_paths()
+        _validate_districts(c["districts"])
+        _validate_road_graph(c["roadNodes"], c["roadEdges"])
+        self._push_activity(f"The village claims new land in the frontier for a {kind} district ({did}).")
+        self._log_benchmark("district_founded", len(c["districts"]), {"id": did, "kind": kind})
+
+    def _maybe_found_district(self):
+        """Deterministic, tick-gated backstop (same shape as
+        _maybe_advance_rules/_maybe_force_contribution) that founds a new
+        district of a buildable kind once every existing district of that
+        kind is at/near capacity AND that kind's contribution activity keeps
+        stalling -- i.e. the civilization has run out of room to build more
+        of something and is actively trying to. This is the mechanism that
+        makes the world genuinely open rather than just bigger-but-finite."""
+        c = self.civilization
+        if len(c["districts"]) >= MAX_TOTAL_DISTRICTS:
+            return
+        if self.frameTick - c.get("lastDistrictFoundFrame", 0) < DISTRICT_FOUND_STALL_THRESHOLD:
+            return
+        for kind, tmpl in DISTRICT_KIND_TEMPLATES.items():
+            if not self._kind_at_capacity(kind):
+                continue
+            if self.frameTick - c["kindLastActivityFrame"].get(kind, 0) < DISTRICT_FOUND_STALL_THRESHOLD:
+                continue
+            plot = self._claim_frontier_plot()
+            if not plot:
+                # Treat "no unclaimed frontier plot" as a silent no-op (log
+                # once) rather than an error -- an extremely distant edge
+                # case given the frontier is sized generously relative to
+                # MAX_TOTAL_DISTRICTS, but cheap to guard against.
+                if not c.get("frontierExhaustedLogged"):
+                    self._push_activity("The frontier has no more unclaimed land left to expand into.")
+                    c["frontierExhaustedLogged"] = True
+                continue
+            self._found_district(kind, tmpl, plot)
+            return  # one founding per gate check keeps this easy to reason about
 
     # --- rules backstop ---
     def _maybe_advance_rules(self):
@@ -1323,11 +1864,11 @@ class SimEngine:
         is_move_only = action.startswith("move_to_") or action == "rest"
         agent["consecutiveIdleMoves"] = (agent.get("consecutiveIdleMoves", 0) + 1) if is_move_only else 0
 
-        if action in ("move_to_farm", "move_to_market", "move_to_forest",
-                      "move_to_beach", "move_to_village", "move_to_cave"):
-            zone = action.replace("move_to_", "")
-            self._set_agent_target(agent, zone)
-            summary = f"{agent['name']} heads to the {zone}"
+        if action == "move_to_district":
+            target = decision.get("target")
+            self._set_agent_target(agent, target)
+            district_id = self._resolve_target_district(target, agent) or target or "somewhere"
+            summary = f"{agent['name']} heads to {district_id}"
 
         elif action == "move_to_agent":
             target = decision.get("target")
@@ -1340,13 +1881,24 @@ class SimEngine:
                     self._set_agent_target_to_agent(agent, nearest["name"])
                     summary = f"{agent['name']} moves toward {nearest['name']}"
 
+        elif action.startswith("move_to_"):
+            # Back-compat hedge: an older move_to_<kind> action (e.g.
+            # "move_to_farm", from a stale client/model) still resolves via
+            # the kind-name hedge in _resolve_target_district instead of
+            # failing outright.
+            kind = action[len("move_to_"):]
+            self._set_agent_target(agent, kind)
+            summary = f"{agent['name']} heads to the {kind}"
+
         elif action == "collect_resource":
             c["collectAttempts"] += 1
-            if not c["activeProject"]:
-                summary = self._start_project_for(agent, decision.get("target")) or f"{agent['name']} could not start a project"
+            district_id = self._resolve_contribution_district(agent, decision.get("target_district"))
+            if not district_id:
+                summary = self._start_project_for(agent, decision.get("target"), decision.get("target_district")) \
+                    or f"{agent['name']} could not start a project"
             else:
                 zone = agent["currentZone"]
-                unmet = self._first_unmet_project_resource()
+                unmet = self._first_unmet_project_resource(district_id)
                 target = decision.get("target")
                 target_def = c["resourceRegistry"].get(target) if target else None
                 zone_resources = self._get_zone_resources(zone)
@@ -1364,8 +1916,9 @@ class SimEngine:
                     c["collectSuccesses"] += 1
                     summary = f"{agent['name']} collected {resource}"
                 else:
-                    contrib_res = self._pick_contribution_resource(agent, {"target": unmet})
-                    contributed = self._try_contribute_resource(agent, contrib_res)
+                    contrib_res = self._pick_contribution_resource(
+                        agent, {"target": unmet, "target_district": district_id}, district_id)
+                    contributed = self._try_contribute_resource(agent, contrib_res, district_id)
                     if contributed:
                         summary = contributed
                     elif unmet and self._gather_zone_for_resource(unmet):
@@ -1420,20 +1973,23 @@ class SimEngine:
             summary = self._review_recipe(agent, action, decision.get("target"), decision.get("message"))
 
         elif action == "start_project":
-            summary = self._start_project_for(agent, decision.get("target")) or f"{agent['name']} could not start a project"
+            summary = self._start_project_for(agent, decision.get("target"), decision.get("target_district")) \
+                or f"{agent['name']} could not start a project"
 
         elif action == "contribute_resources":
-            if not c["activeProject"]:
-                summary = self._start_project_for(agent, decision.get("target")) or f"{agent['name']} could not start a project"
+            district_id = self._resolve_contribution_district(agent, decision.get("target_district"))
+            if not district_id:
+                summary = self._start_project_for(agent, decision.get("target"), decision.get("target_district")) \
+                    or f"{agent['name']} could not start a project"
             else:
-                res = self._pick_contribution_resource(agent, decision)
-                contributed = self._try_contribute_resource(agent, res)
+                res = self._pick_contribution_resource(agent, decision, district_id)
+                contributed = self._try_contribute_resource(agent, res, district_id)
                 if contributed:
                     summary = contributed
-                elif self._is_project_complete():
-                    summary = self._build_active_structure(agent)
+                elif self._is_project_complete(district_id):
+                    summary = self._build_active_structure(agent, district_id)
                 else:
-                    unmet = self._first_unmet_project_resource()
+                    unmet = self._first_unmet_project_resource(district_id)
                     gz = self._gather_zone_for_resource(unmet) if unmet else None
                     if unmet and gz and agent["currentZone"] != gz:
                         self._set_agent_target(agent, gz)
@@ -1445,12 +2001,14 @@ class SimEngine:
                         summary = f"{agent['name']} has nothing to contribute"
 
         elif action == "build_structure":
-            if not c["activeProject"]:
-                summary = self._start_project_for(agent, decision.get("target")) or f"{agent['name']} could not start a project"
-            elif self._is_project_complete():
-                summary = self._build_active_structure(agent)
+            district_id = self._resolve_contribution_district(agent, decision.get("target_district"))
+            if not district_id:
+                summary = self._start_project_for(agent, decision.get("target"), decision.get("target_district")) \
+                    or f"{agent['name']} could not start a project"
+            elif self._is_project_complete(district_id):
+                summary = self._build_active_structure(agent, district_id)
             else:
-                summary = f"{agent['name']} waiting for more resources"
+                summary = f"{agent['name']} waiting for more resources in {district_id}"
 
         elif action == "propose_blueprint":
             bp = decision.get("blueprint")
@@ -1591,14 +2149,15 @@ class SimEngine:
         if not USE_GOALS or not decision:
             return None
         a = decision.get("action")
+        district = decision.get("target_district")
         if a == "collect_resource":
-            return {"kind": "gather", "target": decision.get("target"), "ttl": 8}
+            return {"kind": "gather", "target": decision.get("target"), "district": district, "ttl": 8}
         if a == "contribute_resources":
-            return {"kind": "deliver", "target": decision.get("target"), "ttl": 6}
+            return {"kind": "deliver", "target": decision.get("target"), "district": district, "ttl": 6}
         if a == "craft_item":
             return {"kind": "craft", "target": decision.get("target"), "ttl": 6}
         if a == "build_structure":
-            return {"kind": "build", "target": None, "ttl": 6}
+            return {"kind": "build", "target": None, "district": district, "ttl": 6}
         return None
 
     def _step_goal(self, agent):
@@ -1612,10 +2171,11 @@ class SimEngine:
         if g["ttl"] < 0:
             agent["goal"] = None
             return False
-        if g["kind"] in ("gather", "deliver", "build") and not self.civilization["activeProject"]:
+        district_id = g.get("district") or self._resolve_contribution_district(agent)
+        if g["kind"] in ("gather", "deliver", "build") and not district_id:
             agent["goal"] = None
             return False
-        if g["kind"] == "gather" and not self._first_unmet_project_resource():
+        if g["kind"] == "gather" and not self._first_unmet_project_resource(district_id):
             agent["goal"] = None
             return False
         action_by_kind = {"gather": "collect_resource", "deliver": "contribute_resources",
@@ -1625,6 +2185,7 @@ class SimEngine:
             agent["goal"] = None
             return False
         summary = self.apply_decision(agent, {"action": action, "target": g.get("target"),
+                                              "target_district": district_id,
                                               "message": None, "reasoning": f"goal:{g['kind']}"})
         s = summary or ""
         if any(t in s for t in ("has nothing to contribute", "found nothing", "nothing to craft",
@@ -1634,10 +2195,10 @@ class SimEngine:
         return True
 
     def _apply_rule_based_fallback(self, agent):
-        zone = random.choice(ZONE_NAMES)
-        self._set_agent_target(agent, zone)
-        self._push_memory(agent, f"{agent['name']} wandered toward the {zone}")
-        self._push_activity(f"{agent['name']} wandered toward the {zone} (LLM fallback)")
+        district_id = random.choice(list(self.civilization["districts"].keys()))
+        self._set_agent_target(agent, district_id)
+        self._push_memory(agent, f"{agent['name']} wandered toward {district_id}")
+        self._push_activity(f"{agent['name']} wandered toward {district_id} (LLM fallback)")
 
     # --- LLM think job (runs in worker; builds payload, calls LM, applies) ---
     def _build_think_payload(self, agent):
@@ -1652,11 +2213,13 @@ class SimEngine:
                     "contribution_debt": self.frameTick - (a["lastContributedFrame"] or 0),
                 })
 
+        actives = self._active_project_districts()
         nudges = []
         if agent["assignedTask"]:
             nudges.append(f"Your leader assigned you: {agent['assignedTask']}. Do it now.")
-        if not c["activeProject"]:
-            nudges.append("NOTE: No active project exists. Use start_project now to begin a build.")
+        if not actives:
+            nudges.append("NOTE: No active project exists anywhere. Use start_project now to begin a build "
+                          "(optionally set target_district to one of the known_districts ids).")
         elif agent["consecutiveTalks"] >= 2:
             nudges.append("NOTE: You have chatted twice. Prioritize collect_resource, contribute_resources, or move_to_agent.")
         if agent["role"] != "elder" and c["directive"]:
@@ -1668,13 +2231,13 @@ class SimEngine:
             nudges.append(f"NOTE: You are at capacity for {capped[0]} ({capped[1]}/{COLLECT_CAP}). "
                           f"Use contribute_resources or trade_resource instead of collecting more.")
         spec = self._role_specialty_resource(agent["role"])
-        if spec and spec == self._first_unmet_project_resource():
-            nudges.append(f"NOTE: Your role specializes in {spec}, which the active project still needs. Prioritize collect_resource.")
+        if spec and spec == self._first_unmet_resource_anywhere():
+            nudges.append(f"NOTE: Your role specializes in {spec}, which an active project still needs. Prioritize collect_resource.")
         if EMERGENT_ROLES:
             need_role = self._village_needed_role()
             if need_role and need_role != agent["role"] and self._is_flexible_role(agent["role"]):
-                nudges.append(f"NOTE: No one is gathering {self._first_unmet_project_resource()}, "
-                              f"which the build needs. Consider switch_role to {need_role} to fill the gap.")
+                nudges.append(f"NOTE: No one is gathering {self._first_unmet_resource_anywhere()}, "
+                              f"which a build needs. Consider switch_role to {need_role} to fill the gap.")
         if RULES_ENABLED:
             unvoted = next((r for r in c["pendingRules"] if agent["name"] not in r["votes"]), None)
             if unvoted:
@@ -1683,15 +2246,26 @@ class SimEngine:
             elif (not c["rules"] and not c["pendingRules"]
                   and self.frameTick - c["lastRuleActivityFrame"] > BLUEPRINT_STALL_THRESHOLD):
                 nudges.append("NOTE: The village has no shared rules yet. Consider propose_rule (a small resource_tax builds a shared stockpile).")
-        if agent["role"] == "elder" and c["activeProject"] \
-                and self.frameTick - c["lastProjectContributionFrame"] > STALL_THRESHOLD:
-            stalled = self._first_unmet_project_resource()
-            if stalled:
-                holders = sorted((a for a in self.agents if a["resources"].get(stalled, 0) > 0),
-                                 key=lambda a: a["resources"].get(stalled, 0), reverse=True)
-                holder = holders[0]["name"] if holders else "no one"
-                nudges.append(f"NOTE: No project progress in a while. {stalled} is still short; "
-                              f"{holder} is holding the most of it. Consider assign_task or contribute_resources.")
+        if agent["role"] == "elder" and actives:
+            stalled_district = next((did for did in actives
+                                     if self.frameTick - c["districtLastContribution"].get(did, 0) > STALL_THRESHOLD), None)
+            if stalled_district:
+                stalled = self._first_unmet_project_resource(stalled_district)
+                if stalled:
+                    holders = sorted((a for a in self.agents if a["resources"].get(stalled, 0) > 0),
+                                     key=lambda a: a["resources"].get(stalled, 0), reverse=True)
+                    holder = holders[0]["name"] if holders else "no one"
+                    nudges.append(f"NOTE: No progress on {stalled_district} in a while. {stalled} is still short; "
+                                  f"{holder} is holding the most of it. Consider assign_task or contribute_resources.")
+        if len(actives) < MAX_CONCURRENT_PROJECTS:
+            idle_buildable = next((did for did in self._buildable_district_ids()
+                                   if not c["districtProjects"].get(did)
+                                   and self._district_structure_count(did) < c["districts"][did]["build_grid"]["cap"]),
+                                  None)
+            if idle_buildable and idle_buildable != agent.get("currentDistrict"):
+                nudges.append(f"NOTE: {idle_buildable} has no build underway and there's room for another "
+                              f"concurrent project (up to {MAX_CONCURRENT_PROJECTS} at once). Consider start_project "
+                              f"with target_district {idle_buildable} if you're nearby.")
         if len(c["pendingBlueprints"]) < MAX_PENDING_BLUEPRINTS \
                 and self.frameTick - c["lastBlueprintActivityFrame"] > BLUEPRINT_STALL_THRESHOLD:
             nudges.append("NOTE: No new blueprint activity in a while. Consider propose_blueprint if you have an idea.")
@@ -1729,11 +2303,14 @@ class SimEngine:
             "relationships": dict(agent["relationships"]),
             "beliefs": [self._belief_text(b) for b in agent["beliefs"]] if MEMES_ENABLED else [],
             "nearby_agents": nearby_detailed,
-            "world_zone": get_zone(agent["x"], agent["y"]),
+            "world_zone": agent["currentZone"],
+            "current_district": agent.get("currentDistrict") or "none",
             "civilization_level": c["level"],
             "structures_built": len(c["structures"]),
-            "active_project": c["activeProject"]["name"] if c["activeProject"] else "none",
-            "project_progress": self._project_progress_text(),
+            "active_project": self._active_projects_brief(),
+            "project_progress": self._active_projects_progress_text(),
+            "known_districts": [{"id": did, "kind": d["kind"]} for did, d in c["districts"].items()
+                                if d.get("build_grid")],
             "directive": c["directive"] or "none",
             "idle_agents": idle_agents,
             "known_resources": [{"id": rid, "gather_zone": d.get("gatherZone"),
@@ -1856,6 +2433,8 @@ class SimEngine:
                 self._maybe_advance_rules()
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_force_contribution()
+                self._maybe_start_idle_district_project()
+                self._maybe_found_district()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
             if BENCHMARKS_ENABLED and (ft % BENCHMARK_TICK_FRAMES == 0 or ft == FIRST_BENCHMARK_FRAME):
@@ -1976,9 +2555,40 @@ class SimEngine:
         except Exception:
             pass
 
+    def _migrate_v1_to_v2(self, civ, agents):
+        """One-time migration shim for pre-districts (STATE_VERSION 1) saves:
+        old state.json files have the singular activeProject, no
+        districts/roadNodes/roadEdges/frontierPlots at all (they were static
+        constants before this plan), and no
+        districtProjects/currentDistrict/waypoints. Seed all of those from the
+        starter blueprint and drop the old in-flight activeProject -- a
+        one-time, low-stakes loss of a build-in-progress only. Agent
+        identity/memory/resources/relationships all carry over untouched."""
+        civ["districts"] = json.loads(json.dumps(STARTER_DISTRICTS))
+        civ["roadNodes"] = json.loads(json.dumps(STARTER_ROAD_NODES))
+        civ["roadEdges"] = [list(e) for e in STARTER_ROAD_EDGES]
+        civ["frontierPlots"] = _build_frontier_plots()
+        civ["districtProjects"] = {did: None for did, d in civ["districts"].items() if d.get("build_grid")}
+        civ["districtLastContribution"] = {did: 0 for did in civ["districtProjects"]}
+        civ["kindLastActivityFrame"] = {}
+        civ["lastDistrictFoundFrame"] = 0
+        civ["frontierExhaustedLogged"] = False
+        civ.pop("activeProject", None)
+        civ.pop("lastProjectContributionFrame", None)
+        kind_to_starter_district = {}
+        for did, d in civ["districts"].items():
+            kind_to_starter_district.setdefault(d["kind"], did)
+        for a in agents:
+            kind = a.get("currentZone") or "village"
+            a["currentDistrict"] = kind_to_starter_district.get(kind, "village_core")
+            a["waypoints"] = []
+
     def restore_state(self):
         """If a valid state.json exists, rehydrate the world from it instead of
-        the cold-start roster. Returns True on a successful restore."""
+        the cold-start roster. Returns True on a successful restore. Accepts
+        both the current STATE_VERSION and the pre-districts version 1 (run
+        through _migrate_v1_to_v2 below) so an old save cold-starts the new
+        fields cleanly instead of crashing or being silently discarded."""
         try:
             if not os.path.exists(STATE_PATH):
                 return False
@@ -1986,7 +2596,7 @@ class SimEngine:
                 data = json.load(fh)
         except Exception:
             return False
-        if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+        if not isinstance(data, dict) or data.get("version") not in (1, STATE_VERSION):
             return False
         try:
             with self.lock:
@@ -2000,6 +2610,8 @@ class SimEngine:
                     agents.append(a)
                 if not agents or not civ:
                     return False
+                if data.get("version") == 1:
+                    self._migrate_v1_to_v2(civ, agents)
                 self.civilization = civ
                 self.agents = agents
                 self.agent_names = set(a["name"] for a in agents)
@@ -2007,6 +2619,9 @@ class SimEngine:
                 rs = data.get("roster_size")
                 if rs:
                     self.roster_size = int(rs)
+                self._recompute_road_paths()
+                _validate_districts(self.civilization["districts"])
+                _validate_road_graph(self.civilization["roadNodes"], self.civilization["roadEdges"])
                 # Rebuild the MemoryStore by re-embedding each entry's text.
                 ms = self.d.get("memory_store")
                 if ms is not None:
@@ -2047,19 +2662,23 @@ class SimEngine:
         """Consistent /state snapshot per Contract 2 (copied under lock)."""
         with self.lock:
             c = self.civilization
-            ap = c["activeProject"]
-            active_project = None
-            if ap:
+            district_projects = {}
+            for did, ap in c["districtProjects"].items():
+                if not ap:
+                    district_projects[did] = None
+                    continue
                 total = sum(ap["needs"].values())
                 done = sum(min(ap["contributed"].get(r, 0), n) for r, n in ap["needs"].items())
                 pct = round(done / total * 100) if total else 0
                 progress_text = ", ".join(f"{r} {ap['contributed'].get(r, 0)}/{n}"
                                           for r, n in ap["needs"].items())
-                active_project = {"name": ap["name"], "type": ap["type"],
-                                  "progressText": progress_text, "progressPercent": pct}
+                district_projects[did] = {"name": ap["name"], "type": ap["type"],
+                                          "progressText": progress_text, "progressPercent": pct}
             agents = [{
                 "id": a["id"], "name": a["name"], "role": a["role"], "color": a["color"],
                 "x": a["x"], "y": a["y"], "currentZone": a["currentZone"],
+                "currentDistrict": a.get("currentDistrict"),
+                "waypoints": len(a.get("waypoints") or []),
                 "resources": dict(a["resources"]), "hunger": a["hunger"], "health": a["health"],
                 "incapacitated": a["incapacitated"], "message": a["message"],
                 "isThinking": a["isThinking"], "beliefs": [self._belief_text(b) for b in a["beliefs"]],
@@ -2068,9 +2687,10 @@ class SimEngine:
             civ = {
                 "level": c["level"],
                 "structures": [{"id": s["id"], "type": s["type"], "x": s["x"], "y": s["y"],
-                                "visualStyle": s.get("visualStyle"), "name": s.get("name")}
+                                "visualStyle": s.get("visualStyle"), "name": s.get("name"),
+                                "districtId": s.get("districtId")}
                                for s in c["structures"]],
-                "activeProject": active_project,
+                "districtProjects": district_projects,
                 "completedProjects": c["completedProjects"],
                 "resourceRegistry": {rid: dict(d) for rid, d in c["resourceRegistry"].items()},
                 "projectRegistry": {pid: dict(p) for pid, p in c["projectRegistry"].items()},
@@ -2102,6 +2722,7 @@ class SimEngine:
                         "EMERGENT_ROLES": EMERGENT_ROLES, "RULES_ENABLED": RULES_ENABLED,
                         "MEMES_ENABLED": MEMES_ENABLED, "CRAFTING_ENABLED": CRAFTING_ENABLED,
                         "META_SYSTEM": META_SYSTEM, "PIANO_MODULES": PIANO_MODULES,
+                        "ROADS_ENABLED": ROADS_ENABLED,
                     },
                 },
             }

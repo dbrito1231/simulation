@@ -73,12 +73,59 @@ function markPathRect(x, y, w, h) {
   }
 }
 
-// Cosmetic connecting paths for the 1600x1000 layout (village hub to neighbors).
-markPathRect(690, 430, 24, 130);   // farm -> village
-markPathRect(520, 740, 680, 24);   // village horizontal spine
-markPathRect(1090, 470, 24, 90);   // village -> forest
-markPathRect(1180, 800, 90, 24);   // village -> cave
-markPathRect(420, 760, 120, 24);   // beach -> village
+// Generalizes the old 5 hardcoded connector strips into a loop over the
+// SERVED road-edge list (world_expansion plan) -- founded districts' auto-
+// generated connector edges render exactly the same way, with zero new code.
+// Each edge is drawn as an L-shape (horizontal leg at nodeA's y, then a
+// vertical leg at nodeB's x) so edges need not be axis-aligned themselves.
+function markRoadEdges(edges, nodeCoords) {
+  PATH_CELLS.clear();
+  const half = 12;
+  for (const edge of edges) {
+    const a = nodeCoords[edge[0]];
+    const b = nodeCoords[edge[1]];
+    if (!a || !b) continue;
+    const hx0 = Math.min(a.x, b.x) - half;
+    const hw = Math.abs(b.x - a.x) + half * 2;
+    markPathRect(hx0, a.y - half, hw, half * 2);
+    const vy0 = Math.min(a.y, b.y) - half;
+    const vh = Math.abs(b.y - a.y) + half * 2;
+    markPathRect(b.x - half, vy0, half * 2, vh);
+  }
+}
+
+// Starter road graph (mirrors sim_engine.py's STARTER_ROAD_NODES/EDGES) used
+// as the initial fallback so the very first paint (before index.html's first
+// /districts.js fetch resolves) still shows connecting paths. Real, possibly
+// grown, live data from the server takes over via drawTiledWorld's roadNodes/
+// roadEdges params on every subsequent frame. MUST be kept in sync with
+// sim_engine.py's STARTER_ROAD_NODES/STARTER_ROAD_EDGES.
+const STARTER_ROAD_NODES = {
+  village_hub: { x: 740, y: 900 },
+  farm_north_gate: { x: 740, y: 820 },
+  forest_gate: { x: 1090, y: 460 },
+  cave_east_gate: { x: 1270, y: 824 },
+  beach_gate: { x: 400, y: 800 },
+  market_gate: { x: 1040, y: 1000 },
+  east_hub: { x: 1850, y: 900 },
+  farm_south_gate: { x: 1850, y: 680 },
+  village_east_gate: { x: 1850, y: 960 },
+  workshop_row_gate: { x: 2300, y: 680 },
+  cave_deep_gate: { x: 2300, y: 960 },
+};
+const STARTER_ROAD_EDGES = [
+  ["farm_north_gate", "village_hub"],
+  ["village_hub", "forest_gate"],
+  ["village_hub", "cave_east_gate"],
+  ["village_hub", "beach_gate"],
+  ["village_hub", "market_gate"],
+  ["village_hub", "east_hub"],
+  ["east_hub", "farm_south_gate"],
+  ["east_hub", "village_east_gate"],
+  ["east_hub", "workshop_row_gate"],
+  ["east_hub", "cave_deep_gate"],
+];
+markRoadEdges(STARTER_ROAD_EDGES, STARTER_ROAD_NODES);
 
 const C = {
   g1: "#9bbf6a", g2: "#8aad5a", g3: "#7a9d4a",
@@ -95,6 +142,7 @@ const C = {
   tr: "#6d4c2a", lf: "#3d8b37", lf2: "#2d6b27",
   fn: "#d4c4a0", rk: "#888888", rk2: "#666666",
   dk: "#6b4423", wl: "#4488cc",
+  wk1: "#a8a89c", wk2: "#98988a", wk3: "#87877a", wk4: "#75756a",
 };
 
 function makePathBlendTile(baseKeys) {
@@ -119,11 +167,21 @@ const PATH_BLEND_GRASS = makePathBlendTile(["g1", "g2", "g3"]);
 const PATH_BLEND_BEACH = makePathBlendTile(["s1", "s2", "s3", "sd"]);
 const PATH_BLEND_FARM = makePathBlendTile(["f1", "f2", "f3", "fd"]);
 const PATH_BLEND_VILLAGE = makePathBlendTile(["v1", "v2", "v3"]);
+const PATH_BLEND_BY_KIND = { farm: PATH_BLEND_FARM, village: PATH_BLEND_VILLAGE, beach: PATH_BLEND_BEACH };
+
+// Set by drawTiledWorld() before each pass of tile-fills so pathBlendForZone
+// (called deep inside fillRectWithTiles) can look up "which district kind is
+// this path tile inside" from the SERVED district list instead of the old
+// hardcoded numeric ranges -- generalizes to any district, starter or founded.
+let CURRENT_DISTRICTS_FOR_BLEND = [];
 
 function pathBlendForZone(tx, ty) {
-  if (tx >= 480 && tx < 940 && ty >= 90 && ty < 430) return PATH_BLEND_FARM;
-  if (tx >= 500 && tx < 1180 && ty >= 540 && ty < 960) return PATH_BLEND_VILLAGE;
-  if (tx >= 200 && tx < 420) return PATH_BLEND_BEACH;
+  for (const d of CURRENT_DISTRICTS_FOR_BLEND) {
+    const b = d.bounds;
+    if (tx >= b.x1 && tx < b.x2 && ty >= b.y1 && ty < b.y2) {
+      return PATH_BLEND_BY_KIND[d.kind] || PATH_BLEND_GRASS;
+    }
+  }
   return PATH_BLEND_GRASS;
 }
 
@@ -175,6 +233,7 @@ const TILE_FOREST_FLOOR = makeTile(["fr1", "fr2", "fr3"]);
 const TILE_VILLAGE = makeTile(["v1", "v2", "v3"]);
 const TILE_MARKET = makeTile(["m1", "m2", "m3", "ma"]);
 const TILE_CAVE = makeTile(["cv1", "cv2", "cv3"]);
+const TILE_WORKSHOP = makeTile(["wk1", "wk2", "wk3", "wk4"]);
 
 function drawTree(ctx, x, y) {
   const tree = tileFromStrings([
@@ -896,37 +955,47 @@ function drawZoneLabel(ctx, text, x, y) {
   ctx.fillText(text, x, y + 1);
 }
 
-function drawTiledWorld(ctx, worldW, worldH, frameTick, structures) {
-  const foamOffset = Math.floor(frameTick / 8) % 16;
+// kind -> base tile, and which kinds use the path-blend fill (farm/village/
+// beach originally did; forest/market/cave/workshop use a plain fill, exactly
+// matching pre-districts behavior for the starter core).
+const KIND_TILE = {
+  farm: TILE_FARM, forest: TILE_FOREST_FLOOR, village: TILE_VILLAGE,
+  market: TILE_MARKET, cave: TILE_CAVE, workshop: TILE_WORKSHOP, beach: TILE_BEACH,
+};
+const KIND_USES_PATH_BLEND = new Set(["farm", "village", "beach"]);
 
-  // Zone fills for the 1600x2700 world. These rectangles MUST match getZone()
-  // and ZONE_BOUNDS in sim_engine.py so agents stand on the tiles they gather
-  // from. Farm's band was extended (was 340 tall) and village/market/cave were
-  // shifted down 400px + village given a much taller band, so the build-out
-  // grids (sim_engine.py _build_region_for) have real room to grow into
-  // matching ground instead of running off the map or into each other.
-  fillRectWithTiles(ctx, 0, 0, worldW, worldH, TILE_GRASS, pathBlendForZone);
-  fillRectWithTile(ctx, 0, 0, 200, worldH, oceanTile(foamOffset));
-  fillRectWithTiles(ctx, 200, 0, 220, worldH, TILE_BEACH, pathBlendForZone);
-  fillRectWithTiles(ctx, 480, 90, 460, 740, TILE_FARM, pathBlendForZone);
-  fillRectWithTile(ctx, 1010, 90, 560, 380, TILE_FOREST_FLOOR);
-  fillRectWithTiles(ctx, 500, 940, 680, 1720, TILE_VILLAGE, pathBlendForZone);
-  fillRectWithTile(ctx, 950, 1000, 180, 140, TILE_MARKET);
-  fillRectWithTile(ctx, 1190, 1130, 380, 250, TILE_CAVE);
+// Starter district list (mirrors sim_engine.py's STARTER_DISTRICTS) used as
+// the initial fallback before index.html's first /districts.js fetch
+// resolves, and as the shape reference for the served list thereafter. MUST
+// be kept in sync with sim_engine.py's STARTER_DISTRICTS bounds/kind/label.
+const STARTER_DISTRICTS_JS = [
+  { id: "farm_north", kind: "farm", label: "FARM", bounds: { x1: 500, y1: 110, x2: 920, y2: 810 } },
+  { id: "forest", kind: "forest", label: "FOREST", bounds: { x1: 1030, y1: 110, x2: 1550, y2: 450 } },
+  { id: "village_core", kind: "village", label: "VILLAGE", bounds: { x1: 540, y1: 960, x2: 900, y2: 2540 } },
+  { id: "market", kind: "market", label: "MARKET", bounds: { x1: 970, y1: 1020, x2: 1110, y2: 1120 } },
+  { id: "beach", kind: "beach", label: "BEACH", bounds: { x1: 230, y1: 120, x2: 400, y2: 880 } },
+  { id: "cave_east", kind: "cave", label: "CAVE", bounds: { x1: 1210, y1: 1150, x2: 1540, y2: 1360 } },
+  { id: "ocean", kind: "ocean", label: null, bounds: { x1: 30, y1: 120, x2: 180, y2: 880 } },
+  { id: "farm_south", kind: "farm", label: "FARM (SOUTH FIELDS)", bounds: { x1: 1650, y1: 110, x2: 2050, y2: 710 } },
+  { id: "village_east", kind: "village", label: "EAST VILLAGE", bounds: { x1: 1650, y1: 960, x2: 2050, y2: 2540 } },
+  { id: "workshop_row", kind: "workshop", label: "WORKSHOP ROW", bounds: { x1: 2100, y1: 110, x2: 2500, y2: 710 } },
+  { id: "cave_deep", kind: "cave", label: "DEEP CAVE", bounds: { x1: 2100, y1: 960, x2: 2500, y2: 1560 } },
+];
 
-  // Farm crops (upper farm, leaving the lower band for built farm plots)
+// Hand-placed decorative props for the starter core ONLY (bespoke, not
+// generalized -- see world_expansion plan section 5: "inherently artistic
+// placement, not worth generalizing"). A district founded at runtime renders
+// with just its data-driven tile fill + label, no bespoke props here.
+function drawStarterProps(ctx) {
+  // Farm (north): crops + southern fence.
   for (let fx = 500; fx < 920; fx += 34) {
     for (let fy = 110; fy < 280; fy += 30) {
       if ((fx + fy) % 3 === 0) drawCrop(ctx, fx, fy);
     }
   }
+  for (let fx = 480; fx < 940; fx += 16) drawFence(ctx, fx, 424);
 
-  // Farm fence along southern edge
-  for (let fx = 480; fx < 940; fx += 16) {
-    drawFence(ctx, fx, 424);
-  }
-
-  // Forest trees
+  // Forest trees.
   const treeSpots = [
     [1060, 170], [1150, 130], [1240, 190], [1330, 140], [1420, 200], [1510, 150],
     [1090, 290], [1190, 340], [1290, 270], [1390, 350], [1490, 300], [1540, 410],
@@ -934,35 +1003,74 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures) {
   ];
   for (const [tx, ty] of treeSpots) drawTree(ctx, tx, ty);
 
-  // Beach jetty straddling the beach/ocean line so it reads as a pier over water
+  // Beach jetty straddling the beach/ocean line so it reads as a pier over water.
   drawDock(ctx, 150, 470);
+  drawZoneLabel(ctx, "DOCK", 186, 520);
 
-  // Village well (in the gap between the build grid and the market square)
+  // Village (core) well, houses, cave rocks + entrance, market stall.
   drawWell(ctx, 905, 1000);
-
-  // Cave rocks
+  drawHouse(ctx, 985, 1200);
+  drawHouse(ctx, 1085, 1200);
   drawRocks(ctx, 1260, 1200);
   drawRocks(ctx, 1430, 1260);
   drawRocks(ctx, 1340, 1330);
-
-  // Village houses (static scenery), placed right of the build grid (x<=860).
-  drawHouse(ctx, 985, 1200);
-  drawHouse(ctx, 1085, 1200);
-
-  // Market stall
-  drawMarketStall(ctx, 975, 1015);
-  drawZoneLabel(ctx, "MARKET", 1040, 990);
-  drawZoneLabel(ctx, "FARM", 700, 105);
-  drawZoneLabel(ctx, "FOREST", 1280, 105);
-  drawZoneLabel(ctx, "VILLAGE", 820, 955);
-  drawZoneLabel(ctx, "BEACH", 300, 90);
-  drawZoneLabel(ctx, "DOCK", 186, 520);
-  drawZoneLabel(ctx, "CAVE", 1380, 1148);
-
-  // Cave entrance
   drawCaveEntrance(ctx, 1380, 1280);
+  drawMarketStall(ctx, 975, 1015);
 
-  // Agent-built structures
+  // Farm (south): a lighter second crop patch + fence, mirroring farm_north.
+  for (let fx = 1650; fx < 2050; fx += 40) {
+    for (let fy = 110; fy < 260; fy += 34) {
+      if ((fx + fy) % 4 === 0) drawCrop(ctx, fx, fy);
+    }
+  }
+  for (let fx = 1650; fx < 2050; fx += 16) drawFence(ctx, fx, 424);
+
+  // East village: a couple of houses outside the build grid's footprint.
+  drawHouse(ctx, 1990, 1300);
+  drawHouse(ctx, 2010, 1420);
+
+  // Deep cave: rock outcrops matching cave_east's look.
+  drawRocks(ctx, 2200, 1100);
+  drawRocks(ctx, 2380, 1200);
+}
+
+function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges) {
+  const foamOffset = Math.floor(frameTick / 8) % 16;
+  const activeDistricts = (districts && districts.length) ? districts : STARTER_DISTRICTS_JS;
+  CURRENT_DISTRICTS_FOR_BLEND = activeDistricts;
+  if (roadEdges && roadEdges.length && roadNodes) markRoadEdges(roadEdges, roadNodes);
+
+  // Base grass everywhere (frontier + gaps between districts), then a
+  // data-driven pass over the served district list -- one tile-fill per
+  // district, keyed by kind to the TILE_* constants above. New districts
+  // (founded, or starter ones sharing an existing kind) need zero new tile
+  // code; only the props below stay bespoke to the starter core.
+  fillRectWithTiles(ctx, 0, 0, worldW, worldH, TILE_GRASS, pathBlendForZone);
+  for (const d of activeDistricts) {
+    const b = d.bounds;
+    const w = b.x2 - b.x1, h = b.y2 - b.y1;
+    if (d.kind === "ocean") {
+      fillRectWithTile(ctx, b.x1, b.y1, w, h, oceanTile(foamOffset));
+      continue;
+    }
+    const tile = KIND_TILE[d.kind];
+    if (!tile) continue;
+    if (KIND_USES_PATH_BLEND.has(d.kind)) {
+      fillRectWithTiles(ctx, b.x1, b.y1, w, h, tile, pathBlendForZone);
+    } else {
+      fillRectWithTile(ctx, b.x1, b.y1, w, h, tile);
+    }
+  }
+
+  drawStarterProps(ctx);
+
+  for (const d of activeDistricts) {
+    if (!d.label) continue;
+    const b = d.bounds;
+    drawZoneLabel(ctx, d.label, Math.round((b.x1 + b.x2) / 2), b.y1 - 15);
+  }
+
+  // Agent-built structures.
   if (structures) {
     for (const s of structures) {
       drawStructure(ctx, s);
