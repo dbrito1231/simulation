@@ -241,6 +241,9 @@ EDIBLE_RESOURCES = ["food", "fish"]
 HEAL_AMOUNT = 25
 COLLAPSE_REGEN = 0.5
 COLLAPSE_REVIVE_HEALTH = 15
+REVIVE_HUNGER = 35          # hunger floor on revival, else 0-hunger re-collapse in ~8s
+EDIBLE_RESERVE = 3          # food/fish an agent keeps back from builds/sharing
+SHARE_RADIUS = 120          # auto-share edibles with a starving neighbour within this range
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
@@ -848,6 +851,25 @@ class SimEngine:
                 return rid
         return None
 
+    def _share_edible_with(self, agent):
+        """Deterministic anti-hoarding backstop: a starving agent with nothing
+        to eat receives one edible from a nearby villager holding surplus
+        (above EDIBLE_RESERVE). Without this the only food-transfer paths are
+        heal-donation and voluntary LLM trades, so one well-fed fisher can sit
+        on a full stack while neighbours starve."""
+        for donor in self.agents:
+            if donor is agent or donor["incapacitated"]:
+                continue
+            if self._distance_to(agent, donor) > SHARE_RADIUS:
+                continue
+            for rid in EDIBLE_RESOURCES:
+                if donor["resources"].get(rid, 0) > EDIBLE_RESERVE:
+                    donor["resources"][rid] -= 1
+                    agent["hunger"] = min(100, agent["hunger"] + FOOD_RESTORE)
+                    self._push_activity(f"{donor['name']} shared {rid} with {agent['name']}")
+                    return True
+        return False
+
     def _update_survival(self, agent):
         if not SURVIVAL_ENABLED:
             return
@@ -856,11 +878,14 @@ class SimEngine:
             agent["resources"][edible] -= 1
             agent["hunger"] = min(100, agent["hunger"] + FOOD_RESTORE)
             self._push_activity(f"{agent['name']} ate {edible}")
+        if not edible and agent["hunger"] <= 0:
+            self._share_edible_with(agent)
         agent["hunger"] = max(0, agent["hunger"] - HUNGER_RATE)
         if agent["incapacitated"]:
             agent["health"] = min(100, agent["health"] + COLLAPSE_REGEN)
             if agent["health"] >= COLLAPSE_REVIVE_HEALTH:
                 agent["incapacitated"] = False
+                agent["hunger"] = max(agent["hunger"], REVIVE_HUNGER)
                 self._push_activity(f"{agent['name']} recovered")
         else:
             if agent["hunger"] <= 0:
@@ -956,21 +981,23 @@ class SimEngine:
 
         def usable(did):
             d = c["districts"].get(did)
-            return bool(d and d.get("build_grid") and d["kind"] == kind and not c["districtProjects"].get(did))
+            return bool(d and d.get("build_grid") and d["kind"] == kind
+                        and not c["districtProjects"].get(did)
+                        and self._district_structure_count(did) < d["build_grid"]["cap"])
 
         if target_district and usable(target_district):
             return target_district
         cur = agent.get("currentDistrict")
         if cur and usable(cur):
             return cur
-        candidates = [did for did in self._buildable_district_ids()
-                      if c["districts"][did]["kind"] == kind and not c["districtProjects"].get(did)]
-        if not candidates:
+        # Only districts with room: a project started in a full district can
+        # never build and squats on a concurrent-project slot forever. When
+        # every district of this kind is full, returning None is correct --
+        # _maybe_found_district exists to open up new land in that case.
+        with_room = [did for did in self._buildable_district_ids() if usable(did)]
+        if not with_room:
             return None
-        with_room = [did for did in candidates
-                     if self._district_structure_count(did) < c["districts"][did]["build_grid"]["cap"]]
-        pool = with_room or candidates
-        return min(pool, key=lambda did: self._distance_to_district(agent, did))
+        return min(with_room, key=lambda did: self._distance_to_district(agent, did))
 
     def _distance_to_district(self, agent, district_id):
         b = self.civilization["districts"][district_id]["bounds"]
@@ -1365,7 +1392,9 @@ class SimEngine:
 
     def _enforce_resource_tax(self, agent, res):
         tax = self._active_resource_tax()
-        if tax <= 0:
+        # Edibles are exempt: nothing ever consumes the stockpile, so taxing
+        # food/fish just deletes it from the survival economy.
+        if tax <= 0 or res in EDIBLE_RESOURCES:
             return
         c = self.civilization
         c["taxDue"] += tax
@@ -1618,8 +1647,12 @@ class SimEngine:
                                 if p["contributed"].get(res, 0) < need]
             holder, unmet = None, None
             for res in unmet_resources:
+                # Never strip an agent's food/fish safety margin: builds need
+                # edibles too, but force-taking them from the last agents
+                # standing turns a build stall into a starvation spiral.
+                reserve = EDIBLE_RESERVE if res in EDIBLE_RESOURCES else 0
                 cands = [a for a in self.agents
-                         if not a["incapacitated"] and a["resources"].get(res, 0) > 0]
+                         if not a["incapacitated"] and a["resources"].get(res, 0) > reserve]
                 if cands:
                     unmet = res
                     holder = max(cands, key=lambda a: a["resources"].get(res, 0))
@@ -1659,6 +1692,37 @@ class SimEngine:
                 "action": "start_project", "target_district": district_id,
                 "reasoning": f"No build is underway in {district_id} yet; starting one so work spreads out."})
             return
+
+    # --- stuck-project relocation backstop ---
+    def _maybe_relocate_stuck_project(self):
+        """A project active in a district whose build grid has filled up can
+        never complete: build_structure fails with "no room left to build"
+        forever, the project squats on one of the MAX_CONCURRENT_PROJECTS
+        slots, and everything contributed to it is lost. Move such a project
+        (contributions included) to a same-kind district that has a free spot
+        and no active build. If none exists, do nothing this gate --
+        _kind_at_capacity will be true, _maybe_found_district opens new land,
+        and a later gate completes the move."""
+        c = self.civilization
+        for district_id in self._active_project_districts():
+            if self._find_structure_spot(district_id) is not None:
+                continue
+            project = c["districtProjects"][district_id]
+            kind = c["districts"][district_id]["kind"]
+            dest = next((did for did in self._buildable_district_ids()
+                         if did != district_id
+                         and c["districts"][did]["kind"] == kind
+                         and not c["districtProjects"].get(did)
+                         and self._find_structure_spot(did) is not None), None)
+            if not dest:
+                continue
+            project["districtId"] = dest
+            c["districtProjects"][dest] = project
+            c["districtProjects"][district_id] = None
+            c["districtLastContribution"][dest] = self.frameTick
+            self._touch_kind_activity(kind)
+            self._push_activity(
+                f"The {project['name']} build moves to {dest} — {district_id} has no land left")
 
     # --- district founding (the open-world mechanism) ---
     def _kind_at_capacity(self, kind):
@@ -2115,6 +2179,7 @@ class SimEngine:
                     patient["hunger"] = min(100, patient["hunger"] + FOOD_RESTORE)
                 if patient["incapacitated"] and patient["health"] > 0:
                     patient["incapacitated"] = False
+                    patient["hunger"] = max(patient["hunger"], REVIVE_HUNGER)
                     self._push_activity(f"{patient['name']} was revived by {agent['name']}")
                 self._nudge_ally(agent, patient["name"])
                 self._push_memory(patient, f"Healed by {agent['name']}")
@@ -2432,6 +2497,7 @@ class SimEngine:
             if RULES_ENABLED and ft % RULES_TICK_FRAMES == 0:
                 self._maybe_advance_rules()
             if ft % RULES_TICK_FRAMES == 0:
+                self._maybe_relocate_stuck_project()
                 self._maybe_force_contribution()
                 self._maybe_start_idle_district_project()
                 self._maybe_found_district()
