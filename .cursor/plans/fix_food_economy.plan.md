@@ -16,10 +16,10 @@ todos:
     status: completed
   - id: verify-food-economy
     content: "Run the server ~10 min from the persisted state.json (village lvl 28, 6/8 collapsed at last save). Expect in activity.jsonl: collapse count near zero after the first recovery wave (baseline: 5/3.5min post-wave-1, 36/5min pre-fix); 'ate food/fish' spread across most of the roster (baseline: only Colt+Marco); 'X shared food with Y' events now that seekers converge on food zones; no agent stuck in a collapse->recover cycle."
-    status: in_progress
+    status: completed
   - id: verify-build-stall-fixes
     content: "Same run — verify the already-applied (uncommitted, never yet run) full-district fixes: one 'The Farm Plot build moves to farm_south — farm_north has no land left' relocation event near startup; the relocated Farm Plot completes; zero new 'no room left to build' lines (baseline: 42/3.5min); no new project ever starts in a district at build-grid cap."
-    status: pending
+    status: completed
 isProject: false
 ---
 
