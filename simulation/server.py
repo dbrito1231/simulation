@@ -24,6 +24,24 @@ CORS(app)
 
 LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 
+# Model routing: high-stakes turns (the elder's leadership/approval decisions,
+# and any villager turn taken while invention is REQUIRED, i.e. blueprint
+# authoring) go to the stronger model; routine villager turns go to the small
+# fast one. Ids must match LM Studio's loaded-model ids (GET /v1/models). If a
+# routed id isn't available, run_agent_decision degrades to "local-model" for
+# the rest of the session (same pattern as the response_format auto-degrade),
+# so a single-model LM Studio setup keeps working unchanged.
+MODEL_SMART = "google/gemma-4-e4b"
+MODEL_FAST = "llama-3.2-3b-instruct"
+
+
+def model_for_decision(data):
+    if (data.get("role") or "").lower() == "elder":
+        return MODEL_SMART
+    if str(data.get("invention_status") or "").startswith("REQUIRED"):
+        return MODEL_SMART
+    return MODEL_FAST
+
 
 class SessionLogger:
     """Append-only JSON Lines logger. One session folder per server run."""
@@ -495,6 +513,22 @@ DECISION_SCHEMA = {
 
 # Flipped off for the rest of the session if LM Studio rejects response_format.
 _structured_output_enabled = STRUCTURED_OUTPUT_MODE != "off"
+
+# Flipped off for the rest of the session if LM Studio doesn't know the routed
+# model ids (MODEL_SMART/MODEL_FAST) -- falls back to "local-model", which LM
+# Studio resolves to whatever single model is loaded.
+_model_routing_enabled = True
+
+
+def looks_like_model_not_found_error(http_status, lm_body):
+    """True when LM Studio rejected the request because the requested model id
+    isn't downloaded/loaded (as opposed to any other error)."""
+    text = ""
+    if isinstance(lm_body, dict):
+        text = str(lm_body.get("error") or "")
+    low = text.lower()
+    return bool(low) and "model" in low and any(
+        k in low for k in ("not found", "no model", "failed to load", "unknown model"))
 
 
 def build_response_format():
@@ -1637,7 +1671,8 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5):
     that field holds a chain-of-thought scaffold and only the trailing answer
     should be kept -- and rejected outright if it still looks scaffolded."""
     payload = {
-        "model": "local-model",
+        # Background cognition is routine work -- always the fast model.
+        "model": MODEL_FAST if _model_routing_enabled else "local-model",
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -1781,7 +1816,7 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     if self_prompt:
         system_content += f"\n\nYOUR PERSONA (act in character): {self_prompt}"
     payload = {
-        "model": "local-model",
+        "model": model_for_decision(data) if _model_routing_enabled else "local-model",
         "messages": [
             {"role": "system", "content": system_content},
             {"role": "user", "content": build_user_prompt(data, slim=slim)},
@@ -1845,7 +1880,7 @@ def run_agent_decision(data):
                    decision=fallback, error=error)
             return fallback
 
-        global _structured_output_enabled
+        global _structured_output_enabled, _model_routing_enabled
 
         start = datetime.now()
         try:
@@ -1873,6 +1908,30 @@ def run_agent_decision(data):
             _structured_output_enabled = False
             payload.pop("response_format", None)
             response_format = None
+            start = datetime.now()
+            try:
+                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
+            except requests.exceptions.RequestException:
+                latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+                log_lm(latency_ms, error="LM Studio offline")
+                return {"error": "LM Studio offline", "action": "rest"}
+            latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+            http_status = resp.status_code
+            try:
+                lm_body = resp.json()
+            except ValueError:
+                lm_body = None
+
+        # Auto-degrade: if the routed model id isn't loaded in LM Studio,
+        # disable per-role routing for the session and retry once with the
+        # generic "local-model" id, so a single-model setup keeps working.
+        if (_model_routing_enabled
+                and looks_like_model_not_found_error(http_status, lm_body)):
+            print(f"[server] LM Studio doesn't know model {payload.get('model')!r}; "
+                  f"disabling per-role model routing for this session and retrying "
+                  f"with 'local-model'.")
+            _model_routing_enabled = False
+            payload["model"] = "local-model"
             start = datetime.now()
             try:
                 resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)

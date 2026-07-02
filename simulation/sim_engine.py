@@ -38,6 +38,7 @@ _CIV_SET_KEYS = ("rejectedBlueprintIds", "rejectedRecipeIds", "builtTypes")
 SURVIVAL_ENABLED = True
 CRAFTING_ENABLED = True
 USE_GOALS = True
+STRUCTURE_EFFECTS_ENABLED = True
 MEMORY_ENABLED = True
 AGENT_MESSAGING = True
 PIANO_MODULES = False
@@ -245,6 +246,16 @@ REVIVE_HUNGER = 35          # hunger floor on revival, else 0-hunger re-collapse
 EDIBLE_RESERVE = 3          # food/fish an agent keeps back from builds/sharing
 SHARE_RADIUS = 120          # auto-share edibles with a starving neighbour within this range
 STARVING_HUNGER = 10        # below this, a foodless agent deterministically seeks the nearest food zone
+
+# Structure effects (STRUCTURE_EFFECTS_ENABLED): buildings do something, and
+# soft caps make the Nth duplicate worthless so agents move on to new types.
+FARM_PLOTS_PER_EXTRA = 4    # farm plots in the agent's district per +1 edible gathered
+FARM_YIELD_BONUS_CAP = 2    # max bonus units per gather, so plots beyond 8/district are waste
+HOUSES_PER_NEW_VILLAGER = 3  # each 3 houses raise the population cap by 1 (hard cap: len(AGENT_DEFS))
+WORKSHOPS_PER_CRAFT_BONUS = 3  # workshops village-wide per +1 crafted output (max +1)
+WALL_SOFT_CAP = 10
+WORKSHOP_DISTRICT_CAP = 3   # per buildable village/workshop-kind district
+CUSTOM_SOFT_CAP = 5         # per custom/blueprint type (and the granary)
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
@@ -562,6 +573,7 @@ class SimEngine:
             "frontierExhaustedLogged": False,
             "completedProjects": 0,
             "nextStructureId": 1,
+            "basePopulation": max(1, min(len(AGENT_DEFS), roster_size)),
             "resourceRegistry": {**{k: dict(v) for k, v in BASE_RESOURCES.items()},
                                  **{k: dict(v) for k, v in CRAFTED_RESOURCES.items()}},
             "projectRegistry": {k: dict(v) for k, v in PROJECT_TEMPLATES.items()},
@@ -1092,6 +1104,41 @@ class SimEngine:
     def _district_structure_count(self, district_id):
         return sum(1 for s in self.civilization["structures"] if s.get("districtId") == district_id)
 
+    def _structure_count(self, type_, district_id=None):
+        return sum(1 for s in self.civilization["structures"]
+                   if s.get("type") == type_
+                   and (district_id is None or s.get("districtId") == district_id))
+
+    def _population_cap(self):
+        c = self.civilization
+        base = c.get("basePopulation") or len(self.agents)
+        return min(len(AGENT_DEFS),
+                   base + self._structure_count("house") // HOUSES_PER_NEW_VILLAGER)
+
+    def _type_saturated(self, type_):
+        """Soft cap per structure type, derived from what the type actually
+        does, so building past the cap is provably waste. Saturated types are
+        skipped by role defaults, refused by _start_project_for, and count as
+        'exhausted' toward the invention gate."""
+        if not STRUCTURE_EFFECTS_ENABLED:
+            return False
+        c = self.civilization
+        count = self._structure_count(type_)
+        if type_ == "house":
+            base = c.get("basePopulation") or len(self.agents)
+            return count >= (len(AGENT_DEFS) - base) * HOUSES_PER_NEW_VILLAGER + 3
+        if type_ == "farm_plot":
+            farm_districts = sum(1 for d in c["districts"].values()
+                                 if d["kind"] == "farm" and d.get("build_grid"))
+            return count >= FARM_PLOTS_PER_EXTRA * FARM_YIELD_BONUS_CAP * max(1, farm_districts)
+        if type_ == "workshop":
+            eligible = sum(1 for d in c["districts"].values()
+                           if d["kind"] in ("village", "workshop") and d.get("build_grid"))
+            return count >= WORKSHOP_DISTRICT_CAP * max(1, eligible)
+        if type_ == "wall":
+            return count >= WALL_SOFT_CAP
+        return count >= CUSTOM_SOFT_CAP
+
     def _find_structure_spot(self, district_id):
         d = self.civilization["districts"].get(district_id)
         grid = d.get("build_grid") if d else None
@@ -1146,18 +1193,45 @@ class SimEngine:
 
     def _role_default_project(self, role):
         pref = self.d["ROLE_PROJECT"].get((role or "").lower(), "house")
-        if isinstance(pref, list):
-            return random.choice(pref) if pref else "house"
-        return pref
+        prefs = pref if isinstance(pref, list) else [pref]
+        prefs = prefs or ["house"]
+        open_prefs = [p for p in prefs if not self._type_saturated(p)]
+        if open_prefs:
+            return random.choice(open_prefs)
+        # Every preferred type is saturated: fall back to any unsaturated
+        # registry type (this is what steers the default loop toward the
+        # granary and approved customs once the basics are overbuilt).
+        fallback = [tid for tid in self.civilization["projectRegistry"]
+                    if not self._type_saturated(tid)]
+        if fallback:
+            return random.choice(fallback)
+        return prefs[0]
+
+    def _seed_exhausted(self, tid):
+        """A seed template no longer blocks the invention gate once it is
+        built, saturated past its soft cap, or -- for a never-built seed that
+        depends on crafted goods (the granary) -- once crafting itself has
+        stalled. Without that last clause a dead craft chain would freeze all
+        progression: everything else saturated, the granary unreachable, and
+        invention never armed."""
+        c = self.civilization
+        if tid in c["builtTypes"] or self._type_saturated(tid):
+            return True
+        if not STRUCTURE_EFFECTS_ENABLED:
+            return False
+        tmpl = c["projectRegistry"].get(tid) or PROJECT_TEMPLATES.get(tid) or {}
+        needs_crafted = any(r in self.RECIPES for r in tmpl.get("needs", {}))
+        return needs_crafted and \
+            self.frameTick - c["lastCraftActivityFrame"] > CRAFT_STALL_THRESHOLD
 
     def _invention_required(self):
-        """Blueprint-gated progression (#5.1): true once every seed
-        PROJECT_TEMPLATES id has been built at least once AND there is no
-        approved-but-unbuilt custom project sitting in projectRegistry --
-        i.e. the village has run out of known things to build and can only
-        keep growing through propose_blueprint."""
+        """Blueprint-gated progression (#5.1): true once no productive seed
+        option remains (every seed PROJECT_TEMPLATES id is exhausted per
+        _seed_exhausted) AND there is no approved-but-unbuilt custom project
+        sitting in projectRegistry -- i.e. the village can only keep growing
+        through propose_blueprint."""
         c = self.civilization
-        if not all(tid in c["builtTypes"] for tid in PROJECT_TEMPLATES):
+        if not all(self._seed_exhausted(tid) for tid in PROJECT_TEMPLATES):
             return False
         return not any(pid not in c["builtTypes"] for pid in self._custom_project_ids())
 
@@ -1182,6 +1256,15 @@ class SimEngine:
         if self._invention_required() and not tmpl.get("custom"):
             return (f"{agent['name']} wants to build, but the village needs a NEW invention "
                     f"(propose_blueprint)")
+        if self._type_saturated(type_):
+            alt = next((tid for tid in c["projectRegistry"]
+                        if not self._type_saturated(tid)), None)
+            if alt:
+                return (f"{agent['name']} wants to build a {tmpl['name']}, but the village has "
+                        f"enough of those -- build a {c['projectRegistry'][alt]['name']} instead, "
+                        f"or propose_blueprint")
+            return (f"{agent['name']} wants to build, but every known structure is at capacity -- "
+                    f"the village needs a NEW invention (propose_blueprint)")
         active_count = len(self._active_project_districts())
         if active_count >= MAX_CONCURRENT_PROJECTS:
             return None
@@ -1246,14 +1329,24 @@ class SimEngine:
         if recipe.get("station") and agent["currentZone"] != recipe["station"]:
             self._set_agent_target(agent, recipe["station"])
             return f"{agent['name']} heads to the {recipe['station']} to craft {recipe_id}"
+        # Workshop-station recipes need a physical Workshop somewhere in the
+        # village (structures of type "workshop" are placed in village-kind
+        # districts, so this is a village-wide check, not a per-district one).
+        if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop" \
+                and not self._structure_count("workshop"):
+            return f"{agent['name']} cannot craft {recipe_id} -- the village has no Workshop built yet"
         if not self._has_inputs(agent, recipe["inputs"]):
             missing = [r for r in recipe["inputs"] if agent["resources"].get(r, 0) < recipe["inputs"][r]]
             return f"{agent['name']} lacks {', '.join(missing)} to craft {recipe_id}"
         for r, n in recipe["inputs"].items():
             agent["resources"][r] -= n
-        agent["resources"][recipe_id] = agent["resources"].get(recipe_id, 0) + 1
+        output = 1
+        if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop":
+            output += min(1, self._structure_count("workshop") // WORKSHOPS_PER_CRAFT_BONUS)
+        agent["resources"][recipe_id] = agent["resources"].get(recipe_id, 0) + output
         self.civilization["lastCraftActivityFrame"] = self.frameTick
-        return f"{agent['name']} crafted {recipe_id}"
+        return f"{agent['name']} crafted {recipe_id}" \
+            + (f" x{output} (well-equipped workshops)" if output > 1 else "")
 
     def _custom_recipe_count(self):
         return len([rid for rid in self.RECIPES if rid not in ("planks", "bricks", "tools")])
@@ -1812,6 +1905,26 @@ class SimEngine:
                 "reasoning": f"No build is underway in {district_id} yet; starting one so work spreads out."})
             return
 
+    # --- newcomer backstop (structure effects: houses grow the population) ---
+    def _maybe_welcome_newcomer(self):
+        """Tick-gated like the other _maybe_* backstops. When built housing
+        raises the population cap above the current roster, the next unused
+        AGENT_DEFS entry moves in (at most one per gate interval). Newcomers
+        persist via state.json like any other agent."""
+        if not STRUCTURE_EFFECTS_ENABLED:
+            return
+        if len(self.agents) >= self._population_cap():
+            return
+        unused = next((d for d in AGENT_DEFS if d["name"] not in self.agent_names), None)
+        if not unused:
+            return
+        newcomer = self._make_agents([unused])[0]
+        self.agents.append(newcomer)
+        self.agent_names.add(unused["name"])
+        self.roster_size = len(self.agents)
+        self._push_activity(f"{unused['name']} the {unused['role']} moved to the village -- "
+                            f"the new houses drew a newcomer!")
+
     # --- invention-demand backstop (#5.2) ---
     def _maybe_invention_backstop(self):
         """Deterministic elder backstop, same tick-gated _maybe_* shape as
@@ -2146,9 +2259,15 @@ class SimEngine:
                     candidates.append("food")
                 resource = next((r for r in candidates if agent["resources"].get(r, 0) < COLLECT_CAP), None)
                 if resource:
-                    agent["resources"][resource] = agent["resources"].get(resource, 0) + 1
+                    amount = 1
+                    if STRUCTURE_EFFECTS_ENABLED and resource in EDIBLE_RESOURCES:
+                        plots = self._structure_count("farm_plot", agent.get("currentDistrict"))
+                        amount += min(FARM_YIELD_BONUS_CAP, plots // FARM_PLOTS_PER_EXTRA)
+                    amount = max(1, min(amount, COLLECT_CAP - agent["resources"].get(resource, 0)))
+                    agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
                     c["collectSuccesses"] += 1
-                    summary = f"{agent['name']} collected {resource}"
+                    summary = f"{agent['name']} collected {resource}" \
+                        + (f" x{amount} (farm plots boosted the harvest)" if amount > 1 else "")
                     resource_acted = resource
                 else:
                     contrib_res = self._pick_contribution_resource(
@@ -2527,12 +2646,25 @@ class SimEngine:
         if len(c["pendingBlueprints"]) < MAX_PENDING_BLUEPRINTS \
                 and self.frameTick - c["lastBlueprintActivityFrame"] > BLUEPRINT_STALL_THRESHOLD:
             nudges.append("NOTE: No new blueprint activity in a while. Consider propose_blueprint if you have an idea.")
+        if STRUCTURE_EFFECTS_ENABLED and not invention_required:
+            pref = self.d["ROLE_PROJECT"].get(agent["role"].lower(), "house")
+            prefs = pref if isinstance(pref, list) else [pref]
+            if prefs and all(self._type_saturated(p) for p in prefs):
+                nudges.append(f"NOTE: The village has enough {', '.join(prefs)} structures -- "
+                              f"more add nothing. Build a different type or propose_blueprint.")
         if CRAFTING_ENABLED and self.frameTick - c["lastCraftActivityFrame"] > CRAFT_STALL_THRESHOLD:
             has_workshop = any(s["type"] == "workshop" for s in c["structures"])
             if agent["role"] == "elder" and not has_workshop:
                 nudges.append("NOTE: No workshop exists yet. Direct an agent to build a Workshop so the village can craft planks, bricks, and tools for advanced builds.")
             elif has_workshop:
-                nudges.append("NOTE: No crafting in a while. At the workshop, craft_item (planks/bricks/tools) — advanced builds like the Granary need crafted goods.")
+                granary = c["projectRegistry"].get("granary")
+                if granary and "granary" not in c["builtTypes"]:
+                    crafted_needs = ", ".join(f"{n} {r}" for r, n in granary["needs"].items()
+                                              if r in self.RECIPES)
+                    nudges.append(f"NOTE: No crafting in a while and the Granary is still unbuilt -- "
+                                  f"it needs {crafted_needs}. At the workshop, craft_item those now.")
+                else:
+                    nudges.append("NOTE: No crafting in a while. At the workshop, craft_item (planks/bricks/tools) — advanced builds like the Granary need crafted goods.")
             else:
                 nudges.append("NOTE: The village should build a Workshop, then craft goods for advanced builds like the Granary.")
         if SURVIVAL_ENABLED:
@@ -2565,13 +2697,15 @@ class SimEngine:
             "current_district": agent.get("currentDistrict") or "none",
             "civilization_level": c["level"],
             "structures_built": len(c["structures"]),
+            "structure_counts": {tid: self._structure_count(tid) for tid in c["projectRegistry"]}
+                                if STRUCTURE_EFFECTS_ENABLED else {},
             "active_project": self._active_projects_brief(),
             "project_progress": self._active_projects_progress_text(),
             "known_districts": [{"id": did, "kind": d["kind"]} for did, d in c["districts"].items()
                                 if d.get("build_grid")],
             "directive": c["directive"] or "none",
-            "invention_status": ("REQUIRED: all known structures are built. Use propose_blueprint "
-                                 "to invent a new structure.") if invention_required else "not needed",
+            "invention_status": ("REQUIRED: every known structure is built or at capacity. Use "
+                                 "propose_blueprint to invent a new structure.") if invention_required else "not needed",
             "commitment": agent.get("commitment"),
             "idle_agents": idle_agents,
             "known_resources": [{"id": rid, "gather_zone": d.get("gatherZone"),
@@ -2703,6 +2837,7 @@ class SimEngine:
                 self._maybe_start_idle_district_project()
                 self._maybe_invention_backstop()
                 self._maybe_found_district()
+                self._maybe_welcome_newcomer()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
             if BENCHMARKS_ENABLED and (ft % BENCHMARK_TICK_FRAMES == 0 or ft == FIRST_BENCHMARK_FRAME):
@@ -2780,7 +2915,7 @@ class SimEngine:
             civ[key] = sorted(c.get(key, set()))
         agents = []
         for a in self.agents:
-            ad = {k: v for k, v in a.items() if k != "beliefs"}
+            ad = {k: v for k, v in a.items() if k not in ("beliefs", "isThinking")}
             ad = json.loads(json.dumps(ad, default=str))
             ad["beliefs"] = sorted(a.get("beliefs", set()))
             agents.append(ad)
@@ -2879,10 +3014,21 @@ class SimEngine:
                 # already-built-out village.
                 civ["builtTypes"].update(
                     s.get("type") for s in (civ.get("structures") or []) if s.get("type"))
+                # basePopulation backfill: saves from before structure effects
+                # existed have no record of the starting roster -- treat the
+                # saved roster as the base so existing houses grow it from here.
+                if not civ.get("basePopulation"):
+                    civ["basePopulation"] = max(1, min(len(AGENT_DEFS),
+                                                       len(data.get("agents") or []) or 8))
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
                     a = dict(ad)
+                    # isThinking is an in-flight-only runtime flag; a snapshot
+                    # taken mid-think would otherwise wedge the agent forever
+                    # (the dispatch gate requires False and only the dead
+                    # process's _think_job could have reset it).
+                    a["isThinking"] = False
                     a["beliefs"] = set(a.get("beliefs") or [])
                     # state.json may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
