@@ -4,19 +4,19 @@ overview: "Fix the two bugs found in the log review: reasoning-model chain-of-th
 todos:
   - id: fix-lm-complete
     content: Add answer-extraction + scaffold rejection to lm_complete()/lm_message_text() in server.py
-    status: pending
+    status: completed
   - id: scrub-memory
     content: Extend MemoryStore.clean() to purge scaffold-poisoned entries; filter live longTerm lists in the engine clean step and on state restore
-    status: pending
+    status: completed
   - id: cap-memory-prompt
     content: Cap compose_memory() output to a fixed char budget
-    status: pending
+    status: completed
   - id: context-overflow-retry
     content: Detect 'Context size has been exceeded' in run_agent_decision() and retry once with slimmed prompt; log as context_overflow
-    status: pending
+    status: completed
   - id: update-docs
     content: Update CLAUDE.md LM Studio sizing note (~1500 to ~3400 tokens per slot; fix MAX_CONCURRENT_LLM 3 -> 2)
-    status: pending
+    status: completed
   - id: verify-logs
     content: Run a session and verify lm_studio.jsonl error rate, reflected memories, and prompt sizes
     status: pending

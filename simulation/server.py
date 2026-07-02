@@ -149,6 +149,49 @@ def _cosine(a, b):
     return sum(x * y for x, y in zip(a, b))
 
 
+# Reasoning models (e.g. qwen3.5) sometimes route their entire output --
+# chain-of-thought scaffold included -- into `reasoning_content` instead of
+# `content`. Left unchecked, that scaffold gets stored verbatim as agent
+# memory and re-enters every future prompt via compose_memory(). These two
+# helpers extract the real answer and reject anything that still looks like
+# leaked scaffolding, for both the plain-text LLM path (lm_complete) and the
+# memory stores that may already hold poisoned entries (MemoryStore.clean,
+# and the engine's longTerm lists -- see _ENGINE_DEPS below).
+_SCAFFOLD_MARKER_RE = re.compile(
+    r"(thinking process|\*\*analyze|let'?s think|let me think|"
+    r"chain[- ]of[- ]thought|step[- ]by[- ]step)",
+    re.IGNORECASE,
+)
+_SCAFFOLD_LEADING_LIST_RE = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
+
+
+def is_scaffold_text(text):
+    """True if `text` looks like leaked chain-of-thought scaffold rather than
+    a clean plain-text answer."""
+    if not text:
+        return False
+    if _SCAFFOLD_MARKER_RE.search(text):
+        return True
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) > 2:
+        return True
+    return any(_SCAFFOLD_LEADING_LIST_RE.match(ln) for ln in lines)
+
+
+def extract_plain_answer(text):
+    """Pull the real answer out of raw reasoning-model scaffold text: the
+    answer follows the scaffold, so take the final non-empty line/segment and
+    strip any leftover list markers or quoting."""
+    if not text:
+        return None
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    answer = _SCAFFOLD_LEADING_LIST_RE.sub("", lines[-1])
+    answer = answer.strip(" \"'").strip()
+    return answer or None
+
+
 class MemoryStore:
     """Append-on-write / query-on-read memory with WM/STM/LTM tiers.
 
@@ -249,12 +292,16 @@ class MemoryStore:
         self.entries.sort(key=lambda e: e["id"])
 
     def clean(self):
-        """Memory Cleaner: drop exact-duplicate texts per agent (keeping the
-        most salient/newest copy), then re-trim to the cap. Deterministic and
-        cheap so it can run often without burning LLM calls."""
+        """Memory Cleaner: drop scaffold-poisoned entries (leaked
+        chain-of-thought text from a reasoning model, see is_scaffold_text),
+        then exact-duplicate texts per agent (keeping the most salient/newest
+        copy), then re-trim to the cap. Deterministic and cheap so it can run
+        often without burning LLM calls."""
         with self._lock:
             best = {}
             for e in self.entries:
+                if is_scaffold_text(e["text"]):
+                    continue
                 key = (e["agent"], e["text"])
                 prev = best.get(key)
                 if prev is None or (e["salience"], e["id"]) > (prev["salience"], prev["id"]):
@@ -500,6 +547,9 @@ BLUEPRINTS (inventing new structures):
    must be the id of a blueprint listed in Pending blueprints.
 8. The elder should review Pending blueprints before starting a vanilla project
    when proposals are waiting.
+8b. If Invention status is REQUIRED, every seed structure type is already built —
+   start_project on a seed type will be refused. Use propose_blueprint (or build/
+   contribute to an Approved custom build) instead.
 9. Only propose resources that have a gather_zone (one of: farm, forest, village,
    market, beach, cave, ocean) so villagers can collect them, or set gather_zone to
    null for trade-only resources (these cannot be collected).
@@ -507,6 +557,10 @@ BLUEPRINTS (inventing new structures):
    target set to that resource id.
 11. Don't repeat a message you or another agent already said recently (see Recent
    village conversations) — vary your wording each time you talk.
+11b. If a nearby agent's message mentions a resource you could help with, it may become
+   a Commitment on you. If Commitment is set, prioritize honoring it soon via
+   collect_resource, contribute_resources, or trade_resource for that resource —
+   this fulfills the promise and clears it.
 
 SURVIVAL:
 12. You have Hunger and Health. You auto-eat your own food when hungry, so keep food
@@ -603,6 +657,17 @@ EXAMPLE (gatherer proposing a library + paper):
 EXAMPLE (elder approving a pending blueprint):
 {"action":"approve_blueprint","target":"library","message":"Approved. Gather paper from the forest.","new_role":null,"relationship_update":null,"reasoning":"A worthy addition to the village."}"""
 
+# Reduced-context variant for the context-overflow retry (see
+# run_agent_decision): drops the worked EXAMPLE blocks, which are the bulk of
+# SYSTEM_PROMPT's size, while keeping the rules and the JSON schema so output
+# is still shaped. Sliced by marker rather than a hardcoded example count so
+# this stays correct if examples are added/removed.
+_SYSTEM_PROMPT_EXAMPLES_IDX = SYSTEM_PROMPT.find("\nEXAMPLE (")
+SYSTEM_PROMPT_SLIM = (
+    SYSTEM_PROMPT[:_SYSTEM_PROMPT_EXAMPLES_IDX]
+    if _SYSTEM_PROMPT_EXAMPLES_IDX != -1 else SYSTEM_PROMPT
+)
+
 USER_PROMPT_TEMPLATE = """Your name: {agent_name}
 Your role: {role}
 Your skill: {role_skill}
@@ -621,6 +686,8 @@ Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
+Invention status: {invention_status}
+Commitment: {commitment_text}
 Idle agents needing a task: {idle_agents}
 Known resources: {known_resources}
 Known recipes (craft_item targets): {known_recipes}
@@ -639,9 +706,32 @@ Available actions: {available_actions}
 What do you do next? Respond with only the JSON."""
 
 
+# Hard ceiling on the composed "Recent memory:" prompt line. Bug 1's fix
+# removes the current worst offenders (leaked scaffold text), but this cap
+# guards against any future bloat regardless of cause.
+MEMORY_PROMPT_CHAR_BUDGET = 600
+
+
+def _cap_memory_text(lines, budget=MEMORY_PROMPT_CHAR_BUDGET):
+    """Join memory lines (oldest first) under a total character budget,
+    dropping the oldest lines first and hard-truncating whatever remains
+    (including a "(recalled: ...)" suffix) if it still doesn't fit."""
+    if not lines:
+        return "none"
+    kept = list(lines)
+    merged = " | ".join(kept)
+    while len(merged) > budget and len(kept) > 1:
+        kept.pop(0)
+        merged = " | ".join(kept)
+    if len(merged) > budget:
+        merged = merged[:max(0, budget - 3)].rstrip() + "..."
+    return merged or "none"
+
+
 def compose_memory(data):
     """Merge the client's compacted memory slice with salient memories the
-    server retrieves from its vector store for the current situation (Phase 1).
+    server retrieves from its vector store for the current situation (Phase 1),
+    capped to MEMORY_PROMPT_CHAR_BUDGET characters total.
     """
     client_mem = data.get("memory")
     lines = []
@@ -671,7 +761,7 @@ def compose_memory(data):
         if recalled:
             lines.append("(recalled: " + "; ".join(recalled) + ")")
 
-    return " | ".join(lines) if lines else "none"
+    return _cap_memory_text(lines)
 
 
 def format_nearby_agents(nearby):
@@ -844,6 +934,13 @@ def format_active_rules(active):
         val_str = f" {val}" if val not in (None, "") else ""
         parts.append(f"{r.get('name', '?')} ({r.get('kind', 'custom')}{val_str})")
     return "; ".join(parts) if parts else "none"
+
+
+def format_commitment(commitment):
+    """Format a pending commitment (#5.4) for the prompt, or 'none'."""
+    if not isinstance(commitment, dict) or not commitment.get("to"):
+        return "none"
+    return f'You agreed to help {commitment["to"]}: "{commitment.get("text", "")}"'
 
 
 def format_idle_agents(idle_agents):
@@ -1050,7 +1147,18 @@ def role_fallback_action(role, agent_data):
                     "new_role": None, "relationship_update": None,
                     "reasoning": "Assigning work to an idle villager."}
 
+    invention_required = str(agent_data.get("invention_status") or "").startswith("REQUIRED")
     if not has_project:
+        if invention_required:
+            # Mirrors sim_engine._invention_required's gate on _start_project_for:
+            # every seed structure is already built, so a role-default seed
+            # project would just be refused. Gather instead of stalling; the
+            # elder's own _maybe_invention_backstop is what actually pushes
+            # someone toward propose_blueprint.
+            return {"action": "collect_resource", "target": None, "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "The village needs a new invention before building again; "
+                                 "gathering resources for now."}
         return {"action": "start_project", "target": role_default_project(role), "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Starting a role-appropriate build project."}
@@ -1520,7 +1628,14 @@ def lm_message_text(message):
 def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5):
     """Plain-text LM Studio completion for the background cognition loops
     (Summarizer, meta system, PIANO modules / Cognitive Controller). Returns the
-    text or None on any failure so every caller can degrade gracefully."""
+    text or None on any failure so every caller can degrade gracefully.
+
+    Unlike lm_message_text() (used on the JSON-decision path, where any
+    surrounding text is harmless because extract_json_decision() picks the
+    JSON out of it), this inspects the raw message dict itself: when the
+    model left `content` empty and routed everything into `reasoning_content`,
+    that field holds a chain-of-thought scaffold and only the trailing answer
+    should be kept -- and rejected outright if it still looks scaffolded."""
     payload = {
         "model": "local-model",
         "messages": [
@@ -1535,10 +1650,20 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5):
     try:
         resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
         body = resp.json()
-        return lm_message_text(body["choices"][0]["message"])
+        message = body["choices"][0]["message"]
     except (requests.exceptions.RequestException, ValueError, KeyError,
             IndexError, TypeError):
         return None
+    if not isinstance(message, dict):
+        return None
+    content = (message.get("content") or "").strip()
+    if content:
+        text = content
+    else:
+        text = extract_plain_answer((message.get("reasoning_content") or "").strip())
+    if not text or is_scaffold_text(text):
+        return None
+    return text
 
 
 def extract_json_decision(text):
@@ -1594,6 +1719,89 @@ def extract_json_decision(text):
     return decision
 
 
+def build_user_prompt(data, slim=False):
+    """Fill in USER_PROMPT_TEMPLATE from the agent/civilization state. When
+    slim=True (the context-overflow retry, see run_agent_decision), drop the
+    memory line and recent conversations -- the two most compressible,
+    highest-variance-size fields -- to shrink the prompt."""
+    nearby_formatted = format_nearby_agents(data.get("nearby_agents"))
+    known_resources = data.get("known_resources") or []
+    pending_blueprints = data.get("pending_blueprints") or []
+    approved_custom_projects = data.get("approved_custom_projects") or []
+    rejected_blueprints = data.get("rejected_blueprints") or []
+    idle_agents = data.get("idle_agents") or []
+    behavior_nudge = data.get("behavior_nudge") or ""
+
+    return USER_PROMPT_TEMPLATE.format(
+        agent_name=data.get("agent_name"),
+        role=data.get("role"),
+        role_skill=data.get("role_skill", ""),
+        personality=data.get("personality"),
+        memory="none" if slim else compose_memory(data),
+        hunger=data.get("hunger", 100),
+        health=data.get("health", 100),
+        resources=data.get("resources"),
+        relationships=data.get("relationships"),
+        beliefs=data.get("beliefs") or "none",
+        nearby_agents=nearby_formatted,
+        world_zone=data.get("world_zone"),
+        current_district=data.get("current_district", "none"),
+        known_districts=format_known_districts(data.get("known_districts") or []),
+        civilization_level=data.get("civilization_level", 1),
+        structures_built=data.get("structures_built", 0),
+        active_project=data.get("active_project", "none"),
+        project_progress=data.get("project_progress", "none"),
+        directive=data.get("directive", "none"),
+        invention_status=data.get("invention_status", "not needed"),
+        commitment_text=format_commitment(data.get("commitment")),
+        idle_agents=format_idle_agents(idle_agents),
+        known_resources=format_known_resources(known_resources),
+        known_recipes=format_known_recipes(data.get("known_recipes") or []),
+        pending_blueprints=format_pending_blueprints(pending_blueprints),
+        pending_recipes=format_pending_recipes(data.get("pending_recipes") or []),
+        approved_custom_projects=format_approved_custom(approved_custom_projects),
+        rejected_blueprints=format_rejected_blueprints(rejected_blueprints),
+        pending_rules=format_pending_rules(data.get("pending_rules") or []),
+        active_rules=format_active_rules(data.get("active_rules") or []),
+        recent_conversations="none" if slim else data.get("recent_conversations", "none"),
+        inbox=data.get("inbox", "none"),
+        module_reports=data.get("module_reports", "none"),
+        behavior_nudge=behavior_nudge,
+        available_actions=data.get("available_actions"),
+    )
+
+
+def build_decision_payload(data, self_prompt, response_format, slim=False):
+    """Assemble the LM Studio chat-completion payload for a decision call.
+    slim=True builds the reduced-context retry payload (see
+    run_agent_decision): SYSTEM_PROMPT_SLIM instead of SYSTEM_PROMPT (drops
+    the worked EXAMPLE blocks) plus the slim user prompt. The rules and JSON
+    schema are kept either way so response_format still shapes the output."""
+    system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
+    if self_prompt:
+        system_content += f"\n\nYOUR PERSONA (act in character): {self_prompt}"
+    payload = {
+        "model": "local-model",
+        "messages": [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": build_user_prompt(data, slim=slim)},
+        ],
+        "max_tokens": 512,
+        "temperature": 0.4,
+        "stream": False,
+        "thinking": {"type": "disabled", "budget_tokens": 0},
+    }
+    if response_format is not None:
+        payload["response_format"] = response_format
+    return payload
+
+
+def is_context_overflow_error(err_text):
+    """True for LM Studio's per-slot context-window error, e.g.
+    {"error": "Context size has been exceeded."}."""
+    return "context size has been exceeded" in (err_text or "").lower()
+
+
 def run_agent_decision(data):
     """Build the prompt, call LM Studio, and return a validated decision dict.
 
@@ -1602,73 +1810,15 @@ def run_agent_decision(data):
     failure it returns either an {"error": ...} dict (engine maps these to its
     offline/compute/rest paths) or a role fallback decision."""
     try:
-        nearby_formatted = format_nearby_agents(data.get("nearby_agents"))
-        behavior_nudge = data.get("behavior_nudge") or ""
+        self_prompt = (data.get("self_prompt") or "").strip()
+        response_format = build_response_format()
+        payload = build_decision_payload(data, self_prompt, response_format)
 
         known_resources = data.get("known_resources") or []
         pending_blueprints = data.get("pending_blueprints") or []
         approved_custom_projects = data.get("approved_custom_projects") or []
         rejected_blueprints = data.get("rejected_blueprints") or []
-        idle_agents = data.get("idle_agents") or []
-
-        user_prompt = USER_PROMPT_TEMPLATE.format(
-            agent_name=data.get("agent_name"),
-            role=data.get("role"),
-            role_skill=data.get("role_skill", ""),
-            personality=data.get("personality"),
-            memory=compose_memory(data),
-            hunger=data.get("hunger", 100),
-            health=data.get("health", 100),
-            resources=data.get("resources"),
-            relationships=data.get("relationships"),
-            beliefs=data.get("beliefs") or "none",
-            nearby_agents=nearby_formatted,
-            world_zone=data.get("world_zone"),
-            current_district=data.get("current_district", "none"),
-            known_districts=format_known_districts(data.get("known_districts") or []),
-            civilization_level=data.get("civilization_level", 1),
-            structures_built=data.get("structures_built", 0),
-            active_project=data.get("active_project", "none"),
-            project_progress=data.get("project_progress", "none"),
-            directive=data.get("directive", "none"),
-            idle_agents=format_idle_agents(idle_agents),
-            known_resources=format_known_resources(known_resources),
-            known_recipes=format_known_recipes(data.get("known_recipes") or []),
-            pending_blueprints=format_pending_blueprints(pending_blueprints),
-            pending_recipes=format_pending_recipes(data.get("pending_recipes") or []),
-            approved_custom_projects=format_approved_custom(approved_custom_projects),
-            rejected_blueprints=format_rejected_blueprints(rejected_blueprints),
-            pending_rules=format_pending_rules(data.get("pending_rules") or []),
-            active_rules=format_active_rules(data.get("active_rules") or []),
-            recent_conversations=data.get("recent_conversations", "none"),
-            inbox=data.get("inbox", "none"),
-            module_reports=data.get("module_reports", "none"),
-            behavior_nudge=behavior_nudge,
-            available_actions=data.get("available_actions"),
-        )
-
-        self_prompt = (data.get("self_prompt") or "").strip()
-        system_content = SYSTEM_PROMPT
-        if self_prompt:
-            system_content = (
-                SYSTEM_PROMPT
-                + f"\n\nYOUR PERSONA (act in character): {self_prompt}"
-            )
-
-        payload = {
-            "model": "local-model",
-            "messages": [
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": user_prompt},
-            ],
-            "max_tokens": 512,
-            "temperature": 0.4,
-            "stream": False,
-            "thinking": {"type": "disabled", "budget_tokens": 0},
-        }
-        response_format = build_response_format()
-        if response_format is not None:
-            payload["response_format"] = response_format
+        nearby_formatted = format_nearby_agents(data.get("nearby_agents"))
 
         agent_name = data.get("agent_name")
         frame_tick = data.get("frame_tick")
@@ -1689,10 +1839,10 @@ def run_agent_decision(data):
                 "error": error,
             })
 
-        def bad_response_fallback(latency_ms, response=None, http_status=None):
+        def bad_response_fallback(latency_ms, response=None, http_status=None, error="bad_response"):
             fallback = role_fallback_action(agent_data.get("role"), agent_data)
             log_lm(latency_ms, response=response, http_status=http_status,
-                   decision=fallback, error="bad_response")
+                   decision=fallback, error=error)
             return fallback
 
         global _structured_output_enabled
@@ -1722,6 +1872,7 @@ def run_agent_decision(data):
                   "structured output for this session and retrying without it.")
             _structured_output_enabled = False
             payload.pop("response_format", None)
+            response_format = None
             start = datetime.now()
             try:
                 resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
@@ -1739,28 +1890,63 @@ def run_agent_decision(data):
         if lm_body is None:
             return bad_response_fallback(latency_ms, http_status=http_status)
 
+        # error_kind tags the whole call for logging once at the end (below),
+        # even if the context-overflow retry ultimately recovers a decision --
+        # this is what makes context_overflow measurable/distinguishable in
+        # lm_studio.jsonl per the plan, without double-logging each attempt.
+        error_kind = None
         if isinstance(lm_body, dict) and lm_body.get("error"):
             err = str(lm_body.get("error"))
             if "compute error" in err.lower():
                 log_lm(latency_ms, response=lm_body, http_status=http_status, error="compute_error")
                 return {"error": "compute_error", "action": "rest"}
-            return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
+            if not is_context_overflow_error(err):
+                return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
+
+            # Retry ONCE with a slimmed-down payload: no memory line, no
+            # recent conversations, no worked examples. Rules + JSON schema
+            # are kept so response_format still shapes the output. On any
+            # further failure this falls through to the normal handling below
+            # (which will hit bad_response_fallback), so there is no loop.
+            error_kind = "context_overflow"
+            slim_payload = build_decision_payload(data, self_prompt, response_format, slim=True)
+            payload = slim_payload
+            retry_start = datetime.now()
+            try:
+                resp = requests.post(LM_STUDIO_URL, json=slim_payload, timeout=30)
+            except requests.exceptions.RequestException:
+                latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
+                log_lm(latency_ms, error=error_kind)
+                return {"error": "LM Studio offline", "action": "rest"}
+            latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
+            http_status = resp.status_code
+            try:
+                lm_body = resp.json()
+            except ValueError:
+                lm_body = None
+
+            if lm_body is None:
+                return bad_response_fallback(latency_ms, http_status=http_status, error=error_kind)
+            if isinstance(lm_body, dict) and lm_body.get("error"):
+                return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status, error=error_kind)
 
         try:
             message = lm_body["choices"][0]["message"]
         except (TypeError, KeyError, IndexError):
-            return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
+            return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
+                                          error=error_kind or "bad_response")
 
         raw_text = lm_message_text(message)
         decision = extract_json_decision(raw_text)
         if not decision and isinstance(message, dict):
             decision = extract_json_decision(message.get("content") or "")
         if not decision:
-            return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
+            return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
+                                          error=error_kind or "bad_response")
 
         decision = normalize_decision(decision, agent_data)
 
-        log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=None)
+        log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=error_kind)
         return decision
 
     except Exception:
@@ -1804,6 +1990,7 @@ _ENGINE_DEPS = {
     "SLUG_RE": SLUG_RE,
     "llm_decide": _llm_decide,
     "lm_complete": lm_complete,
+    "is_scaffold_text": is_scaffold_text,
     "memory_store": memory_store,
     "log_activity": session_logger.log_activity,
     "log_conversation": session_logger.log_conversation,

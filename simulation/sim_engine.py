@@ -31,7 +31,7 @@ STATE_VERSION = 2
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 AUTOSAVE_SECONDS = 10
 # Sets on the civilization that serialize to JSON arrays and back.
-_CIV_SET_KEYS = ("rejectedBlueprintIds", "rejectedRecipeIds")
+_CIV_SET_KEYS = ("rejectedBlueprintIds", "rejectedRecipeIds", "builtTypes")
 
 
 # --- Feature flags (ported from index.html consts; now server config) ---
@@ -252,6 +252,17 @@ BLUEPRINT_STALL_THRESHOLD = 1800
 GOAL_STEP_FRAMES = 45
 SAGE_CRITICAL_HEALTH = 30
 CRAFT_STALL_THRESHOLD = 1500
+
+# Invention-gated progression (#5.1/#5.2): consecutive elder turns (see
+# _schedule_think) that _invention_required() must hold true before
+# _maybe_invention_backstop() steps in and assigns the invention task itself.
+INVENTION_BACKSTOP_STREAK = 3
+
+# Consequential conversations (#5.4): a commitment auto-expires if unhonored
+# for this many frames -- roughly 15 think-turns at a typical ~400-frame
+# per-agent think interval, mirroring the STALL_THRESHOLD-style frame-gated
+# expiries used elsewhere in this file.
+COMMITMENT_EXPIRE_FRAMES = 6000
 
 MAX_PENDING_BLUEPRINTS = 5
 MAX_APPROVED_CUSTOM = 15
@@ -514,6 +525,7 @@ class SimEngine:
                 "lastTaskedFrame": None, "lastContributedFrame": None,
                 "consecutiveIdleMoves": 0, "hunger": 80, "health": 100,
                 "incapacitated": False, "goal": None, "actionCounts": {},
+                "commitment": None,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
             }
@@ -553,6 +565,8 @@ class SimEngine:
             "resourceRegistry": {**{k: dict(v) for k, v in BASE_RESOURCES.items()},
                                  **{k: dict(v) for k, v in CRAFTED_RESOURCES.items()}},
             "projectRegistry": {k: dict(v) for k, v in PROJECT_TEMPLATES.items()},
+            "builtTypes": set(),
+            "inventionRequiredStreak": 0,
             "pendingBlueprints": [],
             "rejectedBlueprintIds": set(),
             "pendingRecipes": [],
@@ -1120,6 +1134,7 @@ class SimEngine:
         built_name = project["name"]
         c["districtProjects"][district_id] = None
         c["completedProjects"] += 1
+        c["builtTypes"].add(struct_type)
         agent["lastContributedFrame"] = self.frameTick
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
@@ -1135,12 +1150,38 @@ class SimEngine:
             return random.choice(pref) if pref else "house"
         return pref
 
+    def _invention_required(self):
+        """Blueprint-gated progression (#5.1): true once every seed
+        PROJECT_TEMPLATES id has been built at least once AND there is no
+        approved-but-unbuilt custom project sitting in projectRegistry --
+        i.e. the village has run out of known things to build and can only
+        keep growing through propose_blueprint."""
+        c = self.civilization
+        if not all(tid in c["builtTypes"] for tid in PROJECT_TEMPLATES):
+            return False
+        return not any(pid not in c["builtTypes"] for pid in self._custom_project_ids())
+
     def _start_project_for(self, agent, target, target_district=None):
         c = self.civilization
-        type_ = target if (target and target in c["projectRegistry"]) else self._role_default_project(agent["role"])
+        explicit = bool(target and target in c["projectRegistry"])
+        type_ = target if explicit else self._role_default_project(agent["role"])
+        if not explicit:
+            # Bias the default (role-based) pick toward an approved-but-
+            # unbuilt custom project of the same kind, before any seed
+            # repeat -- this is what makes invention pay off even before
+            # it's strictly required.
+            preferred_kind = PROJECT_KIND.get(type_, "village")
+            biased = next((pid for pid in self._custom_project_ids()
+                           if pid not in c["builtTypes"]
+                           and PROJECT_KIND.get(pid, "village") == preferred_kind), None)
+            if biased:
+                type_ = biased
         tmpl = c["projectRegistry"].get(type_)
         if not tmpl:
             return None
+        if self._invention_required() and not tmpl.get("custom"):
+            return (f"{agent['name']} wants to build, but the village needs a NEW invention "
+                    f"(propose_blueprint)")
         active_count = len(self._active_project_districts())
         if active_count >= MAX_CONCURRENT_PROJECTS:
             return None
@@ -1540,6 +1581,23 @@ class SimEngine:
             self._deliver_message(agent["name"], recipient_name,
                                   f"(belief shared) {self._belief_text(belief)}", "belief")
 
+    def _maybe_form_commitment(self, agent, recipient_name, message):
+        """Consequential conversations (#5.4): talk stops being purely
+        advisory -- a request naming a known resource creates a commitment
+        on the recipient. One commitment per agent; a new one overwrites
+        the old. Honored/cleared in apply_decision's post-action bookkeeping."""
+        if not recipient_name or recipient_name == "everyone":
+            return
+        recipient = self._find_agent(recipient_name)
+        if not recipient or recipient is agent:
+            return
+        text_lower = message.lower()
+        matched = next((rid for rid in self.civilization["resourceRegistry"] if rid in text_lower), None)
+        if not matched:
+            return
+        recipient["commitment"] = {"to": agent["name"], "text": message,
+                                   "madeAt": self.frameTick, "resource": matched}
+
     def _spread_beliefs_by_proximity(self):
         if not MEMES_ENABLED:
             return
@@ -1726,10 +1784,13 @@ class SimEngine:
     def _maybe_start_idle_district_project(self):
         """With multiple buildable districts, nothing today encourages the
         LLM to spread work across them -- it's plausible the model fixates on
-        one district indefinitely. Deterministically start a project in a
+        one district indefinitely.         Deterministically start a project in a
         buildable, idle district that has an agent standing in it, mirroring
         _maybe_advance_rules's shape (cooldown-gated, calls into normal state
-        mutation)."""
+        mutation). Routes through apply_decision -> _start_project_for, so
+        the invention gate (#5.1) applies here automatically -- when
+        invention is required this becomes a no-op refusal rather than a
+        seed-type build, exactly like an LLM-issued start_project would."""
         c = self.civilization
         if len(self._active_project_districts()) >= MAX_CONCURRENT_PROJECTS:
             return
@@ -1750,6 +1811,39 @@ class SimEngine:
                 "action": "start_project", "target_district": district_id,
                 "reasoning": f"No build is underway in {district_id} yet; starting one so work spreads out."})
             return
+
+    # --- invention-demand backstop (#5.2) ---
+    def _maybe_invention_backstop(self):
+        """Deterministic elder backstop, same tick-gated _maybe_* shape as
+        _maybe_advance_rules/_maybe_start_idle_district_project: once
+        _invention_required() has held true for INVENTION_BACKSTOP_STREAK
+        consecutive elder turns (the streak is tracked in
+        civilization["inventionRequiredStreak"], incremented in
+        _schedule_think whenever the elder is dispatched to think, reset on
+        every non-required turn or successful propose_blueprint) and no
+        blueprint is currently pending, direct the most-idle villager to
+        invent one. This keeps the pressure in-world instead of hard-coding
+        a fake proposal -- the blueprint's actual content must still come
+        from the LLM, so a weak model may stall here; that's why the stall
+        itself is logged via _push_activity, to stay observable."""
+        c = self.civilization
+        if c.get("inventionRequiredStreak", 0) < INVENTION_BACKSTOP_STREAK:
+            return
+        if c["pendingBlueprints"]:
+            return
+        elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
+        if not elder:
+            return
+        target = next((a for a in self._idle_agents_for_elder() if a["name"] != elder["name"]), None)
+        if not target:
+            return
+        c["inventionRequiredStreak"] = 0
+        self.apply_decision(elder, {
+            "action": "assign_task", "target": target["name"],
+            "message": "propose a new structure blueprint -- the village needs a new invention!",
+            "reasoning": "All known structures are built and no invention is pending; "
+                         "directing the village to invent something new."})
+        self._push_activity(f"Elder {elder['name']} demands invention: every known structure is already built.")
 
     # --- stuck-project relocation backstop ---
     def _maybe_relocate_stuck_project(self):
@@ -1970,11 +2064,29 @@ class SimEngine:
                 self.lastMemorySize = self.d["memory_store"].size()
             except Exception:
                 pass
+            # MemoryStore.clean() only scrubs the vector store; each agent's
+            # live memory.longTerm list is separate engine state and can hold
+            # the same leaked chain-of-thought scaffold (see is_scaffold_text)
+            # if it was written before validation existed. Without this, a
+            # running session keeps poisoned entries indefinitely -- they only
+            # roll off after LONG_MEM_CAP new (now-validated) summaries arrive.
+            try:
+                is_scaffold = self.d["is_scaffold_text"]
+                for a in self.agents:
+                    long_term = a.get("memory", {}).get("longTerm")
+                    if long_term:
+                        a["memory"]["longTerm"] = [
+                            t for t in long_term if not is_scaffold(t)
+                        ]
+            except Exception:
+                pass
 
     # --- the 27-case world-mutation switch (ported applyDecision) ---
     def apply_decision(self, agent, decision):
         action = decision.get("action") or "rest"
         summary = f"{agent['name']} rested"
+        resource_acted = None  # set by collect_resource/contribute_resources/trade_resource
+        # below; used only to honor a pending commitment (#5.4) after the fact.
         c = self.civilization
 
         is_talk = action == "talk_to_nearby"
@@ -2037,12 +2149,14 @@ class SimEngine:
                     agent["resources"][resource] = agent["resources"].get(resource, 0) + 1
                     c["collectSuccesses"] += 1
                     summary = f"{agent['name']} collected {resource}"
+                    resource_acted = resource
                 else:
                     contrib_res = self._pick_contribution_resource(
                         agent, {"target": unmet, "target_district": district_id}, district_id)
                     contributed = self._try_contribute_resource(agent, contrib_res, district_id)
                     if contributed:
                         summary = contributed
+                        resource_acted = contrib_res
                     elif unmet and self._gather_zone_for_resource(unmet):
                         gz = self._gather_zone_for_resource(unmet)
                         if agent["currentZone"] != gz:
@@ -2062,6 +2176,7 @@ class SimEngine:
                 self._push_conversation(agent["name"], recipient, decision["message"])
                 self._deliver_message(agent["name"], recipient, decision["message"], "speech")
                 self._maybe_spread_beliefs(agent, recipient, decision["message"])
+                self._maybe_form_commitment(agent, recipient, decision["message"])
                 summary = f"{agent['name']} talked to {recipient}"
             else:
                 self._push_communication("talk_attempt", agent["name"], recipient, None, "no_message")
@@ -2080,6 +2195,7 @@ class SimEngine:
                 self._nudge_ally(target, agent["name"])
                 self._push_memory(target, f"Received {give} from {agent['name']}")
                 summary = f"{agent['name']} traded {give} to {target['name']}"
+                resource_acted = give
             elif target:
                 summary = f"{agent['name']} moves to trade with {target['name']}"
             else:
@@ -2108,6 +2224,7 @@ class SimEngine:
                 contributed = self._try_contribute_resource(agent, res, district_id)
                 if contributed:
                     summary = contributed
+                    resource_acted = res
                 elif self._is_project_complete(district_id):
                     summary = self._build_active_structure(agent, district_id)
                 else:
@@ -2119,6 +2236,7 @@ class SimEngine:
                     elif unmet and gz and agent["currentZone"] == gz and agent["resources"].get(unmet, 0) < COLLECT_CAP:
                         agent["resources"][unmet] = agent["resources"].get(unmet, 0) + 1
                         summary = f"{agent['name']} collected {unmet}"
+                        resource_acted = unmet
                     else:
                         summary = f"{agent['name']} has nothing to contribute"
 
@@ -2151,6 +2269,7 @@ class SimEngine:
                     agent["message"] = decision["message"]
                     agent["messageTimer"] = 180
                 c["lastBlueprintActivityFrame"] = self.frameTick
+                c["inventionRequiredStreak"] = 0
                 summary = f"{agent['name']} proposed {bp['name']} (needs {needs_str})"
             else:
                 summary = f"{agent['name']} drafted an invalid blueprint"
@@ -2251,6 +2370,13 @@ class SimEngine:
         if action not in ("rest", "talk_to_nearby", "assign_task"):
             agent["assignedTask"] = None
             agent["idleCycles"] = 0
+        if agent.get("commitment"):
+            commitment = agent["commitment"]
+            if resource_acted and resource_acted == commitment.get("resource"):
+                agent["commitment"] = None
+                self._push_activity(f"{agent['name']} honored a promise to {commitment['to']}")
+            elif self.frameTick - commitment.get("madeAt", self.frameTick) > COMMITMENT_EXPIRE_FRAMES:
+                agent["commitment"] = None
         self._push_memory(agent, summary)
 
         ru = decision.get("relationship_update")
@@ -2337,9 +2463,18 @@ class SimEngine:
                 })
 
         actives = self._active_project_districts()
+        invention_required = self._invention_required()
         nudges = []
         if agent["assignedTask"]:
             nudges.append(f"Your leader assigned you: {agent['assignedTask']}. Do it now.")
+        if invention_required:
+            nudges.append("NOTE: All known structures are already built. The village needs a NEW "
+                          "invention -- use propose_blueprint now.")
+        if agent.get("commitment"):
+            commitment = agent["commitment"]
+            nudges.append(f'NOTE: You agreed to help {commitment["to"]}: "{commitment["text"]}". '
+                          f'Honor it soon with collect_resource, contribute_resources, or '
+                          f'trade_resource for {commitment["resource"]}.')
         if not actives:
             nudges.append("NOTE: No active project exists anywhere. Use start_project now to begin a build "
                           "(optionally set target_district to one of the known_districts ids).")
@@ -2435,6 +2570,9 @@ class SimEngine:
             "known_districts": [{"id": did, "kind": d["kind"]} for did, d in c["districts"].items()
                                 if d.get("build_grid")],
             "directive": c["directive"] or "none",
+            "invention_status": ("REQUIRED: all known structures are built. Use propose_blueprint "
+                                 "to invent a new structure.") if invention_required else "not needed",
+            "commitment": agent.get("commitment"),
             "idle_agents": idle_agents,
             "known_resources": [{"id": rid, "gather_zone": d.get("gatherZone"),
                                  "custom": rid not in BASE_RESOURCES}
@@ -2528,6 +2666,10 @@ class SimEngine:
             return
         if now_ms - self.last_llm_dispatch_ms < LLM_MIN_GAP_MS:
             return
+        if agent["role"] == "elder":
+            c = self.civilization
+            c["inventionRequiredStreak"] = (c.get("inventionRequiredStreak", 0) + 1) \
+                if self._invention_required() else 0
         self.last_llm_dispatch_ms = now_ms
         self._inflight.add(agent["name"])
         agent["isThinking"] = True
@@ -2559,6 +2701,7 @@ class SimEngine:
                 self._maybe_relocate_stuck_project()
                 self._maybe_force_contribution()
                 self._maybe_start_idle_district_project()
+                self._maybe_invention_backstop()
                 self._maybe_found_district()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
@@ -2728,10 +2871,30 @@ class SimEngine:
                 civ = dict(data.get("civilization") or {})
                 for key in _CIV_SET_KEYS:
                     civ[key] = set(civ.get(key) or [])
+                # builtTypes backfill: a save from before #5.1 has no record of
+                # which project types were ever completed, even though
+                # civ["structures"] already captures it losslessly (append-only,
+                # never pruned) -- derive it instead of leaving
+                # _invention_required() permanently False for a long-lived,
+                # already-built-out village.
+                civ["builtTypes"].update(
+                    s.get("type") for s in (civ.get("structures") or []) if s.get("type"))
                 agents = []
+                is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
                     a = dict(ad)
                     a["beliefs"] = set(a.get("beliefs") or [])
+                    # state.json may have been written before scaffold
+                    # validation existed (or before a clean cycle ran), so a
+                    # saved agent's memory.longTerm list can carry leaked
+                    # chain-of-thought text wholesale -- scrub it on load too.
+                    if is_scaffold and isinstance(a.get("memory"), dict):
+                        long_term = a["memory"].get("longTerm")
+                        if long_term:
+                            a["memory"] = dict(a["memory"])
+                            a["memory"]["longTerm"] = [
+                                t for t in long_term if not is_scaffold(t)
+                            ]
                     agents.append(a)
                 if not agents or not civ:
                     return False
