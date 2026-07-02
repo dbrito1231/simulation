@@ -232,7 +232,7 @@ ROLE_REVIEW_FRAMES = 1200
 BENCHMARK_TICK_FRAMES = 600
 FIRST_BENCHMARK_FRAME = 60
 
-HUNGER_RATE = 0.6
+HUNGER_RATE = 0.3
 HEALTH_RATE = 2
 HEALTH_REGEN = 1.5
 EAT_THRESHOLD = 65
@@ -244,6 +244,7 @@ COLLAPSE_REVIVE_HEALTH = 15
 REVIVE_HUNGER = 35          # hunger floor on revival, else 0-hunger re-collapse in ~8s
 EDIBLE_RESERVE = 3          # food/fish an agent keeps back from builds/sharing
 SHARE_RADIUS = 120          # auto-share edibles with a starving neighbour within this range
+STARVING_HUNGER = 10        # below this, a foodless agent deterministically seeks the nearest food zone
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
@@ -1665,6 +1666,63 @@ class SimEngine:
                 "reasoning": f"Build has stalled in {district_id}; contributing my {unmet} to it now."})
 
     # --- idle-district backstop (concurrent builds) ---
+    def _maybe_feed_starving(self):
+        """Deterministic survival backstop (same tick-gated _maybe_* shape as
+        _maybe_force_contribution): a starving agent holding nothing edible
+        heads to the nearest edible gather zone and collects, instead of
+        waiting passively for the LLM to act on the hunger nudge. Auto-eat in
+        _update_survival feeds them on the first collect. Same philosophy as
+        rushToHeal: survival is too important to leave to prompt nudges; the
+        "you are hungry" NOTE stays for coherence only. Sage-emergency
+        responders are exempt (the elder's life outranks their own hunger)."""
+        if not SURVIVAL_ENABLED:
+            return
+        em = self._sage_emergency()
+        responders = self._sage_responders(em) if em else set()
+        for agent in self.agents:
+            if agent["incapacitated"] or agent["hunger"] > STARVING_HUNGER:
+                continue
+            if agent["name"] in responders or self._first_edible(agent):
+                continue
+            # Nearest edible source: food@farm vs fish@beach, by district distance.
+            best = None  # (distance, resource_id, district_id)
+            for rid in EDIBLE_RESOURCES:
+                zone = self._gather_zone_for_resource(rid)
+                if not zone:
+                    continue
+                for did in self._districts_of_kind(zone):
+                    d = self._distance_to_district(agent, did)
+                    if best is None or d < best[0]:
+                        best = (d, rid, did)
+            if best is None:
+                continue
+            _, rid, district_id = best
+            agent["goal"] = None
+            if agent["currentZone"] == self._gather_zone_for_resource(rid):
+                if self._resolve_contribution_district(agent):
+                    # In the right zone: collect now and install a gather goal
+                    # so _step_goal keeps at it without LLM round-trips.
+                    decision = {"action": "collect_resource", "target": rid,
+                                "target_district": None, "message": None,
+                                "reasoning": "Starving - gathering food to survive."}
+                    self.apply_decision(agent, decision)
+                    agent["goal"] = self._goal_for_decision(decision)
+                elif agent["resources"].get(rid, 0) < COLLECT_CAP:
+                    # No active project anywhere: a full apply_decision would
+                    # detour into _start_project_for, which a hunger backstop
+                    # has no business doing. Collect the edible directly.
+                    agent["resources"][rid] = agent["resources"].get(rid, 0) + 1
+                    self.civilization["collectAttempts"] += 1
+                    self.civilization["collectSuccesses"] += 1
+                    self._push_activity(f"{agent['name']} collected {rid}")
+            else:
+                # Wrong zone: walk there via the road network. The gate
+                # re-fires every RULES_TICK_FRAMES until they arrive, then the
+                # branch above takes over.
+                self._set_agent_target(agent, district_id)
+                self._push_activity(
+                    f"{agent['name']} is starving and heads to {district_id} for {rid}")
+
     def _maybe_start_idle_district_project(self):
         """With multiple buildable districts, nothing today encourages the
         LLM to spread work across them -- it's plausible the model fixates on
@@ -2497,6 +2555,7 @@ class SimEngine:
             if RULES_ENABLED and ft % RULES_TICK_FRAMES == 0:
                 self._maybe_advance_rules()
             if ft % RULES_TICK_FRAMES == 0:
+                self._maybe_feed_starving()
                 self._maybe_relocate_stuck_project()
                 self._maybe_force_contribution()
                 self._maybe_start_idle_district_project()
