@@ -43,6 +43,8 @@ MODEL_FAST = "google/gemma-4-e4b"
 
 
 def model_for_decision(data):
+    if data.get("invention_only"):
+        return MODEL_SMART
     if (data.get("role") or "").lower() == "elder":
         return MODEL_SMART
     if str(data.get("invention_status") or "").startswith("REQUIRED"):
@@ -1290,13 +1292,16 @@ def normalize_decision(decision, agent_data):
         approved_ids = agent_data.get("approved_blueprint_ids") or []
         rejected_ids = agent_data.get("rejected_blueprint_ids") or []
         custom_count = agent_data.get("custom_resource_count", 0)
-        ok, _reason = validate_blueprint(
+        ok, reason = validate_blueprint(
             decision.get("blueprint"), known_ids, pending_ids, approved_ids, custom_count,
             rejected_ids,
         )
         if not ok:
             fallback = role_fallback_action(agent_data.get("role"), agent_data)
-            fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid blueprint)").strip()
+            fallback["reasoning"] = (fallback.get("reasoning", "") + f" (invalid blueprint: {reason})").strip()
+            # Surfaced to the agent's next prompt by the engine so the model
+            # learns why its proposal vanished instead of repeating it.
+            fallback["rejection_note"] = reason
             return fallback
         return decision
 
@@ -1768,11 +1773,49 @@ def extract_json_decision(text):
     return decision
 
 
+INVENTION_USER_PROMPT = """You are {agent_name}, the village {role}.
+
+THIS TURN YOU HAVE EXACTLY ONE JOB: invent a new structure for the village by responding with a propose_blueprint action. Ignore every other duty this turn (including task assignment if you are the elder). Do NOT pick any other action.
+
+Structure ids already taken (your blueprint id must NOT be any of these): {taken_ids}
+Blueprint ids previously rejected (do NOT reuse): {rejected_ids}
+Resources you may reference in "needs": {resource_ids}
+You may also introduce up to 3 brand-new resources via "new_resources", each with a gather_zone of farm, forest, village, market, beach, cave, or ocean (or null for crafted-only goods).
+{feedback}
+Respond with ONLY the JSON decision object: action "propose_blueprint" plus a complete "blueprint" object (id: new snake_case slug, name, needs with 1-8 entries and amounts 1-5 each, optional new_resources, visual_style one of house/farm_plot/workshop/wall/generic). Invent something the village doesn't have yet."""
+
+
+def build_invention_prompt(data):
+    """Slim, single-purpose user prompt for a dedicated invention turn (set by
+    the engine's _maybe_invention_backstop). Strips every competing nudge and
+    state section so the model's whole budget goes into authoring a valid,
+    novel blueprint."""
+    taken = sorted(set(list(data.get("structure_counts") or {})
+                       + [str(a) for a in data.get("approved_custom_projects") or []]
+                       + [b.get("id") for b in data.get("pending_blueprints") or []
+                          if isinstance(b, dict) and b.get("id")]))
+    rejected = [str(r) for r in data.get("rejected_blueprints") or []]
+    resources = [r.get("id") for r in data.get("known_resources") or []
+                 if isinstance(r, dict) and r.get("id")]
+    feedback = data.get("behavior_nudge") or ""
+    return INVENTION_USER_PROMPT.format(
+        agent_name=data.get("agent_name"),
+        role=data.get("role"),
+        taken_ids=", ".join(taken) or "none",
+        rejected_ids=", ".join(rejected) or "none",
+        resource_ids=", ".join(resources) or "none",
+        feedback=feedback,
+    )
+
+
 def build_user_prompt(data, slim=False):
     """Fill in USER_PROMPT_TEMPLATE from the agent/civilization state. When
     slim=True (the context-overflow retry, see run_agent_decision), drop the
     memory line and recent conversations -- the two most compressible,
-    highest-variance-size fields -- to shrink the prompt."""
+    highest-variance-size fields -- to shrink the prompt. invention_only
+    turns get the dedicated proposal-only prompt instead."""
+    if data.get("invention_only"):
+        return build_invention_prompt(data)
     nearby_formatted = format_nearby_agents(data.get("nearby_agents"))
     known_resources = data.get("known_resources") or []
     pending_blueprints = data.get("pending_blueprints") or []

@@ -273,6 +273,16 @@ CRAFT_STALL_THRESHOLD = 1500
 # _schedule_think) that _invention_required() must hold true before
 # _maybe_invention_backstop() steps in and assigns the invention task itself.
 INVENTION_BACKSTOP_STREAK = 3
+# After this many backstop delegations without a valid proposal landing (or
+# when no villager is available to task), the elder stops delegating and takes
+# the invention-only turn himself.
+INVENTION_ELDER_TAKEOVER = 3
+# The elder may not re-task the same villager within this window; keeps the
+# MAIN RULE from turning every elder turn into an assign_task megaphone.
+ELDER_RETASK_COOLDOWN_FRAMES = 1800
+# An agent with company nearby that hasn't spoken for this long gets a gentle
+# talk_to_nearby nudge (the consecutiveTalks>=2 brake still applies).
+SOCIAL_SILENCE_FRAMES = 4500
 
 # Consequential conversations (#5.4): a commitment auto-expires if unhonored
 # for this many frames -- roughly 15 think-turns at a typical ~400-frame
@@ -578,7 +588,8 @@ class SimEngine:
                 "lastTaskedFrame": None, "lastContributedFrame": None,
                 "consecutiveIdleMoves": 0, "hunger": 80, "health": 100,
                 "incapacitated": False, "goal": None, "actionCounts": {},
-                "commitment": None,
+                "commitment": None, "inventionTurn": False,
+                "lastBlueprintRejection": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
             }
@@ -621,6 +632,7 @@ class SimEngine:
             "projectRegistry": {k: dict(v) for k, v in PROJECT_TEMPLATES.items()},
             "builtTypes": set(),
             "inventionRequiredStreak": 0,
+            "inventionBackstopFires": 0,
             "pendingBlueprints": [],
             "rejectedBlueprintIds": set(),
             "pendingRecipes": [],
@@ -1274,6 +1286,12 @@ class SimEngine:
         sitting in projectRegistry -- i.e. the village can only keep growing
         through propose_blueprint."""
         c = self.civilization
+        if len(self._custom_project_ids()) >= MAX_APPROVED_CUSTOM:
+            # Safety net: validate_blueprint rejects every proposal past this
+            # cap, so demanding invention here is a deadlock (the 2026-07-02
+            # session spun for hours on it). _maybe_retire_blueprint normally
+            # frees a slot first; if it can't, the village is fully developed.
+            return False
         if not all(self._seed_exhausted(tid) for tid in PROJECT_TEMPLATES):
             return False
         return not any(pid not in c["builtTypes"] for pid in self._custom_project_ids())
@@ -1347,7 +1365,13 @@ class SimEngine:
             or agent.get("idleCycles", 0) >= 2)
 
     def _idle_agents_for_elder(self):
-        idle = [a for a in self.agents if self._is_idle(a)]
+        # Re-task cooldown: an agent tasked recently isn't offered to the
+        # elder again, so the MAIN RULE can't spend every elder turn
+        # re-announcing directives at the same villagers (the 2026-07-02
+        # session logged 1,556 elder directives vs 19 villager speeches).
+        idle = [a for a in self.agents if self._is_idle(a)
+                and (a["lastTaskedFrame"] is None
+                     or self.frameTick - a["lastTaskedFrame"] > ELDER_RETASK_COOLDOWN_FRAMES)]
         idle.sort(key=lambda a: (a["lastTaskedFrame"] if a["lastTaskedFrame"] is not None
                                  else float("-inf")))
         return idle
@@ -2012,6 +2036,24 @@ class SimEngine:
         self._push_activity(f"{unused['name']} the {unused['role']} moved to the village -- "
                             f"the new houses drew a newcomer!")
 
+    # --- blueprint retirement (frees approval slots so invention never deadlocks) ---
+    def _maybe_retire_blueprint(self):
+        """Once the approved-custom count reaches MAX_APPROVED_CUSTOM,
+        validate_blueprint rejects every new proposal -- while
+        _invention_required() keeps demanding one. Retire the oldest *built*
+        custom blueprint (drop its registry entry; standing structures keep
+        their own name/visualStyle so nothing on the map changes) to keep a
+        slot open for the next invention."""
+        c = self.civilization
+        while len(self._custom_project_ids()) >= MAX_APPROVED_CUSTOM:
+            retired = next((pid for pid in self._custom_project_ids()
+                            if pid in c["builtTypes"]), None)
+            if not retired:
+                return  # nothing built to retire; _invention_required stays False
+            name = c["projectRegistry"][retired].get("name", retired)
+            del c["projectRegistry"][retired]
+            self._push_activity(f"The {name} design has been archived -- its plans made room for new inventions.")
+
     # --- invention-demand backstop (#5.2) ---
     def _maybe_invention_backstop(self):
         """Deterministic elder backstop, same tick-gated _maybe_* shape as
@@ -2022,10 +2064,14 @@ class SimEngine:
         _schedule_think whenever the elder is dispatched to think, reset on
         every non-required turn or successful propose_blueprint) and no
         blueprint is currently pending, direct the most-idle villager to
-        invent one. This keeps the pressure in-world instead of hard-coding
-        a fake proposal -- the blueprint's actual content must still come
-        from the LLM, so a weak model may stall here; that's why the stall
-        itself is logged via _push_activity, to stay observable."""
+        invent one -- and flag that villager's next think as an
+        invention-only turn (slim, proposal-focused prompt; see
+        _build_think_payload / server build_invention_prompt). After
+        INVENTION_ELDER_TAKEOVER delegations with no valid proposal landing
+        (counted in civilization["inventionBackstopFires"], reset on every
+        accepted proposal), or when no villager is free to task, the elder
+        takes the invention-only turn himself. The blueprint's actual content
+        still comes from the LLM either way."""
         c = self.civilization
         if c.get("inventionRequiredStreak", 0) < INVENTION_BACKSTOP_STREAK:
             return
@@ -2035,9 +2081,15 @@ class SimEngine:
         if not elder:
             return
         target = next((a for a in self._idle_agents_for_elder() if a["name"] != elder["name"]), None)
-        if not target:
+        if c.get("inventionBackstopFires", 0) >= INVENTION_ELDER_TAKEOVER or not target:
+            c["inventionRequiredStreak"] = 0
+            c["inventionBackstopFires"] = 0
+            elder["inventionTurn"] = True
+            self._push_activity(f"Elder {elder['name']} will draft the new blueprint himself.")
             return
         c["inventionRequiredStreak"] = 0
+        c["inventionBackstopFires"] = c.get("inventionBackstopFires", 0) + 1
+        target["inventionTurn"] = True
         self.apply_decision(elder, {
             "action": "assign_task", "target": target["name"],
             "message": "propose a new structure blueprint -- the village needs a new invention!",
@@ -2381,6 +2433,7 @@ class SimEngine:
             if decision.get("message"):
                 agent["message"] = decision["message"]
                 agent["messageTimer"] = 180
+                agent["lastSpokeFrame"] = self.frameTick
                 self._push_conversation(agent["name"], recipient, decision["message"])
                 self._deliver_message(agent["name"], recipient, decision["message"], "speech")
                 self._maybe_spread_beliefs(agent, recipient, decision["message"])
@@ -2478,8 +2531,12 @@ class SimEngine:
                     agent["messageTimer"] = 180
                 c["lastBlueprintActivityFrame"] = self.frameTick
                 c["inventionRequiredStreak"] = 0
+                c["inventionBackstopFires"] = 0
+                agent["lastBlueprintRejection"] = None
                 summary = f"{agent['name']} proposed {bp['name']} (needs {needs_str})"
             else:
+                agent["lastBlueprintRejection"] = {"reason": "invalid blueprint (bad id, duplicate, "
+                                                  "or unknown resource)", "frame": self.frameTick}
                 summary = f"{agent['name']} drafted an invalid blueprint"
 
         elif action == "approve_blueprint":
@@ -2676,7 +2733,16 @@ class SimEngine:
 
         actives = self._active_project_districts()
         invention_required = self._invention_required()
+        # One-shot invention-only turn (set by _maybe_invention_backstop):
+        # the server swaps in a slim, proposal-only prompt for this call.
+        invention_turn = bool(agent.get("inventionTurn"))
+        if invention_turn:
+            agent["inventionTurn"] = False
         nudges = []
+        rejection = agent.get("lastBlueprintRejection")
+        if rejection and self.frameTick - rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+            nudges.append(f"NOTE: Your last blueprint proposal was rejected: {rejection['reason']}. "
+                          f"Propose a different blueprint that avoids that problem.")
         if agent["assignedTask"] and \
                 self.frameTick - (agent.get("lastTaskedFrame") or 0) > DIRECTIVE_TTL_FRAMES:
             # Same staleness problem as the directive: an old task (possibly
@@ -2697,8 +2763,12 @@ class SimEngine:
                           f'Honor it soon with collect_resource, contribute_resources, or '
                           f'trade_resource for {commitment["resource"]}.')
         if not actives:
-            nudges.append("NOTE: No active project exists anywhere. Use start_project now to begin a build "
-                          "(optionally set target_district to one of the known_districts ids).")
+            # Suppressed while invention is required: start_project would be
+            # refused anyway, and the nudge pulls the model away from
+            # propose_blueprint (the only action that unblocks progress).
+            if not invention_required:
+                nudges.append("NOTE: No active project exists anywhere. Use start_project now to begin a build "
+                              "(optionally set target_district to one of the known_districts ids).")
         elif agent["consecutiveTalks"] >= 2:
             nudges.append("NOTE: You have chatted twice. Prioritize collect_resource, contribute_resources, or move_to_agent.")
         directive = self._current_directive()
@@ -2781,6 +2851,10 @@ class SimEngine:
             if em and em["name"] != agent["name"] and agent["name"] in self._sage_responders(em):
                 nudges.append(f"EMERGENCY: Elder Sage's life is the top priority — abandon your task and "
                               f"heal_agent {em['name']}. Nothing matters more than the elder's survival.")
+        if nearby_detailed and agent["consecutiveTalks"] == 0 \
+                and self.frameTick - agent.get("lastSpokeFrame", 0) > SOCIAL_SILENCE_FRAMES:
+            nudges.append("NOTE: You haven't spoken with anyone in a while and someone is nearby. "
+                          "Consider talk_to_nearby to coordinate plans, ask for help, or share what you know.")
         behavior_nudge = " ".join(nudges)
 
         return {
@@ -2807,6 +2881,7 @@ class SimEngine:
             "known_districts": [{"id": did, "kind": d["kind"]} for did, d in c["districts"].items()
                                 if d.get("build_grid")],
             "directive": self._current_directive() or "none",
+            "invention_only": invention_turn,
             "invention_status": ("REQUIRED: every known structure is built or at capacity. Use "
                                  "propose_blueprint to invent a new structure.") if invention_required else "not needed",
             "commitment": agent.get("commitment"),
@@ -2878,6 +2953,12 @@ class SimEngine:
                 else:
                     self.lmStatus = "online"
                     self.llm_cooldown_until = 0.0
+                    if decision.get("rejection_note"):
+                        # normalize_decision swapped an invalid propose_blueprint
+                        # for a fallback; remember why so the next prompt can
+                        # tell the model instead of failing silently again.
+                        agent["lastBlueprintRejection"] = {
+                            "reason": decision["rejection_note"], "frame": self.frameTick}
                     self.apply_decision(agent, decision)
                     agent["goal"] = self._goal_for_decision(decision)
         except Exception:
@@ -2939,6 +3020,7 @@ class SimEngine:
                 self._maybe_force_contribution()
                 self._maybe_start_idle_district_project()
                 self._maybe_build_funded_project()
+                self._maybe_retire_blueprint()
                 self._maybe_invention_backstop()
                 self._maybe_found_district()
                 self._maybe_welcome_newcomer()
