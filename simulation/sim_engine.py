@@ -1286,7 +1286,7 @@ class SimEngine:
                     return True
         return False
 
-    def _craft_output_bonus(self, recipe):
+    def _craft_output_bonus(self, recipe, district_id=None):
         if not STRUCTURE_EFFECTS_ENABLED:
             return 0
         station = recipe.get("station")
@@ -1299,7 +1299,7 @@ class SimEngine:
                 if boost.get("kind") != "craft" or boost.get("station") != station:
                     continue
                 scope = boost.get("scope", "village")
-                count = self._structure_count(type_id, None if scope == "village" else None)
+                count = self._structure_count(type_id, district_id if scope == "district" else None)
                 every_n = boost.get("every_n", 1)
                 max_bonus = boost.get("max_bonus", 1)
                 bonus += min(max_bonus, (count // every_n) * boost.get("bonus", 1))
@@ -1620,7 +1620,7 @@ class SimEngine:
             agent["resources"][r] -= n
         output = 1
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop":
-            output += self._craft_output_bonus(recipe)
+            output += self._craft_output_bonus(recipe, agent.get("currentDistrict"))
         agent["resources"][recipe_id] = agent["resources"].get(recipe_id, 0) + output
         self.civilization["lastCraftActivityFrame"] = self.frameTick
         return f"{agent['name']} crafted {recipe_id}" \
