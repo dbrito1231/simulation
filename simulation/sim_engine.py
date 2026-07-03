@@ -16,6 +16,7 @@ import json
 import math
 import os
 import random
+import re
 import threading
 import time
 from collections import deque
@@ -260,6 +261,10 @@ CUSTOM_SOFT_CAP = 5         # per custom/blueprint type (and the granary)
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
 BLUEPRINT_STALL_THRESHOLD = 1800
+# A leader directive is broadcast to every agent's prompt with "Prioritize
+# it"; without an expiry it dominates decisions forever (and persists across
+# sessions via state.json). ~3 minutes at 30 ticks/s = several think cycles.
+DIRECTIVE_TTL_FRAMES = 5400
 GOAL_STEP_FRAMES = 45
 SAGE_CRITICAL_HEALTH = 30
 CRAFT_STALL_THRESHOLD = 1500
@@ -371,6 +376,43 @@ def _dist(ax, ay, bx, by):
 
 def _rects_overlap(a, b):
     return a["x1"] < b["x2"] and b["x1"] < a["x2"] and a["y1"] < b["y2"] and b["y1"] < a["y2"]
+
+
+# assign_task speech gets embedded in templated prompt text ("Your leader
+# assigned you: <task>. Do it now."), so oratory framing ("My dear agents,
+# Luna, please ...") reads as garbage there. Strip the greeting/addressee
+# preamble and cap the length; the task itself is what must survive.
+_TASK_PREAMBLE = re.compile(
+    r"^(?:(?:my\s+)?dear(?:est)?s?(?:\s+\w+)?|villagers?|agents?|everyone|friends?|"
+    r"hello|greetings|attention|listen(?:\s+up)?|please)[\s,!.:;-]+",
+    re.IGNORECASE)
+_TASK_MAX_LEN = 200
+
+
+def _clean_task_text(text, target_name=None):
+    task = " ".join((text or "").split())
+    for _ in range(4):
+        before = task
+        task = _TASK_PREAMBLE.sub("", task)
+        if target_name:
+            task = re.sub(r"^" + re.escape(target_name) + r"[\s,!.:;-]+", "", task, flags=re.IGNORECASE)
+        if task == before:
+            break
+    task = task.strip(" ,;:-")
+    if not task:
+        task = " ".join((text or "").split())
+    if len(task) > _TASK_MAX_LEN:
+        # Prefer a sentence boundary; otherwise cut at a word.
+        cut = task.rfind(". ", 0, _TASK_MAX_LEN)
+        if cut < 40:
+            cut = task.rfind(" ", 0, _TASK_MAX_LEN)
+        task = task[:cut if cut > 0 else _TASK_MAX_LEN]
+    # The prompt templates supply their own trailing punctuation ("...: <task>.
+    # Do it now."), so a terminal ./!/? here would double up.
+    task = re.sub(r"[\s.!?;:,]+$", "", task)
+    if task and task[0].islower():
+        task = task[0].upper() + task[1:]
+    return task
 
 
 def _validate_districts(districts):
@@ -584,6 +626,7 @@ class SimEngine:
             "pendingRecipes": [],
             "rejectedRecipeIds": set(),
             "directive": None,
+            "directiveFrame": 0,
             "lastBlueprintActivityFrame": 0,
             "lastCraftActivityFrame": 0,
             "lastRuleActivityFrame": 0,
@@ -1280,10 +1323,23 @@ class SimEngine:
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         if agent["role"] == "elder":
+            # No trailing period: the prompt nudge templates this as
+            # "Your leader directs: {directive}. Prioritize it."
             c["directive"] = (f"Elder {agent['name']} directs: build the {tmpl['name']} in {district_id}; "
-                              f"gather {self._project_resource_list(tmpl)}.")
+                              f"gather {self._project_resource_list(tmpl)}")
+            c["directiveFrame"] = self.frameTick
             return f"{agent['name']} started {tmpl['name']} project in {district_id}. {c['directive']}"
         return f"{agent['name']} started {tmpl['name']} project in {district_id}"
+
+    def _current_directive(self):
+        """The leader directive, or None once it has aged past its TTL
+        (covers stale directives restored from state.json too)."""
+        c = self.civilization
+        if not c["directive"]:
+            return None
+        if self.frameTick - c.get("directiveFrame", 0) > DIRECTIVE_TTL_FRAMES:
+            return None
+        return c["directive"]
 
     def _is_idle(self, agent):
         return agent["role"] != "elder" and (
@@ -1905,6 +1961,34 @@ class SimEngine:
                 "reasoning": f"No build is underway in {district_id} yet; starting one so work spreads out."})
             return
 
+    def _maybe_build_funded_project(self):
+        """Deterministic backstop, same tick-gated _maybe_* shape as
+        _maybe_start_idle_district_project: a fully funded project that has
+        sat unbuilt past STALL_THRESHOLD gets built by the builder (or any
+        able agent). Observed sessions (e.g. 2026-07-02T19-50-21) left
+        100%-funded projects idle because nothing ever pushed the LLM toward
+        build_structure. Routes through apply_decision so the normal
+        build path (spot finding, level check) applies."""
+        c = self.civilization
+        if self.frameTick - c.get("lastFundedBuildCheckFrame", 0) < STALL_THRESHOLD:
+            return
+        c["lastFundedBuildCheckFrame"] = self.frameTick
+        for district_id in self._active_project_districts():
+            if not self._is_project_complete(district_id):
+                continue
+            # Freshly funded: give the LLM a turn to build it itself first.
+            if self.frameTick - c["districtLastContribution"].get(district_id, 0) < STALL_THRESHOLD:
+                continue
+            builder = next((a for a in self.agents if not a["incapacitated"] and a["role"] == "builder"), None) \
+                or next((a for a in self.agents if not a["incapacitated"]), None)
+            if not builder:
+                return
+            builder["goal"] = None
+            self.apply_decision(builder, {
+                "action": "build_structure", "target_district": district_id,
+                "reasoning": f"The {district_id} project is fully funded; raising the structure."})
+            return
+
     # --- newcomer backstop (structure effects: houses grow the population) ---
     def _maybe_welcome_newcomer(self):
         """Tick-gated like the other _maybe_* backstops. When built housing
@@ -1921,7 +2005,10 @@ class SimEngine:
         newcomer = self._make_agents([unused])[0]
         self.agents.append(newcomer)
         self.agent_names.add(unused["name"])
-        self.roster_size = len(self.agents)
+        # Deliberately do NOT touch self.roster_size: it means "cold-start
+        # roster" (what reset() re-seeds from). Letting spawns inflate it made
+        # a later Reset cold-start at 12 agents with basePopulation=12,
+        # permanently disabling this very mechanic in the new world.
         self._push_activity(f"{unused['name']} the {unused['role']} moved to the village -- "
                             f"the new houses drew a newcomer!")
 
@@ -2212,7 +2299,9 @@ class SimEngine:
         agent["consecutiveIdleMoves"] = (agent.get("consecutiveIdleMoves", 0) + 1) if is_move_only else 0
 
         if action == "move_to_district":
-            target = decision.get("target")
+            # Models often put the district id in target_district instead of
+            # target; accept either so the move actually happens.
+            target = decision.get("target") or decision.get("target_district")
             self._set_agent_target(agent, target)
             district_id = self._resolve_target_district(target, agent) or target or "somewhere"
             summary = f"{agent['name']} heads to {district_id}"
@@ -2424,13 +2513,17 @@ class SimEngine:
         elif action == "assign_task":
             target = self._find_agent(decision.get("target"))
             if agent["role"] == "elder" and target and self._is_idle(target) and decision.get("message"):
-                target["assignedTask"] = decision["message"]
+                task_text = _clean_task_text(decision["message"], target["name"])
+                target["assignedTask"] = task_text
                 target["lastTaskedFrame"] = self.frameTick
-                c["directive"] = f"Elder {agent['name']} directs: {target['name']} should {decision['message']}."
-                self._push_communication("directive", agent["name"], target["name"], decision["message"])
-                self._deliver_message(agent["name"], target["name"], decision["message"], "directive")
+                # Deliberately NOT written to c["directive"]: that field is
+                # broadcast to every agent's prompt with "Prioritize it", and a
+                # per-agent task there sent the whole roster chasing one
+                # villager's errand (measured 83% move_to_district sessions).
+                self._push_communication("directive", agent["name"], target["name"], task_text)
+                self._deliver_message(agent["name"], target["name"], task_text, "directive")
                 self._transmit_belief(agent, target, MEME_SPREAD_PROB)
-                summary = f"Elder {agent['name']} tasked {target['name']}: {decision['message']}"
+                summary = f"Elder {agent['name']} tasked {target['name']}: {task_text}"
             else:
                 summary = f"{agent['name']} could not assign that task"
 
@@ -2584,11 +2677,20 @@ class SimEngine:
         actives = self._active_project_districts()
         invention_required = self._invention_required()
         nudges = []
+        if agent["assignedTask"] and \
+                self.frameTick - (agent.get("lastTaskedFrame") or 0) > DIRECTIVE_TTL_FRAMES:
+            # Same staleness problem as the directive: an old task (possibly
+            # restored from state.json) shouldn't bias decisions forever.
+            agent["assignedTask"] = None
         if agent["assignedTask"]:
             nudges.append(f"Your leader assigned you: {agent['assignedTask']}. Do it now.")
         if invention_required:
             nudges.append("NOTE: All known structures are already built. The village needs a NEW "
                           "invention -- use propose_blueprint now.")
+        ready = next((did for did in actives if self._is_project_complete(did)), None)
+        if ready:
+            nudges.append(f"PROJECT READY: the build in {ready} is fully funded. "
+                          f"Use build_structure with target_district {ready} now.")
         if agent.get("commitment"):
             commitment = agent["commitment"]
             nudges.append(f'NOTE: You agreed to help {commitment["to"]}: "{commitment["text"]}". '
@@ -2599,8 +2701,9 @@ class SimEngine:
                           "(optionally set target_district to one of the known_districts ids).")
         elif agent["consecutiveTalks"] >= 2:
             nudges.append("NOTE: You have chatted twice. Prioritize collect_resource, contribute_resources, or move_to_agent.")
-        if agent["role"] != "elder" and c["directive"]:
-            nudges.append(f"Your leader directs: {c['directive']}. Prioritize it.")
+        directive = self._current_directive()
+        if agent["role"] != "elder" and directive:
+            nudges.append(f"Your leader directs: {directive}. Prioritize it.")
         if agent.get("consecutiveIdleMoves", 0) >= 3:
             nudges.append("NOTE: You have been moving without acting. Prioritize collect_resource or contribute_resources.")
         capped = next(((k, v) for k, v in agent["resources"].items() if v >= COLLECT_CAP), None)
@@ -2703,7 +2806,7 @@ class SimEngine:
             "project_progress": self._active_projects_progress_text(),
             "known_districts": [{"id": did, "kind": d["kind"]} for did, d in c["districts"].items()
                                 if d.get("build_grid")],
-            "directive": c["directive"] or "none",
+            "directive": self._current_directive() or "none",
             "invention_status": ("REQUIRED: every known structure is built or at capacity. Use "
                                  "propose_blueprint to invent a new structure.") if invention_required else "not needed",
             "commitment": agent.get("commitment"),
@@ -2835,6 +2938,7 @@ class SimEngine:
                 self._maybe_relocate_stuck_project()
                 self._maybe_force_contribution()
                 self._maybe_start_idle_district_project()
+                self._maybe_build_funded_project()
                 self._maybe_invention_backstop()
                 self._maybe_found_district()
                 self._maybe_welcome_newcomer()
@@ -3132,7 +3236,7 @@ class SimEngine:
                 "pendingRecipes": [dict(r) for r in c["pendingRecipes"]],
                 "rules": [dict(r) for r in c["rules"]],
                 "pendingRules": [dict(r) for r in c["pendingRules"]],
-                "directive": c["directive"],
+                "directive": self._current_directive(),
                 "stockpile": dict(c["stockpile"]),
                 "taxDue": c["taxDue"], "taxPaid": c["taxPaid"],
                 "collectAttempts": c["collectAttempts"], "collectSuccesses": c["collectSuccesses"],

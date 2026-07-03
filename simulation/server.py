@@ -26,13 +26,20 @@ LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 
 # Model routing: high-stakes turns (the elder's leadership/approval decisions,
 # and any villager turn taken while invention is REQUIRED, i.e. blueprint
-# authoring) go to the stronger model; routine villager turns go to the small
-# fast one. Ids must match LM Studio's loaded-model ids (GET /v1/models). If a
-# routed id isn't available, run_agent_decision degrades to "local-model" for
-# the rest of the session (same pattern as the response_format auto-degrade),
-# so a single-model LM Studio setup keeps working unchanged.
+# authoring) go to MODEL_SMART; routine villager turns and background
+# cognition go to MODEL_FAST. Ids must match LM Studio's loaded-model ids
+# (GET /v1/models). If a routed id isn't available, run_agent_decision
+# degrades to "local-model" for the rest of the session (same pattern as the
+# response_format auto-degrade), so a single-model setup keeps working.
+#
+# Both tiers currently resolve to gemma: the 2026-07-02 session showed
+# llama-3.2-3b picking move_to_district on 95% of 2,764 villager turns (the
+# ~3,100-token prompt is beyond a 3B) while ALSO running slower than gemma
+# (6.6s vs 4.6s avg -- its Q8 quant spilled to CPU next to gemma on a 12GB
+# card). Slot a real secondary back in here only if it's <=4GB on-GPU AND
+# demonstrably handles the decision prompt; otherwise one good model wins.
 MODEL_SMART = "google/gemma-4-e4b"
-MODEL_FAST = "llama-3.2-3b-instruct"
+MODEL_FAST = "google/gemma-4-e4b"
 
 
 def model_for_decision(data):
@@ -1322,6 +1329,13 @@ def normalize_decision(decision, agent_data):
         fallback = role_fallback_action(agent_data.get("role"), agent_data)
         fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid role switch)").strip()
         return fallback
+
+    if action == "move_to_district" and not decision.get("target"):
+        # Models reliably put the district id in target_district (the schema
+        # describes that field as "district id"); the engine reads only
+        # target, so without this promotion the agent never moves.
+        if decision.get("target_district"):
+            decision["target"] = decision["target_district"]
 
     if action != "talk_to_nearby":
         if isinstance(decision, dict):
