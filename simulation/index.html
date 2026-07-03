@@ -933,6 +933,9 @@ function renderBenchmarks() {
   if (MEMORY_ENABLED) {
     chips.push(`<span class="res-chip">memory <span class="civ-value">${b.memory}</span></span>`);
   }
+  if (b.effectThroughput != null && b.effectThroughput !== undefined) {
+    chips.push(`<span class="res-chip">effects <span class="civ-value">${b.effectThroughput}</span></span>`);
+  }
   if (PIANO_MODULES || META_SYSTEM) {
     chips.push(`<span class="res-chip">modules <span class="civ-value">${b.moduleTotal}</span></span>`);
   }

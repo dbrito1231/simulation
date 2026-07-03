@@ -431,6 +431,11 @@ BASE_RESOURCE_IDS = {"food", "wood", "gold"}
 SEED_PROJECT_IDS = {"house", "farm_plot", "workshop", "wall"}
 VISUAL_STYLES = {"house", "farm_plot", "workshop", "wall", "generic"}
 SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,24}$")
+FUNCTION_EFFECT_KEYS = ("produces", "boosts", "unlocks", "stores", "houses")
+VALID_PRODUCE_SCOPES = {"village", "district"}
+VALID_BOOST_KINDS = {"gather", "craft"}
+VALID_BOOST_SCOPES = {"village", "district"}
+VALID_UNLOCK_KINDS = {"craft"}
 MAX_PENDING_BLUEPRINTS = 5
 MAX_APPROVED_CUSTOM = 15
 MAX_CUSTOM_RESOURCES = 10
@@ -495,6 +500,7 @@ DECISION_SCHEMA = {
                 "needs": {"type": "object"},
                 "new_resources": {"type": "array"},
                 "visual_style": {"type": "string"},
+                "function": {"type": "object"},
             },
         },
         "recipe": {
@@ -584,8 +590,10 @@ MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to 
 
 BLUEPRINTS (inventing new structures):
 6. Any agent may use propose_blueprint to invent a new structure type. Include a
-   "blueprint" object (see schema below). Optionally bundle up to 3 new gatherable
-   resources inside "new_resources".
+   "blueprint" object (see schema below) with a required "function" block that
+   declares what the building DOES (produces/boosts/unlocks/houses). Identical
+   effect sets are rejected. Optionally bundle up to 3 new gatherable resources
+   inside "new_resources".
 7. Only the elder may approve_blueprint or reject_blueprint. The "target"
    must be the id of a blueprint listed in Pending blueprints.
 8. The elder should review Pending blueprints before starting a vanilla project
@@ -664,7 +672,13 @@ BLUEPRINT object schema (only for propose_blueprint):
   "new_resources": [                      // 0-3 items, bundled new resources
     {"id": "paper", "name": "Paper", "gather_zone": "forest", "color": "#E8D5B7"}
   ],
-  "visual_style": "house"                // house | farm_plot | workshop | wall | generic
+  "visual_style": "house",               // house | farm_plot | workshop | wall | generic
+  "function": {                          // REQUIRED: at least one effect
+    "produces": [{"resource":"herbs","amount":2,"every_ticks":600,"scope":"district"}],
+    "boosts": [{"kind":"gather","resources":["food"],"every_n":4,"bonus":1,"max_bonus":2,"scope":"district"}],
+    "unlocks": [{"kind":"craft","station":"workshop"}],
+    "houses": {"every_n": 3}
+  }
 }
 
 RECIPE object schema (only for propose_recipe):
@@ -695,7 +709,7 @@ EXAMPLE (trader, Marco nearby):
 {"action":"talk_to_nearby","target":"Marco","message":"Could you spare any wood? I'll trade you food for it.","new_role":null,"relationship_update":null,"reasoning":"Coordinating trade for the build."}
 
 EXAMPLE (gatherer proposing a library + paper):
-{"action":"propose_blueprint","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"The village needs knowledge storage.","blueprint":{"id":"library","name":"Library","needs":{"wood":4,"paper":2},"new_resources":[{"id":"paper","name":"Paper","gather_zone":"forest","color":"#E8D5B7"}],"visual_style":"house"}}
+{"action":"propose_blueprint","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"The village needs knowledge storage.","blueprint":{"id":"library","name":"Library","needs":{"wood":4,"paper":2},"new_resources":[{"id":"paper","name":"Paper","gather_zone":"forest","color":"#E8D5B7"}],"visual_style":"house","function":{"produces":[{"resource":"paper","amount":1,"every_ticks":900,"scope":"village"}]}}}
 
 EXAMPLE (elder approving a pending blueprint):
 {"action":"approve_blueprint","target":"library","message":"Approved. Gather paper from the forest.","new_role":null,"relationship_update":null,"reasoning":"A worthy addition to the village."}"""
@@ -1096,8 +1110,121 @@ def held_shortfall_resource(agent_data):
     return None
 
 
+def canonical_effect_vector(function):
+    """Stable JSON key for duplicate-effect detection (ignores structure id/name)."""
+    if not isinstance(function, dict):
+        return ""
+
+    def _norm_list(items):
+        normed = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            normed.append({k: (sorted(v) if k == "resources" and isinstance(v, list) else v)
+                           for k, v in sorted(item.items())})
+        return sorted(normed, key=lambda x: json.dumps(x, sort_keys=True))
+
+    payload = {}
+    if function.get("produces"):
+        payload["produces"] = _norm_list(function["produces"])
+    if function.get("boosts"):
+        payload["boosts"] = _norm_list(function["boosts"])
+    if function.get("unlocks"):
+        payload["unlocks"] = _norm_list(function["unlocks"])
+    if function.get("stores"):
+        payload["stores"] = _norm_list(function["stores"])
+    if function.get("houses"):
+        houses = function["houses"]
+        if isinstance(houses, dict):
+            payload["houses"] = {k: houses[k] for k in sorted(houses)}
+    if not payload:
+        return ""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def validate_function_block(function, available_resource_ids):
+    """Validate a blueprint function block. Returns (ok, reason)."""
+    if not isinstance(function, dict):
+        return False, "function block required (produces/boosts/unlocks/stores/houses)"
+    if not any(function.get(k) for k in FUNCTION_EFFECT_KEYS):
+        return False, "function must declare at least one effect"
+
+    for prod in function.get("produces") or []:
+        if not isinstance(prod, dict):
+            return False, "produce entry must be an object"
+        res = prod.get("resource")
+        if not isinstance(res, str) or res not in available_resource_ids:
+            return False, f"unknown produce resource: {res}"
+        amount = prod.get("amount")
+        if isinstance(amount, bool) or not isinstance(amount, int) or not (1 <= amount <= 5):
+            return False, "produce amount must be 1-5"
+        every = prod.get("every_ticks", 600)
+        if isinstance(every, bool) or not isinstance(every, int) or not (150 <= every <= 7200):
+            return False, "produce every_ticks must be 150-7200"
+        scope = prod.get("scope", "village")
+        if scope not in VALID_PRODUCE_SCOPES:
+            return False, "invalid produce scope"
+
+    for boost in function.get("boosts") or []:
+        if not isinstance(boost, dict):
+            return False, "boost entry must be an object"
+        kind = boost.get("kind")
+        if kind not in VALID_BOOST_KINDS:
+            return False, "invalid boost kind"
+        if kind == "gather":
+            resources = boost.get("resources")
+            if not isinstance(resources, list) or not resources:
+                return False, "gather boost needs resources list"
+            for res in resources:
+                if res not in available_resource_ids:
+                    return False, f"unknown boost resource: {res}"
+        if kind == "craft" and not boost.get("station"):
+            return False, "craft boost needs station"
+        every_n = boost.get("every_n", 1)
+        if isinstance(every_n, bool) or not isinstance(every_n, int) or not (1 <= every_n <= 10):
+            return False, "boost every_n must be 1-10"
+        bonus = boost.get("bonus", 1)
+        if isinstance(bonus, bool) or not isinstance(bonus, int) or not (1 <= bonus <= 5):
+            return False, "boost bonus must be 1-5"
+        max_bonus = boost.get("max_bonus", 1)
+        if isinstance(max_bonus, bool) or not isinstance(max_bonus, int) or not (1 <= max_bonus <= 10):
+            return False, "boost max_bonus must be 1-10"
+        scope = boost.get("scope", "village")
+        if scope not in VALID_BOOST_SCOPES:
+            return False, "invalid boost scope"
+
+    for unlock in function.get("unlocks") or []:
+        if not isinstance(unlock, dict):
+            return False, "unlock entry must be an object"
+        kind = unlock.get("kind")
+        if kind not in VALID_UNLOCK_KINDS:
+            return False, "invalid unlock kind"
+        if kind == "craft" and not unlock.get("station"):
+            return False, "craft unlock needs station"
+
+    houses = function.get("houses")
+    if houses is not None:
+        if not isinstance(houses, dict):
+            return False, "houses must be an object"
+        every_n = houses.get("every_n", 3)
+        if isinstance(every_n, bool) or not isinstance(every_n, int) or not (1 <= every_n <= 10):
+            return False, "houses every_n must be 1-10"
+
+    for store in function.get("stores") or []:
+        if not isinstance(store, dict):
+            return False, "store entry must be an object"
+        res = store.get("resource")
+        if not isinstance(res, str) or res not in available_resource_ids:
+            return False, f"unknown store resource: {res}"
+        cap = store.get("capacity")
+        if isinstance(cap, bool) or not isinstance(cap, int) or not (5 <= cap <= 100):
+            return False, "store capacity must be 5-100"
+
+    return True, None
+
+
 def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
-                       custom_resource_count, rejected_ids=None):
+                       custom_resource_count, rejected_ids=None, known_effect_vectors=None):
     """Validate a proposed blueprint. Returns (ok: bool, reason: str|None)."""
     rejected_ids = rejected_ids or []
     if not isinstance(blueprint, dict):
@@ -1161,6 +1288,17 @@ def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
     visual_style = blueprint.get("visual_style", "generic")
     if visual_style not in VISUAL_STYLES:
         return False, "invalid visual_style"
+
+    available = set(known_resource_ids) | new_ids | BASE_RESOURCE_IDS
+    fn = blueprint.get("function")
+    ok_fn, fn_reason = validate_function_block(fn, available)
+    if not ok_fn:
+        return False, fn_reason
+
+    vec = canonical_effect_vector(fn)
+    known = set(known_effect_vectors or [])
+    if vec and vec in known:
+        return False, "duplicate effect vector (another structure already has identical effects)"
 
     return True, None
 
@@ -1294,7 +1432,7 @@ def normalize_decision(decision, agent_data):
         custom_count = agent_data.get("custom_resource_count", 0)
         ok, reason = validate_blueprint(
             decision.get("blueprint"), known_ids, pending_ids, approved_ids, custom_count,
-            rejected_ids,
+            rejected_ids, agent_data.get("known_effect_vectors"),
         )
         if not ok:
             fallback = role_fallback_action(agent_data.get("role"), agent_data)
@@ -1653,6 +1791,7 @@ def build_agent_data(data, nearby_formatted, known_resources, pending_blueprints
     agent_data["idle_agents"] = [
         a for a in data.get("idle_agents") or [] if isinstance(a, dict) and a.get("name")
     ]
+    agent_data["known_effect_vectors"] = list(data.get("known_effect_vectors") or [])
     return agent_data
 
 
@@ -1777,12 +1916,14 @@ INVENTION_USER_PROMPT = """You are {agent_name}, the village {role}.
 
 THIS TURN YOU HAVE EXACTLY ONE JOB: invent a new structure for the village by responding with a propose_blueprint action. Ignore every other duty this turn (including task assignment if you are the elder). Do NOT pick any other action.
 
+What problem does this structure solve? Your blueprint must include a "function" block (produces/boosts/unlocks/houses) describing its mechanical effect — not just a name.
+
 Structure ids already taken (your blueprint id must NOT be any of these): {taken_ids}
 Blueprint ids previously rejected (do NOT reuse): {rejected_ids}
-Resources you may reference in "needs": {resource_ids}
+Resources you may reference in "needs" and "function": {resource_ids}
 You may also introduce up to 3 brand-new resources via "new_resources", each with a gather_zone of farm, forest, village, market, beach, cave, or ocean (or null for crafted-only goods).
 {feedback}
-Respond with ONLY the JSON decision object: action "propose_blueprint" plus a complete "blueprint" object (id: new snake_case slug, name, needs with 1-8 entries and amounts 1-5 each, optional new_resources, visual_style one of house/farm_plot/workshop/wall/generic). Invent something the village doesn't have yet."""
+Respond with ONLY the JSON decision object: action "propose_blueprint" plus a complete "blueprint" (id, name, needs, required function block, optional new_resources, visual_style). Invent something with a NEW effect, not a renamed duplicate."""
 
 
 def build_invention_prompt(data):
@@ -2111,6 +2252,8 @@ _ENGINE_DEPS = {
     "log_activity": session_logger.log_activity,
     "log_conversation": session_logger.log_conversation,
     "log_benchmark": session_logger.log_benchmark,
+    "validate_blueprint": validate_blueprint,
+    "canonical_effect_vector": canonical_effect_vector,
 }
 
 _roster_env = os.environ.get("SIM_AGENTS")

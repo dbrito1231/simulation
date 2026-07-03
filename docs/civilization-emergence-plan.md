@@ -86,7 +86,7 @@ Grouped by stratum. ✅ = exists, 🟡 = exists as a stub/label, ❌ = missing.
 ### Foundational (the world)
 | # | Subsystem | Status | What's missing |
 |---|-----------|--------|----------------|
-| F1 | **Structure function registry** | 🟡 (3 of ~20 types) | Every structure type declares effects: `produces`, `unlocks`, `boosts`, `stores`, `houses`. Blueprints must declare a function to validate. |
+| F1 | **Structure function registry** | 🟡 (registry + validation; legacy saves grandfathered) | Every structure type declares effects: `produces`, `unlocks`, `boosts`, `stores`, `houses`. Blueprints must declare a function to validate. |
 | F2 | **Resource ecology** | ❌ | Per-district resource *stocks* that deplete with gathering and regenerate on a curve; overharvest → local exhaustion; seasons/weather as slow modifiers. |
 | F3 | **Terraforming / world mutation** | 🟡 (districts+roads exist) | Agent-driven land change: clear forest → field, drain/expand beach, dig canal, plant grove. "Expanding the beach" is exactly this: projects whose output is *terrain*, not a building. |
 | F4 | **Physical goods** | ❌ | Stockpiles live in agent pockets and a tax pool. Needed: storage structures with capacity (F1 gives them a function), spoilage for edibles, and transport (goods must be *moved*, making roads and carts matter). |
@@ -112,7 +112,7 @@ Grouped by stratum. ✅ = exists, 🟡 = exists as a stub/label, ❌ = missing.
 ### Cross-cutting
 | # | Subsystem | Status | What's missing |
 |---|-----------|--------|----------------|
-| X1 | **Consequence engine** | ❌ | One generic tick-time effects framework (`produces/consumes/modifies` with district scoping) that F1–E5 all register into, instead of new special cases per feature. Build first. |
+| X1 | **Consequence engine** | 🟡 (produces tick + query-time boosts/unlocks/houses) | One generic tick-time effects framework (`produces/consumes/modifies` with district scoping) that F1–E5 all register into, instead of new special cases per feature. Build first. |
 | X2 | **Observability per subsystem** | 🟡 (benchmarks.jsonl) | Each new subsystem ships with its own benchmark metric + activity events, or it can't be audited in Part 5's loop. |
 | X3 | **LLM budget discipline** | ✅ pattern exists | Keep the USE_GOALS split: physics/economy/ecology fully deterministic; the LLM only *chooses*. New systems must not add per-tick LLM calls. |
 
@@ -179,6 +179,22 @@ building."
 ("Botanical Garden produced 2 herbs"). No two custom blueprints with identical
 effect vectors get approved.
 **Flag:** extends `STRUCTURE_EFFECTS_ENABLED`.
+
+**Implementation log (2026-07-03):** Consequence engine landed on
+`feat/server-authoritative-engine`. Generic registry in `sim_engine.py`
+(`SEED_STRUCTURE_FUNCTIONS`, `_get_structure_function`, `_tick_structure_effects`);
+hardcoded farm/house/workshop effects refactored into seed function blocks; wall
+and granary gained tick-time `produces`. Blueprint schema requires `function`;
+`validate_blueprint` / `validate_function_block` / `canonical_effect_vector` in
+`server.py` reject functionless and duplicate-effect proposals with surfaced
+`rejection_note`. Invention prompt reframed around problem-solving. Observability:
+`activity.jsonl` lines like `"Botanical Garden produced 5 herbs"`, benchmark
+`structure_effect_throughput`. **Verification:** py_compile clean; ~90s session on
+resumed level-36 save — 15 structure types logged produces on first effect tick;
+benchmark throughput 15; deterministic validation tests pass for functionless /
+duplicate / unique blueprints. **Note for Part 2:** pre-Phase-A customs in old
+saves share a legacy default produce vector until re-invented with distinct
+functions; new approvals are blocked from duplicating any resolved vector.
 
 ### Phase B — Resource ecology (F2) and terraforming (F3)
 District resource stocks, depletion, regrowth curves; gather yield scales with
@@ -326,7 +342,8 @@ Per phase, run this relay:
    confirms the dependency phases actually landed (flags on, effects visible
    in a fresh session's logs), and produces a file/line-level change map.
    Output: a short brief the implementer can act on without re-searching.
-2. **Implementation agent** (worktree isolation). Input: the recon brief +
+2. **Implementation agent** (working directly on `feat/server-authoritative-engine`
+   — no worktrees, no side branches). Input: the recon brief +
    the phase's scope from Part 4. Implements behind the phase's feature flag,
    keeps prompt growth within the ~200-token budget, adds the phase's
    benchmark metric + activity events in the same change (X2 is a
@@ -349,6 +366,9 @@ Per phase, run this relay:
    (the MAX_APPROVED_CUSTOM lesson).
 
 Handoff rules:
+- **All work happens on `feat/server-authoritative-engine`.** No worktrees,
+  no feature branches per phase; feature flags are the isolation mechanism,
+  and each phase is a commit (or small series) on that branch.
 - The **user starts and stops the server** between stages (see the standing
   practice: the implementing agent kills the server and confirms port 5001 is
   free when its work is done; the user restarts it for soak runs).

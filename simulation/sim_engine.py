@@ -257,6 +257,8 @@ WORKSHOPS_PER_CRAFT_BONUS = 3  # workshops village-wide per +1 crafted output (m
 WALL_SOFT_CAP = 10
 WORKSHOP_DISTRICT_CAP = 3   # per buildable village/workshop-kind district
 CUSTOM_SOFT_CAP = 5         # per custom/blueprint type (and the granary)
+EFFECT_TICK_FRAMES = 150     # deterministic structure-effect tick (produces, etc.)
+LEGACY_CUSTOM_PRODUCE = {"resource": "herbs", "amount": 1, "every_ticks": 600, "scope": "village"}
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
@@ -340,6 +342,50 @@ if CRAFTING_ENABLED:
         "name": "Granary", "needs": {"planks": 2, "bricks": 2, "food": 1}, "visualStyle": "house"
     }
     PROJECT_ORDER.append("granary")
+
+# Seed structure functions (Phase A): every built type declares mechanical effects.
+# Custom blueprints must supply their own function block; these cover seed templates.
+SEED_STRUCTURE_FUNCTIONS = {
+    "house": {"houses": {"every_n": HOUSES_PER_NEW_VILLAGER}},
+    "farm_plot": {
+        "boosts": [{
+            "kind": "gather",
+            "resources": list(EDIBLE_RESOURCES),
+            "every_n": FARM_PLOTS_PER_EXTRA,
+            "bonus": 1,
+            "max_bonus": FARM_YIELD_BONUS_CAP,
+            "scope": "district",
+        }],
+    },
+    "workshop": {
+        "unlocks": [{"kind": "craft", "station": "workshop"}],
+        "boosts": [{
+            "kind": "craft",
+            "station": "workshop",
+            "every_n": WORKSHOPS_PER_CRAFT_BONUS,
+            "bonus": 1,
+            "max_bonus": 1,
+            "scope": "village",
+        }],
+    },
+    "wall": {
+        "produces": [{
+            "resource": "stone",
+            "amount": 1,
+            "every_ticks": 1800,
+            "scope": "village",
+        }],
+    },
+}
+if CRAFTING_ENABLED:
+    SEED_STRUCTURE_FUNCTIONS["granary"] = {
+        "produces": [{
+            "resource": "food",
+            "amount": 1,
+            "every_ticks": 1200,
+            "scope": "village",
+        }],
+    }
 
 BASE_RESOURCES = {
     "food": {"name": "Food", "gatherZone": "farm", "color": "#4CAF50"},
@@ -650,7 +696,10 @@ class SimEngine:
             "stockpile": {},
             "taxDue": 0,
             "taxPaid": 0,
+            "effectLastFire": {},
         }
+        self._effect_period_fired = 0
+        self._last_effect_benchmark_fired = 0
         self._recompute_road_paths()
         active_defs = self._select_active_defs(roster_size)
         self.agent_names = set(d["name"] for d in active_defs)
@@ -1164,11 +1213,154 @@ class SimEngine:
                    if s.get("type") == type_
                    and (district_id is None or s.get("districtId") == district_id))
 
+    # --- structure function registry (Phase A consequence engine) ---
+    def _get_structure_function(self, type_):
+        if not STRUCTURE_EFFECTS_ENABLED:
+            return {}
+        c = self.civilization
+        tmpl = c["projectRegistry"].get(type_) or PROJECT_TEMPLATES.get(type_) or {}
+        fn = tmpl.get("function")
+        if fn:
+            return fn
+        if type_ in SEED_STRUCTURE_FUNCTIONS:
+            return SEED_STRUCTURE_FUNCTIONS[type_]
+        if tmpl.get("custom"):
+            return {"produces": [dict(LEGACY_CUSTOM_PRODUCE)]}
+        return {}
+
+    def _canonical_effect_vector(self, function):
+        return self.d["canonical_effect_vector"](function)
+
+    def _known_effect_vectors(self):
+        c = self.civilization
+        vectors = set()
+        for tid, fn in SEED_STRUCTURE_FUNCTIONS.items():
+            vec = self._canonical_effect_vector(fn)
+            if vec:
+                vectors.add(vec)
+        for pid in c["projectRegistry"]:
+            fn = self._get_structure_function(pid)
+            if fn:
+                vec = self._canonical_effect_vector(fn)
+                if vec:
+                    vectors.add(vec)
+        for bp in c["pendingBlueprints"]:
+            fn = bp.get("function")
+            if fn:
+                vec = self._canonical_effect_vector(fn)
+                if vec:
+                    vectors.add(vec)
+        return vectors
+
+    def _structure_display_name(self, type_id):
+        c = self.civilization
+        return (c["projectRegistry"].get(type_id) or PROJECT_TEMPLATES.get(type_id) or {}).get("name", type_id)
+
+    def _gather_yield_bonus(self, agent, resource):
+        if not STRUCTURE_EFFECTS_ENABLED:
+            return 0
+        district = agent.get("currentDistrict")
+        bonus = 0
+        for type_id in {s["type"] for s in self.civilization["structures"]}:
+            fn = self._get_structure_function(type_id)
+            for boost in fn.get("boosts") or []:
+                if boost.get("kind") != "gather":
+                    continue
+                resources = boost.get("resources") or []
+                if resource not in resources:
+                    continue
+                scope = boost.get("scope", "district")
+                count = self._structure_count(type_id, district if scope == "district" else None)
+                every_n = boost.get("every_n", 1)
+                max_bonus = boost.get("max_bonus", 1)
+                bonus += min(max_bonus, (count // every_n) * boost.get("bonus", 1))
+        return bonus
+
+    def _craft_station_unlocked(self, station):
+        if not STRUCTURE_EFFECTS_ENABLED or not station:
+            return True
+        for type_id in {s["type"] for s in self.civilization["structures"]}:
+            fn = self._get_structure_function(type_id)
+            for unlock in fn.get("unlocks") or []:
+                if unlock.get("kind") == "craft" and unlock.get("station") == station:
+                    return True
+        return False
+
+    def _craft_output_bonus(self, recipe):
+        if not STRUCTURE_EFFECTS_ENABLED:
+            return 0
+        station = recipe.get("station")
+        if not station:
+            return 0
+        bonus = 0
+        for type_id in {s["type"] for s in self.civilization["structures"]}:
+            fn = self._get_structure_function(type_id)
+            for boost in fn.get("boosts") or []:
+                if boost.get("kind") != "craft" or boost.get("station") != station:
+                    continue
+                scope = boost.get("scope", "village")
+                count = self._structure_count(type_id, None if scope == "village" else None)
+                every_n = boost.get("every_n", 1)
+                max_bonus = boost.get("max_bonus", 1)
+                bonus += min(max_bonus, (count // every_n) * boost.get("bonus", 1))
+        return bonus
+
+    def _deposit_produced(self, resource, amount, type_id, district_id=None):
+        c = self.civilization
+        if resource not in c["resourceRegistry"]:
+            return
+        c["stockpile"][resource] = c["stockpile"].get(resource, 0) + amount
+        name = self._structure_display_name(type_id)
+        where = f" in {district_id}" if district_id else ""
+        self._push_activity(f"{name} produced {amount} {resource}{where}")
+
+    def _tick_structure_effects(self):
+        """Apply tick-time produces (and log every firing). Boosts/unlocks/houses
+        are query-time via the registry helpers above."""
+        if not STRUCTURE_EFFECTS_ENABLED:
+            return
+        c = self.civilization
+        last_fire = c.setdefault("effectLastFire", {})
+        built_types = {s["type"] for s in c["structures"]}
+        for type_id in built_types:
+            fn = self._get_structure_function(type_id)
+            for prod in fn.get("produces") or []:
+                resource = prod.get("resource")
+                every = prod.get("every_ticks", 600)
+                fire_key = f"{type_id}:{resource}:{prod.get('scope', 'village')}"
+                if self.frameTick - last_fire.get(fire_key, -every) < every:
+                    continue
+                scope = prod.get("scope", "village")
+                amount_each = prod.get("amount", 1)
+                if scope == "district":
+                    for did in {s.get("districtId") for s in c["structures"] if s["type"] == type_id}:
+                        count = self._structure_count(type_id, did)
+                        if count <= 0:
+                            continue
+                        total = amount_each * count
+                        self._deposit_produced(resource, total, type_id, did)
+                        self._effect_period_fired += 1
+                else:
+                    count = self._structure_count(type_id)
+                    if count <= 0:
+                        continue
+                    total = amount_each * count
+                    self._deposit_produced(resource, total, type_id)
+                    self._effect_period_fired += 1
+                last_fire[fire_key] = self.frameTick
+
     def _population_cap(self):
         c = self.civilization
         base = c.get("basePopulation") or len(self.agents)
-        return min(len(AGENT_DEFS),
-                   base + self._structure_count("house") // HOUSES_PER_NEW_VILLAGER)
+        cap = base
+        if STRUCTURE_EFFECTS_ENABLED:
+            for type_id in {s["type"] for s in c["structures"]} | set(SEED_STRUCTURE_FUNCTIONS):
+                fn = self._get_structure_function(type_id)
+                houses = fn.get("houses")
+                if houses:
+                    every_n = houses.get("every_n", HOUSES_PER_NEW_VILLAGER)
+                    cap += self._structure_count(type_id) // every_n
+        return min(len(AGENT_DEFS), cap)
 
     def _type_saturated(self, type_):
         """Soft cap per structure type, derived from what the type actually
@@ -1179,17 +1371,23 @@ class SimEngine:
             return False
         c = self.civilization
         count = self._structure_count(type_)
-        if type_ == "house":
+        fn = self._get_structure_function(type_)
+        houses = fn.get("houses")
+        if houses:
             base = c.get("basePopulation") or len(self.agents)
-            return count >= (len(AGENT_DEFS) - base) * HOUSES_PER_NEW_VILLAGER + 3
-        if type_ == "farm_plot":
-            farm_districts = sum(1 for d in c["districts"].values()
-                                 if d["kind"] == "farm" and d.get("build_grid"))
-            return count >= FARM_PLOTS_PER_EXTRA * FARM_YIELD_BONUS_CAP * max(1, farm_districts)
-        if type_ == "workshop":
-            eligible = sum(1 for d in c["districts"].values()
-                           if d["kind"] in ("village", "workshop") and d.get("build_grid"))
-            return count >= WORKSHOP_DISTRICT_CAP * max(1, eligible)
+            every_n = houses.get("every_n", HOUSES_PER_NEW_VILLAGER)
+            return count >= (len(AGENT_DEFS) - base) * every_n + 3
+        for boost in fn.get("boosts") or []:
+            if boost.get("kind") == "gather":
+                every_n = boost.get("every_n", FARM_PLOTS_PER_EXTRA)
+                max_bonus = boost.get("max_bonus", FARM_YIELD_BONUS_CAP)
+                farm_districts = sum(1 for d in c["districts"].values()
+                                     if d["kind"] == "farm" and d.get("build_grid"))
+                return count >= every_n * max_bonus * max(1, farm_districts)
+            if boost.get("kind") == "craft":
+                eligible = sum(1 for d in c["districts"].values()
+                               if d["kind"] in ("village", "workshop") and d.get("build_grid"))
+                return count >= WORKSHOP_DISTRICT_CAP * max(1, eligible)
         if type_ == "wall":
             return count >= WALL_SOFT_CAP
         return count >= CUSTOM_SOFT_CAP
@@ -1413,7 +1611,7 @@ class SimEngine:
         # village (structures of type "workshop" are placed in village-kind
         # districts, so this is a village-wide check, not a per-district one).
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop" \
-                and not self._structure_count("workshop"):
+                and not self._craft_station_unlocked("workshop"):
             return f"{agent['name']} cannot craft {recipe_id} -- the village has no Workshop built yet"
         if not self._has_inputs(agent, recipe["inputs"]):
             missing = [r for r in recipe["inputs"] if agent["resources"].get(r, 0) < recipe["inputs"][r]]
@@ -1422,7 +1620,7 @@ class SimEngine:
             agent["resources"][r] -= n
         output = 1
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop":
-            output += min(1, self._structure_count("workshop") // WORKSHOPS_PER_CRAFT_BONUS)
+            output += self._craft_output_bonus(recipe)
         agent["resources"][recipe_id] = agent["resources"].get(recipe_id, 0) + output
         self.civilization["lastCraftActivityFrame"] = self.frameTick
         return f"{agent['name']} crafted {recipe_id}" \
@@ -1630,59 +1828,16 @@ class SimEngine:
     def _validate_blueprint(self, bp):
         c = self.civilization
         if not isinstance(bp, dict):
-            return False
-        if len(c["pendingBlueprints"]) >= MAX_PENDING_BLUEPRINTS:
-            return False
-        if len(self._custom_project_ids()) >= MAX_APPROVED_CUSTOM:
-            return False
-        bid = bp.get("id")
-        if not isinstance(bid, str) or not self.SLUG_RE.match(bid):
-            return False
-        if bid in PROJECT_TEMPLATES or bid in c["projectRegistry"]:
-            return False
-        if any(p["id"] == bid for p in c["pendingBlueprints"]):
-            return False
-        name = bp.get("name")
-        if not isinstance(name, str) or not (1 <= len(name) <= 32):
-            return False
-        new_resources = bp.get("new_resources") or []
-        if not isinstance(new_resources, list) or len(new_resources) > 3:
-            return False
-        new_ids = set()
-        for r in new_resources:
-            if not isinstance(r, dict):
-                return False
-            rid = r.get("id")
-            if not isinstance(rid, str) or not self.SLUG_RE.match(rid):
-                return False
-            if rid in BASE_RESOURCES:
-                return False
-            if rid in c["resourceRegistry"] or rid in new_ids:
-                return False
-            rname = r.get("name")
-            if not isinstance(rname, str) or not (1 <= len(rname) <= 32):
-                return False
-            gz = r.get("gather_zone")
-            if gz is not None and gz not in VALID_GATHER_ZONES:
-                return False
-            new_ids.add(rid)
-        if self._custom_resource_count() + len(new_ids) > MAX_CUSTOM_RESOURCES:
-            return False
-        needs = bp.get("needs")
-        if not isinstance(needs, dict):
-            return False
-        if not (1 <= len(needs) <= 8):
-            return False
-        for key, amt in needs.items():
-            known = (key in c["resourceRegistry"]) or (key in new_ids) or (key in BASE_RESOURCES)
-            if not known:
-                return False
-            if isinstance(amt, bool) or not isinstance(amt, int) or not (1 <= amt <= 5):
-                return False
-        vs = bp.get("visual_style") or "generic"
-        if vs not in VALID_VISUAL_STYLES:
-            return False
-        return True
+            return False, "blueprint must be an object"
+        return self.d["validate_blueprint"](
+            bp,
+            list(c["resourceRegistry"].keys()),
+            [p["id"] for p in c["pendingBlueprints"]],
+            self._custom_project_ids(),
+            self._custom_resource_count(),
+            list(c["rejectedBlueprintIds"]),
+            list(self._known_effect_vectors()),
+        )
 
     # --- relationships / helpers ---
     def _nudge_ally(self, agent, other_name):
@@ -2268,6 +2423,7 @@ class SimEngine:
             "rules": len(self.civilization["rules"]),
             "structures": len(self.civilization["structures"]),
             "level": self.civilization["level"], "memory": self.lastMemorySize,
+            "effectThroughput": self._effect_period_fired,
         }
         role_counts = {}
         for a in self.agents:
@@ -2280,6 +2436,12 @@ class SimEngine:
             self._log_benchmark("meme_adoption", adoption,
                                 {"rate": round(adoption_rate, 2), "seed": MEME_SEED_ID, "of": len(self.agents)})
         self._log_benchmark("memory_store_size", self.lastMemorySize)
+        if STRUCTURE_EFFECTS_ENABLED:
+            fired = self._effect_period_fired
+            self._log_benchmark("structure_effect_throughput", fired,
+                                {"period_ticks": BENCHMARK_TICK_FRAMES})
+            self._last_effect_benchmark_fired = fired
+            self._effect_period_fired = 0
 
     # --- memory maintenance (round-robin summarizer + periodic cleaner) ---
     def _run_memory_maintenance(self):
@@ -2401,14 +2563,17 @@ class SimEngine:
                 resource = next((r for r in candidates if agent["resources"].get(r, 0) < COLLECT_CAP), None)
                 if resource:
                     amount = 1
-                    if STRUCTURE_EFFECTS_ENABLED and resource in EDIBLE_RESOURCES:
-                        plots = self._structure_count("farm_plot", agent.get("currentDistrict"))
-                        amount += min(FARM_YIELD_BONUS_CAP, plots // FARM_PLOTS_PER_EXTRA)
+                    if STRUCTURE_EFFECTS_ENABLED:
+                        bonus = self._gather_yield_bonus(agent, resource)
+                        amount += bonus
                     amount = max(1, min(amount, COLLECT_CAP - agent["resources"].get(resource, 0)))
                     agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
                     c["collectSuccesses"] += 1
+                    bonus_note = ""
+                    if amount > 1:
+                        bonus_note = " (structure effects boosted the harvest)"
                     summary = f"{agent['name']} collected {resource}" \
-                        + (f" x{amount} (farm plots boosted the harvest)" if amount > 1 else "")
+                        + (f" x{amount}{bonus_note}" if amount > 1 else "")
                     resource_acted = resource
                 else:
                     contrib_res = self._pick_contribution_resource(
@@ -2515,29 +2680,33 @@ class SimEngine:
             bp = decision.get("blueprint")
             if bp and bp.get("id") in c["rejectedBlueprintIds"]:
                 summary = f"{agent['name']}'s blueprint {bp.get('id')} was already rejected"
-            elif self._validate_blueprint(bp):
-                needs_str = ", ".join(f"{k}x{v}" for k, v in bp["needs"].items())
-                c["pendingBlueprints"].append({
-                    "id": bp["id"], "name": bp["name"], "needs": dict(bp["needs"]),
-                    "newResources": [{"id": r["id"], "name": r["name"],
-                                      "gatherZone": r.get("gather_zone"),
-                                      "color": r.get("color", "#BDBDBD")}
-                                     for r in (bp.get("new_resources") or [])],
-                    "visualStyle": bp.get("visual_style") or "generic",
-                    "proposedBy": agent["name"],
-                })
-                if decision.get("message"):
-                    agent["message"] = decision["message"]
-                    agent["messageTimer"] = 180
-                c["lastBlueprintActivityFrame"] = self.frameTick
-                c["inventionRequiredStreak"] = 0
-                c["inventionBackstopFires"] = 0
-                agent["lastBlueprintRejection"] = None
-                summary = f"{agent['name']} proposed {bp['name']} (needs {needs_str})"
+                agent["lastBlueprintRejection"] = {
+                    "reason": "blueprint was previously rejected", "frame": self.frameTick}
             else:
-                agent["lastBlueprintRejection"] = {"reason": "invalid blueprint (bad id, duplicate, "
-                                                  "or unknown resource)", "frame": self.frameTick}
-                summary = f"{agent['name']} drafted an invalid blueprint"
+                ok, reason = self._validate_blueprint(bp)
+                if ok:
+                    needs_str = ", ".join(f"{k}x{v}" for k, v in bp["needs"].items())
+                    c["pendingBlueprints"].append({
+                        "id": bp["id"], "name": bp["name"], "needs": dict(bp["needs"]),
+                        "function": dict(bp["function"]),
+                        "newResources": [{"id": r["id"], "name": r["name"],
+                                          "gatherZone": r.get("gather_zone"),
+                                          "color": r.get("color", "#BDBDBD")}
+                                         for r in (bp.get("new_resources") or [])],
+                        "visualStyle": bp.get("visual_style") or "generic",
+                        "proposedBy": agent["name"],
+                    })
+                    if decision.get("message"):
+                        agent["message"] = decision["message"]
+                        agent["messageTimer"] = 180
+                    c["lastBlueprintActivityFrame"] = self.frameTick
+                    c["inventionRequiredStreak"] = 0
+                    c["inventionBackstopFires"] = 0
+                    agent["lastBlueprintRejection"] = None
+                    summary = f"{agent['name']} proposed {bp['name']} (needs {needs_str})"
+                else:
+                    agent["lastBlueprintRejection"] = {"reason": reason, "frame": self.frameTick}
+                    summary = f"{agent['name']} drafted an invalid blueprint ({reason})"
 
         elif action == "approve_blueprint":
             idx = next((i for i, p in enumerate(c["pendingBlueprints"]) if p["id"] == decision.get("target")), -1)
@@ -2547,8 +2716,11 @@ class SimEngine:
                     if r["id"] not in c["resourceRegistry"]:
                         c["resourceRegistry"][r["id"]] = {"name": r["name"],
                                                           "gatherZone": r["gatherZone"], "color": r["color"]}
-                c["projectRegistry"][bp["id"]] = {"name": bp["name"], "needs": dict(bp["needs"]),
-                                                  "visualStyle": bp["visualStyle"], "custom": True}
+                c["projectRegistry"][bp["id"]] = {
+                    "name": bp["name"], "needs": dict(bp["needs"]),
+                    "visualStyle": bp["visualStyle"], "custom": True,
+                    "function": dict(bp.get("function") or {}),
+                }
                 c["pendingBlueprints"].pop(idx)
                 c["lastBlueprintActivityFrame"] = self.frameTick
                 if decision.get("message"):
@@ -2897,6 +3069,7 @@ class SimEngine:
                                 for r in c["pendingRecipes"]],
             "approved_custom_projects": self._custom_project_ids(),
             "rejected_blueprints": list(c["rejectedBlueprintIds"]),
+            "known_effect_vectors": list(self._known_effect_vectors()),
             "pending_rules": [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
                                "yes": list(r["votes"].values()).count("yes"),
                                "no": list(r["votes"].values()).count("no"),
@@ -3024,6 +3197,8 @@ class SimEngine:
                 self._maybe_invention_backstop()
                 self._maybe_found_district()
                 self._maybe_welcome_newcomer()
+            if STRUCTURE_EFFECTS_ENABLED and ft % EFFECT_TICK_FRAMES == 0:
+                self._tick_structure_effects()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
             if BENCHMARKS_ENABLED and (ft % BENCHMARK_TICK_FRAMES == 0 or ft == FIRST_BENCHMARK_FRAME):
@@ -3206,6 +3381,7 @@ class SimEngine:
                 if not civ.get("basePopulation"):
                     civ["basePopulation"] = max(1, min(len(AGENT_DEFS),
                                                        len(data.get("agents") or []) or 8))
+                civ.setdefault("effectLastFire", {})
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
