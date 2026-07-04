@@ -280,6 +280,23 @@ blind; stalled-squatted districts count as capacity pressure in
 regrowth (~+1 per 600 frames) and deplete ≥2× gathered amount so overharvest
 is reachable. Ecology re-verification must include a forced-depletion check.
 
+**Loop-back (2026-07-04):** Implemented all six audit fixes on
+`feat/server-authoritative-engine`. `_maybe_abandon_stalled_projects` cancels
+projects with no contribution progress for `PROJECT_ABANDON_THRESHOLD`
+(3× `STALL_THRESHOLD` = 1800 frames), refunds to stockpile, logs + surfaces
+`lastProjectAbandonment`. `_start_project_for` rejects duplicate active types
+(`lastProjectRejection`). `_maybe_start_approved_custom` escalates (found
+district of needed kind, else one log + `APPROVED_CUSTOM_BACKOFF_FRAMES`
+cooldown). Squatted districts count as full in `_kind_at_capacity` /
+`_district_counts_as_full`. Stock writes clamp to max; scarcity index ratios
+clamped to 1.0. Ecology: `ECOLOGY_REGROW_FRAMES=600`, `STOCK_REGROW_PER_TICK=1`,
+`STOCK_DEPLETE_MULTIPLIER=2`. **Verification (restored stuck-granary
+`state.json`, session `2026-07-04T09-34-27`):** both granaries abandoned @
+frame 1604100; Waterwheel Mill started in `village_east` with contributions;
+duplicate-granary rejections logged; forced depletion/regrow/clamp tests pass;
+`ECOLOGY_ENABLED=False` gate unchanged. Phase B civilization test remains for
+the next soak audit.
+
 ### Phase C — Physical goods & plural needs (F4, I5)
 Granaries/vaults get real capacity (from Phase A functions); edibles spoil
 outside storage; goods must be carried (a cart — the first *vehicle* — is a

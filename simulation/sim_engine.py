@@ -260,16 +260,22 @@ WALL_SOFT_CAP = 10
 WORKSHOP_DISTRICT_CAP = 3   # per buildable village/workshop-kind district
 CUSTOM_SOFT_CAP = 5         # per custom/blueprint type (and the granary)
 EFFECT_TICK_FRAMES = 150     # deterministic structure-effect tick (produces, etc.)
-ECOLOGY_TICK_FRAMES = 150    # stock regrowth tick (same gate as structure effects)
+# Ecology regrowth: +1 per ECOLOGY_REGROW_FRAMES (~20s at 30 ticks/s). At ~3
+# gathers/min/agent depleting 2× yield, one district needs regrowth slower than
+# harvest to reach "depleted" under sustained gathering (old +2/150 was ~8× too fast).
+ECOLOGY_REGROW_FRAMES = 600
 LEGACY_CUSTOM_PRODUCE = {"resource": "herbs", "amount": 1, "every_ticks": 600, "scope": "village"}
 APPROVED_CUSTOM_STALL_FRAMES = 1800  # ~1 min: nudge + elder backstop for unbuilt approvals
+APPROVED_CUSTOM_BACKOFF_FRAMES = 5400  # ~3 min cooldown after escalation gives up
 STOCK_DEFAULT_MAX = 100
-STOCK_REGROW_PER_TICK = 2
+STOCK_REGROW_PER_TICK = 1
+STOCK_DEPLETE_MULTIPLIER = 2   # each gather removes 2× the units collected
 STOCK_LOW_RATIO = 0.25
 STOCK_MIN_YIELD_RATIO = 0.25  # lowest gather yield multiplier when stock is low but > 0
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
+PROJECT_ABANDON_THRESHOLD = STALL_THRESHOLD * 3  # no contribution progress → cancel + refund
 BLUEPRINT_STALL_THRESHOLD = 1800
 # A leader directive is broadcast to every agent's prompt with "Prioritize
 # it"; without an expiry it dominates decisions forever (and persists across
@@ -685,7 +691,8 @@ class SimEngine:
                 "consecutiveIdleMoves": 0, "hunger": 80, "health": 100,
                 "incapacitated": False, "goal": None, "actionCounts": {},
                 "commitment": None, "inventionTurn": False,
-                "lastBlueprintRejection": None, "lastGatherRejection": None, "lastSpokeFrame": 0,
+                "lastBlueprintRejection": None, "lastGatherRejection": None,
+                "lastProjectRejection": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
             }
@@ -749,6 +756,10 @@ class SimEngine:
             "effectLastFire": {},
             "districtStocks": {},
             "approvedCustomApprovedFrame": {},
+            "lastProjectAbandonment": None,
+            "approvedCustomBackoffUntil": 0,
+            "approvedCustomBackstopFailures": 0,
+            "approvedCustomEscalationLogged": False,
         }
         self._effect_period_fired = 0
         self._last_effect_benchmark_fired = 0
@@ -1267,7 +1278,9 @@ class SimEngine:
 
     def _set_district_stock(self, district_id, resource_id, value):
         c = self.civilization
-        c.setdefault("districtStocks", {}).setdefault(district_id, {})[resource_id] = max(0, value)
+        max_s = self._stock_max(resource_id)
+        c.setdefault("districtStocks", {}).setdefault(district_id, {})[resource_id] = \
+            min(max_s, max(0, value))
 
     def _add_district_stock(self, district_id, resource_id, amount):
         current = self._district_stock(district_id, resource_id)
@@ -1301,7 +1314,7 @@ class SimEngine:
             kind = self.civilization["districts"][district_id]["kind"]
             reason = f"the {kind} here is depleted of {resource_id}"
             return False, reason, 0.0
-        ratio = current / max_s
+        ratio = min(1.0, current / max_s)
         scale = max(STOCK_MIN_YIELD_RATIO, ratio)
         return True, None, scale
 
@@ -1357,7 +1370,7 @@ class SimEngine:
         for stocks in self.civilization["districtStocks"].values():
             for rid, val in stocks.items():
                 max_s = self._stock_max(rid)
-                total += val / max_s if max_s else 0
+                total += min(1.0, val / max_s if max_s else 0)
                 count += 1
         return round(total / count, 3) if count else 1.0
 
@@ -1745,7 +1758,8 @@ class SimEngine:
         if ECOLOGY_ENABLED:
             did = agent.get("currentDistrict")
             if did:
-                self._deplete_district_stock(did, resource, amount)
+                self._deplete_district_stock(
+                    did, resource, amount * STOCK_DEPLETE_MULTIPLIER)
         agent["lastGatherRejection"] = None
         bonus_note = ""
         if amount > 1:
@@ -1838,6 +1852,16 @@ class SimEngine:
         active_count = len(self._active_project_districts())
         if active_count >= MAX_CONCURRENT_PROJECTS:
             return None
+        dup_did = next((did for did, p in c["districtProjects"].items()
+                        if p and p.get("type") == type_), None)
+        if dup_did:
+            name = tmpl["name"]
+            agent["lastProjectRejection"] = {
+                "reason": f"a {name} project is already active in {dup_did}",
+                "frame": self.frameTick,
+            }
+            return (f"{agent['name']} cannot start another {name} — "
+                    f"one is already underway in {dup_did}")
         district_id = self._resolve_build_district(agent, type_, target_district)
         if not district_id or c["districtProjects"].get(district_id):
             return None
@@ -2479,27 +2503,100 @@ class SimEngine:
                 "reasoning": f"The {district_id} project is fully funded; raising the structure."})
             return
 
+    def _project_contribution_stall_frames(self, district_id):
+        c = self.civilization
+        if not c["districtProjects"].get(district_id):
+            return 0
+        last = c["districtLastContribution"].get(district_id, self.frameTick)
+        return self.frameTick - last
+
+    def _project_squatting_past_abandon_threshold(self, district_id):
+        return self._project_contribution_stall_frames(district_id) >= PROJECT_ABANDON_THRESHOLD
+
+    def _project_type_active(self, type_):
+        return any(p and p.get("type") == type_
+                   for p in self.civilization["districtProjects"].values())
+
+    def _maybe_abandon_stalled_projects(self):
+        """Cancel district projects with no contribution progress for
+        PROJECT_ABANDON_THRESHOLD frames; refund materials and free the slot."""
+        c = self.civilization
+        for district_id in list(self._active_project_districts()):
+            if not self._project_squatting_past_abandon_threshold(district_id):
+                continue
+            project = c["districtProjects"][district_id]
+            name = project.get("name", project.get("type", "project"))
+            for res, amt in (project.get("contributed") or {}).items():
+                if amt > 0:
+                    c["stockpile"][res] = c["stockpile"].get(res, 0) + amt
+            c["districtProjects"][district_id] = None
+            reason = (f"the {name} project in {district_id} was abandoned — "
+                      f"materials reclaimed")
+            c["lastProjectAbandonment"] = {
+                "reason": reason, "frame": self.frameTick, "district": district_id,
+            }
+            self._touch_kind_activity(c["districts"][district_id]["kind"])
+            self._push_activity(reason[0].upper() + reason[1:])
+
     def _maybe_start_approved_custom(self):
         """When an approved custom blueprint sits unbuilt too long, the elder
-        deterministically starts a project for it (Phase A audit carry-over)."""
+        deterministically starts a project for it (Phase A audit carry-over).
+        On failure, try founding a district of the needed kind; otherwise log
+        once and back off instead of retrying every STALL_THRESHOLD."""
         c = self.civilization
+        if self.frameTick < c.get("approvedCustomBackoffUntil", 0):
+            return
         if len(self._active_project_districts()) >= MAX_CONCURRENT_PROJECTS:
             return
         if self.frameTick - c.get("lastApprovedCustomCheckFrame", 0) < STALL_THRESHOLD:
             return
-        c["lastApprovedCustomCheckFrame"] = self.frameTick
         stalled = self._stalled_approved_customs()
         if not stalled:
             return
         pid, name, _ = stalled[0]
+        if self._project_type_active(pid):
+            return
+        c["lastApprovedCustomCheckFrame"] = self.frameTick
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
         if not elder:
             return
         elder["goal"] = None
-        self.apply_decision(elder, {
+        decision = {
             "action": "start_project", "target": pid,
-            "reasoning": f"The village approved {name} but never started building it."})
-        self._push_activity(f"Elder {elder['name']} directs the village to build the approved {name}")
+            "reasoning": f"The village approved {name} but never started building it."}
+
+        def _try_start():
+            self.apply_decision(elder, decision)
+            return self._project_type_active(pid)
+
+        if _try_start():
+            c["approvedCustomBackstopFailures"] = 0
+            c["approvedCustomEscalationLogged"] = False
+            c["approvedCustomBackoffUntil"] = 0
+            self._push_activity(f"Elder {elder['name']} directs the village to build the approved {name}")
+            return
+
+        kind = PROJECT_KIND.get(pid, "village")
+        tmpl = DISTRICT_KIND_TEMPLATES.get(kind)
+        if tmpl:
+            plot = self._claim_frontier_plot()
+            if plot:
+                self._found_district(kind, tmpl, plot)
+                if _try_start():
+                    c["approvedCustomBackstopFailures"] = 0
+                    c["approvedCustomEscalationLogged"] = False
+                    c["approvedCustomBackoffUntil"] = 0
+                    self._push_activity(
+                        f"Elder {elder['name']} opens new {kind} land and starts the approved {name}")
+                    return
+
+        c["approvedCustomBackstopFailures"] = c.get("approvedCustomBackstopFailures", 0) + 1
+        if not c.get("approvedCustomEscalationLogged"):
+            self._push_activity(
+                f"Cannot start approved {name} — all {kind} districts are blocked; "
+                f"backing off until land opens")
+            c["approvedCustomEscalationLogged"] = True
+        c["approvedCustomBackoffUntil"] = self.frameTick + APPROVED_CUSTOM_BACKOFF_FRAMES
 
     # --- newcomer backstop (structure effects: houses grow the population) ---
     def _maybe_welcome_newcomer(self):
@@ -2617,13 +2714,22 @@ class SimEngine:
                 f"The {project['name']} build moves to {dest} — {district_id} has no land left")
 
     # --- district founding (the open-world mechanism) ---
+    def _district_counts_as_full(self, district_id):
+        c = self.civilization
+        if c["districtProjects"].get(district_id) and \
+                self._project_squatting_past_abandon_threshold(district_id):
+            return True
+        d = c["districts"][district_id]
+        if d.get("build_grid"):
+            return self._district_structure_count(district_id) >= d["build_grid"]["cap"]
+        return False
+
     def _kind_at_capacity(self, kind):
         ids = [did for did, d in self.civilization["districts"].items()
                if d["kind"] == kind and d.get("build_grid")]
         if not ids:
             return False
-        return all(self._district_structure_count(did) >= self.civilization["districts"][did]["build_grid"]["cap"]
-                   for did in ids)
+        return all(self._district_counts_as_full(did) for did in ids)
 
     def _claim_frontier_plot(self):
         for plot in self.civilization["frontierPlots"]:
@@ -3262,6 +3368,12 @@ class SimEngine:
         if gather_rejection and self.frameTick - gather_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last gather failed: {gather_rejection['reason']}. "
                           f"Try another district, start_terraform plant_grove, or gather something else.")
+        project_rejection = agent.get("lastProjectRejection")
+        if project_rejection and self.frameTick - project_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+            nudges.append(f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
+        abandonment = c.get("lastProjectAbandonment")
+        if abandonment and self.frameTick - abandonment.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+            nudges.append(f"NOTE: {abandonment['reason']}.")
         stalled_customs = self._stalled_approved_customs()
         if stalled_customs:
             pid, name, _ = stalled_customs[0]
@@ -3549,6 +3661,7 @@ class SimEngine:
                 self._maybe_advance_rules()
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_feed_starving()
+                self._maybe_abandon_stalled_projects()
                 self._maybe_relocate_stuck_project()
                 self._maybe_force_contribution()
                 self._maybe_start_idle_district_project()
@@ -3560,7 +3673,7 @@ class SimEngine:
                 self._maybe_welcome_newcomer()
             if STRUCTURE_EFFECTS_ENABLED and ft % EFFECT_TICK_FRAMES == 0:
                 self._tick_structure_effects()
-            if ECOLOGY_ENABLED and ft % ECOLOGY_TICK_FRAMES == 0:
+            if ECOLOGY_ENABLED and ft % ECOLOGY_REGROW_FRAMES == 0:
                 self._tick_ecology_regrow()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
@@ -3746,6 +3859,10 @@ class SimEngine:
                                                        len(data.get("agents") or []) or 8))
                 civ.setdefault("effectLastFire", {})
                 civ.setdefault("approvedCustomApprovedFrame", {})
+                civ.setdefault("lastProjectAbandonment", None)
+                civ.setdefault("approvedCustomBackoffUntil", 0)
+                civ.setdefault("approvedCustomBackstopFailures", 0)
+                civ.setdefault("approvedCustomEscalationLogged", False)
                 if ECOLOGY_ENABLED and not civ.get("districtStocks"):
                     civ["districtStocks"] = self._init_district_stocks(
                         civ.get("districts") or {}, civ.get("resourceRegistry"))
@@ -3759,6 +3876,7 @@ class SimEngine:
                     # process's _think_job could have reset it).
                     a["isThinking"] = False
                     a["beliefs"] = set(a.get("beliefs") or [])
+                    a.setdefault("lastProjectRejection", None)
                     # state.json may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
                     # saved agent's memory.longTerm list can carry leaked
