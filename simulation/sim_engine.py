@@ -48,6 +48,7 @@ EMERGENT_ROLES = True
 RULES_ENABLED = True
 MEMES_ENABLED = True
 BENCHMARKS_ENABLED = True
+ECOLOGY_ENABLED = True
 # World-expansion plan: waypoint-based road routing for general travel
 # (move_to_district / idle wander / craft-station redirects). Sage-emergency
 # rescue and short local hops (move_to_agent, trade, talk) always stay direct
@@ -163,6 +164,7 @@ DISTRICT_KIND_TEMPLATES = {
     "farm": {"tile": "farm", "grid": {"cols": 4, "dx": 105, "dy": 85, "cap": 30}},
     "village": {"tile": "village", "grid": {"cols": 4, "dx": 100, "dy": 95, "cap": 30}},
     "workshop": {"tile": "workshop", "grid": {"cols": 4, "dx": 100, "dy": 90, "cap": 24}},
+    "beach": {"tile": "beach", "grid": {"cols": 3, "dx": 100, "dy": 80, "cap": 18}},
 }
 
 # project type -> the district kind it must be built in (farmers build farm
@@ -258,7 +260,13 @@ WALL_SOFT_CAP = 10
 WORKSHOP_DISTRICT_CAP = 3   # per buildable village/workshop-kind district
 CUSTOM_SOFT_CAP = 5         # per custom/blueprint type (and the granary)
 EFFECT_TICK_FRAMES = 150     # deterministic structure-effect tick (produces, etc.)
+ECOLOGY_TICK_FRAMES = 150    # stock regrowth tick (same gate as structure effects)
 LEGACY_CUSTOM_PRODUCE = {"resource": "herbs", "amount": 1, "every_ticks": 600, "scope": "village"}
+APPROVED_CUSTOM_STALL_FRAMES = 1800  # ~1 min: nudge + elder backstop for unbuilt approvals
+STOCK_DEFAULT_MAX = 100
+STOCK_REGROW_PER_TICK = 2
+STOCK_LOW_RATIO = 0.25
+STOCK_MIN_YIELD_RATIO = 0.25  # lowest gather yield multiplier when stock is low but > 0
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
@@ -386,6 +394,45 @@ if CRAFTING_ENABLED:
             "scope": "village",
         }],
     }
+
+# Terraform projects (Phase B): funded like builds but mutate terrain/stocks.
+TERRAFORM_TEMPLATES = {
+    "plant_grove": {
+        "name": "Plant Grove",
+        "needs": {"wood": 2, "herbs": 1},
+        "kind": "forest",
+        "function": {
+            "modifies": [{
+                "target": "stock", "resources": ["wood", "herbs"],
+                "set_ratio": 0.85, "scope": "district",
+            }],
+        },
+    },
+    "clear_field": {
+        "name": "Clear Field",
+        "needs": {"wood": 1, "stone": 1},
+        "kind": "farm",
+        "function": {
+            "modifies": [{
+                "target": "stock", "resources": ["food"],
+                "set_ratio": 1.0, "scope": "district",
+            }],
+        },
+    },
+    "extend_beach": {
+        "name": "Extend Beach",
+        "needs": {"stone": 2, "wood": 1},
+        "kind": "beach",
+        "function": {
+            "modifies": [{
+                "target": "stock", "resources": ["fish"],
+                "set_ratio": 0.9, "scope": "district",
+            }],
+            "found_district": "beach",
+        },
+    },
+}
+TERRAFORM_FUNCTIONS = {tid: tmpl["function"] for tid, tmpl in TERRAFORM_TEMPLATES.items()}
 
 BASE_RESOURCES = {
     "food": {"name": "Food", "gatherZone": "farm", "color": "#4CAF50"},
@@ -635,7 +682,7 @@ class SimEngine:
                 "consecutiveIdleMoves": 0, "hunger": 80, "health": 100,
                 "incapacitated": False, "goal": None, "actionCounts": {},
                 "commitment": None, "inventionTurn": False,
-                "lastBlueprintRejection": None, "lastSpokeFrame": 0,
+                "lastBlueprintRejection": None, "lastGatherRejection": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
             }
@@ -697,9 +744,13 @@ class SimEngine:
             "taxDue": 0,
             "taxPaid": 0,
             "effectLastFire": {},
+            "districtStocks": {},
+            "approvedCustomApprovedFrame": {},
         }
         self._effect_period_fired = 0
         self._last_effect_benchmark_fired = 0
+        if ECOLOGY_ENABLED:
+            self.civilization["districtStocks"] = self._init_district_stocks(self.civilization["districts"])
         self._recompute_road_paths()
         active_defs = self._select_active_defs(roster_size)
         self.agent_names = set(d["name"] for d in active_defs)
@@ -1182,6 +1233,222 @@ class SimEngine:
         return [rid for rid, d in self.civilization["resourceRegistry"].items()
                 if d.get("gatherZone") == zone]
 
+    # --- resource ecology (Phase B; gated by ECOLOGY_ENABLED) ---
+    def _stock_max(self, resource_id):
+        return STOCK_DEFAULT_MAX
+
+    def _resources_for_district_kind(self, kind, resource_registry=None):
+        reg = resource_registry or self.civilization["resourceRegistry"]
+        return [rid for rid, d in reg.items()
+                if d.get("gatherZone") == kind and not d.get("crafted")]
+
+    def _init_district_stocks(self, districts, resource_registry=None):
+        stocks = {}
+        for did, d in districts.items():
+            kind = d.get("kind")
+            if not kind:
+                continue
+            res_ids = self._resources_for_district_kind(kind, resource_registry)
+            if res_ids:
+                stocks[did] = {rid: self._stock_max(rid) for rid in res_ids}
+        return stocks
+
+    def _ensure_district_stocks(self):
+        c = self.civilization
+        if c.get("districtStocks"):
+            return
+        c["districtStocks"] = self._init_district_stocks(c["districts"])
+
+    def _district_stock(self, district_id, resource_id):
+        return c_stocks.get(resource_id) if (c_stocks := self.civilization["districtStocks"].get(district_id)) else None
+
+    def _set_district_stock(self, district_id, resource_id, value):
+        c = self.civilization
+        c.setdefault("districtStocks", {}).setdefault(district_id, {})[resource_id] = max(0, value)
+
+    def _add_district_stock(self, district_id, resource_id, amount):
+        current = self._district_stock(district_id, resource_id)
+        if current is None:
+            return
+        self._set_district_stock(district_id, resource_id, current + amount)
+
+    def _deplete_district_stock(self, district_id, resource_id, amount):
+        current = self._district_stock(district_id, resource_id)
+        if current is None:
+            return
+        new_val = max(0, current - amount)
+        self._set_district_stock(district_id, resource_id, new_val)
+        if current > 0 and new_val <= 0:
+            kind = self.civilization["districts"][district_id]["kind"]
+            self._push_activity(
+                f"The {kind} in {district_id} is depleted of {resource_id} — gathering fails here until it regrows")
+
+    def _ecology_gather_gate(self, agent, resource_id):
+        """Returns (allowed, reason, yield_scale). Non-tracked resources pass through."""
+        if not ECOLOGY_ENABLED:
+            return True, None, 1.0
+        district_id = agent.get("currentDistrict")
+        if not district_id:
+            return True, None, 1.0
+        current = self._district_stock(district_id, resource_id)
+        if current is None:
+            return True, None, 1.0
+        max_s = self._stock_max(resource_id)
+        if current <= 0:
+            kind = self.civilization["districts"][district_id]["kind"]
+            reason = f"the {kind} here is depleted of {resource_id}"
+            return False, reason, 0.0
+        ratio = current / max_s
+        scale = max(STOCK_MIN_YIELD_RATIO, ratio)
+        return True, None, scale
+
+    def _format_district_stocks_for_prompt(self, agent):
+        if not ECOLOGY_ENABLED:
+            return "none"
+        self._ensure_district_stocks()
+        did = agent.get("currentDistrict")
+        if not did:
+            return "none"
+        stocks = self.civilization["districtStocks"].get(did) or {}
+        if not stocks:
+            return "none"
+        parts = []
+        for rid, val in sorted(stocks.items()):
+            max_s = self._stock_max(rid)
+            if val <= 0:
+                parts.append(f"{rid}:depleted")
+            elif val < max_s * STOCK_LOW_RATIO:
+                parts.append(f"{rid}:low")
+            elif val < max_s * 0.5:
+                parts.append(f"{rid}:fair")
+            else:
+                parts.append(f"{rid}:ok")
+        return ", ".join(parts)
+
+    def _tick_ecology_regrow(self):
+        if not ECOLOGY_ENABLED:
+            return
+        self._ensure_district_stocks()
+        c = self.civilization
+        for did, stocks in c["districtStocks"].items():
+            kind = c["districts"].get(did, {}).get("kind", "land")
+            for rid, val in list(stocks.items()):
+                max_s = self._stock_max(rid)
+                if val >= max_s:
+                    continue
+                new_val = min(max_s, val + STOCK_REGROW_PER_TICK)
+                if new_val == val:
+                    continue
+                stocks[rid] = new_val
+                if val <= 0 < new_val:
+                    self._push_activity(
+                        f"The {kind} in {did} is recovering — {rid} stock is growing again")
+                elif val < max_s * STOCK_LOW_RATIO <= new_val:
+                    self._push_activity(f"{rid} stock in {did} has regrown to fair levels")
+
+    def _ecology_scarcity_index(self):
+        if not ECOLOGY_ENABLED:
+            return None
+        self._ensure_district_stocks()
+        total, count = 0.0, 0
+        for stocks in self.civilization["districtStocks"].values():
+            for rid, val in stocks.items():
+                max_s = self._stock_max(rid)
+                total += val / max_s if max_s else 0
+                count += 1
+        return round(total / count, 3) if count else 1.0
+
+    def _get_terraform_function(self, terraform_id):
+        return TERRAFORM_FUNCTIONS.get(terraform_id) or {}
+
+    def _stalled_approved_customs(self):
+        c = self.civilization
+        frames = c.get("approvedCustomApprovedFrame") or {}
+        out = []
+        for pid in self._custom_project_ids():
+            if pid in c["builtTypes"]:
+                continue
+            if any(p and p.get("type") == pid for p in c["districtProjects"].values()):
+                continue
+            approved_at = frames.get(pid, c.get("lastBlueprintActivityFrame", 0))
+            if self.frameTick - approved_at < APPROVED_CUSTOM_STALL_FRAMES:
+                continue
+            name = c["projectRegistry"][pid].get("name", pid)
+            out.append((pid, name, approved_at))
+        out.sort(key=lambda x: x[2])
+        return out
+
+    def _start_terraform_for(self, agent, target, target_district=None):
+        c = self.civilization
+        tmpl = TERRAFORM_TEMPLATES.get(target) if target else None
+        if not tmpl:
+            return None
+        if len(self._active_project_districts()) >= MAX_CONCURRENT_PROJECTS:
+            return None
+        kind = tmpl["kind"]
+        district_id = None
+        if target_district and c["districts"].get(target_district, {}).get("kind") == kind \
+                and not c["districtProjects"].get(target_district):
+            district_id = target_district
+        if not district_id:
+            cur = agent.get("currentDistrict")
+            if cur and c["districts"].get(cur, {}).get("kind") == kind \
+                    and not c["districtProjects"].get(cur):
+                district_id = cur
+        if not district_id:
+            candidates = [did for did, d in c["districts"].items()
+                          if d.get("kind") == kind and not c["districtProjects"].get(did)]
+            if candidates:
+                district_id = min(candidates, key=lambda did: self._distance_to_district(agent, did))
+        if not district_id:
+            return None
+        c["districtProjects"][district_id] = {
+            "type": target, "name": tmpl["name"], "needs": dict(tmpl["needs"]),
+            "contributed": {res: 0 for res in tmpl["needs"]},
+            "districtId": district_id, "isTerraform": True,
+        }
+        c["districtLastContribution"][district_id] = self.frameTick
+        self._touch_kind_activity(c["districts"][district_id]["kind"])
+        return f"{agent['name']} started {tmpl['name']} terraform in {district_id}"
+
+    def _apply_terraform_modifiers(self, district_id, function):
+        c = self.civilization
+        self._ensure_district_stocks()
+        for mod in function.get("modifies") or []:
+            if mod.get("target") != "stock":
+                continue
+            scope_did = district_id if mod.get("scope", "district") == "district" else district_id
+            for rid in mod.get("resources") or []:
+                max_s = self._stock_max(rid)
+                if mod.get("set_ratio") is not None:
+                    self._set_district_stock(scope_did, rid, int(max_s * mod["set_ratio"]))
+                elif mod.get("add"):
+                    self._add_district_stock(scope_did, rid, mod["add"])
+        if function.get("found_district") in DISTRICT_KIND_TEMPLATES:
+            plot = self._claim_frontier_plot()
+            if plot:
+                self._found_district(function["found_district"],
+                                     DISTRICT_KIND_TEMPLATES[function["found_district"]], plot)
+
+    def _complete_terraform(self, agent, district_id):
+        c = self.civilization
+        project = c["districtProjects"].get(district_id)
+        if not project or not project.get("isTerraform"):
+            return f"{agent['name']} has nothing to terraform"
+        tid = project["type"]
+        tmpl = TERRAFORM_TEMPLATES.get(tid) or {}
+        fn = tmpl.get("function") or self._get_terraform_function(tid)
+        self._apply_terraform_modifiers(district_id, fn)
+        name = project["name"]
+        c["districtProjects"][district_id] = None
+        c["completedProjects"] += 1
+        agent["lastContributedFrame"] = self.frameTick
+        c["districtLastContribution"][district_id] = self.frameTick
+        self._touch_kind_activity(c["districts"][district_id]["kind"])
+        self._check_civilization_level()
+        self._push_activity(f"{agent['name']} completed {name} — the land in {district_id} has changed")
+        return f"{agent['name']} completed {name} in {district_id}"
+
     def _try_contribute_resource(self, agent, res, district_id=None):
         district_id = district_id or self._resolve_contribution_district(agent)
         p = self.civilization["districtProjects"].get(district_id) if district_id else None
@@ -1309,7 +1576,21 @@ class SimEngine:
         c = self.civilization
         if resource not in c["resourceRegistry"]:
             return
-        c["stockpile"][resource] = c["stockpile"].get(resource, 0) + amount
+        if ECOLOGY_ENABLED:
+            self._ensure_district_stocks()
+            if district_id and self._district_stock(district_id, resource) is not None:
+                self._add_district_stock(district_id, resource, amount)
+            else:
+                dids = [did for did, stocks in c["districtStocks"].items()
+                        if resource in stocks]
+                if dids:
+                    share = max(1, amount // len(dids))
+                    for did in dids:
+                        self._add_district_stock(did, resource, share)
+                else:
+                    c["stockpile"][resource] = c["stockpile"].get(resource, 0) + amount
+        else:
+            c["stockpile"][resource] = c["stockpile"].get(resource, 0) + amount
         name = self._structure_display_name(type_id)
         where = f" in {district_id}" if district_id else ""
         self._push_activity(f"{name} produced {amount} {resource}{where}")
@@ -1420,6 +1701,8 @@ class SimEngine:
         project = c["districtProjects"].get(district_id) if district_id else None
         if not project:
             return f"{agent['name']} has nothing to build"
+        if project.get("isTerraform"):
+            return self._complete_terraform(agent, district_id)
         spot = self._find_structure_spot(district_id)
         if not spot:
             return f"{agent['name']} finds {district_id} has no room left to build"
@@ -1440,6 +1723,31 @@ class SimEngine:
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         self._check_civilization_level()
         return f"{agent['name']} built {built_name} in {district_id}"
+
+    def _perform_gather(self, agent, resource):
+        """Ecology-aware gather with structure boosts. Returns summary string."""
+        c = self.civilization
+        allowed, reason, scale = self._ecology_gather_gate(agent, resource)
+        if not allowed:
+            agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
+            return f"{agent['name']} found nothing — {reason}"
+        amount = 1
+        if STRUCTURE_EFFECTS_ENABLED:
+            amount += self._gather_yield_bonus(agent, resource)
+        if ECOLOGY_ENABLED and scale < 1.0:
+            amount = max(1, int(amount * scale))
+        amount = max(1, min(amount, COLLECT_CAP - agent["resources"].get(resource, 0)))
+        agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
+        c["collectSuccesses"] += 1
+        if ECOLOGY_ENABLED:
+            did = agent.get("currentDistrict")
+            if did:
+                self._deplete_district_stock(did, resource, amount)
+        agent["lastGatherRejection"] = None
+        bonus_note = ""
+        if amount > 1:
+            bonus_note = " (structure effects boosted the harvest)"
+        return f"{agent['name']} collected {resource}" + (f" x{amount}{bonus_note}" if amount > 1 else "")
 
     def _project_resource_list(self, project):
         return " and ".join(project["needs"].keys())
@@ -2168,6 +2476,28 @@ class SimEngine:
                 "reasoning": f"The {district_id} project is fully funded; raising the structure."})
             return
 
+    def _maybe_start_approved_custom(self):
+        """When an approved custom blueprint sits unbuilt too long, the elder
+        deterministically starts a project for it (Phase A audit carry-over)."""
+        c = self.civilization
+        if len(self._active_project_districts()) >= MAX_CONCURRENT_PROJECTS:
+            return
+        if self.frameTick - c.get("lastApprovedCustomCheckFrame", 0) < STALL_THRESHOLD:
+            return
+        c["lastApprovedCustomCheckFrame"] = self.frameTick
+        stalled = self._stalled_approved_customs()
+        if not stalled:
+            return
+        pid, name, _ = stalled[0]
+        elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
+        if not elder:
+            return
+        elder["goal"] = None
+        self.apply_decision(elder, {
+            "action": "start_project", "target": pid,
+            "reasoning": f"The village approved {name} but never started building it."})
+        self._push_activity(f"Elder {elder['name']} directs the village to build the approved {name}")
+
     # --- newcomer backstop (structure effects: houses grow the population) ---
     def _maybe_welcome_newcomer(self):
         """Tick-gated like the other _maybe_* backstops. When built housing
@@ -2330,6 +2660,10 @@ class SimEngine:
         _validate_road_graph(c["roadNodes"], c["roadEdges"])
         self._push_activity(f"The village claims new land in the frontier for a {kind} district ({did}).")
         self._log_benchmark("district_founded", len(c["districts"]), {"id": did, "kind": kind})
+        if ECOLOGY_ENABLED:
+            self._ensure_district_stocks()
+            new_stocks = self._init_district_stocks({did: c["districts"][did]}, c["resourceRegistry"])
+            c["districtStocks"].update(new_stocks)
 
     def _maybe_found_district(self):
         """Deterministic, tick-gated backstop (same shape as
@@ -2424,6 +2758,7 @@ class SimEngine:
             "structures": len(self.civilization["structures"]),
             "level": self.civilization["level"], "memory": self.lastMemorySize,
             "effectThroughput": self._effect_period_fired,
+            "ecologyScarcity": self._ecology_scarcity_index(),
         }
         role_counts = {}
         for a in self.agents:
@@ -2442,6 +2777,11 @@ class SimEngine:
                                 {"period_ticks": BENCHMARK_TICK_FRAMES})
             self._last_effect_benchmark_fired = fired
             self._effect_period_fired = 0
+        if ECOLOGY_ENABLED:
+            scarcity = self._ecology_scarcity_index()
+            if scarcity is not None:
+                self._log_benchmark("ecology_scarcity_index", scarcity,
+                                    {"period_ticks": BENCHMARK_TICK_FRAMES})
 
     # --- memory maintenance (round-robin summarizer + periodic cleaner) ---
     def _run_memory_maintenance(self):
@@ -2562,19 +2902,8 @@ class SimEngine:
                     candidates.append("food")
                 resource = next((r for r in candidates if agent["resources"].get(r, 0) < COLLECT_CAP), None)
                 if resource:
-                    amount = 1
-                    if STRUCTURE_EFFECTS_ENABLED:
-                        bonus = self._gather_yield_bonus(agent, resource)
-                        amount += bonus
-                    amount = max(1, min(amount, COLLECT_CAP - agent["resources"].get(resource, 0)))
-                    agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
-                    c["collectSuccesses"] += 1
-                    bonus_note = ""
-                    if amount > 1:
-                        bonus_note = " (structure effects boosted the harvest)"
-                    summary = f"{agent['name']} collected {resource}" \
-                        + (f" x{amount}{bonus_note}" if amount > 1 else "")
-                    resource_acted = resource
+                    summary = self._perform_gather(agent, resource)
+                    resource_acted = resource if "collected" in summary else None
                 else:
                     contrib_res = self._pick_contribution_resource(
                         agent, {"target": unmet, "target_district": district_id}, district_id)
@@ -2640,6 +2969,14 @@ class SimEngine:
             summary = self._start_project_for(agent, decision.get("target"), decision.get("target_district")) \
                 or f"{agent['name']} could not start a project"
 
+        elif action == "start_terraform":
+            if ECOLOGY_ENABLED:
+                summary = self._start_terraform_for(agent, decision.get("target"),
+                                                    decision.get("target_district")) \
+                    or f"{agent['name']} could not start that terraform project"
+            else:
+                summary = f"{agent['name']} cannot terraform — ecology is disabled"
+
         elif action == "contribute_resources":
             district_id = self._resolve_contribution_district(agent, decision.get("target_district"))
             if not district_id:
@@ -2660,9 +2997,11 @@ class SimEngine:
                         self._set_agent_target(agent, gz)
                         summary = f"{agent['name']} heads to gather {unmet}"
                     elif unmet and gz and agent["currentZone"] == gz and agent["resources"].get(unmet, 0) < COLLECT_CAP:
-                        agent["resources"][unmet] = agent["resources"].get(unmet, 0) + 1
-                        summary = f"{agent['name']} collected {unmet}"
-                        resource_acted = unmet
+                        summary = self._perform_gather(agent, unmet)
+                        if "collected" in summary:
+                            resource_acted = unmet
+                        else:
+                            resource_acted = None
                     else:
                         summary = f"{agent['name']} has nothing to contribute"
 
@@ -2721,6 +3060,7 @@ class SimEngine:
                     "visualStyle": bp["visualStyle"], "custom": True,
                     "function": dict(bp.get("function") or {}),
                 }
+                c.setdefault("approvedCustomApprovedFrame", {})[bp["id"]] = self.frameTick
                 c["pendingBlueprints"].pop(idx)
                 c["lastBlueprintActivityFrame"] = self.frameTick
                 if decision.get("message"):
@@ -2915,6 +3255,20 @@ class SimEngine:
         if rejection and self.frameTick - rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last blueprint proposal was rejected: {rejection['reason']}. "
                           f"Propose a different blueprint that avoids that problem.")
+        gather_rejection = agent.get("lastGatherRejection")
+        if gather_rejection and self.frameTick - gather_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+            nudges.append(f"NOTE: Your last gather failed: {gather_rejection['reason']}. "
+                          f"Try another district, start_terraform plant_grove, or gather something else.")
+        stalled_customs = self._stalled_approved_customs()
+        if stalled_customs:
+            pid, name, _ = stalled_customs[0]
+            nudges.append(f"NOTE: The village approved {name} but never built it. "
+                          f"Use start_project with target {pid}.")
+        if ECOLOGY_ENABLED:
+            stocks_line = self._format_district_stocks_for_prompt(agent)
+            if ":depleted" in stocks_line or ":low" in stocks_line:
+                nudges.append(f"NOTE: Local stocks are strained ({stocks_line}). "
+                              f"Consider start_terraform (plant_grove/clear_field/extend_beach) or move_to_district.")
         if agent["assignedTask"] and \
                 self.frameTick - (agent.get("lastTaskedFrame") or 0) > DIRECTIVE_TTL_FRAMES:
             # Same staleness problem as the directive: an old task (possibly
@@ -3070,6 +3424,8 @@ class SimEngine:
             "approved_custom_projects": self._custom_project_ids(),
             "rejected_blueprints": list(c["rejectedBlueprintIds"]),
             "known_effect_vectors": list(self._known_effect_vectors()),
+            "district_stocks": self._format_district_stocks_for_prompt(agent),
+            "known_terraform": list(TERRAFORM_TEMPLATES.keys()) if ECOLOGY_ENABLED else [],
             "pending_rules": [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
                                "yes": list(r["votes"].values()).count("yes"),
                                "no": list(r["votes"].values()).count("no"),
@@ -3082,7 +3438,8 @@ class SimEngine:
             "self_prompt": "",
             "module_reports": "none",
             "behavior_nudge": behavior_nudge,
-            "available_actions": self.d["AVAILABLE_ACTIONS"],
+            "available_actions": [a for a in self.d["AVAILABLE_ACTIONS"]
+                                  if a != "start_terraform" or ECOLOGY_ENABLED],
         }
 
     def _recent_conversations_text(self):
@@ -3193,12 +3550,15 @@ class SimEngine:
                 self._maybe_force_contribution()
                 self._maybe_start_idle_district_project()
                 self._maybe_build_funded_project()
+                self._maybe_start_approved_custom()
                 self._maybe_retire_blueprint()
                 self._maybe_invention_backstop()
                 self._maybe_found_district()
                 self._maybe_welcome_newcomer()
             if STRUCTURE_EFFECTS_ENABLED and ft % EFFECT_TICK_FRAMES == 0:
                 self._tick_structure_effects()
+            if ECOLOGY_ENABLED and ft % ECOLOGY_TICK_FRAMES == 0:
+                self._tick_ecology_regrow()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
             if BENCHMARKS_ENABLED and (ft % BENCHMARK_TICK_FRAMES == 0 or ft == FIRST_BENCHMARK_FRAME):
@@ -3382,6 +3742,10 @@ class SimEngine:
                     civ["basePopulation"] = max(1, min(len(AGENT_DEFS),
                                                        len(data.get("agents") or []) or 8))
                 civ.setdefault("effectLastFire", {})
+                civ.setdefault("approvedCustomApprovedFrame", {})
+                if ECOLOGY_ENABLED and not civ.get("districtStocks"):
+                    civ["districtStocks"] = self._init_district_stocks(
+                        civ.get("districts") or {}, civ.get("resourceRegistry"))
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
@@ -3519,6 +3883,7 @@ class SimEngine:
                         "MEMES_ENABLED": MEMES_ENABLED, "CRAFTING_ENABLED": CRAFTING_ENABLED,
                         "META_SYSTEM": META_SYSTEM, "PIANO_MODULES": PIANO_MODULES,
                         "ROADS_ENABLED": ROADS_ENABLED,
+                        "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
                     },
                 },
             }

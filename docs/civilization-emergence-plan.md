@@ -87,8 +87,8 @@ Grouped by stratum. ✅ = exists, 🟡 = exists as a stub/label, ❌ = missing.
 | # | Subsystem | Status | What's missing |
 |---|-----------|--------|----------------|
 | F1 | **Structure function registry** | 🟡 (registry + validation; legacy saves grandfathered) | Every structure type declares effects: `produces`, `unlocks`, `boosts`, `stores`, `houses`. Blueprints must declare a function to validate. |
-| F2 | **Resource ecology** | ❌ | Per-district resource *stocks* that deplete with gathering and regenerate on a curve; overharvest → local exhaustion; seasons/weather as slow modifiers. |
-| F3 | **Terraforming / world mutation** | 🟡 (districts+roads exist) | Agent-driven land change: clear forest → field, drain/expand beach, dig canal, plant grove. "Expanding the beach" is exactly this: projects whose output is *terrain*, not a building. |
+| F2 | **Resource ecology** | 🟡 (district stocks, depletion, regrowth) | Per-district resource *stocks* that deplete with gathering and regenerate on a curve; overharvest → local exhaustion; seasons/weather as slow modifiers. |
+| F3 | **Terraforming / world mutation** | 🟡 (start_terraform projects) | Agent-driven land change: clear forest → field, drain/expand beach, dig canal, plant grove. "Expanding the beach" is exactly this: projects whose output is *terrain*, not a building. |
 | F4 | **Physical goods** | ❌ | Stockpiles live in agent pockets and a tax pool. Needed: storage structures with capacity (F1 gives them a function), spoilage for edibles, and transport (goods must be *moved*, making roads and carts matter). |
 
 ### Intermediate (the society)
@@ -233,6 +233,20 @@ district/frontier machinery.
 migrate, plant a grove, or propose a quota. Scarcity appears in prompts and in
 decisions.
 **Flag:** `ECOLOGY_ENABLED`.
+
+**Implementation log (2026-07-03):** Phase A audit carry-over: `_stalled_approved_customs`,
+prompt nudge + `_maybe_start_approved_custom` elder backstop (live session logged
+"Elder Sage directs the village to build the approved Waterwheel Mill"). Ecology:
+`districtStocks` per district/kind, `_perform_gather` depletes + scales yield,
+`_tick_ecology_regrow`, `lastGatherRejection` surfaced in prompts. Terraform:
+`start_terraform` + `TERRAFORM_TEMPLATES`/`TERRAFORM_FUNCTIONS` (`plant_grove`,
+`clear_field`, `extend_beach`); completion via `_complete_terraform` (stock
+restore + optional beach district founding). Prompt adds `Local resource stocks`
+and terraform targets (~150 tokens). Observability: depletion/regrowth/completion
+activity lines; benchmark `ecology_scarcity_index`. **Verification:** py_compile
+clean; deterministic tests pass (depletion message, terraform end-to-end, approved-
+custom backstop, ECOLOGY_ENABLED=False gate); live ~90s session shows approved-custom
+backstop + ecology benchmark. Restored saves without stocks initialize to full.
 
 ### Phase C — Physical goods & plural needs (F4, I5)
 Granaries/vaults get real capacity (from Phase A functions); edibles spoil

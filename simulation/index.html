@@ -477,6 +477,7 @@ let MEMES_ENABLED = true;
 let RULES_ENABLED = true;
 let MEMORY_ENABLED = true;
 let BENCHMARKS_ENABLED = true;
+let ECOLOGY_ENABLED = true;
 let PIANO_MODULES = false;
 let META_SYSTEM = false;
 
@@ -936,6 +937,9 @@ function renderBenchmarks() {
   if (b.effectThroughput != null && b.effectThroughput !== undefined) {
     chips.push(`<span class="res-chip">effects <span class="civ-value">${b.effectThroughput}</span></span>`);
   }
+  if (b.ecologyScarcity != null && b.ecologyScarcity !== undefined) {
+    chips.push(`<span class="res-chip">ecology <span class="civ-value">${Math.round(b.ecologyScarcity * 100)}%</span></span>`);
+  }
   if (PIANO_MODULES || META_SYSTEM) {
     chips.push(`<span class="res-chip">modules <span class="civ-value">${b.moduleTotal}</span></span>`);
   }
@@ -1220,6 +1224,7 @@ function applyFlags(flags) {
   if ("RULES_ENABLED" in flags) RULES_ENABLED = !!flags.RULES_ENABLED;
   if ("MEMORY_ENABLED" in flags) MEMORY_ENABLED = !!flags.MEMORY_ENABLED;
   if ("BENCHMARKS_ENABLED" in flags) BENCHMARKS_ENABLED = !!flags.BENCHMARKS_ENABLED;
+  if ("ECOLOGY_ENABLED" in flags) ECOLOGY_ENABLED = !!flags.ECOLOGY_ENABLED;
   if ("PIANO_MODULES" in flags) PIANO_MODULES = !!flags.PIANO_MODULES;
   if ("META_SYSTEM" in flags) META_SYSTEM = !!flags.META_SYSTEM;
 }

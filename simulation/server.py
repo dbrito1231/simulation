@@ -429,6 +429,7 @@ memory_store = MemoryStore(os.path.join(session_logger.dir, "memory.json"))
 GATHER_ZONES = {"farm", "forest", "village", "market", "beach", "cave", "ocean"}
 BASE_RESOURCE_IDS = {"food", "wood", "gold"}
 SEED_PROJECT_IDS = {"house", "farm_plot", "workshop", "wall"}
+TERRAFORM_PROJECT_IDS = frozenset({"plant_grove", "clear_field", "extend_beach"})
 VISUAL_STYLES = {"house", "farm_plot", "workshop", "wall", "generic"}
 SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,24}$")
 FUNCTION_EFFECT_KEYS = ("produces", "boosts", "unlocks", "stores", "houses")
@@ -467,6 +468,7 @@ DECISION_ACTIONS = [
     "move_to_district", "move_to_agent",
     "collect_resource", "talk_to_nearby", "trade_resource",
     "start_project", "contribute_resources", "build_structure",
+    "start_terraform",
     "propose_blueprint", "approve_blueprint", "reject_blueprint",
     "assign_task", "change_role", "rest",
     # Survival (#2) and crafting (#4) actions. The client gates these by flag,
@@ -587,6 +589,10 @@ MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to 
    optional target_district (defaults to your current district, or the district most in need of help).
 5b. If "Incoming messages" lists requests or directives addressed to you, act on them this turn (gather/contribute/heal/trade as asked, or reply with talk_to_nearby).
 5c. Use move_to_district with target set to a district id from Known districts (e.g. "farm_north", "village_east") to travel there. You'll automatically walk the road network to get there.
+
+ECOLOGY (when enabled):
+5d. Each district has local resource stocks that deplete when you gather and regrow over time. If Local stocks shows "depleted" or "low", gathering that resource here fails until stocks recover — use start_terraform (plant_grove restores forest wood/herbs; clear_field restores farm food; extend_beach restores fish and may claim new beach land) or move_to_district to another district.
+5e. start_terraform with target set to plant_grove, clear_field, or extend_beach begins a funded terraform project (same contribute/build flow as structures). Use build_structure when the terraform project is fully funded.
 
 BLUEPRINTS (inventing new structures):
 6. Any agent may use propose_blueprint to invent a new structure type. Include a
@@ -738,6 +744,8 @@ Agents near you: {nearby_agents}
 Current zone: {world_zone}
 Current district: {current_district}
 Known districts (use as target_district): {known_districts}
+Local resource stocks (your current district): {district_stocks}
+Terraform projects (start_terraform targets): {known_terraform}
 Civilization level: {civilization_level}
 Structures built: {structures_built}
 Active builds (by district): {active_project}
@@ -1424,6 +1432,14 @@ def normalize_decision(decision, agent_data):
     nearby_names = parse_nearby_names(nearby_raw)
     nearby_empty = len(nearby_names) == 0
 
+    if action == "start_terraform":
+        target = decision.get("target")
+        if target not in TERRAFORM_PROJECT_IDS:
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid terraform target)").strip()
+            return fallback
+        return decision
+
     if action == "propose_blueprint":
         known_ids = agent_data.get("known_resource_ids") or []
         pending_ids = agent_data.get("pending_blueprint_ids") or []
@@ -1980,6 +1996,8 @@ def build_user_prompt(data, slim=False):
         world_zone=data.get("world_zone"),
         current_district=data.get("current_district", "none"),
         known_districts=format_known_districts(data.get("known_districts") or []),
+        district_stocks=data.get("district_stocks") or "none",
+        known_terraform=", ".join(data.get("known_terraform") or []) or "none",
         civilization_level=data.get("civilization_level", 1),
         structures_built=data.get("structures_built", 0),
         active_project=data.get("active_project", "none"),
