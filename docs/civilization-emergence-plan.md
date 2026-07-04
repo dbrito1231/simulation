@@ -248,6 +248,38 @@ clean; deterministic tests pass (depletion message, terraform end-to-end, approv
 custom backstop, ECOLOGY_ENABLED=False gate); live ~90s session shows approved-custom
 backstop + ecology benchmark. Restored saves without stocks initialize to full.
 
+**Audit verdict (2026-07-04, session `2026-07-03T21-21-13`, ~12h soak on the
+restored fresh-world save): FAIL — Phase B loops back; Phase C blocked.**
+The civilization test could not run: scarcity never appeared (0 depletion
+events, 0 gather failures, 0 terraform starts, every prompt read `ok` for 12
+hours) AND the build pipeline deadlocked (0 structures built; 3,402
+`could not start` failures). Findings, in causal order:
+1. **Village-district squatting deadlock (design, worst).** Both village-kind
+   districts are occupied by two parallel `granary` projects that need
+   crafted goods that never arrive (Phase A audit finding #2, now causal).
+   There is NO project-abandonment path, so they squat forever; every
+   village-kind `start_project` (houses, the approved Waterwheel Mill) fails.
+   `_maybe_start_approved_custom` retried every 600 frames for 12h (1,653
+   fires) with no escalation — a gate with no deterministic escape, the exact
+   invariant the plan forbids. `_maybe_found_district` never opened new
+   village land (60 frontier plots free) because squatted-by-stalled-project
+   doesn't register as capacity pressure.
+2. **Ecology can't bind (tuning).** Regrowth (+2 per 150-frame tick ≈
+   16/min/resource/district) far outpaces gathering; stocks never left `ok`.
+3. **Stock overfill bug.** Deposits (`_add_district_stock`, incl. structure
+   produces) don't clamp at `STOCK_DEFAULT_MAX`; the scarcity index — meant
+   to be 0–1 — read **3.7** (stocks at ~370% of max), pushing depletion even
+   further out of reach.
+Required fixes for the loop-back (in order): project abandonment (a project
+with no contribution progress for ~3× STALL_THRESHOLD is cancelled, refunded,
+district freed, logged); no duplicate active project of the same type;
+`_maybe_start_approved_custom` escalates on repeated failure (found a
+district of the needed kind, else back off with one log) instead of retrying
+blind; stalled-squatted districts count as capacity pressure in
+`_maybe_found_district`; clamp all stock writes to max; fix the index; slow
+regrowth (~+1 per 600 frames) and deplete ≥2× gathered amount so overharvest
+is reachable. Ecology re-verification must include a forced-depletion check.
+
 ### Phase C — Physical goods & plural needs (F4, I5)
 Granaries/vaults get real capacity (from Phase A functions); edibles spoil
 outside storage; goods must be carried (a cart — the first *vehicle* — is a
