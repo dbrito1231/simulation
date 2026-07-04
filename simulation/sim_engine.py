@@ -398,8 +398,11 @@ if CRAFTING_ENABLED:
 # Terraform projects (Phase B): funded like builds but mutate terrain/stocks.
 TERRAFORM_TEMPLATES = {
     "plant_grove": {
+        # Needs must stay fundable in a FRESH world: base/gatherable resources
+        # only (herbs only exists once a blueprint invents it — a depleted
+        # forest must never depend on an uninvented resource to recover).
         "name": "Plant Grove",
-        "needs": {"wood": 2, "herbs": 1},
+        "needs": {"wood": 2, "food": 1},
         "kind": "forest",
         "function": {
             "modifies": [{
