@@ -196,6 +196,34 @@ duplicate / unique blueprints. **Note for Part 2:** pre-Phase-A customs in old
 saves share a legacy default produce vector until re-invented with distinct
 functions; new approvals are blocked from duplicating any resolved vector.
 
+**Audit verdict (2026-07-03, session `2026-07-03T13-35-24`, ~7.4h fresh-world
+soak): PASS — Phase B may proceed.** Evidence: 0 LLM errors/overflows; every
+built structure type visibly functional (Wall produced stone ×330 on schedule,
+farm-plot gather boost ×603, workshop craft boost ×172); blueprint function
+requirement held — only 3 invalid proposals all session (vs 1,344 silent
+rejections pre-fix), each with a surfaced reason (`unknown produce resource:
+tannin`, `need amount must be 1-5`, `duplicate blueprint id`); invention
+quality shifted from lexical to functional (first fresh-world custom:
+**Waterwheel Mill**, not an "Advanced X"); invention nags 18 (vs 3,144);
+villager speech 212 vs 639 directives (was 19 vs 1,556). Newly discovered
+gaps, added per the Part 5 loop:
+- **Approved-but-unbuilt inventions stall without saturation pressure.** The
+  Waterwheel Mill was approved at frame 70,984 and never got a project in the
+  remaining ~520k frames: the custom-project bias in `_start_project_for`
+  only fires when a role's default project *kind* matches, and the invention
+  gate never arms in a young world. Fix candidate (small, next session): when
+  an approved custom is unbuilt for N frames, add a prompt nudge + let the
+  elder direct a `start_project` for it. Owner: Phase B recon.
+- **The granary chain still doesn't close.** 189 crafts happened, 2 granary
+  projects started, 0 granaries completed in 7.4h — crafted goods are being
+  produced but contributions keep flowing to cheap seed projects (16 farm
+  plots built). Watch under Phase B scarcity; if it persists, it's an
+  economy-routing problem for Phase C/E, not a crafting problem.
+- **Produced goods accumulate in `civilization["stockpile"]`, which nothing
+  consumes** (pre-existing; 330+ stone banked this run). Phase C is the
+  designed consumer — until then this is accepted dead weight, tracked here
+  so it isn't forgotten.
+
 ### Phase B — Resource ecology (F2) and terraforming (F3)
 District resource stocks, depletion, regrowth curves; gather yield scales with
 stock. Terraform project type: output is a terrain/district mutation (field
