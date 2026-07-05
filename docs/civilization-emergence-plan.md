@@ -557,6 +557,63 @@ Handoff rules:
   back to step 1 with the audit findings as the new recon input — the phase
   does not advance, and no next-phase work starts.
 
+## Part 8 — The automated overnight cycle
+
+The Part 7 relay, automated. Two scheduled Claude Code sessions per day drive
+one full iteration; the human checkpoint is reading the morning summary and
+the commits (the loop never pushes, never leaves
+`feat/server-authoritative-engine`).
+
+State lives in two files:
+- `.cursor/next-prompt.md` — the pending implementation prompt (written by
+  the morning stage; consumed by the night stage; absent = nothing to
+  implement, soak-only night).
+- `.claude/overnight-cycle.json` — `{ "lastReviewedCommit": "<sha>",
+  "iteration": N, "phase": "B" }`, updated by whichever stage acts.
+
+**NIGHT stage (~22:30):**
+1. Preflight: repo on `feat/server-authoritative-engine`, working tree clean
+   (commit strays with a note if not); LM Studio up (`lms ps`; context ÷
+   parallel ≥ 3,400); port 5001 free.
+2. If `.cursor/next-prompt.md` exists: spawn a general-purpose subagent with
+   its contents (the implementer — subagent context keeps it separate from
+   this session's reviewer role). Subagent implements + commits, then delete
+   the prompt file.
+3. Review pass (this session, fresh eyes): diff `lastReviewedCommit..HEAD`
+   against the phase's scope and the two invariants (no silent rejections;
+   no gate without a deterministic escape). Small fixes committed directly;
+   large problems → write a corrective prompt back to `.cursor/next-prompt.md`
+   and end WITHOUT starting the server (the morning stage will report it).
+   Update `lastReviewedCommit`.
+4. Start the soak: launch the server in the background
+   (`uv run python simulation/server.py`), confirm `http://127.0.0.1:5001`
+   responds and a new `simulation/logs/<ts>/` folder is writing, then end
+   the session (the server keeps running detached).
+
+**MORNING stage (~07:30):**
+1. Stop the server; confirm port 5001 free.
+2. Part 5 audit of the newest session folder against the current phase's
+   civilization test + standing questions. Append the verdict to the
+   phase's Part 4 log (PASS → next phase; FAIL → findings, causally ordered).
+3. Write the next implementation prompt to `.cursor/next-prompt.md`
+   (loop-back fixes on FAIL; the next phase's relay prompt on PASS), using
+   the same template as previous iterations (git rules, hard rules, VERIFY,
+   RECORD sections).
+4. Commit the plan-doc update (and cycle-state bump) with message
+   `Overnight cycle N: <verdict summary>`.
+5. Leave a concise summary as the session's final message (and a
+   notification if available): verdict, key numbers, what tonight will do.
+
+Guardrails:
+- The cycle only ever *pauses itself*: any preflight failure, LM Studio
+  outage, or review-stage rejection ends the stage with a report instead of
+  proceeding — nothing forces a soak on a bad build.
+- Phase advancement still requires a PASS verdict written by the audit; the
+  night stage never starts next-phase work on its own.
+- Disable the two scheduled tasks to fall back to the manual Part 7 relay at
+  any time; the state files make manual and automated iterations
+  interchangeable.
+
 ## Constraints that shape everything above
 
 - **One LLM, ~6.5s/decision, 2 slots** (gemma-4-e4b on a 12GB card). All new
