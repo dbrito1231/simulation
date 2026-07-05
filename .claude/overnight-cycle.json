@@ -1,6 +1,6 @@
 {
   "lastReviewedCommit": "1d03b00",
-  "iteration": 0,
+  "iteration": 1,
   "phase": "B",
-  "note": "Loop-back #3 (abcc158) is committed but NOT yet reviewed; the first night stage must review 1d03b00..HEAD before soaking."
+  "note": "2026-07-05 morning: first automated-cycle run found no usable soak data (server was started/restarted several times in ~90min, newest session only ~1.6min old) -- audit reported INCONCLUSIVE, no phase verdict, no code fix needed. HEAD is now 99a951f, but the only unreviewed commits (4cfcd63, 99a951f) are docs/gitignore-only -- abcc158 (loop-back #3) is still the substantive commit awaiting the pending 1d03b00..HEAD review. Tonight's night stage must: (1) do that review pass and advance lastReviewedCommit, (2) start the soak exactly once and leave it running untouched for 8h+ so a real Phase B audit is possible."
 }

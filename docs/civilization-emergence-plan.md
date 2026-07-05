@@ -384,6 +384,35 @@ stockpile supplied toward Granary/Clear Field; after simulated granary deferral
 `invention_required` False and House starts; 6 structures built over 8000 ticks
 with stockpile-seeded Workshop. Phase B civilization test remains for next soak.
 
+**Audit verdict (2026-07-05, morning stage, first automated-cycle run):
+INCONCLUSIVE — no soak data to audit; Phase B neither cleared nor sent back.**
+This was the first invocation of the Part 8 automation (`overnight-cycle.json`
+still showed `iteration: 0`, `lastReviewedCommit: 1d03b00` with the note that
+the pending review of `1d03b00..HEAD` had not happened yet). What actually
+happened before this stage ran, reconstructed from timestamps: two admin
+commits landed at 12:47/12:50 (`4cfcd63` Part 8 doc, `99a951f` gitignore for a
+stray `archive/state.json`) — no `sim_engine.py`/`server.py` changes, so the
+pending review is of docs/gitignore only — then the server was started and
+restarted several times in quick succession (`simulation/logs/` shows session
+folders at `11:16`, `11:20`, `11:22`, and `12:53`, each 1–90 minutes, not one
+continuous run) with the newest containing only **~1.6 minutes** of data at
+the moment this audit ran, and no folder anywhere near the 8h+ the civilization
+test needs. Per the audit's own skip rule (newest session under ~30 min ⇒
+report, don't fabricate a verdict), no PASS/FAIL is recorded and Phase C stays
+blocked. Supplementary signal from the longest available fragment
+(`2026-07-05T11-22-15`, ~87 min, 1,144 decisions, 0 LLM errors): loop-back #3
+appears to be holding — 4 Workshops, 2 Walls, 2 Waterwheel Mills built, 5
+Clear Field terraforms completed, no granary-monoculture freeze — but
+`move_to_district` was still 58% of actions (667/1,144), down from the 85%
+that failed loop-back #1's audit but well above a healthy mix; not
+conclusive at this sample size. **Required for a real audit:** the night
+stage must (1) actually perform the still-pending review of `1d03b00..HEAD`
+and advance `lastReviewedCommit`, and (2) start the soak once and leave the
+server running untouched for 8h+ — no restarts — so one session folder
+accumulates enough data to grep. No code defect was found, so no loop-back
+fix prompt was written; `.cursor/next-prompt.md` is intentionally left absent
+(soak-only night, per Part 8's "absent = nothing to implement" rule).
+
 ### Phase C — Physical goods & plural needs (F4, I5)
 Granaries/vaults get real capacity (from Phase A functions); edibles spoil
 outside storage; goods must be carried (a cart — the first *vehicle* — is a
