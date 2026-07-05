@@ -297,6 +297,54 @@ duplicate-granary rejections logged; forced depletion/regrow/clamp tests pass;
 `ECOLOGY_ENABLED=False` gate unchanged. Phase B civilization test remains for
 the next soak audit.
 
+**Audit verdict (2026-07-05, session `2026-07-04T10-19-58`, ~14.5h soak):
+FAIL — second loop-back. Scarcity now binds (4,959 depletions, 3,457 failed
+gathers with surfaced reasons, 1,501 recoveries) and the deadlock machinery
+works (the Waterwheel Mill was finally built via the escalation chain; no
+permanent squatting). But the RESPONSE layer failed — the test's causal chain
+stops at "gathers fail":**
+1. **Zero terraforms in 14.5h — an interface bug, not a model limitation.**
+   All 39 `start_terraform` attempts were rejected as invalid targets: the
+   model passes district ids ("farm_north") or resources as `target` because
+   it thinks of terraforming a *place*; the schema wants a template id. Fix:
+   normalize must infer the template from a district target's kind
+   (farm→clear_field, forest→plant_grove, beach→extend_beach), fuzzy-match
+   names, and surface rejections into the next prompt (same promotion
+   pattern move_to_district already has for target_district).
+2. **The "try another district" nudge turned the village nomadic:** 85% of
+   ALL decisions (9,968/11,672) were move_to_district; contribute collapsed
+   to 110, and projects starved. The prompt-only response to scarcity does
+   not work at this model size — the village needs a deterministic scarcity
+   reflex (same lesson as the original start_project stall): on a depleted
+   gather, route to (a) contribute to a matching active terraform, else
+   (b) start the right terraform here if fundable, else (c) move to the
+   best-stocked district for that resource — as goal/backstop, not model
+   roulette.
+3. **Abandonment churned: 510 cancellations, 1 build.** With scarcity
+   slowing funding, PROJECT_ABANDON_THRESHOLD (1800 frames ≈ 1 min) cancels
+   everything before completion. Raise to ≥10× STALL_THRESHOLD and extend
+   further for projects needing crafted goods.
+No quota rules were proposed (nothing survived long enough to govern). LM
+errors: 14/11,672 (healthy). Phase C remains blocked.
+
+**Loop-back #2 (2026-07-05):** Three response-layer fixes on
+`feat/server-authoritative-engine`. **(1) Terraform target inference**
+(`server.py` `normalize_decision` / `_infer_terraform_decision`): district ids
+and resource names promote to template ids (farm→`clear_field`, forest→
+`plant_grove`, beach→`extend_beach`); fuzzy display names; failures surface
+`lastTerraformRejection`. **(2) Deterministic scarcity reflex**
+(`_scarcity_reflex_on_depletion` in `_perform_gather`): on depletion, contribute
+to matching active terraform → else start terraform in-place → else route to
+highest-stock district; gather nudge softened (terraform before migrate).
+**(3) Abandonment tuning:** `PROJECT_ABANDON_THRESHOLD` = 10× `STALL_THRESHOLD`
+(6000 frames); crafted-needs projects use 20× (12000). **Verification (session
+`2026-07-05T00-59-23`, restored `state.json`):** Sage `start_terraform` with
+district id → "started Clear Field terraform in farm_north"; scarcity reflex
+lines for Colt/Mia contributing to that terraform; 0 abandons over 6500
+deterministic ticks; `ECOLOGY_ENABLED=False` gate unchanged. Phase B
+civilization test remains for next soak (terraform completions must restore
+stocks and village stabilizes).
+
 ### Phase C — Physical goods & plural needs (F4, I5)
 Granaries/vaults get real capacity (from Phase A functions); edibles spoil
 outside storage; goods must be carried (a cart — the first *vehicle* — is a

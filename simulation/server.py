@@ -430,6 +430,93 @@ GATHER_ZONES = {"farm", "forest", "village", "market", "beach", "cave", "ocean"}
 BASE_RESOURCE_IDS = {"food", "wood", "gold"}
 SEED_PROJECT_IDS = {"house", "farm_plot", "workshop", "wall"}
 TERRAFORM_PROJECT_IDS = frozenset({"plant_grove", "clear_field", "extend_beach"})
+KIND_TO_TERRAFORM = {"farm": "clear_field", "forest": "plant_grove", "beach": "extend_beach"}
+TERRAFORM_KIND = {v: k for k, v in KIND_TO_TERRAFORM.items()}
+RESOURCE_TO_TERRAFORM = {
+    "wood": "plant_grove", "herbs": "plant_grove",
+    "food": "clear_field", "fish": "extend_beach",
+}
+
+
+def _district_kind_map(agent_data):
+    out = {}
+    for d in agent_data.get("known_districts") or []:
+        if isinstance(d, dict) and d.get("id"):
+            out[d["id"]] = d.get("kind")
+    return out
+
+
+def _fuzzy_terraform_id(raw):
+    """Map display names and slugs to canonical terraform template ids."""
+    if not raw:
+        return None
+    s = str(raw).strip().lower()
+    if s in TERRAFORM_PROJECT_IDS:
+        return s
+    slug = s.replace(" ", "_").replace("-", "_")
+    if slug in TERRAFORM_PROJECT_IDS:
+        return slug
+    compact = s.replace(" ", "").replace("_", "").replace("-", "")
+    for tid in TERRAFORM_PROJECT_IDS:
+        if compact == tid.replace("_", ""):
+            return tid
+    aliases = {
+        "plant grove": "plant_grove", "plantgrove": "plant_grove",
+        "clear field": "clear_field", "clearfield": "clear_field",
+        "extend beach": "extend_beach", "extendbeach": "extend_beach",
+    }
+    return aliases.get(s) or aliases.get(compact)
+
+
+def _infer_terraform_decision(decision, agent_data):
+    """Promote district/resource targets to template ids (models name places)."""
+    district_map = _district_kind_map(agent_data)
+    target = decision.get("target")
+    target_district = decision.get("target_district")
+
+    if target in TERRAFORM_PROJECT_IDS:
+        if target_district and target_district not in district_map:
+            decision["target_district"] = None
+        return decision, None
+
+    if target and target in district_map:
+        tmpl = KIND_TO_TERRAFORM.get(district_map[target])
+        if tmpl:
+            decision["target"] = tmpl
+            decision["target_district"] = target
+            return decision, None
+
+    if target_district and target_district in district_map:
+        tmpl = KIND_TO_TERRAFORM.get(district_map[target_district])
+        if tmpl:
+            decision["target"] = tmpl
+            return decision, None
+
+    fuzzy = _fuzzy_terraform_id(target)
+    if fuzzy:
+        decision["target"] = fuzzy
+        return decision, None
+
+    known_resources = agent_data.get("known_resource_ids") or []
+    if target and target in known_resources:
+        tmpl = RESOURCE_TO_TERRAFORM.get(target)
+        if tmpl:
+            decision["target"] = tmpl
+            want_kind = TERRAFORM_KIND[tmpl]
+            if target_district and district_map.get(target_district) == want_kind:
+                decision["target_district"] = target_district
+            else:
+                current = agent_data.get("current_district")
+                if current and district_map.get(current) == want_kind:
+                    decision["target_district"] = current
+                else:
+                    match = next((did for did, k in district_map.items() if k == want_kind), None)
+                    if match:
+                        decision["target_district"] = match
+            return decision, None
+
+    return None, f"could not infer terraform template from target {target!r}"
+
 VISUAL_STYLES = {"house", "farm_plot", "workshop", "wall", "generic"}
 SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,24}$")
 FUNCTION_EFFECT_KEYS = ("produces", "boosts", "unlocks", "stores", "houses")
@@ -1433,12 +1520,13 @@ def normalize_decision(decision, agent_data):
     nearby_empty = len(nearby_names) == 0
 
     if action == "start_terraform":
-        target = decision.get("target")
-        if target not in TERRAFORM_PROJECT_IDS:
-            fallback = role_fallback_action(agent_data.get("role"), agent_data)
-            fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid terraform target)").strip()
-            return fallback
-        return decision
+        inferred, reason = _infer_terraform_decision(decision, agent_data)
+        if inferred:
+            return inferred
+        fallback = role_fallback_action(agent_data.get("role"), agent_data)
+        fallback["reasoning"] = (fallback.get("reasoning", "") + f" (invalid terraform: {reason})").strip()
+        fallback["terraform_rejection_note"] = reason
+        return fallback
 
     if action == "propose_blueprint":
         known_ids = agent_data.get("known_resource_ids") or []

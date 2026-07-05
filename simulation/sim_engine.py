@@ -275,7 +275,10 @@ STOCK_MIN_YIELD_RATIO = 0.25  # lowest gather yield multiplier when stock is low
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
-PROJECT_ABANDON_THRESHOLD = STALL_THRESHOLD * 3  # no contribution progress → cancel + refund
+# Abandon only after long stalls — scarcity slows funding; crafted-needs projects
+# (granary, etc.) get 2× the base window.
+PROJECT_ABANDON_THRESHOLD = STALL_THRESHOLD * 10
+PROJECT_ABANDON_THRESHOLD_CRAFTED = STALL_THRESHOLD * 20
 BLUEPRINT_STALL_THRESHOLD = 1800
 # A leader directive is broadcast to every agent's prompt with "Prioritize
 # it"; without an expiry it dominates decisions forever (and persists across
@@ -442,6 +445,7 @@ TERRAFORM_TEMPLATES = {
     },
 }
 TERRAFORM_FUNCTIONS = {tid: tmpl["function"] for tid, tmpl in TERRAFORM_TEMPLATES.items()}
+KIND_TERRAFORM = {"farm": "clear_field", "forest": "plant_grove", "beach": "extend_beach"}
 
 BASE_RESOURCES = {
     "food": {"name": "Food", "gatherZone": "farm", "color": "#4CAF50"},
@@ -692,7 +696,8 @@ class SimEngine:
                 "incapacitated": False, "goal": None, "actionCounts": {},
                 "commitment": None, "inventionTurn": False,
                 "lastBlueprintRejection": None, "lastGatherRejection": None,
-                "lastProjectRejection": None, "lastSpokeFrame": 0,
+                "lastProjectRejection": None, "lastTerraformRejection": None,
+                "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
             }
@@ -1394,6 +1399,79 @@ class SimEngine:
         out.sort(key=lambda x: x[2])
         return out
 
+    def _terraform_template_for_kind(self, kind):
+        return KIND_TERRAFORM.get(kind)
+
+    def _active_terraform_for_kind(self, kind):
+        template = self._terraform_template_for_kind(kind)
+        if not template:
+            return None
+        for did, p in self.civilization["districtProjects"].items():
+            if p and p.get("isTerraform") and p.get("type") == template:
+                return did
+        return None
+
+    def _district_highest_stock(self, resource_id):
+        if not ECOLOGY_ENABLED:
+            return None
+        self._ensure_district_stocks()
+        best_did = None
+        best_val = -1
+        for did, stocks in self.civilization["districtStocks"].items():
+            val = stocks.get(resource_id)
+            if val is not None and val > best_val:
+                best_val = val
+                best_did = did
+        return best_did if best_val > 0 else None
+
+    def _scarcity_reflex_migrate(self, agent, resource):
+        dest = self._district_highest_stock(resource)
+        if not dest:
+            gz = self._gather_zone_for_resource(resource)
+            if gz:
+                dest = next((did for did, d in self.civilization["districts"].items()
+                             if d.get("kind") == gz), None)
+        if dest and dest != agent.get("currentDistrict"):
+            self.apply_decision(agent, {
+                "action": "move_to_district", "target": dest,
+                "reasoning": f"scarcity reflex: seeking {resource}",
+            })
+            self._push_activity(
+                f"{agent['name']} scarcity reflex: routed to {dest} for depleted {resource}")
+
+    def _scarcity_reflex_on_depletion(self, agent, resource):
+        """Deterministic response to ecology depletion (no LLM). Terraform
+        contribute/start first; migrate to best-stocked district last."""
+        if not ECOLOGY_ENABLED:
+            return
+        c = self.civilization
+        did = agent.get("currentDistrict")
+        if not did or did not in c.get("districts", {}):
+            self._scarcity_reflex_migrate(agent, resource)
+            return
+        kind = c["districts"][did].get("kind")
+        terraform_did = self._active_terraform_for_kind(kind)
+        if terraform_did:
+            p = c["districtProjects"][terraform_did]
+            unmet = self._first_unmet_project_resource(terraform_did)
+            if USE_GOALS:
+                agent["goal"] = {
+                    "kind": "gather" if unmet else "deliver",
+                    "target": unmet,
+                    "district": terraform_did,
+                    "ttl": 10,
+                }
+            self._push_activity(
+                f"{agent['name']} scarcity reflex: contributing to {p['name']} in {terraform_did}")
+            return
+        template = self._terraform_template_for_kind(kind)
+        if template and not c["districtProjects"].get(did):
+            summary = self._start_terraform_for(agent, template, did)
+            if summary:
+                self._push_activity(f"{agent['name']} scarcity reflex: {summary}")
+                return
+        self._scarcity_reflex_migrate(agent, resource)
+
     def _start_terraform_for(self, agent, target, target_district=None):
         c = self.civilization
         tmpl = TERRAFORM_TEMPLATES.get(target) if target else None
@@ -1746,6 +1824,7 @@ class SimEngine:
         allowed, reason, scale = self._ecology_gather_gate(agent, resource)
         if not allowed:
             agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
+            self._scarcity_reflex_on_depletion(agent, resource)
             return f"{agent['name']} found nothing — {reason}"
         amount = 1
         if STRUCTURE_EFFECTS_ENABLED:
@@ -2510,16 +2589,27 @@ class SimEngine:
         last = c["districtLastContribution"].get(district_id, self.frameTick)
         return self.frameTick - last
 
+    def _abandon_threshold_for(self, district_id):
+        project = self.civilization["districtProjects"].get(district_id)
+        if not project:
+            return PROJECT_ABANDON_THRESHOLD
+        registry = self.civilization.get("resourceRegistry") or {}
+        needs = project.get("needs") or {}
+        if any(registry.get(res, {}).get("crafted") for res in needs):
+            return PROJECT_ABANDON_THRESHOLD_CRAFTED
+        return PROJECT_ABANDON_THRESHOLD
+
     def _project_squatting_past_abandon_threshold(self, district_id):
-        return self._project_contribution_stall_frames(district_id) >= PROJECT_ABANDON_THRESHOLD
+        return self._project_contribution_stall_frames(district_id) >= \
+            self._abandon_threshold_for(district_id)
 
     def _project_type_active(self, type_):
         return any(p and p.get("type") == type_
                    for p in self.civilization["districtProjects"].values())
 
     def _maybe_abandon_stalled_projects(self):
-        """Cancel district projects with no contribution progress for
-        PROJECT_ABANDON_THRESHOLD frames; refund materials and free the slot."""
+        """Cancel district projects with no contribution progress past the
+        per-project abandon threshold; refund materials and free the slot."""
         c = self.civilization
         for district_id in list(self._active_project_districts()):
             if not self._project_squatting_past_abandon_threshold(district_id):
@@ -3081,8 +3171,15 @@ class SimEngine:
         elif action == "start_terraform":
             if ECOLOGY_ENABLED:
                 summary = self._start_terraform_for(agent, decision.get("target"),
-                                                    decision.get("target_district")) \
-                    or f"{agent['name']} could not start that terraform project"
+                                                    decision.get("target_district"))
+                if summary:
+                    agent["lastTerraformRejection"] = None
+                else:
+                    agent["lastTerraformRejection"] = {
+                        "reason": "no free district of the right kind for that terraform",
+                        "frame": self.frameTick,
+                    }
+                    summary = f"{agent['name']} could not start that terraform project"
             else:
                 summary = f"{agent['name']} cannot terraform — ecology is disabled"
 
@@ -3367,7 +3464,11 @@ class SimEngine:
         gather_rejection = agent.get("lastGatherRejection")
         if gather_rejection and self.frameTick - gather_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last gather failed: {gather_rejection['reason']}. "
-                          f"Try another district, start_terraform plant_grove, or gather something else.")
+                          f"Contribute to an active terraform or start_terraform here before moving elsewhere.")
+        terraform_rejection = agent.get("lastTerraformRejection")
+        if terraform_rejection and self.frameTick - terraform_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+            nudges.append(f"NOTE: Your last start_terraform failed: {terraform_rejection['reason']}. "
+                          f"Use a template id (plant_grove/clear_field/extend_beach) or name the district.")
         project_rejection = agent.get("lastProjectRejection")
         if project_rejection and self.frameTick - project_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
@@ -3598,7 +3699,12 @@ class SimEngine:
                 else:
                     self.lmStatus = "online"
                     self.llm_cooldown_until = 0.0
-                    if decision.get("rejection_note"):
+                    if decision.get("terraform_rejection_note"):
+                        agent["lastTerraformRejection"] = {
+                            "reason": decision["terraform_rejection_note"],
+                            "frame": self.frameTick,
+                        }
+                    elif decision.get("rejection_note"):
                         # normalize_decision swapped an invalid propose_blueprint
                         # for a fallback; remember why so the next prompt can
                         # tell the model instead of failing silently again.
@@ -3877,6 +3983,7 @@ class SimEngine:
                     a["isThinking"] = False
                     a["beliefs"] = set(a.get("beliefs") or [])
                     a.setdefault("lastProjectRejection", None)
+                    a.setdefault("lastTerraformRejection", None)
                     # state.json may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
                     # saved agent's memory.longTerm list can carry leaked
