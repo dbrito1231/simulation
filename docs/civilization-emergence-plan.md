@@ -345,6 +345,45 @@ deterministic ticks; `ECOLOGY_ENABLED=False` gate unchanged. Phase B
 civilization test remains for next soak (terraform completions must restore
 stocks and village stabilizes).
 
+**Audit verdict (2026-07-05, session `2026-07-05T01-03-08`, ~10h soak): FAIL
+— third loop-back, scope narrowed to the build economy. Terraform now works
+end-to-end (107 Clear Field starts, 22 completions; the reflex + target
+inference from loop-back #2 landed) and scarcity remains healthy. But ZERO
+structures were built. The causal chain:**
+1. **Craft-input starvation:** 1,247 `lacks X to craft` failures vs 69
+   successful crafts. Ecology rate-limits wood/stone, and nothing routes a
+   crafter to gather its missing inputs — it just retries blind, wasting
+   ~16% of all LLM turns. Fix: extend the scarcity reflex — a failed craft
+   sets a deterministic gather goal for the missing input.
+2. **Abandonment destroys progress:** all 69 crafted planks were contributed
+   (routing works!), but 162 abandonments refunded materials into the
+   consumer-less stockpile and the next granary attempt started from zero —
+   68 restarts, Sisyphus. Fix: when a project starts, auto-seed it from
+   matching stockpile materials (gives the stockpile its first consumer and
+   makes abandonment lossless).
+3. **Granary monoculture:** the Granary was the ONLY project type started
+   all session (everything else saturated in this world; granary is the one
+   approved-unbuilt custom, so `_invention_required` stays False and no new
+   blueprints get demanded). One unbuildable project froze all progress.
+   Fix: after K consecutive abandonments of the same type, defer it for a
+   long cooldown and let `_invention_required` treat a deferred custom as
+   non-blocking so the village pursues invention meanwhile.
+
+**Loop-back #3 (2026-07-05):** Build-economy fixes on
+`feat/server-authoritative-engine`. **(1) Craft-input reflex:**
+`_craft_input_reflex` on missing inputs sets a `craft_gather` goal (or scarcity
+reflex if depleted); `lastCraftRejection` surfaced in prompts. **(2) Stockpile
+seeds projects:** `_seed_project_from_stockpile` on every new build/terraform
+start — abandonment refunds become lossless. **(3) Serial-abandonment deferral:**
+`projectAbandonStreak` / `deferredProjectTypes` (K=3, cooldown 20×
+`STALL_THRESHOLD`); `_start_project_for`, elder backstops, and role defaults skip
+deferred types; `_invention_required()` ignores deferred unbuilt customs; cleared
+on successful build or cooldown expiry. **Verification (restored `state.json`,
+session `2026-07-05T11-16-04` + deterministic ticks):** craft reflex lines;
+stockpile supplied toward Granary/Clear Field; after simulated granary deferral
+`invention_required` False and House starts; 6 structures built over 8000 ticks
+with stockpile-seeded Workshop. Phase B civilization test remains for next soak.
+
 ### Phase C — Physical goods & plural needs (F4, I5)
 Granaries/vaults get real capacity (from Phase A functions); edibles spoil
 outside storage; goods must be carried (a cart — the first *vehicle* — is a

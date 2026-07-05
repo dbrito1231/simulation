@@ -279,6 +279,8 @@ STALL_THRESHOLD = 600
 # (granary, etc.) get 2× the base window.
 PROJECT_ABANDON_THRESHOLD = STALL_THRESHOLD * 10
 PROJECT_ABANDON_THRESHOLD_CRAFTED = STALL_THRESHOLD * 20
+PROJECT_DEFER_ABANDON_STREAK = 3
+PROJECT_DEFER_COOLDOWN = STALL_THRESHOLD * 20  # defer serially-abandoned types ~6.5 min
 BLUEPRINT_STALL_THRESHOLD = 1800
 # A leader directive is broadcast to every agent's prompt with "Prioritize
 # it"; without an expiry it dominates decisions forever (and persists across
@@ -697,7 +699,7 @@ class SimEngine:
                 "commitment": None, "inventionTurn": False,
                 "lastBlueprintRejection": None, "lastGatherRejection": None,
                 "lastProjectRejection": None, "lastTerraformRejection": None,
-                "lastSpokeFrame": 0,
+                "lastCraftRejection": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
             }
@@ -765,6 +767,8 @@ class SimEngine:
             "approvedCustomBackoffUntil": 0,
             "approvedCustomBackstopFailures": 0,
             "approvedCustomEscalationLogged": False,
+            "projectAbandonStreak": {},
+            "deferredProjectTypes": {},
         }
         self._effect_period_fired = 0
         self._last_effect_benchmark_fired = 0
@@ -1379,6 +1383,98 @@ class SimEngine:
                 count += 1
         return round(total / count, 3) if count else 1.0
 
+    def _is_project_type_deferred(self, type_):
+        """Returns (deferred, frames_remaining). Clears expired deferrals."""
+        c = self.civilization
+        until = c.get("deferredProjectTypes", {}).get(type_)
+        if not until:
+            return False, 0
+        if self.frameTick >= until:
+            c["deferredProjectTypes"].pop(type_, None)
+            c.get("projectAbandonStreak", {}).pop(type_, None)
+            return False, 0
+        return True, until - self.frameTick
+
+    def _unbuilt_customs_blocking_invention(self):
+        c = self.civilization
+        return any(pid not in c["builtTypes"] and not self._is_project_type_deferred(pid)[0]
+                   for pid in self._custom_project_ids())
+
+    def _seed_project_from_stockpile(self, district_id, project):
+        """Transfer matching stockpile materials into a newly started project."""
+        c = self.civilization
+        needs = project.get("needs") or {}
+        contributed = project.setdefault("contributed", {})
+        seeds = []
+        for res, need in needs.items():
+            short = need - contributed.get(res, 0)
+            if short <= 0:
+                continue
+            available = int(c["stockpile"].get(res, 0))
+            if available <= 0:
+                continue
+            take = min(short, available)
+            c["stockpile"][res] = available - take
+            contributed[res] = contributed.get(res, 0) + take
+            seeds.append((take, res))
+        if seeds:
+            parts = ", ".join(f"{amt} {res}" for amt, res in seeds)
+            self._push_activity(
+                f"The village stockpile supplied {parts} toward the {project['name']}")
+        return bool(seeds)
+
+    def _largest_missing_input(self, agent, inputs):
+        best = None
+        best_short = 0
+        for res, need in inputs.items():
+            short = need - agent["resources"].get(res, 0)
+            if short > best_short:
+                best_short = short
+                best = res
+        return best
+
+    def _craft_input_reflex(self, agent, recipe_id, recipe):
+        """On missing craft inputs: gather the largest deficit deterministically."""
+        missing = self._largest_missing_input(agent, recipe["inputs"])
+        if not missing:
+            return
+        reason = f"lacks {missing} to craft {recipe_id}"
+        agent["lastCraftRejection"] = {"reason": reason, "frame": self.frameTick, "resource": missing}
+        allowed, _, _ = self._ecology_gather_gate(agent, missing)
+        if not allowed and ECOLOGY_ENABLED:
+            self._scarcity_reflex_on_depletion(agent, missing)
+        elif USE_GOALS:
+            agent["goal"] = {
+                "kind": "craft_gather", "target": missing, "recipe": recipe_id, "ttl": 10,
+            }
+        else:
+            gz = self._gather_zone_for_resource(missing)
+            if gz and agent["currentZone"] != gz:
+                self._set_agent_target(agent, gz)
+        self._push_activity(
+            f"{agent['name']} craft reflex: gathering {missing} for {recipe_id}")
+
+    def _step_craft_gather_goal(self, agent, g):
+        resource = g.get("target")
+        if not resource:
+            agent["goal"] = None
+            return False
+        if agent["resources"].get(resource, 0) >= COLLECT_CAP:
+            agent["goal"] = None
+            return False
+        gz = self._gather_zone_for_resource(resource)
+        if gz and agent["currentZone"] != gz:
+            self._set_agent_target(agent, gz)
+            return True
+        allowed, _, _ = self._ecology_gather_gate(agent, resource)
+        if not allowed:
+            self._scarcity_reflex_on_depletion(agent, resource)
+            return True
+        summary = self._perform_gather(agent, resource)
+        if "found nothing" in summary:
+            return True
+        return True
+
     def _get_terraform_function(self, terraform_id):
         return TERRAFORM_FUNCTIONS.get(terraform_id) or {}
 
@@ -1388,6 +1484,8 @@ class SimEngine:
         out = []
         for pid in self._custom_project_ids():
             if pid in c["builtTypes"]:
+                continue
+            if self._is_project_type_deferred(pid)[0]:
                 continue
             if any(p and p.get("type") == pid for p in c["districtProjects"].values()):
                 continue
@@ -1501,6 +1599,7 @@ class SimEngine:
             "contributed": {res: 0 for res in tmpl["needs"]},
             "districtId": district_id, "isTerraform": True,
         }
+        self._seed_project_from_stockpile(district_id, c["districtProjects"][district_id])
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         return f"{agent['name']} started {tmpl['name']} terraform in {district_id}"
@@ -1812,6 +1911,8 @@ class SimEngine:
         c["districtProjects"][district_id] = None
         c["completedProjects"] += 1
         c["builtTypes"].add(struct_type)
+        c.get("projectAbandonStreak", {}).pop(struct_type, None)
+        c.get("deferredProjectTypes", {}).pop(struct_type, None)
         agent["lastContributedFrame"] = self.frameTick
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
@@ -1852,14 +1953,16 @@ class SimEngine:
         pref = self.d["ROLE_PROJECT"].get((role or "").lower(), "house")
         prefs = pref if isinstance(pref, list) else [pref]
         prefs = prefs or ["house"]
-        open_prefs = [p for p in prefs if not self._type_saturated(p)]
+        open_prefs = [p for p in prefs if not self._type_saturated(p)
+                      and not self._is_project_type_deferred(p)[0]]
         if open_prefs:
             return random.choice(open_prefs)
         # Every preferred type is saturated: fall back to any unsaturated
         # registry type (this is what steers the default loop toward the
         # granary and approved customs once the basics are overbuilt).
         fallback = [tid for tid in self.civilization["projectRegistry"]
-                    if not self._type_saturated(tid)]
+                    if not self._type_saturated(tid)
+                    and not self._is_project_type_deferred(tid)[0]]
         if fallback:
             return random.choice(fallback)
         return prefs[0]
@@ -1896,7 +1999,7 @@ class SimEngine:
             return False
         if not all(self._seed_exhausted(tid) for tid in PROJECT_TEMPLATES):
             return False
-        return not any(pid not in c["builtTypes"] for pid in self._custom_project_ids())
+        return self._unbuilt_customs_blocking_invention()
 
     def _start_project_for(self, agent, target, target_district=None):
         c = self.civilization
@@ -1910,12 +2013,21 @@ class SimEngine:
             preferred_kind = PROJECT_KIND.get(type_, "village")
             biased = next((pid for pid in self._custom_project_ids()
                            if pid not in c["builtTypes"]
+                           and not self._is_project_type_deferred(pid)[0]
                            and PROJECT_KIND.get(pid, "village") == preferred_kind), None)
             if biased:
                 type_ = biased
         tmpl = c["projectRegistry"].get(type_)
         if not tmpl:
             return None
+        deferred, _ = self._is_project_type_deferred(type_)
+        if deferred:
+            name = tmpl.get("name", type_)
+            agent["lastProjectRejection"] = {
+                "reason": f"{name} is deferred after repeated abandonments — try another project",
+                "frame": self.frameTick,
+            }
+            return (f"{agent['name']} cannot start {name} — deferred after repeated abandonments")
         if self._invention_required() and not tmpl.get("custom"):
             return (f"{agent['name']} wants to build, but the village needs a NEW invention "
                     f"(propose_blueprint)")
@@ -1950,6 +2062,7 @@ class SimEngine:
             "contributed": contributed, "visualStyle": tmpl.get("visualStyle") or "generic",
             "districtId": district_id,
         }
+        self._seed_project_from_stockpile(district_id, c["districtProjects"][district_id])
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         if agent["role"] == "elder":
@@ -2028,14 +2141,16 @@ class SimEngine:
                 and not self._craft_station_unlocked("workshop"):
             return f"{agent['name']} cannot craft {recipe_id} -- the village has no Workshop built yet"
         if not self._has_inputs(agent, recipe["inputs"]):
-            missing = [r for r in recipe["inputs"] if agent["resources"].get(r, 0) < recipe["inputs"][r]]
-            return f"{agent['name']} lacks {', '.join(missing)} to craft {recipe_id}"
+            self._craft_input_reflex(agent, recipe_id, recipe)
+            missing = self._largest_missing_input(agent, recipe["inputs"])
+            return f"{agent['name']} lacks {missing} to craft {recipe_id}"
         for r, n in recipe["inputs"].items():
             agent["resources"][r] -= n
         output = 1
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop":
             output += self._craft_output_bonus(recipe, agent.get("currentDistrict"))
         agent["resources"][recipe_id] = agent["resources"].get(recipe_id, 0) + output
+        agent["lastCraftRejection"] = None
         self.civilization["lastCraftActivityFrame"] = self.frameTick
         return f"{agent['name']} crafted {recipe_id}" \
             + (f" x{output} (well-equipped workshops)" if output > 1 else "")
@@ -2616,10 +2731,20 @@ class SimEngine:
                 continue
             project = c["districtProjects"][district_id]
             name = project.get("name", project.get("type", "project"))
+            ptype = project.get("type")
             for res, amt in (project.get("contributed") or {}).items():
                 if amt > 0:
                     c["stockpile"][res] = c["stockpile"].get(res, 0) + amt
             c["districtProjects"][district_id] = None
+            if ptype:
+                streak = c.setdefault("projectAbandonStreak", {})
+                streak[ptype] = streak.get(ptype, 0) + 1
+                if streak[ptype] >= PROJECT_DEFER_ABANDON_STREAK:
+                    c.setdefault("deferredProjectTypes", {})[ptype] = \
+                        self.frameTick + PROJECT_DEFER_COOLDOWN
+                    self._push_activity(
+                        f"The village defers further {name} projects — "
+                        f"{streak[ptype]} abandonments in a row")
             reason = (f"the {name} project in {district_id} was abandoned — "
                       f"materials reclaimed")
             c["lastProjectAbandonment"] = {
@@ -2644,6 +2769,8 @@ class SimEngine:
         if not stalled:
             return
         pid, name, _ = stalled[0]
+        if self._is_project_type_deferred(pid)[0]:
+            return
         if self._project_type_active(pid):
             return
         c["lastApprovedCustomCheckFrame"] = self.frameTick
@@ -3407,6 +3534,8 @@ class SimEngine:
         if g["ttl"] < 0:
             agent["goal"] = None
             return False
+        if g["kind"] == "craft_gather":
+            return self._step_craft_gather_goal(agent, g)
         district_id = g.get("district") or self._resolve_contribution_district(agent)
         if g["kind"] in ("gather", "deliver", "build") and not district_id:
             agent["goal"] = None
@@ -3469,6 +3598,10 @@ class SimEngine:
         if terraform_rejection and self.frameTick - terraform_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last start_terraform failed: {terraform_rejection['reason']}. "
                           f"Use a template id (plant_grove/clear_field/extend_beach) or name the district.")
+        craft_rejection = agent.get("lastCraftRejection")
+        if craft_rejection and self.frameTick - craft_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+            nudges.append(f"NOTE: Your last craft failed: {craft_rejection['reason']}. "
+                          f"Gather the missing input first.")
         project_rejection = agent.get("lastProjectRejection")
         if project_rejection and self.frameTick - project_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
@@ -3969,6 +4102,8 @@ class SimEngine:
                 civ.setdefault("approvedCustomBackoffUntil", 0)
                 civ.setdefault("approvedCustomBackstopFailures", 0)
                 civ.setdefault("approvedCustomEscalationLogged", False)
+                civ.setdefault("projectAbandonStreak", {})
+                civ.setdefault("deferredProjectTypes", {})
                 if ECOLOGY_ENABLED and not civ.get("districtStocks"):
                     civ["districtStocks"] = self._init_district_stocks(
                         civ.get("districts") or {}, civ.get("resourceRegistry"))
@@ -3984,6 +4119,7 @@ class SimEngine:
                     a["beliefs"] = set(a.get("beliefs") or [])
                     a.setdefault("lastProjectRejection", None)
                     a.setdefault("lastTerraformRejection", None)
+                    a.setdefault("lastCraftRejection", None)
                     # state.json may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
                     # saved agent's memory.longTerm list can carry leaked
