@@ -19,3 +19,6 @@ simulation/logs/
 # Full-state persistence snapshot (Contract 3)
 simulation/state.json
 simulation/state.json.tmp
+
+# Manual state backups
+archive/
