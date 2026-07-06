@@ -599,6 +599,7 @@ DECISION_SCHEMA = {
                 "needs": {"type": "object"},
                 "new_resources": {"type": "array"},
                 "visual_style": {"type": "string"},
+                "sprite": {"type": ["object", "null"]},
                 "function": {"type": "object"},
             },
         },
@@ -785,6 +786,10 @@ BLUEPRINT object schema (only for propose_blueprint):
     {"id": "paper", "name": "Paper", "gather_zone": "forest", "color": "#E8D5B7"}
   ],
   "visual_style": "house",               // house | farm_plot | workshop | wall | generic
+  "sprite": {                            // OPTIONAL pixel art: how YOUR invention looks on the map
+    "palette": ["#8B5A2B", "#D9C08C", "#4A6B3A"],   // 2-5 hex colors; a=1st, b=2nd, c=3rd...
+    "grid": ["...aaa...", "..aaaaa..", ".bbbbbbb.", ".bcbbbcb.", ".bbbbbbb."]
+  },                                     // 4-14 rows, each 4-14 chars of . (empty) or a-e
   "function": {                          // REQUIRED: at least one effect
     "produces": [{"resource":"herbs","amount":2,"every_ticks":600,"scope":"district"}],
     "boosts": [{"kind":"gather","resources":["food"],"every_n":4,"bonus":1,"max_bonus":2,"scope":"district"}],
@@ -1256,6 +1261,37 @@ def canonical_effect_vector(function):
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+SPRITE_CELL_RE = re.compile(r"^[.a-e]+$")
+
+
+def validate_sprite_block(sprite):
+    """Validate an optional LLM-authored pixel sprite. Returns (ok, reason).
+    Kept deliberately permissive on artistry, strict on shape: the viewer
+    renders whatever passes, and a missing sprite falls back to a
+    deterministic procedural one (never a blocker for invention)."""
+    if not isinstance(sprite, dict):
+        return False, "sprite must be an object with palette and grid"
+    palette = sprite.get("palette")
+    if not isinstance(palette, list) or not (2 <= len(palette) <= 5):
+        return False, "sprite palette must be 2-5 hex colors"
+    for color in palette:
+        if not isinstance(color, str) or not HEX_COLOR_RE.match(color):
+            return False, f"invalid sprite color: {color!r} (use #RRGGBB)"
+    grid = sprite.get("grid")
+    if not isinstance(grid, list) or not (4 <= len(grid) <= 14):
+        return False, "sprite grid must be 4-14 rows"
+    for row in grid:
+        if not isinstance(row, str) or not (4 <= len(row) <= 14):
+            return False, "each sprite row must be a string of 4-14 cells"
+        if not SPRITE_CELL_RE.match(row):
+            return False, "sprite rows may only contain . (empty) and letters a-e"
+        for ch in row:
+            if ch != "." and (ord(ch) - ord("a")) >= len(palette):
+                return False, f"sprite cell '{ch}' has no palette entry"
+    return True, None
+
+
 def validate_function_block(function, available_resource_ids):
     """Validate a blueprint function block. Returns (ok, reason)."""
     if not isinstance(function, dict):
@@ -1406,6 +1442,15 @@ def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
     visual_style = blueprint.get("visual_style", "generic")
     if visual_style not in VISUAL_STYLES:
         return False, "invalid visual_style"
+
+    # Optional LLM-authored pixel sprite. Missing is fine (the viewer draws a
+    # deterministic procedural sprite instead); a PRESENT-but-malformed sprite
+    # is rejected with a reason so the model can fix it next attempt.
+    sprite = blueprint.get("sprite")
+    if sprite is not None:
+        ok_sprite, sprite_reason = validate_sprite_block(sprite)
+        if not ok_sprite:
+            return False, sprite_reason
 
     available = set(known_resource_ids) | new_ids | BASE_RESOURCE_IDS
     fn = blueprint.get("function")
@@ -2050,7 +2095,8 @@ Blueprint ids previously rejected (do NOT reuse): {rejected_ids}
 Resources you may reference in "needs" and "function": {resource_ids}
 You may also introduce up to 3 brand-new resources via "new_resources", each with a gather_zone of farm, forest, village, market, beach, cave, or ocean (or null for crafted-only goods).
 {feedback}
-Respond with ONLY the JSON decision object: action "propose_blueprint" plus a complete "blueprint" (id, name, needs, required function block, optional new_resources, visual_style). Invent something with a NEW effect, not a renamed duplicate."""
+Design how it LOOKS too: include a "sprite" — 2-5 hex colors in "palette" plus a "grid" of 4-14 rows (4-14 chars each) using . for empty and a-e for palette colors. Make it recognizable at a glance.
+Respond with ONLY the JSON decision object: action "propose_blueprint" plus a complete "blueprint" (id, name, needs, required function block, optional new_resources, visual_style, sprite). Invent something with a NEW effect, not a renamed duplicate."""
 
 
 def build_invention_prompt(data):

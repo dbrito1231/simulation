@@ -2254,6 +2254,7 @@ class SimEngine:
             "id": c["nextStructureId"], "type": struct_type,
             "x": spot["x"], "y": spot["y"],
             "visualStyle": project.get("visualStyle") or "generic",
+            "sprite": project.get("sprite"),
             "name": project["name"], "districtId": district_id,
             # Phase C decay stat; every read uses .get(default 100) so
             # structures from pre-Phase-C saves need no migration.
@@ -2431,6 +2432,7 @@ class SimEngine:
         c["districtProjects"][district_id] = {
             "type": type_, "name": tmpl["name"], "needs": dict(tmpl["needs"]),
             "contributed": contributed, "visualStyle": tmpl.get("visualStyle") or "generic",
+            "sprite": tmpl.get("sprite"),
             "districtId": district_id,
         }
         self._seed_project_from_stockpile(district_id, c["districtProjects"][district_id])
@@ -3854,6 +3856,7 @@ class SimEngine:
                                           "color": r.get("color", "#BDBDBD")}
                                          for r in (bp.get("new_resources") or [])],
                         "visualStyle": bp.get("visual_style") or "generic",
+                        "sprite": bp.get("sprite"),
                         "proposedBy": agent["name"],
                     })
                     if decision.get("message"):
@@ -3882,6 +3885,7 @@ class SimEngine:
                 c["projectRegistry"][bp["id"]] = {
                     "name": bp["name"], "needs": dict(bp["needs"]),
                     "visualStyle": bp["visualStyle"], "custom": True,
+                    "sprite": bp.get("sprite"),
                     "function": dict(bp.get("function") or {}),
                 }
                 c.setdefault("approvedCustomApprovedFrame", {})[bp["id"]] = self.frameTick
@@ -4744,6 +4748,7 @@ class SimEngine:
                 "level": c["level"],
                 "structures": [{"id": s["id"], "type": s["type"], "x": s["x"], "y": s["y"],
                                 "visualStyle": s.get("visualStyle"), "name": s.get("name"),
+                                "sprite": s.get("sprite"),
                                 "districtId": s.get("districtId"),
                                 "condition": s.get("condition", 100),
                                 "isRuin": bool(s.get("isRuin"))}

@@ -722,6 +722,21 @@ CLI where applicable (fall back to `GET http://localhost:1234/v1/models` if
    after any change (that log shows per-slot token checkpoints that
    `lm_studio.jsonl` doesn't).
 
+**LLM-authored structure sprites (implemented interactively 2026-07-06,
+pre-Phase-D).** Inventions no longer render as a letter-in-a-box: the
+blueprint schema gains an optional `sprite` block ({palette: 2–5 hex colors,
+grid: 4–14 rows of `.`/`a–e` cells}) the model authors alongside the function
+block; `validate_sprite_block` (server.py) rejects malformed sprites with
+surfaced reasons but a MISSING sprite never blocks invention — the viewer's
+new deterministic procedural generator (sprites.js: hash of the type id →
+composed pixel building, 8 palettes × 3 roofs × 3 window styles × chimney)
+covers customs without sprites, including everything in old saves. Sprite
+data flows blueprint → pendingBlueprints → projectRegistry → project →
+structure → /state. Precedence: seed grid → LLM sprite → visualStyle grid →
+procedural (letter-box fallback is now unreachable). Client half is live on
+browser refresh; engine half activates on the next server restart (tonight's
+slot). Prompt cost: ~140 tokens, invention turns only.
+
 ## Part 7 — Implementation via subagents
 
 Each phase is delivered by a small team of scoped subagents rather than one

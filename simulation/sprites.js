@@ -401,12 +401,83 @@ function colorFromId(id) {
 // at scale 2 = 32x32px) so a house reads as a building, not a doll-sized prop.
 const STRUCTURE_SCALE = 5;
 
+// LLM-authored sprites: blueprints may carry {palette: ["#RRGGBB",...],
+// grid: [".aab.", ...]} (validated server-side). Convert to the color-row
+// format drawPixelGrid consumes; cache per structure type.
+const _specGridCache = new Map();
+function spriteGridFromSpec(typeId, spec) {
+  if (!spec || !Array.isArray(spec.palette) || !Array.isArray(spec.grid)) return null;
+  const key = typeId || JSON.stringify(spec.grid);
+  if (_specGridCache.has(key)) return _specGridCache.get(key);
+  let grid = null;
+  try {
+    grid = spec.grid.map((row) => Array.from(String(row)).map((ch) => {
+      if (ch === ".") return null;
+      const idx = ch.charCodeAt(0) - 97;
+      return spec.palette[idx] || null;
+    }));
+    if (!grid.length || grid.every((r) => r.every((c) => !c))) grid = null;
+  } catch (e) { grid = null; }
+  _specGridCache.set(key, grid);
+  return grid;
+}
+
+// Procedural sprite for customs with no LLM sprite (incl. pre-sprite saves):
+// a deterministic little building composed from the type id's hash, so every
+// invention looks distinct and the letter-in-a-box fallback never shows.
+const _PROC_PALETTES = [
+  ["#8B5A2B", "#C62828", "#F5E6C8"], ["#78909C", "#37474F", "#FFD54F"],
+  ["#A1887F", "#4E342E", "#AED581"], ["#90A4AE", "#B71C1C", "#E3F2FD"],
+  ["#BCAAA4", "#33691E", "#FFF176"], ["#D7CCC8", "#1565C0", "#FFAB91"],
+  ["#795548", "#F9A825", "#B3E5FC"], ["#607D8B", "#6A1B9A", "#DCEDC8"],
+];
+const _procGridCache = new Map();
+function proceduralGridForStructure(structure) {
+  const key = structure.type || structure.name || "?";
+  if (_procGridCache.has(key)) return _procGridCache.get(key);
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = ((h << 5) - h + key.charCodeAt(i)) | 0;
+  h = Math.abs(h);
+  const [wall, roof, accent] = _PROC_PALETTES[h % _PROC_PALETTES.length];
+  const W = 10, H = 9, roofStyle = (h >> 3) % 3, winStyle = (h >> 5) % 3;
+  const chimney = ((h >> 7) % 2) === 0;
+  const grid = [];
+  for (let y = 0; y < H; y++) {
+    const row = [];
+    for (let x = 0; x < W; x++) {
+      let c = null;
+      if (y < 3) {
+        if (roofStyle === 0) c = roof;
+        else if (roofStyle === 1) { const inset = 2 - y; c = (x >= inset && x < W - inset) ? roof : null; }
+        else { const mid = W / 2, spread = y * 2 + 2; c = Math.abs(x - mid + 0.5) < spread / 2 ? roof : null; }
+        if (chimney && y === 0 && x === W - 3) c = wall;
+      } else {
+        c = wall;
+        if (y >= 6 && x >= 4 && x <= 5) c = accent;
+        else if (winStyle === 0 && y === 4 && (x === 2 || x === 7)) c = accent;
+        else if (winStyle === 1 && y % 2 === 0 && (x === 1 || x === 8)) c = accent;
+        else if (winStyle === 2 && y === 4 && x >= 2 && x <= 7 && x % 2 === 0) c = accent;
+      }
+      row.push(c);
+    }
+    grid.push(row);
+  }
+  _procGridCache.set(key, grid);
+  return grid;
+}
+
 function getStructureGrid(structure) {
   let grid = STRUCTURE_GRIDS[structure.type];
-  if (!grid && structure.visualStyle && structure.visualStyle !== "generic") {
-    grid = STRUCTURE_GRIDS[structure.visualStyle];
+  if (grid) return grid;
+  if (structure.sprite) {
+    grid = spriteGridFromSpec(structure.type, structure.sprite);
+    if (grid) return grid;
   }
-  return grid || null;
+  if (structure.visualStyle && structure.visualStyle !== "generic") {
+    grid = STRUCTURE_GRIDS[structure.visualStyle];
+    if (grid) return grid;
+  }
+  return proceduralGridForStructure(structure);
 }
 
 // Pixel footprint of a structure's sprite, used by index.html to place the
