@@ -4754,6 +4754,12 @@ class SimEngine:
                 "projectRegistry": {pid: dict(p) for pid, p in c["projectRegistry"].items()},
                 "pendingBlueprints": [dict(b) for b in c["pendingBlueprints"]],
                 "pendingRecipes": [dict(r) for r in c["pendingRecipes"]],
+                # The viewer's Recipes sidebar row reads civ.recipes; it was
+                # dead (always empty) because the snapshot never included the
+                # live RECIPES registry (C5 cleanup, 2026-07-06).
+                "recipes": {rid: {"name": r["name"], "inputs": dict(r["inputs"]),
+                                  "station": r.get("station")}
+                            for rid, r in self.RECIPES.items()} if CRAFTING_ENABLED else {},
                 "rules": [dict(r) for r in c["rules"]],
                 "pendingRules": [dict(r) for r in c["pendingRules"]],
                 "directive": self._current_directive(),
