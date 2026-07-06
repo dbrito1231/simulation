@@ -513,6 +513,62 @@ storage *because it needs it*, not because a nudge said so — and repairs a
 decaying structure before it collapses.
 **Flag:** `GOODS_ENABLED`.
 
+**Implementation log (2026-07-06, Day-2 morning batch):** All six scope items
+landed behind `GOODS_ENABLED` in `sim_engine.py`, one slow goods gate
+(`GOODS_TICK_FRAMES` ~30s) + a nightly gate (`DAY_FRAMES` ~7.5 min), all
+deterministic. (1) Storage: `_storage_capacity` = `BASE_STORAGE_CAPACITY` (25)
++ working structures' Phase A `stores` entries; the seed granary gains
+`stores` food 40/fish 20 (flag-gated so the flag-off effect vector is
+unchanged). (2) Spoilage: `_tick_spoilage` rots 25% (min 1) of edible overflow
+per tick — stockpile first, then largest holders, never below
+`EDIBLE_RESERVE`; surfaced via the `lastSpoilage` nudge. (3) Cart: seed
+`cart` recipe (workshop, planks 2 + wood 2); `_carry_cap` = `COLLECT_CAP` +20
+while holding one (query-time, all six COLLECT_CAP gather sites routed
+through it). (4) Shelter: `_tick_shelter` nightly — each working house beds
+`HOUSE_SHELTER_OCCUPANTS` (2), nearest first; the unsheltered lose 6 hunger
+(floored at 20 — a nudge, never a collapse path), surfaced via
+`lastShelterNote`. (5) Decay/repair: `condition` 100 at build, −0.5/goods
+tick (~70 min to disrepair, ~100 min to ruin — sized in-code as the consumer
+for the 30-builds/hour sprawl); below 30 the structure stops
+producing/boosting/housing/unlocking (`_working_structure_count`; saturation
+still counts totals so decayed ≠ rebuild-more); at 0 → ruin; new
+`repair_structure` action (synced server `DECISION_ACTIONS`/`SYSTEM_PROMPT`
+rules 19–20, engine `apply_decision`, viewer `ACTION_LABELS`) restores +50
+for 1 primary material, rebuilds a ruin for half the original needs (the
+deterministic escape); `DISASTER_PROB` 0.005/tick random damage, logged
+dramatically; refusals surface via `lastRepairRejection` + an in-district
+disrepair/ruin nudge. (6) Seasons: frameTick-derived clock
+(`SEASON_FRAMES` ~30 min/season), `SEASON_REGROW_MULT` spring 2×/winter 0× on
+ecology regrowth, one `Season:` prompt line rendered only when the flag is on
+(flag-off prompts byte-identical; ~180 tokens total prompt growth incl. the
+two SYSTEM_PROMPT rules). Observability in-commit: activity lines for
+spoilage/season turns/disrepair/collapse/disaster/night + benchmarks
+`storage_utilization` (with spoiled-per-period), `structure_condition`
+(ruins/disrepair counts), `season_turn`, `disaster_damage`,
+`structure_repaired`. Back-compat: civ/agent nudge fields setdefault'd;
+structure `condition`/`isRuin` read via `.get` defaults (pre-C saves need no
+migration). **Verification:** py_compile clean; 10 deterministic offline
+checks pass (storage math incl. disrepair-granary, spoilage + reserve floor,
+decay thresholds, repair rejection/normal/ruin-rebuild half-cost, forced
+disaster, shelter floor + full-roof path, cart cap, winter-0×/spring-2×
+regrowth, season prompt line on/off, both benchmarks); a dedicated
+GOODS_ENABLED=False run asserts Phase B equivalence (no cart, no stores, no
+decay/spoilage/season line, carry cap unchanged, repair refused with reason).
+**Forced live smoke (session `2026-07-06T08-06-53`, 331-structure restored
+world, temp constants: goods tick 2s, day 15s, season 30s, decay 6, disaster
+0.3):** 15 spoilage events (51 units in one benchmark period,
+`storage_utilization` 1.28 → capacity pressure visible), 4 season turns with
+`Season: winter — stocks do not regrow; rely on stored food` reaching live
+prompts, 329 disrepair + 327 ruin collapses, 10 disasters, 6 nights, both new
+benchmarks streaming; disrepair/ruin/spoilage nudges confirmed in
+`lm_studio.jsonl` prompts — and the elder responded to spoilage by directing
+a "Storage Hub" build unprompted. The model chose `repair_structure` live
+(Zara, on a ruined Farm Plot) and the refusal surfaced its reason ("Zara
+lacks food, herbs to repair the Farm Plot" — no silent rejection); the
+success paths (repair +50, ruin rebuild at half cost) are covered by the
+deterministic offline checks through the same engine code. Temp constants
+reverted before commit.
+
 ### Phase D — Technology tiers & eras (E1)
 `tier` on recipes/structures/blueprints; stations unlock the next tier;
 blueprint validator requires tier-appropriate prerequisites; era computed from

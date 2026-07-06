@@ -562,6 +562,10 @@ DECISION_ACTIONS = [
     "collect_resource", "talk_to_nearby", "trade_resource",
     "start_project", "contribute_resources", "build_structure",
     "start_terraform",
+    # Phase C (GOODS_ENABLED): structure upkeep. The engine filters it from
+    # available_actions when the flag is off; normalize passes it through and
+    # the engine surfaces reasons (lastRepairRejection).
+    "repair_structure",
     "propose_blueprint", "approve_blueprint", "reject_blueprint",
     "assign_task", "change_role", "rest",
     # Survival (#2) and crafting (#4) actions. The client gates these by flag,
@@ -749,6 +753,15 @@ COGNITIVE CONTROLLER:
    Perception/Social/Desire/Reflection reports together and output the single
    best decision. The reports advise you; they never replace the JSON output.
 
+UPKEEP & SEASONS (when repair_structure is available):
+19. Structures decay: below 30 condition they stop working; at 0 they collapse
+   into ruins. Use repair_structure (target a structure name/type/id, or null
+   for the most damaged one nearby). A repair costs 1 of the structure's main
+   material; rebuilding a ruin costs half its original materials.
+20. Food spoils when the village holds more than its storage capacity — build
+   storage (granary, or a blueprint with a "stores" function). Winter stops
+   district stock regrowth: stockpile food before it. Craft a cart to carry more.
+
 Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
 Do not use chain-of-thought or reasoning — output the JSON object immediately.
 The JSON must match this structure exactly:
@@ -839,7 +852,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-Civilization level: {civilization_level}
+{season_line}Civilization level: {civilization_level}
 Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
@@ -2078,6 +2091,13 @@ def build_user_prompt(data, slim=False):
     rejected_blueprints = data.get("rejected_blueprints") or []
     idle_agents = data.get("idle_agents") or []
     behavior_nudge = data.get("behavior_nudge") or ""
+    # Phase C: one short season line, rendered ONLY when the engine sends a
+    # season (GOODS_ENABLED) so flag-off prompts stay byte-identical.
+    season = data.get("season")
+    season_line = ""
+    if season:
+        winter_hint = " — stocks do not regrow; rely on stored food" if season == "winter" else ""
+        season_line = f"Season: {season}{winter_hint}\n"
 
     return USER_PROMPT_TEMPLATE.format(
         agent_name=data.get("agent_name"),
@@ -2112,6 +2132,7 @@ def build_user_prompt(data, slim=False):
         rejected_blueprints=format_rejected_blueprints(rejected_blueprints),
         pending_rules=format_pending_rules(data.get("pending_rules") or []),
         active_rules=format_active_rules(data.get("active_rules") or []),
+        season_line=season_line,
         recent_conversations="none" if slim else data.get("recent_conversations", "none"),
         inbox=data.get("inbox", "none"),
         module_reports=data.get("module_reports", "none"),

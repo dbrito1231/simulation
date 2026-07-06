@@ -261,22 +261,22 @@ WORKSHOP_DISTRICT_CAP = 3   # per buildable village/workshop-kind district
 CUSTOM_SOFT_CAP = 5         # per custom/blueprint type (and the granary)
 EFFECT_TICK_FRAMES = 150     # deterministic structure-effect tick (produces, etc.)
 # Ecology regrowth: +1 per ECOLOGY_REGROW_FRAMES (~20s at 30 ticks/s). At ~3
-# gathers/min/agent depleting 2× yield, one district needs regrowth slower than
-# harvest to reach "depleted" under sustained gathering (old +2/150 was ~8× too fast).
+# gathers/min/agent depleting 2Ã— yield, one district needs regrowth slower than
+# harvest to reach "depleted" under sustained gathering (old +2/150 was ~8Ã— too fast).
 ECOLOGY_REGROW_FRAMES = 600
 LEGACY_CUSTOM_PRODUCE = {"resource": "herbs", "amount": 1, "every_ticks": 600, "scope": "village"}
 APPROVED_CUSTOM_STALL_FRAMES = 1800  # ~1 min: nudge + elder backstop for unbuilt approvals
 APPROVED_CUSTOM_BACKOFF_FRAMES = 5400  # ~3 min cooldown after escalation gives up
 STOCK_DEFAULT_MAX = 100
 STOCK_REGROW_PER_TICK = 1
-STOCK_DEPLETE_MULTIPLIER = 2   # each gather removes 2× the units collected
+STOCK_DEPLETE_MULTIPLIER = 2   # each gather removes 2Ã— the units collected
 STOCK_LOW_RATIO = 0.25
 STOCK_MIN_YIELD_RATIO = 0.25  # lowest gather yield multiplier when stock is low but > 0
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
-# Abandon only after long stalls — scarcity slows funding; crafted-needs projects
-# (granary, etc.) get 2× the base window.
+# Abandon only after long stalls â€” scarcity slows funding; crafted-needs projects
+# (granary, etc.) get 2Ã— the base window.
 PROJECT_ABANDON_THRESHOLD = STALL_THRESHOLD * 10
 PROJECT_ABANDON_THRESHOLD_CRAFTED = STALL_THRESHOLD * 20
 PROJECT_DEFER_ABANDON_STREAK = 3
@@ -355,6 +355,64 @@ LLM_MIN_GAP_MS = 250
 # finishes. Tune empirically.
 MAX_CONCURRENT_PROJECTS = 3
 
+# --- Phase C: physical goods, plural needs & consequence (GOODS_ENABLED) ---
+# All deterministic tick mechanics; the LLM only chooses (repair_structure,
+# craft the cart, build storage). With the flag off, behavior is exactly
+# Phase B: no spoilage/decay/seasons/shelter, carry cap == COLLECT_CAP, no
+# cart recipe, no repair action offered, no Season prompt line.
+GOODS_ENABLED = True
+GOODS_TICK_FRAMES = 900   # slow goods tick (~30s at 30 ticks/s): spoilage + decay + disaster
+# Storage: village-wide capacity per resource id. The base is what a small camp
+# can pile up without buildings; built structures add capacity via their
+# "stores" function effect (Phase A registry; validate_function_block caps each
+# entry at 5-100). Sizing: 8 agents each keep EDIBLE_RESERVE (3) = 24 edibles
+# village-wide, so base 25 means living hand-to-mouth is safe but any real
+# hoard needs storage built for it.
+BASE_STORAGE_CAPACITY = 25
+# Spoilage: each goods tick, 25% (min 1) of the edible overflow beyond storage
+# capacity rots -- stockpile first, then the largest holders, never taking an
+# agent below EDIBLE_RESERVE (spoilage must never starve anyone; the escape is
+# building storage, eating, or contributing the surplus).
+SPOILAGE_RATIO = 0.25
+# Cart (the first vehicle): holding one raises the carry cap query-time, the
+# same pattern as _gather_yield_bonus. COLLECT_CAP itself stays unchanged.
+CART_CARRY_BONUS = 20
+# Shelter: one night per DAY_FRAMES (~7.5 min real time). Each *working* house
+# shelters HOUSE_SHELTER_OCCUPANTS; unsheltered agents lose a little hunger --
+# a nudge, never a punishment: ~1/7 of one meal (FOOD_RESTORE 45), floored at
+# SHELTER_HUNGER_FLOOR (20), i.e. a night outside can never push anyone into
+# the starvation-reflex band (STARVING_HUNGER 10).
+DAY_FRAMES = 13500
+HOUSE_SHELTER_OCCUPANTS = 2
+SHELTER_HUNGER_PENALTY = 6
+SHELTER_HUNGER_FLOOR = 20
+# Decay & repair: the designed consumer for the build-rate sprawl (2026-07-06
+# audit: ~30 builds/hour with nothing consuming structures). condition is 100
+# at build and decays 0.5 per goods tick (30s): ~70 min of neglect to
+# disrepair (<30: the structure stops producing/boosting/housing), ~100 min to
+# ruin (0). One repair (+50 condition) costs 1 unit of the structure's primary
+# material, so keeping a structure standing costs ~1 resource per ~50 min --
+# with ~50 structures standing that is ~1 repair/minute village-wide, a real
+# competing use of gathering time that should bend the build rate down. A ruin
+# is rebuilt via repair_structure for half the original needs (min 1 each) --
+# cheaper than new, the deterministic escape for total collapse.
+STRUCTURE_DECAY_PER_GOODS_TICK = 0.5
+STRUCTURE_DISREPAIR_THRESHOLD = 30
+REPAIR_CONDITION_RESTORE = 50
+# Disaster: rare random damage so decay isn't perfectly predictable. 0.005 per
+# ~30s goods tick => expected roughly once per 100 minutes of runtime.
+DISASTER_PROB = 0.005
+DISASTER_DAMAGE = (40, 70)
+# Seasons: a four-season clock derived purely from frameTick (no extra state to
+# persist). One season = SEASON_FRAMES (~30 min => a full year every 2h; an
+# overnight soak sees several winters). The season multiplies district stock
+# regrowth: spring booms, winter stops regrowth entirely. Escapes: stores/
+# granary capacity built before winter (spoilage permitting), and the season
+# simply turning.
+SEASON_FRAMES = 54000
+SEASONS = ["spring", "summer", "autumn", "winter"]
+SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}
+
 # --- Registries (ported from index.html) ---
 PROJECT_TEMPLATES = {
     "house": {"name": "House", "needs": {"wood": 3, "stone": 1, "food": 1, "fish": 1}, "visualStyle": "house"},
@@ -412,12 +470,20 @@ if CRAFTING_ENABLED:
             "scope": "village",
         }],
     }
+    if GOODS_ENABLED:
+        # Phase C: the granary finally does what its name says -- the seed
+        # `stores` effect (real storage capacity, spoilage headroom). Gated on
+        # the flag so the flag-off effect vector matches Phase B exactly.
+        SEED_STRUCTURE_FUNCTIONS["granary"]["stores"] = [
+            {"resource": "food", "capacity": 40},
+            {"resource": "fish", "capacity": 20},
+        ]
 
 # Terraform projects (Phase B): funded like builds but mutate terrain/stocks.
 TERRAFORM_TEMPLATES = {
     "plant_grove": {
         # Needs must stay fundable in a FRESH world: base/gatherable resources
-        # only (herbs only exists once a blueprint invents it — a depleted
+        # only (herbs only exists once a blueprint invents it â€” a depleted
         # forest must never depend on an uninvented resource to recover).
         "name": "Plant Grove",
         "needs": {"wood": 2, "food": 1},
@@ -475,6 +541,14 @@ SEED_RECIPES = {
     "bricks": {"name": "Bricks", "inputs": {"stone": 2}, "station": "workshop"},
     "tools": {"name": "Tools", "inputs": {"wood": 2, "stone": 1}, "station": "workshop"},
 } if CRAFTING_ENABLED else {}
+if CRAFTING_ENABLED and GOODS_ENABLED:
+    # Phase C: the cart, the first vehicle -- a crafted good whose holder gets
+    # a higher carry cap (see _carry_cap). Costs a craft chain (wood -> planks
+    # -> cart at the workshop), so it is earned, not named into existence.
+    CRAFTED_RESOURCES["cart"] = {"name": "Cart", "gatherZone": None,
+                                 "color": "#A1887F", "crafted": True}
+    SEED_RECIPES["cart"] = {"name": "Cart", "inputs": {"planks": 2, "wood": 2},
+                            "station": "workshop"}
 
 AGENT_DEFS = [
     {"id": 1, "name": "Aria", "role": "farmer", "personality": "hardworking and cautious", "color": "#4CAF50", "zone": "farm_north"},
@@ -706,7 +780,8 @@ class SimEngine:
                 "commitment": None, "inventionTurn": False,
                 "lastBlueprintRejection": None, "lastGatherRejection": None,
                 "lastProjectRejection": None, "lastTerraformRejection": None,
-                "lastCraftRejection": None, "lastSpokeFrame": 0,
+                "lastCraftRejection": None, "lastRepairRejection": None,
+                "lastShelterNote": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
             }
@@ -773,6 +848,7 @@ class SimEngine:
             "districtStocks": {},
             "approvedCustomApprovedFrame": {},
             "lastProjectAbandonment": None,
+            "lastSpoilage": None,
             "approvedCustomBackoffUntil": 0,
             "approvedCustomBackstopFailures": 0,
             "approvedCustomEscalationLogged": False,
@@ -781,6 +857,8 @@ class SimEngine:
         }
         self._effect_period_fired = 0
         self._last_effect_benchmark_fired = 0
+        self._spoiled_period = 0     # Phase C: spoilage counter per benchmark period
+        self._last_season = None     # Phase C: season-turn activity logging
         if ECOLOGY_ENABLED:
             self.civilization["districtStocks"] = self._init_district_stocks(self.civilization["districts"])
         self._recompute_road_paths()
@@ -1315,7 +1393,7 @@ class SimEngine:
         if current > 0 and new_val <= 0:
             kind = self.civilization["districts"][district_id]["kind"]
             self._push_activity(
-                f"The {kind} in {district_id} is depleted of {resource_id} — gathering fails here until it regrows")
+                f"The {kind} in {district_id} is depleted of {resource_id} â€” gathering fails here until it regrows")
 
     def _ecology_gather_gate(self, agent, resource_id):
         """Returns (allowed, reason, yield_scale). Non-tracked resources pass through."""
@@ -1364,19 +1442,26 @@ class SimEngine:
             return
         self._ensure_district_stocks()
         c = self.civilization
+        regrow = STOCK_REGROW_PER_TICK
+        if GOODS_ENABLED:
+            # Phase C seasons: spring regrows double, winter not at all --
+            # the loop-closer with storage/spoilage (stockpile before winter).
+            regrow *= SEASON_REGROW_MULT.get(self._current_season(), 1)
+            if regrow <= 0:
+                return
         for did, stocks in c["districtStocks"].items():
             kind = c["districts"].get(did, {}).get("kind", "land")
             for rid, val in list(stocks.items()):
                 max_s = self._stock_max(rid)
                 if val >= max_s:
                     continue
-                new_val = min(max_s, val + STOCK_REGROW_PER_TICK)
+                new_val = min(max_s, val + regrow)
                 if new_val == val:
                     continue
                 stocks[rid] = new_val
                 if val <= 0 < new_val:
                     self._push_activity(
-                        f"The {kind} in {did} is recovering — {rid} stock is growing again")
+                        f"The {kind} in {did} is recovering â€” {rid} stock is growing again")
                 elif val < max_s * STOCK_LOW_RATIO <= new_val:
                     self._push_activity(f"{rid} stock in {did} has regrown to fair levels")
 
@@ -1468,7 +1553,7 @@ class SimEngine:
         if not resource:
             agent["goal"] = None
             return False
-        if agent["resources"].get(resource, 0) >= COLLECT_CAP:
+        if agent["resources"].get(resource, 0) >= self._carry_cap(agent):
             agent["goal"] = None
             return False
         gz = self._gather_zone_for_resource(resource)
@@ -1648,7 +1733,7 @@ class SimEngine:
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         self._check_civilization_level()
-        self._push_activity(f"{agent['name']} completed {name} — the land in {district_id} has changed")
+        self._push_activity(f"{agent['name']} completed {name} â€” the land in {district_id} has changed")
         return f"{agent['name']} completed {name} in {district_id}"
 
     def _try_contribute_resource(self, agent, res, district_id=None):
@@ -1725,6 +1810,47 @@ class SimEngine:
         c = self.civilization
         return (c["projectRegistry"].get(type_id) or PROJECT_TEMPLATES.get(type_id) or {}).get("name", type_id)
 
+    # --- Phase C query-time helpers (GOODS_ENABLED) ---
+    def _working_structure_count(self, type_, district_id=None):
+        """Structures still functional under decay: condition >= the disrepair
+        threshold (ruins are 0 and never count). With GOODS_ENABLED off this
+        is exactly _structure_count, so Phase A/B behavior is unchanged."""
+        if not GOODS_ENABLED:
+            return self._structure_count(type_, district_id)
+        return sum(1 for s in self.civilization["structures"]
+                   if s.get("type") == type_
+                   and (district_id is None or s.get("districtId") == district_id)
+                   and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)
+
+    def _carry_cap(self, agent):
+        """Per-agent carry cap: COLLECT_CAP, +CART_CARRY_BONUS while holding a
+        cart (query-time vehicle effect, like _gather_yield_bonus)."""
+        if GOODS_ENABLED and agent["resources"].get("cart", 0) > 0:
+            return COLLECT_CAP + CART_CARRY_BONUS
+        return COLLECT_CAP
+
+    def _storage_capacity(self, resource_id):
+        """Village-wide storage capacity for a resource: the base camp pile
+        plus every working structure's `stores` entries (Phase A function
+        registry -- accepted by validate_function_block since Phase A, made
+        real here)."""
+        cap = BASE_STORAGE_CAPACITY
+        if not STRUCTURE_EFFECTS_ENABLED:
+            return cap
+        for type_id in {s["type"] for s in self.civilization["structures"]}:
+            fn = self._get_structure_function(type_id)
+            for store in fn.get("stores") or []:
+                if store.get("resource") != resource_id:
+                    continue
+                cap += store.get("capacity", 0) * self._working_structure_count(type_id)
+        return cap
+
+    def _current_season(self):
+        """Four-season clock derived from frameTick (no persisted state)."""
+        if not GOODS_ENABLED:
+            return None
+        return SEASONS[(self.frameTick // SEASON_FRAMES) % len(SEASONS)]
+
     def _gather_yield_bonus(self, agent, resource):
         if not STRUCTURE_EFFECTS_ENABLED:
             return 0
@@ -1739,7 +1865,7 @@ class SimEngine:
                 if resource not in resources:
                     continue
                 scope = boost.get("scope", "district")
-                count = self._structure_count(type_id, district if scope == "district" else None)
+                count = self._working_structure_count(type_id, district if scope == "district" else None)
                 every_n = boost.get("every_n", 1)
                 max_bonus = boost.get("max_bonus", 1)
                 bonus += min(max_bonus, (count // every_n) * boost.get("bonus", 1))
@@ -1751,7 +1877,8 @@ class SimEngine:
         for type_id in {s["type"] for s in self.civilization["structures"]}:
             fn = self._get_structure_function(type_id)
             for unlock in fn.get("unlocks") or []:
-                if unlock.get("kind") == "craft" and unlock.get("station") == station:
+                if unlock.get("kind") == "craft" and unlock.get("station") == station \
+                        and self._working_structure_count(type_id) > 0:
                     return True
         return False
 
@@ -1768,7 +1895,7 @@ class SimEngine:
                 if boost.get("kind") != "craft" or boost.get("station") != station:
                     continue
                 scope = boost.get("scope", "village")
-                count = self._structure_count(type_id, district_id if scope == "district" else None)
+                count = self._working_structure_count(type_id, district_id if scope == "district" else None)
                 every_n = boost.get("every_n", 1)
                 max_bonus = boost.get("max_bonus", 1)
                 bonus += min(max_bonus, (count // every_n) * boost.get("bonus", 1))
@@ -1815,22 +1942,234 @@ class SimEngine:
                     continue
                 scope = prod.get("scope", "village")
                 amount_each = prod.get("amount", 1)
+                # Phase C: only structures in working condition produce
+                # (_working_structure_count == _structure_count with GOODS off).
                 if scope == "district":
                     for did in {s.get("districtId") for s in c["structures"] if s["type"] == type_id}:
-                        count = self._structure_count(type_id, did)
+                        count = self._working_structure_count(type_id, did)
                         if count <= 0:
                             continue
                         total = amount_each * count
                         self._deposit_produced(resource, total, type_id, did)
                         self._effect_period_fired += 1
                 else:
-                    count = self._structure_count(type_id)
+                    count = self._working_structure_count(type_id)
                     if count <= 0:
                         continue
                     total = amount_each * count
                     self._deposit_produced(resource, total, type_id)
                     self._effect_period_fired += 1
                 last_fire[fire_key] = self.frameTick
+
+    # --- Phase C tick mechanics (GOODS_ENABLED): spoilage / decay / disaster / shelter ---
+    def _tick_goods(self):
+        """The slow goods tick (GOODS_TICK_FRAMES): season bookkeeping,
+        edible spoilage beyond storage capacity, structure decay, and the
+        rare disaster. All deterministic -- no LLM involvement."""
+        if not GOODS_ENABLED:
+            return
+        season = self._current_season()
+        if season != self._last_season:
+            self._last_season = season
+            note = " -- district stocks will not regrow until spring" if season == "winter" else ""
+            self._push_activity(f"The season turns: {season} begins{note}")
+            self._log_benchmark("season_turn", SEASONS.index(season), {"season": season})
+        self._tick_spoilage()
+        self._tick_structure_decay()
+        self._maybe_disaster()
+
+    def _tick_spoilage(self):
+        """Edibles beyond village storage capacity rot: SPOILAGE_RATIO of the
+        overflow per goods tick (min 1), stockpile first, then the largest
+        holders -- never below EDIBLE_RESERVE, so spoilage cannot starve
+        anyone. The escape is storage: build a structure with a `stores`
+        effect (granary), or eat/contribute the surplus."""
+        c = self.civilization
+        for rid in EDIBLE_RESOURCES:
+            cap = self._storage_capacity(rid)
+            stock = c["stockpile"].get(rid, 0)
+            held = sum(a["resources"].get(rid, 0) for a in self.agents)
+            overflow = stock + held - cap
+            if overflow <= 0:
+                continue
+            to_spoil = min(overflow, max(1, int(overflow * SPOILAGE_RATIO)))
+            spoiled = min(to_spoil, stock)
+            if spoiled > 0:
+                c["stockpile"][rid] = stock - spoiled
+            while spoiled < to_spoil:
+                holders = [a for a in self.agents
+                           if a["resources"].get(rid, 0) > EDIBLE_RESERVE]
+                if not holders:
+                    break
+                top = max(holders, key=lambda a: a["resources"].get(rid, 0))
+                top["resources"][rid] -= 1
+                spoiled += 1
+            if spoiled <= 0:
+                continue
+            self._spoiled_period += spoiled
+            reason = (f"{spoiled} {rid} spoiled -- the village holds more than its "
+                      f"storage capacity ({cap}). Build storage (a granary or a "
+                      f"blueprint with a stores effect) or eat/contribute the surplus")
+            c["lastSpoilage"] = {"reason": reason, "frame": self.frameTick}
+            self._push_activity(reason[0].upper() + reason[1:])
+
+    def _tick_structure_decay(self):
+        """Structures decay STRUCTURE_DECAY_PER_GOODS_TICK per goods tick.
+        Below STRUCTURE_DISREPAIR_THRESHOLD they stop working (produces/
+        boosts/unlocks/houses all go through _working_structure_count); at 0
+        they collapse into a ruin, rebuildable via repair_structure for half
+        the original materials (the deterministic escape)."""
+        c = self.civilization
+        for s in c["structures"]:
+            cond = s.get("condition", 100.0)
+            if cond <= 0:
+                continue
+            new_cond = max(0.0, cond - STRUCTURE_DECAY_PER_GOODS_TICK)
+            s["condition"] = new_cond
+            name = s.get("name") or s.get("type")
+            did = s.get("districtId") or "the village"
+            if cond >= STRUCTURE_DISREPAIR_THRESHOLD > new_cond:
+                self._push_activity(
+                    f"The {name} in {did} has fallen into disrepair -- it stops "
+                    f"working until someone uses repair_structure")
+            if new_cond <= 0:
+                s["isRuin"] = True
+                self._push_activity(
+                    f"The {name} in {did} has collapsed into a ruin! "
+                    f"repair_structure can rebuild it for half the original materials")
+
+    def _maybe_disaster(self):
+        """Rare random structure damage (DISASTER_PROB per goods tick), so
+        decay isn't perfectly predictable and repair stays relevant even in a
+        well-kept village. Logged dramatically; the standard escape applies
+        (repair, or rebuild from the ruin)."""
+        c = self.civilization
+        candidates = [s for s in c["structures"] if s.get("condition", 100) > 0]
+        if not candidates or random.random() >= DISASTER_PROB:
+            return
+        s = random.choice(candidates)
+        dmg = random.randint(*DISASTER_DAMAGE)
+        s["condition"] = max(0.0, s.get("condition", 100.0) - dmg)
+        name = s.get("name") or s.get("type")
+        did = s.get("districtId") or "the village"
+        line = (f"DISASTER! A storm tears through the {name} in {did} -- "
+                f"{dmg} damage (condition {int(s['condition'])})")
+        if s["condition"] <= 0:
+            s["isRuin"] = True
+            line += "; it lies in ruins"
+        self._push_activity(line)
+        self._log_benchmark("disaster_damage", dmg,
+                            {"structure": s.get("type"), "district": did})
+
+    def _tick_shelter(self):
+        """Nightly (every DAY_FRAMES): each working house shelters
+        HOUSE_SHELTER_OCCUPANTS villagers (nearest to a house first);
+        everyone else spends the night outside and loses a little hunger --
+        a surfaced nudge, never a hard punishment (floored at
+        SHELTER_HUNGER_FLOOR, above the starvation band). This is what makes
+        houses consumed nightly instead of just population math."""
+        if not GOODS_ENABLED or not SURVIVAL_ENABLED:
+            return
+        c = self.civilization
+        house_structs = []
+        for type_id in {s["type"] for s in c["structures"]}:
+            if (self._get_structure_function(type_id) or {}).get("houses"):
+                house_structs.extend(
+                    s for s in c["structures"]
+                    if s["type"] == type_id
+                    and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)
+        slots = len(house_structs) * HOUSE_SHELTER_OCCUPANTS
+        if slots >= len(self.agents):
+            self._push_activity("Night falls -- every villager has a roof tonight")
+            return
+
+        def dist_to_house(a):
+            if not house_structs:
+                return float("inf")
+            return min(_dist(a["x"], a["y"], s["x"], s["y"]) for s in house_structs)
+
+        unsheltered = sorted(self.agents, key=dist_to_house)[slots:]
+        penalized = 0
+        for a in unsheltered:
+            if a["incapacitated"] or a["hunger"] <= SHELTER_HUNGER_FLOOR:
+                continue
+            a["hunger"] = max(SHELTER_HUNGER_FLOOR, a["hunger"] - SHELTER_HUNGER_PENALTY)
+            a["lastShelterNote"] = {
+                "reason": (f"you spent the night outside -- {len(house_structs)} working "
+                           f"house(s) shelter only {slots} of {len(self.agents)} villagers"),
+                "frame": self.frameTick,
+            }
+            penalized += 1
+        if penalized:
+            self._push_activity(
+                f"Night falls -- {penalized} villager(s) had no shelter "
+                f"({len(house_structs)} working houses, {slots} beds for {len(self.agents)})")
+
+    # --- Phase C: repair_structure (the decay escape hatch) ---
+    def _find_repair_target(self, agent, target):
+        """Resolve a repair target: explicit structure id/type/name first
+        (worst-condition match wins), else the worst damaged structure in the
+        agent's district, else village-wide."""
+        c = self.civilization
+        damaged = [s for s in c["structures"]
+                   if s.get("isRuin") or s.get("condition", 100) < 100]
+        if not damaged:
+            return None
+        if target:
+            t = str(target).strip().lower()
+            matches = [s for s in damaged
+                       if str(s.get("id")) == t
+                       or (s.get("type") or "").lower() == t
+                       or (s.get("name") or "").lower() == t]
+            if matches:
+                return min(matches, key=lambda s: s.get("condition", 100))
+        local = [s for s in damaged if s.get("districtId") == agent.get("currentDistrict")]
+        pool = local or damaged
+        return min(pool, key=lambda s: s.get("condition", 100))
+
+    def _repair_cost(self, structure):
+        """Normal repair: 1 unit of the structure's primary material per
+        +REPAIR_CONDITION_RESTORE. Ruin rebuild: half the original needs
+        (min 1 each) -- deliberately cheaper than starting a new project."""
+        c = self.civilization
+        tmpl = c["projectRegistry"].get(structure.get("type")) \
+            or PROJECT_TEMPLATES.get(structure.get("type")) or {}
+        needs = tmpl.get("needs") or {"wood": 2}
+        if structure.get("isRuin") or structure.get("condition", 100) <= 0:
+            return {res: max(1, amt // 2) for res, amt in needs.items()}
+        primary = next(iter(needs), "wood")
+        return {primary: 1}
+
+    def _repair_structure(self, agent, target):
+        s = self._find_repair_target(agent, target)
+        if not s:
+            agent["lastRepairRejection"] = {
+                "reason": "nothing needs repair right now", "frame": self.frameTick}
+            return f"{agent['name']} found nothing that needs repair"
+        cost = self._repair_cost(s)
+        name = s.get("name") or s.get("type")
+        missing = [res for res, amt in cost.items() if agent["resources"].get(res, 0) < amt]
+        if missing:
+            cost_str = ", ".join(f"{amt} {res}" for res, amt in cost.items())
+            agent["lastRepairRejection"] = {
+                "reason": f"repairing the {name} needs {cost_str} -- you lack {', '.join(missing)}",
+                "frame": self.frameTick}
+            return f"{agent['name']} lacks {', '.join(missing)} to repair the {name}"
+        for res, amt in cost.items():
+            agent["resources"][res] -= amt
+        was_ruin = bool(s.get("isRuin")) or s.get("condition", 100) <= 0
+        if was_ruin:
+            s["condition"] = 100.0
+            s["isRuin"] = False
+            summary = f"{agent['name']} rebuilt the {name} from its ruins in {s.get('districtId')}"
+        else:
+            s["condition"] = min(100.0, s.get("condition", 100.0) + REPAIR_CONDITION_RESTORE)
+            summary = (f"{agent['name']} repaired the {name} in {s.get('districtId')} "
+                       f"(condition {int(s['condition'])})")
+        agent["lastRepairRejection"] = None
+        self._log_benchmark("structure_repaired", int(s["condition"]),
+                            {"structure": s.get("type"), "ruin_rebuild": was_ruin})
+        return summary
 
     def _population_cap(self):
         c = self.civilization
@@ -1842,14 +2181,16 @@ class SimEngine:
                 houses = fn.get("houses")
                 if houses:
                     every_n = houses.get("every_n", HOUSES_PER_NEW_VILLAGER)
-                    cap += self._structure_count(type_id) // every_n
+                    cap += self._working_structure_count(type_id) // every_n
         return min(len(AGENT_DEFS), cap)
 
     def _type_saturated(self, type_):
         """Soft cap per structure type, derived from what the type actually
         does, so building past the cap is provably waste. Saturated types are
         skipped by role defaults, refused by _start_project_for, and count as
-        'exhausted' toward the invention gate."""
+        'exhausted' toward the invention gate. Deliberately counts TOTAL
+        structures (not Phase C working ones): a district full of decayed
+        houses should be repaired, not built over."""
         if not STRUCTURE_EFFECTS_ENABLED:
             return False
         c = self.civilization
@@ -1914,6 +2255,9 @@ class SimEngine:
             "x": spot["x"], "y": spot["y"],
             "visualStyle": project.get("visualStyle") or "generic",
             "name": project["name"], "districtId": district_id,
+            # Phase C decay stat; every read uses .get(default 100) so
+            # structures from pre-Phase-C saves need no migration.
+            "condition": 100.0, "isRuin": False,
         })
         c["nextStructureId"] += 1
         built_name = project["name"]
@@ -1935,13 +2279,13 @@ class SimEngine:
         if not allowed:
             agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
             self._scarcity_reflex_on_depletion(agent, resource)
-            return f"{agent['name']} found nothing — {reason}"
+            return f"{agent['name']} found nothing â€” {reason}"
         amount = 1
         if STRUCTURE_EFFECTS_ENABLED:
             amount += self._gather_yield_bonus(agent, resource)
         if ECOLOGY_ENABLED and scale < 1.0:
             amount = max(1, int(amount * scale))
-        amount = max(1, min(amount, COLLECT_CAP - agent["resources"].get(resource, 0)))
+        amount = max(1, min(amount, self._carry_cap(agent) - agent["resources"].get(resource, 0)))
         agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
         c["collectSuccesses"] += 1
         if ECOLOGY_ENABLED:
@@ -2044,10 +2388,10 @@ class SimEngine:
         if deferred:
             name = tmpl.get("name", type_)
             agent["lastProjectRejection"] = {
-                "reason": f"{name} is deferred after repeated abandonments — try another project",
+                "reason": f"{name} is deferred after repeated abandonments â€” try another project",
                 "frame": self.frameTick,
             }
-            return (f"{agent['name']} cannot start {name} — deferred after repeated abandonments")
+            return (f"{agent['name']} cannot start {name} â€” deferred after repeated abandonments")
         if self._invention_required() and not tmpl.get("custom"):
             return (f"{agent['name']} wants to build, but the village needs a NEW invention "
                     f"(propose_blueprint)")
@@ -2078,7 +2422,7 @@ class SimEngine:
                 "reason": f"a {name} project is already active in {dup_did}",
                 "frame": self.frameTick,
             }
-            return (f"{agent['name']} cannot start another {name} — "
+            return (f"{agent['name']} cannot start another {name} â€” "
                     f"one is already underway in {dup_did}")
         district_id = self._resolve_build_district(agent, type_, target_district)
         if not district_id or c["districtProjects"].get(district_id):
@@ -2649,7 +2993,7 @@ class SimEngine:
                                 "reasoning": "Starving - gathering food to survive."}
                     self.apply_decision(agent, decision)
                     agent["goal"] = self._goal_for_decision(decision)
-                elif agent["resources"].get(rid, 0) < COLLECT_CAP:
+                elif agent["resources"].get(rid, 0) < self._carry_cap(agent):
                     # No active project anywhere: a full apply_decision would
                     # detour into _start_project_for, which a hunger backstop
                     # has no business doing. Collect the edible directly.
@@ -2770,9 +3114,9 @@ class SimEngine:
                     c.setdefault("deferredProjectTypes", {})[ptype] = \
                         self.frameTick + PROJECT_DEFER_COOLDOWN
                     self._push_activity(
-                        f"The village defers further {name} projects — "
+                        f"The village defers further {name} projects â€” "
                         f"{streak[ptype]} abandonments in a row")
-            reason = (f"the {name} project in {district_id} was abandoned — "
+            reason = (f"the {name} project in {district_id} was abandoned â€” "
                       f"materials reclaimed")
             c["lastProjectAbandonment"] = {
                 "reason": reason, "frame": self.frameTick, "district": district_id,
@@ -2837,7 +3181,7 @@ class SimEngine:
         c["approvedCustomBackstopFailures"] = c.get("approvedCustomBackstopFailures", 0) + 1
         if not c.get("approvedCustomEscalationLogged"):
             self._push_activity(
-                f"Cannot start approved {name} — all {kind} districts are blocked; "
+                f"Cannot start approved {name} â€” all {kind} districts are blocked; "
                 f"backing off until land opens")
             c["approvedCustomEscalationLogged"] = True
         c["approvedCustomBackoffUntil"] = self.frameTick + APPROVED_CUSTOM_BACKOFF_FRAMES
@@ -3043,7 +3387,7 @@ class SimEngine:
             c["districtLastContribution"][dest] = self.frameTick
             self._touch_kind_activity(kind)
             self._push_activity(
-                f"The {project['name']} build moves to {dest} — {district_id} has no land left")
+                f"The {project['name']} build moves to {dest} â€” {district_id} has no land left")
 
     # --- district founding (the open-world mechanism) ---
     def _district_counts_as_full(self, district_id):
@@ -3223,6 +3567,27 @@ class SimEngine:
             if scarcity is not None:
                 self._log_benchmark("ecology_scarcity_index", scarcity,
                                     {"period_ticks": BENCHMARK_TICK_FRAMES})
+        if GOODS_ENABLED:
+            c = self.civilization
+            caps = {rid: self._storage_capacity(rid) for rid in EDIBLE_RESOURCES}
+            stored = {rid: c["stockpile"].get(rid, 0)
+                      + sum(a["resources"].get(rid, 0) for a in self.agents)
+                      for rid in EDIBLE_RESOURCES}
+            total_cap = sum(caps.values()) or 1
+            self._log_benchmark("storage_utilization",
+                                round(sum(stored.values()) / total_cap, 3),
+                                {"stored": stored, "capacity": caps,
+                                 "spoiled_period": self._spoiled_period,
+                                 "season": self._current_season()})
+            self._spoiled_period = 0
+            conds = [s.get("condition", 100) for s in c["structures"]]
+            if conds:
+                self._log_benchmark(
+                    "structure_condition", round(sum(conds) / len(conds), 1),
+                    {"ruins": sum(1 for s in c["structures"] if s.get("isRuin")),
+                     "disrepair": sum(1 for v in conds
+                                      if 0 < v < STRUCTURE_DISREPAIR_THRESHOLD),
+                     "structures": len(conds)})
 
     # --- memory maintenance (round-robin summarizer + periodic cleaner) ---
     def _run_memory_maintenance(self):
@@ -3341,7 +3706,8 @@ class SimEngine:
                 candidates.extend(zone_resources)
                 if not zone_resources and zone == "beach" and agent["role"] == "fisher":
                     candidates.append("food")
-                resource = next((r for r in candidates if agent["resources"].get(r, 0) < COLLECT_CAP), None)
+                resource = next((r for r in candidates
+                                 if agent["resources"].get(r, 0) < self._carry_cap(agent)), None)
                 if resource:
                     summary = self._perform_gather(agent, resource)
                     resource_acted = resource if "collected" in summary else None
@@ -3423,7 +3789,13 @@ class SimEngine:
                     }
                     summary = f"{agent['name']} could not start that terraform project"
             else:
-                summary = f"{agent['name']} cannot terraform — ecology is disabled"
+                summary = f"{agent['name']} cannot terraform â€” ecology is disabled"
+
+        elif action == "repair_structure":
+            if GOODS_ENABLED:
+                summary = self._repair_structure(agent, decision.get("target"))
+            else:
+                summary = f"{agent['name']} cannot repair â€” structure decay is disabled"
 
         elif action == "contribute_resources":
             district_id = self._resolve_contribution_district(agent, decision.get("target_district"))
@@ -3444,7 +3816,8 @@ class SimEngine:
                     if unmet and gz and agent["currentZone"] != gz:
                         self._set_agent_target(agent, gz)
                         summary = f"{agent['name']} heads to gather {unmet}"
-                    elif unmet and gz and agent["currentZone"] == gz and agent["resources"].get(unmet, 0) < COLLECT_CAP:
+                    elif unmet and gz and agent["currentZone"] == gz \
+                            and agent["resources"].get(unmet, 0) < self._carry_cap(agent):
                         summary = self._perform_gather(agent, unmet)
                         if "collected" in summary:
                             resource_acted = unmet
@@ -3726,6 +4099,25 @@ class SimEngine:
         project_rejection = agent.get("lastProjectRejection")
         if project_rejection and self.frameTick - project_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
+        if GOODS_ENABLED:
+            repair_rejection = agent.get("lastRepairRejection")
+            if repair_rejection and self.frameTick - repair_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: Your last repair failed: {repair_rejection['reason']}.")
+            spoilage = c.get("lastSpoilage")
+            if spoilage and self.frameTick - spoilage.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: {spoilage['reason']}.")
+            shelter = agent.get("lastShelterNote")
+            if shelter and self.frameTick - shelter.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: {shelter['reason']}. More houses would fix this.")
+            worst_local = min((s for s in c["structures"]
+                               if s.get("districtId") == agent.get("currentDistrict")
+                               and (s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD)),
+                              key=lambda s: s.get("condition", 100), default=None)
+            if worst_local:
+                state_word = "in ruins" if worst_local.get("isRuin") else "in disrepair and not working"
+                nudges.append(f"NOTE: The {worst_local.get('name') or worst_local.get('type')} here is "
+                              f"{state_word} (condition {int(worst_local.get('condition', 0))}). "
+                              f"Use repair_structure to restore it.")
         abandonment = c.get("lastProjectAbandonment")
         if abandonment and self.frameTick - abandonment.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: {abandonment['reason']}.")
@@ -3772,9 +4164,10 @@ class SimEngine:
             nudges.append(f"Your leader directs: {directive}. Prioritize it.")
         if agent.get("consecutiveIdleMoves", 0) >= 3:
             nudges.append("NOTE: You have been moving without acting. Prioritize collect_resource or contribute_resources.")
-        capped = next(((k, v) for k, v in agent["resources"].items() if v >= COLLECT_CAP), None)
+        carry_cap = self._carry_cap(agent)
+        capped = next(((k, v) for k, v in agent["resources"].items() if v >= carry_cap), None)
         if capped:
-            nudges.append(f"NOTE: You are at capacity for {capped[0]} ({capped[1]}/{COLLECT_CAP}). "
+            nudges.append(f"NOTE: You are at capacity for {capped[0]} ({capped[1]}/{carry_cap}). "
                           f"Use contribute_resources or trade_resource instead of collecting more.")
         spec = self._role_specialty_resource(agent["role"])
         if spec and spec == self._first_unmet_resource_anywhere():
@@ -3833,7 +4226,7 @@ class SimEngine:
                     nudges.append(f"NOTE: No crafting in a while and the Granary is still unbuilt -- "
                                   f"it needs {crafted_needs}. At the workshop, craft_item those now.")
                 else:
-                    nudges.append("NOTE: No crafting in a while. At the workshop, craft_item (planks/bricks/tools) — advanced builds like the Granary need crafted goods.")
+                    nudges.append("NOTE: No crafting in a while. At the workshop, craft_item (planks/bricks/tools) â€” advanced builds like the Granary need crafted goods.")
             else:
                 nudges.append("NOTE: The village should build a Workshop, then craft goods for advanced builds like the Granary.")
         if SURVIVAL_ENABLED:
@@ -3845,7 +4238,7 @@ class SimEngine:
                 nudges.append(f"NOTE: {collapsed['name']} has collapsed. {verb} to revive them.")
             em = self._sage_emergency()
             if em and em["name"] != agent["name"] and agent["name"] in self._sage_responders(em):
-                nudges.append(f"EMERGENCY: Elder Sage's life is the top priority — abandon your task and "
+                nudges.append(f"EMERGENCY: Elder Sage's life is the top priority â€” abandon your task and "
                               f"heal_agent {em['name']}. Nothing matters more than the elder's survival.")
         if nearby_detailed and agent["consecutiveTalks"] == 0 \
                 and self.frameTick - agent.get("lastSpokeFrame", 0) > SOCIAL_SILENCE_FRAMES:
@@ -3896,6 +4289,9 @@ class SimEngine:
             "known_effect_vectors": list(self._known_effect_vectors()),
             "district_stocks": self._format_district_stocks_for_prompt(agent),
             "known_terraform": list(TERRAFORM_TEMPLATES.keys()) if ECOLOGY_ENABLED else [],
+            # Phase C: one short prompt line (server renders it only when set,
+            # so flag-off prompts stay byte-identical to Phase B).
+            "season": self._current_season(),
             "pending_rules": [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
                                "yes": list(r["votes"].values()).count("yes"),
                                "no": list(r["votes"].values()).count("no"),
@@ -3909,7 +4305,8 @@ class SimEngine:
             "module_reports": "none",
             "behavior_nudge": behavior_nudge,
             "available_actions": [a for a in self.d["AVAILABLE_ACTIONS"]
-                                  if a != "start_terraform" or ECOLOGY_ENABLED],
+                                  if (a != "start_terraform" or ECOLOGY_ENABLED)
+                                  and (a != "repair_structure" or GOODS_ENABLED)],
         }
 
     def _recent_conversations_text(self):
@@ -4037,6 +4434,10 @@ class SimEngine:
                 self._tick_structure_effects()
             if ECOLOGY_ENABLED and ft % ECOLOGY_REGROW_FRAMES == 0:
                 self._tick_ecology_regrow()
+            if GOODS_ENABLED and ft % GOODS_TICK_FRAMES == 0:
+                self._tick_goods()
+            if GOODS_ENABLED and ft % DAY_FRAMES == 0:
+                self._tick_shelter()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
             if BENCHMARKS_ENABLED and (ft % BENCHMARK_TICK_FRAMES == 0 or ft == FIRST_BENCHMARK_FRAME):
@@ -4229,6 +4630,10 @@ class SimEngine:
                 civ.setdefault("deferredProjectTypes", {})
                 civ.setdefault("rejectedBlueprintFrames", {})
                 civ.setdefault("customResourceAddedFrame", {})
+                # Phase C: spoilage nudge state. Structure condition/isRuin
+                # deliberately have NO migration -- every read defaults via
+                # .get(cond, 100), so pre-Phase-C structures start pristine.
+                civ.setdefault("lastSpoilage", None)
                 if ECOLOGY_ENABLED and not civ.get("districtStocks"):
                     civ["districtStocks"] = self._init_district_stocks(
                         civ.get("districts") or {}, civ.get("resourceRegistry"))
@@ -4245,6 +4650,8 @@ class SimEngine:
                     a.setdefault("lastProjectRejection", None)
                     a.setdefault("lastTerraformRejection", None)
                     a.setdefault("lastCraftRejection", None)
+                    a.setdefault("lastRepairRejection", None)
+                    a.setdefault("lastShelterNote", None)
                     # state.json may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
                     # saved agent's memory.longTerm list can carry leaked
@@ -4337,7 +4744,9 @@ class SimEngine:
                 "level": c["level"],
                 "structures": [{"id": s["id"], "type": s["type"], "x": s["x"], "y": s["y"],
                                 "visualStyle": s.get("visualStyle"), "name": s.get("name"),
-                                "districtId": s.get("districtId")}
+                                "districtId": s.get("districtId"),
+                                "condition": s.get("condition", 100),
+                                "isRuin": bool(s.get("isRuin"))}
                                for s in c["structures"]],
                 "districtProjects": district_projects,
                 "completedProjects": c["completedProjects"],
@@ -4348,6 +4757,7 @@ class SimEngine:
                 "rules": [dict(r) for r in c["rules"]],
                 "pendingRules": [dict(r) for r in c["pendingRules"]],
                 "directive": self._current_directive(),
+                "season": self._current_season(),
                 "stockpile": dict(c["stockpile"]),
                 "taxDue": c["taxDue"], "taxPaid": c["taxPaid"],
                 "collectAttempts": c["collectAttempts"], "collectSuccesses": c["collectSuccesses"],
@@ -4373,6 +4783,7 @@ class SimEngine:
                         "META_SYSTEM": META_SYSTEM, "PIANO_MODULES": PIANO_MODULES,
                         "ROADS_ENABLED": ROADS_ENABLED,
                         "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
+                        "GOODS_ENABLED": GOODS_ENABLED,
                     },
                 },
             }
