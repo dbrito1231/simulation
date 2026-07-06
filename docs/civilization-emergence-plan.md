@@ -413,13 +413,60 @@ accumulates enough data to grep. No code defect was found, so no loop-back
 fix prompt was written; `.cursor/next-prompt.md` is intentionally left absent
 (soak-only night, per Part 8's "absent = nothing to implement" rule).
 
-### Phase C — Physical goods & plural needs (F4, I5)
+**Audit verdict (2026-07-05, evening slot, session `2026-07-05T16-41-19`,
+4h54m soak, 3,858 decisions, 18 LLM errors, 0 context overflows): ECOLOGY
+PASS / build-economy FAIL — hot-fixed in-session (`c6e1bbc`); Phase B
+conditional on the morning slot confirming the fix.** Note: the soak ended
+early because the server was stopped manually at 21:35 (a `git pull` was run
+in its window — the PR #1 merge); the standing 24/7 rule was briefly broken
+outside the automation. Judged per-flag:
+- **`STRUCTURE_EFFECTS_ENABLED` (Phase A): PASS, no regression.** Produces
+  fired all session (Waterwheel Mills 12+3 planks/period, Wall 10 stone),
+  saturation caps bound and steered role defaults.
+- **`ECOLOGY_ENABLED` (Phase B core test): PASS.** The full causal chain of
+  the civilization test ran without prompting: farm_north depleted (28
+  depletion events, 13 surfaced local gather failures), the scarcity reflex
+  answered (21 Clear Field terraform starts, several reflex-initiated, ~20
+  completions restoring the land), stocks regrew (26 recoveries), the
+  scarcity index stayed bounded (max 0.956), and migration occurred without
+  the loop-back #1 nomadism (move_to_district 45.9% vs 85%). No quota rule
+  was proposed — acceptable, the test is migrate OR terraform OR quota.
+- **Build economy (loop-back #3 scope): FAIL — zero structures built
+  in-session, zero blueprint proposals in 3,858 decisions.** Not a model
+  failure: three precise gate bugs. (1) `_invention_required()` was
+  **inverted** by the abcc158 refactor (dropped the `not` on
+  `_unbuilt_customs_blocking_invention()`), so once the village finished
+  building everything — the state this soak ended in: all 5 seed types +
+  both customs built, 44 structures — invention went permanently False.
+  (2) `_seed_exhausted()` had no deferral clause: loop-back #3's craft
+  reflex made crafting healthy (45 crafts vs 29 fails, vs 69/1,247 last
+  soak), which kept the granary's craft-stall escape False while the
+  granary cycled abandon→defer (25 abandons, ~8 deferral cycles), holding
+  the gate shut with nothing buildable. (3) The saturation nudge named the
+  deferred Granary as the alternative 471 times → 535 deterministic
+  rejections — agents rammed a wall the engine itself had closed.
+  **Hot-fix (same session, per compressed-cadence hot-fix authority):**
+  restored the negation, deferred types count as exhausted, nudge skips
+  deferred/duplicate-active types. Forced smoke test on the restored
+  `state.json` (the exact deadlocked world): gate True when fully built,
+  False with a pending approved custom, True when that custom is deferred,
+  nudge demands invention. The overnight soak validates live invention
+  (proposals → elder approval → new project types); the morning slot
+  confirms before Phase C starts.
+
+### Phase C — Physical goods, plural needs & consequence (F4, I5)
 Granaries/vaults get real capacity (from Phase A functions); edibles spoil
 outside storage; goods must be carried (a cart — the first *vehicle* — is a
 craftable that raises carry capacity). Warmth/shelter need makes houses
-consumed nightly, not just population math.
+consumed nightly, not just population math. Adopted from the copilot audit
+([response doc](copilot-audit-response.md) C1/C6-B): **structure decay** —
+structures gain a condition stat, degrade without upkeep, get a repair verb,
+and rare disasters can damage them (with the standard escape hatch: anything
+lost is rebuildable); and **seasons** as slow multipliers on district stock
+regrowth (winter bites, closing the loop with spoilage/storage).
 **Test:** winter (B) + no granary → visible hardship; the village builds
-storage *because it needs it*, not because a nudge said so.
+storage *because it needs it*, not because a nudge said so — and repairs a
+decaying structure before it collapses.
 **Flag:** `GOODS_ENABLED`.
 
 ### Phase D — Technology tiers & eras (E1)
@@ -435,7 +482,10 @@ tier-3 "wagon" — with each step consuming the previous one's output.
 
 ### Phase E — Market & property (I2, I3)
 Market structure posts prices from district stocks and stockpile levels; gold
-mediates; plots/homes claimable; inheritance recorded.
+mediates; plots/homes claimable; inheritance recorded. Adopted from the
+copilot audit (C2): **relationships get teeth here** — trade terms, refusal,
+and price tolerance condition on ally/neutral/rival, making the relationship
+system mechanical instead of decorative.
 **Test:** a price spike after a shortage changes what agents gather next tick;
 `benchmarks.jsonl` gains a wealth-Gini metric that moves.
 **Flag:** `ECONOMY_ENABLED`.
@@ -502,6 +552,13 @@ function blocks and tier prerequisites — structured generation under long
 prompts). Preferred class: a dense 8–14B at Q4 that fits in 12 GB with 2×3,400
 tokens of slot context. `qwen/qwen3.5-9b` (6.55 GB) is already on disk and is
 the first candidate to benchmark.
+
+**Creativity experiment (adopted from the copilot audit, C4):** decision
+calls run 512 tokens / temp 0.4 / thinking disabled — right for routine
+turns, but plausibly suppressing authoring quality on invention-only turns.
+Before Phase D: an A/B replay of logged invention prompts at temp ~0.8 and a
+larger token budget, judged on blueprint validity rate and effect-vector
+novelty. Adopt per-call overrides only if the replay wins.
 
 **Switching is decided by replay, not vibes.** `lm_studio.jsonl` stores every
 real request/response pair. Before any model change: replay 50–100 logged
@@ -600,45 +657,105 @@ State lives in two files:
 - `.claude/overnight-cycle.json` — `{ "lastReviewedCommit": "<sha>",
   "iteration": N, "phase": "B" }`, updated by whichever stage acts.
 
-**NIGHT stage (~22:30):**
-1. Preflight: repo on `feat/server-authoritative-engine`, working tree clean
-   (commit strays with a note if not); LM Studio up (`lms ps`; context ÷
-   parallel ≥ 3,400); port 5001 free.
-2. If `.cursor/next-prompt.md` exists: spawn a general-purpose subagent with
-   its contents (the implementer — subagent context keeps it separate from
-   this session's reviewer role). Subagent implements + commits, then delete
-   the prompt file.
-3. Review pass (this session, fresh eyes): diff `lastReviewedCommit..HEAD`
-   against the phase's scope and the two invariants (no silent rejections;
-   no gate without a deterministic escape). Small fixes committed directly;
-   large problems → write a corrective prompt back to `.cursor/next-prompt.md`
-   and end WITHOUT starting the server (the morning stage will report it).
-   Update `lastReviewedCommit`.
-4. Start the soak: launch the server in the background
-   (`uv run python simulation/server.py`), confirm `http://127.0.0.1:5001`
-   responds and a new `simulation/logs/<ts>/` folder is writing, then end
-   the session (the server keeps running detached).
+**Standing rule: the simulation runs 24/7.** Both stages end by ensuring the
+server is up on port 5001 — the sim soaks continuously, day and night. The
+only sanctioned downtime is the seconds it takes a stage to restart it (to
+load new code, or to close a log session for a clean audit). If a stage finds
+the server down for any reason, it turns it on before ending — even when
+earlier steps of that stage failed (the sole exception: LM Studio is down, in
+which case a server would only fill logs with fallback noise; report loudly
+instead).
 
-**MORNING stage (~07:30):**
-1. Stop the server; confirm port 5001 free.
-2. Part 5 audit of the newest session folder against the current phase's
-   civilization test + standing questions. Append the verdict to the
-   phase's Part 4 log (PASS → next phase; FAIL → findings, causally ordered).
-3. Write the next implementation prompt to `.cursor/next-prompt.md`
-   (loop-back fixes on FAIL; the next phase's relay prompt on PASS), using
-   the same template as previous iterations (git rules, hard rules, VERIFY,
-   RECORD sections).
-4. Commit the plan-doc update (and cycle-state bump) with message
-   `Overnight cycle N: <verdict summary>`.
-5. Leave a concise summary as the session's final message (and a
-   notification if available): verdict, key numbers, what tonight will do.
+**Canonical server launch (visible window, NOT a background task):** the user
+watches the server output live, and a Claude-session background task dies
+with its session — so the server always runs in its own titled cmd window,
+which survives session teardown. From PowerShell:
+
+```powershell
+# stop: old window first (if any), then anything still holding port 5001
+taskkill /F /FI "WINDOWTITLE eq SimServer*" 2>$null
+# (then taskkill /F /PID <pid> for any remaining listener on 5001)
+
+# start: visible, titled, self-contained
+Start-Process cmd -ArgumentList '/k', 'title SimServer && cd /d C:\Users\dbadmin\Desktop\GitServ\simulation && uv run python simulation/server.py'
+```
+
+Health check after launch: HTTP 200 from `http://127.0.0.1:5001/` and the
+newest `simulation/logs/<ts>/` folder's .jsonl files growing. The
+WINDOWTITLE-based kill keeps old windows from accumulating across restarts.
+
+**Compressed cadence (adopted 2026-07-05 — target: all phases in ≤5 nights).**
+Both daily stages are now SYMMETRIC full cycles: each one audits the soak
+that just ended, implements the next batch, reviews it, and restarts the
+server for the next soak. Two audit+implement slots per day (the server
+soaks 24/7 either way — one-slot-per-day was auditing only half the data we
+generate). Three de-risking rules make the compression survivable:
+- **Hot-fix authority:** on a FAIL whose cause is small and precisely
+  understood (a tuning constant, a target-inference bug — the shape of
+  loop-backs #1–#2), the auditing stage implements the fix ITSELF in-session
+  and restarts; no next-prompt round-trip, no lost half-day. Full loop-back
+  prompts are reserved for design-level failures.
+- **Forced smoke test before commit:** every implementation subagent must
+  drive its new mechanics end-to-end in a short live run (force the
+  depletion / winter / decay condition rather than waiting for it) — the
+  class of bug that cost Phase B three loop-backs is catchable in minutes
+  when provoked deliberately.
+- **Batching:** compatible phases land together behind separate flags; the
+  audit attributes failures per-flag via their distinct log signatures. A
+  FAIL in one flag loops only that flag; the others keep their verdict.
+
+Pre-staged implementation prompts live in `.cursor/phase-prompts/phase-{C..G}.md`
+(recon-grade change maps included, written 2026-07-05). A slot starting a
+phase copies the matching file to `.cursor/next-prompt.md` (appending any
+carry-over items like C3/C5 for Phase C) — implementation subagents start
+warm instead of re-deriving the codebase.
+
+Batch schedule (slips right if a batch fails; ~3 slack slots in 5 nights):
+| Slot | Work |
+|---|---|
+| Night 1 (tonight) | Phase B exam (clean soak, already queued) |
+| Day 2 | B verdict → C3 amnesty + C5 legacy strip + **Phase C** (goods/decay/seasons) |
+| Night 2 | **Phase D** (tiers/eras); Part 6 model replay + C4 temp experiment run during the day slot |
+| Day 3 | **Phase E** (market/property/relationships) |
+| Night 3 | **Phase F** (population/governance) |
+| Day 4 | **Phase G** (knowledge/culture/factions/diplomacy) |
+| Night 4 – Night 5 | Loop-back slack + a final ALL-FLAGS-ON long soak as the acceptance run |
+
+**EACH stage (morning ~07:30 and evening ~21:30):**
+1. Stop the server (closes the log session for a clean audit); confirm port
+   5001 free. If none was running, say so prominently — the standing rule
+   was violated.
+2. Part 5 audit of the newest session folder against the civilization tests
+   of every phase flag that was ON during the soak (batched phases are
+   judged independently). Append verdicts to the Part 4 logs. Soaks under
+   ~4h get a provisional verdict (confirmed by the next slot) rather than
+   INCONCLUSIVE — compressed cadence accepts shorter windows.
+3. On small precise FAILs: hot-fix now (this session), per the rule above.
+   On design-level FAILs: write the loop-back prompt to
+   `.cursor/next-prompt.md` for the batch, and pull forward the next batch
+   item that does NOT depend on the failed flag.
+4. Implement the next batch item: if `.cursor/next-prompt.md` exists (or
+   the batch schedule says a phase is due), spawn the implementation
+   subagent with it; then this session reviews `lastReviewedCommit..HEAD`
+   (two invariants + phase scope), fixes small issues, commits, updates
+   `lastReviewedCommit`, runs py_compile.
+5. Commit the plan-doc/state updates: `Cycle N.<slot>: <verdict summary>`.
+6. **Restart the server** (canonical visible-window launch + health check)
+   regardless of audit outcome — the sim stays up. Sole exception:
+   LM Studio down (report loudly, leave off).
+7. Leave a concise human summary: per-flag verdicts, key numbers, what the
+   next slot will do.
 
 Guardrails:
-- The cycle only ever *pauses itself*: any preflight failure, LM Studio
-  outage, or review-stage rejection ends the stage with a report instead of
-  proceeding — nothing forces a soak on a bad build.
-- Phase advancement still requires a PASS verdict written by the audit; the
-  night stage never starts next-phase work on its own.
+- The cycle only ever *pauses the pipeline, never the world*: a preflight
+  failure or review-stage rejection skips implementation/soak-restart and
+  reports — but each stage still leaves the server running (LM Studio being
+  down is the one exception).
+- Phase advancement still requires a PASS verdict written by an audit — but
+  under the compressed cadence the SAME session that writes a PASS may
+  immediately implement the next batch item (audit-then-implement in one
+  slot is the design, not a violation). What remains forbidden: starting
+  next-phase work while its prerequisite flag's verdict is FAIL or missing.
 - Disable the two scheduled tasks to fall back to the manual Part 7 relay at
   any time; the state files make manual and automated iterations
   interchangeable.
