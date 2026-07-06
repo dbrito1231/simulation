@@ -1973,9 +1973,15 @@ class SimEngine:
         depends on crafted goods (the granary) -- once crafting itself has
         stalled. Without that last clause a dead craft chain would freeze all
         progression: everything else saturated, the granary unreachable, and
-        invention never armed."""
+        invention never armed. A deferred type counts as exhausted for the
+        same reason: while it can't be started, it must not hold the
+        invention gate shut (2026-07-05 evening soak: healthy crafting kept
+        the stall clause False while the granary cycled through deferrals,
+        so nothing was buildable AND invention never armed)."""
         c = self.civilization
         if tid in c["builtTypes"] or self._type_saturated(tid):
+            return True
+        if self._is_project_type_deferred(tid)[0]:
             return True
         if not STRUCTURE_EFFECTS_ENABLED:
             return False
@@ -1999,7 +2005,12 @@ class SimEngine:
             return False
         if not all(self._seed_exhausted(tid) for tid in PROJECT_TEMPLATES):
             return False
-        return self._unbuilt_customs_blocking_invention()
+        # Invention is required when NO approved custom is left to pursue
+        # (all built or deferred). The loop-back #3 refactor dropped this
+        # negation, inverting the gate: it read "required" only while an
+        # unbuilt custom existed, and went permanently False once the
+        # village finished building everything (2026-07-05 evening audit).
+        return not self._unbuilt_customs_blocking_invention()
 
     def _start_project_for(self, agent, target, target_district=None):
         c = self.civilization
@@ -2032,8 +2043,15 @@ class SimEngine:
             return (f"{agent['name']} wants to build, but the village needs a NEW invention "
                     f"(propose_blueprint)")
         if self._type_saturated(type_):
+            # Only suggest an alternative the agent can actually start:
+            # deferred types and types with an active duplicate both get
+            # deterministically rejected, so naming them here just rams
+            # agents into a wall (471 such nudges in the 2026-07-05 soak).
             alt = next((tid for tid in c["projectRegistry"]
-                        if not self._type_saturated(tid)), None)
+                        if not self._type_saturated(tid)
+                        and not self._is_project_type_deferred(tid)[0]
+                        and not any(p and p.get("type") == tid
+                                    for p in c["districtProjects"].values())), None)
             if alt:
                 return (f"{agent['name']} wants to build a {tmpl['name']}, but the village has "
                         f"enough of those -- build a {c['projectRegistry'][alt]['name']} instead, "
