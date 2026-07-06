@@ -1374,7 +1374,11 @@ def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
         new_ids.add(rid)
 
     if custom_resource_count + len(new_ids) > MAX_CUSTOM_RESOURCES:
-        return False, "too many custom resources"
+        # The engine auto-retires unreferenced custom resources at this cap
+        # (_maybe_retire_custom_resource), so hitting it here means every
+        # existing custom resource is still in use somewhere -- say so.
+        return False, ("too many custom resources -- every existing one is still in use; "
+                       "propose without new_resources until one falls out of use")
 
     needs = blueprint.get("needs")
     if not isinstance(needs, dict) or not (1 <= len(needs) <= 8):

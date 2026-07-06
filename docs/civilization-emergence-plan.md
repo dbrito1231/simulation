@@ -454,6 +454,50 @@ outside the automation. Judged per-flag:
   (proposals → elder approval → new project types); the morning slot
   confirms before Phase C starts.
 
+**Audit verdict (2026-07-06, morning slot, session `2026-07-05T22-24-13`,
+9h16m soak, 4,716 decisions, 7 transient LM-offline errors, 0 context
+overflows — first full soak on qwen3.5-9b): PASS on all three flags.
+Phase B is COMPLETE; Phase C unblocked.** Judged per-flag:
+- **`STRUCTURE_EFFECTS_ENABLED` (Phase A): PASS, no regression.** 39,277
+  produce events; effect throughput 31 structure types/period (was 15 at
+  Phase A landing); the duplicate-effect-vector guard fired live (9
+  rejections, each with a surfaced reason).
+- **`ECOLOGY_ENABLED` (Phase B core): PASS, no regression.** 36 district
+  depletion events (forest wood, farm_north food) plus per-agent failed
+  gathers with surfaced reasons; the scarcity reflex answered with 13
+  terraform starts (Plant Grove, Clear Field — most reflex-initiated);
+  recoveries logged (31 "recovering"/"regrown" lines); scarcity index
+  bounded [0.849, 1.0], mean 0.975.
+- **Build economy / live invention (the c6e1bbc confirmation): PASS —
+  the fix holds.** The full loop ran all night on the fully-built world
+  where invention is the only growth path: invention gate armed → elder
+  delegated proposals (and took over himself 32× per
+  `INVENTION_ELDER_TAKEOVER`) → 32 `propose_blueprint` decisions → ~30
+  distinct blueprints approved (Watchtower, Observatory family, Library,
+  Market Hall, Greenhouse, a water-infrastructure family…) → 80
+  `start_project` + 204 `build_structure` decisions → **283 structures
+  built**, all new types placed. No monoculture freeze, no silent
+  rejections (301 `rejection_note`s, every one with a reason).
+  `move_to_district` collapsed to **14.1%** (665/4,716; was 85% at
+  loop-back #1, 45.9% last soak) — the qwen switch + honest nudges
+  compound. 13 distinct actions chosen.
+
+Newly discovered gaps (Part 5 loop), none blocking:
+1. **Busiest rejection: `too many custom resources` ×137.** The custom-
+   resource cap has no expiry/retirement analogue — same shape as the
+   MAX_APPROVED_CUSTOM deadlock, not yet blocking (structure invention
+   flowed around it). Fix bundled into the Day-2 C3 amnesty item (both
+   are "cap needs an expiry" fixes).
+2. **Expansion sprawl without demand:** 9 new village districts founded
+   and 283 builds in 9h16m — the same approved customs rebuilt up to
+   16-20× each (16 Observatories). Nothing consumes structures or makes
+   the marginal build costly; Phase C decay/upkeep/storage is the
+   designed consumer (watch the build rate bend down under
+   `GOODS_ENABLED`), Phase F population the designed demand.
+3. LM Studio blipped offline for 7 decisions, self-recovered; `lms ps`
+   confirms context 13000 / parallel 2 (6,500 per slot, above the 3,400
+   floor).
+
 ### Phase C — Physical goods, plural needs & consequence (F4, I5)
 Granaries/vaults get real capacity (from Phase A functions); edibles spoil
 outside storage; goods must be carried (a cart — the first *vehicle* — is a

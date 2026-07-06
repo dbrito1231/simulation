@@ -315,6 +315,13 @@ MAX_PENDING_BLUEPRINTS = 5
 MAX_APPROVED_CUSTOM = 15
 MAX_CUSTOM_RESOURCES = 10
 MAX_CUSTOM_RECIPES = 12
+# Blueprint amnesty (C3, 2026-07-06): rejectedBlueprintIds used to be a
+# permanent blacklist -- once rejected, an id could never legitimately be
+# re-proposed, mirroring the MAX_APPROVED_CUSTOM deadlock shape. A rejected id
+# now expires after this cooldown (~20 min at 30 ticks/s: long enough that the
+# elder's verdict means something across many think cycles, short enough that
+# a 9h soak sees several amnesty waves).
+BLUEPRINT_AMNESTY_FRAMES = STALL_THRESHOLD * 60
 MAX_PENDING_RULES = 4
 MAX_ACTIVE_RULES = 8
 
@@ -745,6 +752,8 @@ class SimEngine:
             "inventionBackstopFires": 0,
             "pendingBlueprints": [],
             "rejectedBlueprintIds": set(),
+            "rejectedBlueprintFrames": {},
+            "customResourceAddedFrame": {},
             "pendingRecipes": [],
             "rejectedRecipeIds": set(),
             "directive": None,
@@ -2874,6 +2883,94 @@ class SimEngine:
             del c["projectRegistry"][retired]
             self._push_activity(f"The {name} design has been archived -- its plans made room for new inventions.")
 
+    # --- blueprint amnesty (C3: rejected ids expire instead of blacklisting forever) ---
+    def _maybe_amnesty_rejected_blueprints(self):
+        """A rejected blueprint id used to stay in rejectedBlueprintIds forever
+        (permanent blacklist -- copilot audit #16). Grant amnesty after
+        BLUEPRINT_AMNESTY_FRAMES so a once-rejected idea can legitimately be
+        re-proposed later, mirroring _maybe_retire_blueprint's slot-freeing
+        pattern. Ids restored from a pre-amnesty save have no rejection frame;
+        their clock starts at the first gate check after restore."""
+        c = self.civilization
+        if not c["rejectedBlueprintIds"]:
+            return
+        frames = c.setdefault("rejectedBlueprintFrames", {})
+        for bid in list(c["rejectedBlueprintIds"]):
+            rejected_at = frames.get(bid)
+            if rejected_at is None:
+                frames[bid] = self.frameTick
+                continue
+            if self.frameTick - rejected_at >= BLUEPRINT_AMNESTY_FRAMES:
+                c["rejectedBlueprintIds"].discard(bid)
+                frames.pop(bid, None)
+                self._push_activity(
+                    f"The old rejection of the '{bid}' blueprint has been forgotten -- "
+                    f"it may be proposed again")
+
+    # --- custom-resource retirement (C3: the resource cap gets an expiry too) ---
+    def _custom_resource_referenced(self, rid):
+        """True while anything still uses the custom resource: a structure
+        function that produces/boosts it, a project (registry or active) that
+        needs it, a recipe that inputs or outputs it (pending included), or a
+        remaining balance in the stockpile / any agent's inventory."""
+        c = self.civilization
+        if c["stockpile"].get(rid, 0) > 0:
+            return True
+        if any(a["resources"].get(rid, 0) > 0 for a in self.agents):
+            return True
+        if rid in self.RECIPES or any(rid in r["inputs"] for r in self.RECIPES.values()):
+            return True
+        if any(p["id"] == rid or rid in p.get("inputs", {}) for p in c["pendingRecipes"]):
+            return True
+        for pid, tmpl in c["projectRegistry"].items():
+            if rid in (tmpl.get("needs") or {}):
+                return True
+            fn = self._get_structure_function(pid)
+            if any(prod.get("resource") == rid for prod in fn.get("produces") or []):
+                return True
+            if any(rid in (boost.get("resources") or []) for boost in fn.get("boosts") or []):
+                return True
+        for bp in c["pendingBlueprints"]:
+            if rid in (bp.get("needs") or {}):
+                return True
+            fn = bp.get("function") or {}
+            if any(prod.get("resource") == rid for prod in fn.get("produces") or []):
+                return True
+            if any(rid in (boost.get("resources") or []) for boost in fn.get("boosts") or []):
+                return True
+        for p in c["districtProjects"].values():
+            if p and rid in (p.get("needs") or {}):
+                return True
+        return False
+
+    def _maybe_retire_custom_resource(self):
+        """Once MAX_CUSTOM_RESOURCES is hit, validate_blueprint rejects every
+        proposal bundling a new resource ("too many custom resources" x137 in
+        the 2026-07-05 9h soak) with no expiry analogue -- same shape as the
+        MAX_APPROVED_CUSTOM deadlock. Retire the oldest custom resource that
+        nothing references anymore (no producer, recipe, project need, or
+        remaining stock); if every one is still in use the cap is legitimately
+        hard and the rejection reason (server.py validate_blueprint) says so."""
+        c = self.civilization
+        while self._custom_resource_count() >= MAX_CUSTOM_RESOURCES:
+            added = c.setdefault("customResourceAddedFrame", {})
+            custom = [rid for rid in c["resourceRegistry"]
+                      if rid not in BASE_RESOURCES and rid not in CRAFTED_RESOURCES]
+            unreferenced = [rid for rid in custom if not self._custom_resource_referenced(rid)]
+            if not unreferenced:
+                return  # all referenced: the cap holds until something falls out of use
+            retired = min(unreferenced, key=lambda rid: added.get(rid, 0))
+            name = c["resourceRegistry"][retired].get("name", retired)
+            del c["resourceRegistry"][retired]
+            added.pop(retired, None)
+            # Scrub dead stock entries so district stocks don't track a
+            # resource that can no longer be gathered or referenced.
+            for stocks in (c.get("districtStocks") or {}).values():
+                stocks.pop(retired, None)
+            self._push_activity(
+                f"The unused resource {name} ({retired}) has faded from village life -- "
+                f"its slot is free for new inventions")
+
     # --- invention-demand backstop (#5.2) ---
     def _maybe_invention_backstop(self):
         """Deterministic elder backstop, same tick-gated _maybe_* shape as
@@ -3406,6 +3503,9 @@ class SimEngine:
                     if r["id"] not in c["resourceRegistry"]:
                         c["resourceRegistry"][r["id"]] = {"name": r["name"],
                                                           "gatherZone": r["gatherZone"], "color": r["color"]}
+                        # Age record for the custom-resource retirement gate
+                        # (_maybe_retire_custom_resource picks the oldest).
+                        c.setdefault("customResourceAddedFrame", {})[r["id"]] = self.frameTick
                 c["projectRegistry"][bp["id"]] = {
                     "name": bp["name"], "needs": dict(bp["needs"]),
                     "visualStyle": bp["visualStyle"], "custom": True,
@@ -3426,6 +3526,9 @@ class SimEngine:
             if agent["role"] == "elder" and idx != -1:
                 bp = c["pendingBlueprints"].pop(idx)
                 c["rejectedBlueprintIds"].add(bp["id"])
+                # Amnesty clock (C3): the rejection expires after
+                # BLUEPRINT_AMNESTY_FRAMES via _maybe_amnesty_rejected_blueprints.
+                c.setdefault("rejectedBlueprintFrames", {})[bp["id"]] = self.frameTick
                 summary = f"{agent['name']} rejected {bp['name']} blueprint"
             else:
                 summary = f"{agent['name']} could not reject that blueprint"
@@ -3925,6 +4028,8 @@ class SimEngine:
                 self._maybe_build_funded_project()
                 self._maybe_start_approved_custom()
                 self._maybe_retire_blueprint()
+                self._maybe_amnesty_rejected_blueprints()
+                self._maybe_retire_custom_resource()
                 self._maybe_invention_backstop()
                 self._maybe_found_district()
                 self._maybe_welcome_newcomer()
@@ -4122,6 +4227,8 @@ class SimEngine:
                 civ.setdefault("approvedCustomEscalationLogged", False)
                 civ.setdefault("projectAbandonStreak", {})
                 civ.setdefault("deferredProjectTypes", {})
+                civ.setdefault("rejectedBlueprintFrames", {})
+                civ.setdefault("customResourceAddedFrame", {})
                 if ECOLOGY_ENABLED and not civ.get("districtStocks"):
                     civ["districtStocks"] = self._init_district_stocks(
                         civ.get("districts") or {}, civ.get("resourceRegistry"))
