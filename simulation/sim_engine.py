@@ -261,22 +261,22 @@ WORKSHOP_DISTRICT_CAP = 3   # per buildable village/workshop-kind district
 CUSTOM_SOFT_CAP = 5         # per custom/blueprint type (and the granary)
 EFFECT_TICK_FRAMES = 150     # deterministic structure-effect tick (produces, etc.)
 # Ecology regrowth: +1 per ECOLOGY_REGROW_FRAMES (~20s at 30 ticks/s). At ~3
-# gathers/min/agent depleting 2Ã— yield, one district needs regrowth slower than
-# harvest to reach "depleted" under sustained gathering (old +2/150 was ~8Ã— too fast).
+# gathers/min/agent depleting 2× yield, one district needs regrowth slower than
+# harvest to reach "depleted" under sustained gathering (old +2/150 was ~8× too fast).
 ECOLOGY_REGROW_FRAMES = 600
 LEGACY_CUSTOM_PRODUCE = {"resource": "herbs", "amount": 1, "every_ticks": 600, "scope": "village"}
 APPROVED_CUSTOM_STALL_FRAMES = 1800  # ~1 min: nudge + elder backstop for unbuilt approvals
 APPROVED_CUSTOM_BACKOFF_FRAMES = 5400  # ~3 min cooldown after escalation gives up
 STOCK_DEFAULT_MAX = 100
 STOCK_REGROW_PER_TICK = 1
-STOCK_DEPLETE_MULTIPLIER = 2   # each gather removes 2Ã— the units collected
+STOCK_DEPLETE_MULTIPLIER = 2   # each gather removes 2× the units collected
 STOCK_LOW_RATIO = 0.25
 STOCK_MIN_YIELD_RATIO = 0.25  # lowest gather yield multiplier when stock is low but > 0
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
-# Abandon only after long stalls â€” scarcity slows funding; crafted-needs projects
-# (granary, etc.) get 2Ã— the base window.
+# Abandon only after long stalls — scarcity slows funding; crafted-needs projects
+# (granary, etc.) get 2× the base window.
 PROJECT_ABANDON_THRESHOLD = STALL_THRESHOLD * 10
 PROJECT_ABANDON_THRESHOLD_CRAFTED = STALL_THRESHOLD * 20
 PROJECT_DEFER_ABANDON_STREAK = 3
@@ -483,7 +483,7 @@ if CRAFTING_ENABLED:
 TERRAFORM_TEMPLATES = {
     "plant_grove": {
         # Needs must stay fundable in a FRESH world: base/gatherable resources
-        # only (herbs only exists once a blueprint invents it â€” a depleted
+        # only (herbs only exists once a blueprint invents it — a depleted
         # forest must never depend on an uninvented resource to recover).
         "name": "Plant Grove",
         "needs": {"wood": 2, "food": 1},
@@ -1393,7 +1393,7 @@ class SimEngine:
         if current > 0 and new_val <= 0:
             kind = self.civilization["districts"][district_id]["kind"]
             self._push_activity(
-                f"The {kind} in {district_id} is depleted of {resource_id} â€” gathering fails here until it regrows")
+                f"The {kind} in {district_id} is depleted of {resource_id} — gathering fails here until it regrows")
 
     def _ecology_gather_gate(self, agent, resource_id):
         """Returns (allowed, reason, yield_scale). Non-tracked resources pass through."""
@@ -1461,7 +1461,7 @@ class SimEngine:
                 stocks[rid] = new_val
                 if val <= 0 < new_val:
                     self._push_activity(
-                        f"The {kind} in {did} is recovering â€” {rid} stock is growing again")
+                        f"The {kind} in {did} is recovering — {rid} stock is growing again")
                 elif val < max_s * STOCK_LOW_RATIO <= new_val:
                     self._push_activity(f"{rid} stock in {did} has regrown to fair levels")
 
@@ -1733,7 +1733,7 @@ class SimEngine:
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         self._check_civilization_level()
-        self._push_activity(f"{agent['name']} completed {name} â€” the land in {district_id} has changed")
+        self._push_activity(f"{agent['name']} completed {name} — the land in {district_id} has changed")
         return f"{agent['name']} completed {name} in {district_id}"
 
     def _try_contribute_resource(self, agent, res, district_id=None):
@@ -2279,7 +2279,7 @@ class SimEngine:
         if not allowed:
             agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
             self._scarcity_reflex_on_depletion(agent, resource)
-            return f"{agent['name']} found nothing â€” {reason}"
+            return f"{agent['name']} found nothing — {reason}"
         amount = 1
         if STRUCTURE_EFFECTS_ENABLED:
             amount += self._gather_yield_bonus(agent, resource)
@@ -2388,10 +2388,10 @@ class SimEngine:
         if deferred:
             name = tmpl.get("name", type_)
             agent["lastProjectRejection"] = {
-                "reason": f"{name} is deferred after repeated abandonments â€” try another project",
+                "reason": f"{name} is deferred after repeated abandonments — try another project",
                 "frame": self.frameTick,
             }
-            return (f"{agent['name']} cannot start {name} â€” deferred after repeated abandonments")
+            return (f"{agent['name']} cannot start {name} — deferred after repeated abandonments")
         if self._invention_required() and not tmpl.get("custom"):
             return (f"{agent['name']} wants to build, but the village needs a NEW invention "
                     f"(propose_blueprint)")
@@ -2422,7 +2422,7 @@ class SimEngine:
                 "reason": f"a {name} project is already active in {dup_did}",
                 "frame": self.frameTick,
             }
-            return (f"{agent['name']} cannot start another {name} â€” "
+            return (f"{agent['name']} cannot start another {name} — "
                     f"one is already underway in {dup_did}")
         district_id = self._resolve_build_district(agent, type_, target_district)
         if not district_id or c["districtProjects"].get(district_id):
@@ -3114,9 +3114,9 @@ class SimEngine:
                     c.setdefault("deferredProjectTypes", {})[ptype] = \
                         self.frameTick + PROJECT_DEFER_COOLDOWN
                     self._push_activity(
-                        f"The village defers further {name} projects â€” "
+                        f"The village defers further {name} projects — "
                         f"{streak[ptype]} abandonments in a row")
-            reason = (f"the {name} project in {district_id} was abandoned â€” "
+            reason = (f"the {name} project in {district_id} was abandoned — "
                       f"materials reclaimed")
             c["lastProjectAbandonment"] = {
                 "reason": reason, "frame": self.frameTick, "district": district_id,
@@ -3181,7 +3181,7 @@ class SimEngine:
         c["approvedCustomBackstopFailures"] = c.get("approvedCustomBackstopFailures", 0) + 1
         if not c.get("approvedCustomEscalationLogged"):
             self._push_activity(
-                f"Cannot start approved {name} â€” all {kind} districts are blocked; "
+                f"Cannot start approved {name} — all {kind} districts are blocked; "
                 f"backing off until land opens")
             c["approvedCustomEscalationLogged"] = True
         c["approvedCustomBackoffUntil"] = self.frameTick + APPROVED_CUSTOM_BACKOFF_FRAMES
@@ -3387,7 +3387,7 @@ class SimEngine:
             c["districtLastContribution"][dest] = self.frameTick
             self._touch_kind_activity(kind)
             self._push_activity(
-                f"The {project['name']} build moves to {dest} â€” {district_id} has no land left")
+                f"The {project['name']} build moves to {dest} — {district_id} has no land left")
 
     # --- district founding (the open-world mechanism) ---
     def _district_counts_as_full(self, district_id):
@@ -3789,13 +3789,13 @@ class SimEngine:
                     }
                     summary = f"{agent['name']} could not start that terraform project"
             else:
-                summary = f"{agent['name']} cannot terraform â€” ecology is disabled"
+                summary = f"{agent['name']} cannot terraform — ecology is disabled"
 
         elif action == "repair_structure":
             if GOODS_ENABLED:
                 summary = self._repair_structure(agent, decision.get("target"))
             else:
-                summary = f"{agent['name']} cannot repair â€” structure decay is disabled"
+                summary = f"{agent['name']} cannot repair — structure decay is disabled"
 
         elif action == "contribute_resources":
             district_id = self._resolve_contribution_district(agent, decision.get("target_district"))
@@ -4226,7 +4226,7 @@ class SimEngine:
                     nudges.append(f"NOTE: No crafting in a while and the Granary is still unbuilt -- "
                                   f"it needs {crafted_needs}. At the workshop, craft_item those now.")
                 else:
-                    nudges.append("NOTE: No crafting in a while. At the workshop, craft_item (planks/bricks/tools) â€” advanced builds like the Granary need crafted goods.")
+                    nudges.append("NOTE: No crafting in a while. At the workshop, craft_item (planks/bricks/tools) — advanced builds like the Granary need crafted goods.")
             else:
                 nudges.append("NOTE: The village should build a Workshop, then craft goods for advanced builds like the Granary.")
         if SURVIVAL_ENABLED:
@@ -4238,7 +4238,7 @@ class SimEngine:
                 nudges.append(f"NOTE: {collapsed['name']} has collapsed. {verb} to revive them.")
             em = self._sage_emergency()
             if em and em["name"] != agent["name"] and agent["name"] in self._sage_responders(em):
-                nudges.append(f"EMERGENCY: Elder Sage's life is the top priority â€” abandon your task and "
+                nudges.append(f"EMERGENCY: Elder Sage's life is the top priority — abandon your task and "
                               f"heal_agent {em['name']}. Nothing matters more than the elder's survival.")
         if nearby_detailed and agent["consecutiveTalks"] == 0 \
                 and self.frameTick - agent.get("lastSpokeFrame", 0) > SOCIAL_SILENCE_FRAMES:
