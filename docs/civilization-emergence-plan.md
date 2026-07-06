@@ -672,7 +672,12 @@ elder judges COMPARATIVELY — approve the best, reject the rest with recorded
 reasons. Deliberation is in-world and logged, so council quality gains double
 as observable civic behavior. The same pattern extends to Phase F succession
 and rule votes with no new machinery. Scope lives in
-`.cursor/phase-prompts/phase-D.md` item 6.
+`.cursor/phase-prompts/phase-D.md` item 6 — including two GUI views (2026-07-06):
+a persisted **Council panel** in the viewer sidebar (structured debate record:
+proposals side by side, verdict, per-candidate reasons — survives refresh via
+councilLog in state.json) and a **staged in-world debate** (proposers walk to
+the elder, sequenced speech bubbles, verdict bubble, "Council in session"
+banner) built from existing movement/bubble mechanics.
 
 **Replay result (2026-07-05): SWITCHED to `qwen/qwen3.5-9b`.** 100 logged
 prompts (60 routine / 20 elder / 20 invention): both models 100% JSON and
