@@ -38,8 +38,14 @@ LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 # (6.6s vs 4.6s avg -- its Q8 quant spilled to CPU next to gemma on a 12GB
 # card). Slot a real secondary back in here only if it's <=4GB on-GPU AND
 # demonstrably handles the decision prompt; otherwise one good model wins.
-MODEL_SMART = "google/gemma-4-e4b"
-MODEL_FAST = "google/gemma-4-e4b"
+# 2026-07-05 replay benchmark (100 logged prompts, docs/civilization-emergence-plan.md
+# Part 6): qwen3.5-9b vs gemma-4-e4b — equal JSON/action validity (100%), but
+# qwen halved move_to_district fixation (32% vs 65%), chose 9 distinct actions
+# vs 7, and authored 20/20 valid blueprints vs 19/20, at ~3s/decision more.
+# qwen emits via reasoning_content (empty content) — extract_decision_text
+# already handles that path.
+MODEL_SMART = "qwen/qwen3.5-9b"
+MODEL_FAST = "qwen/qwen3.5-9b"
 
 
 def model_for_decision(data):

@@ -560,6 +560,19 @@ Before Phase D: an A/B replay of logged invention prompts at temp ~0.8 and a
 larger token budget, judged on blueprint validity rate and effect-vector
 novelty. Adopt per-call overrides only if the replay wins.
 
+**Replay result (2026-07-05): SWITCHED to `qwen/qwen3.5-9b`.** 100 logged
+prompts (60 routine / 20 elder / 20 invention): both models 100% JSON and
+action validity, but qwen chose 9 distinct actions vs gemma's 7, halved the
+move_to_district share (32% vs 65% — the exact pathology every audit
+flagged), and authored 20/20 structurally valid blueprints vs 19/20. Cost:
+median 9.4s vs ~6.5s per decision (measured while gemma was concurrently
+serving live sim traffic, so qwen's true latency is better than that).
+qwen emits via `reasoning_content` (empty `content`); server.py's extractor
+already handles it. LM Studio config: context 13000, parallel 2 (6,500
+tokens/slot). MODEL_SMART/MODEL_FAST updated. gemma stays on disk as the
+fallback. Pre-D takeaway: the earlier "upgrade at Phase D" trigger was
+executed early on 2026-07-05 per the acceleration decision.
+
 **Switching is decided by replay, not vibes.** `lm_studio.jsonl` stores every
 real request/response pair. Before any model change: replay 50–100 logged
 decision prompts (mix of routine turns, invention-only turns, elder turns)
