@@ -660,6 +660,20 @@ Before Phase D: an A/B replay of logged invention prompts at temp ~0.8 and a
 larger token budget, judged on blueprint validity rate and effect-vector
 novelty. Adopt per-call overrides only if the replay wins.
 
+**Diegetic invention council (adopted 2026-07-06, from Karpathy's LLM-council
+pattern):** a literal multi-model council is off the table (one model fits
+the 12 GB card; routine turns can't afford 2N+1 calls) — but the council's
+mechanism (independent generation → comparative review → one judge) is
+applied at the one seam where it pays: invention events. The village already
+has the structure (proposals → pendingBlueprints → elder approval); Phase D
+makes it a real council: 2–3 villagers propose in parallel (temperature
+override from C4 provides the diversity a second model would have), and the
+elder judges COMPARATIVELY — approve the best, reject the rest with recorded
+reasons. Deliberation is in-world and logged, so council quality gains double
+as observable civic behavior. The same pattern extends to Phase F succession
+and rule votes with no new machinery. Scope lives in
+`.cursor/phase-prompts/phase-D.md` item 6.
+
 **Replay result (2026-07-05): SWITCHED to `qwen/qwen3.5-9b`.** 100 logged
 prompts (60 routine / 20 elder / 20 invention): both models 100% JSON and
 action validity, but qwen chose 9 distinct actions vs gemma's 7, halved the
