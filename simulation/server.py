@@ -47,6 +47,15 @@ LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 MODEL_SMART = "qwen/qwen3.5-9b"
 MODEL_FAST = "qwen/qwen3.5-9b"
 
+# Phase D model-experiment hook (plan Part 6 / copilot-audit C4): invention-only
+# calls may override the decision defaults (temperature 0.4 / max_tokens 512).
+# None = inherit the defaults, i.e. current behavior. The Part 6 replay
+# experiment flips these (e.g. temperature 0.8, max_tokens 768) -- adopt only
+# if the replay wins on blueprint validity + effect-vector novelty. The council
+# fan-out relies on this hook for proposal diversity once flipped.
+INVENTION_TEMPERATURE = None
+INVENTION_MAX_TOKENS = None
+
 
 def model_for_decision(data):
     if data.get("invention_only"):
@@ -533,6 +542,10 @@ VALID_UNLOCK_KINDS = {"craft"}
 MAX_PENDING_BLUEPRINTS = 5
 MAX_APPROVED_CUSTOM = 15
 MAX_CUSTOM_RESOURCES = 10
+# Phase D (TECH_TREE_ENABLED): blueprint tech-tier bounds. Tier gating only
+# runs when the caller passes a village_tier (the engine passes None with the
+# flag off, so flag-off validation is unchanged).
+MAX_TECH_TIER = 3
 # Role definitions are the single source of truth in roles.json (also served to
 # the browser as /roles.js). The server derives its role maps from it so the
 # client and server can never drift.
@@ -858,8 +871,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-{season_line}Civilization level: {civilization_level}
-Structures built: {structures_built}
+{season_line}{level_line}Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
@@ -1375,8 +1387,15 @@ def validate_function_block(function, available_resource_ids):
 
 
 def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
-                       custom_resource_count, rejected_ids=None, known_effect_vectors=None):
-    """Validate a proposed blueprint. Returns (ok: bool, reason: str|None)."""
+                       custom_resource_count, rejected_ids=None, known_effect_vectors=None,
+                       village_tier=None):
+    """Validate a proposed blueprint. Returns (ok: bool, reason: str|None).
+
+    village_tier (Phase D, TECH_TREE_ENABLED): when not None, the blueprint's
+    optional "tier" (default 1) must not exceed it, and any unlock effect's
+    tier must be at most blueprint tier + 1 (the deterministic-escape rule: the
+    station for tier N must itself be buildable at tier N-1). None = no tier
+    checks at all (flag off)."""
     rejected_ids = rejected_ids or []
     if not isinstance(blueprint, dict):
         return False, "blueprint must be an object"
@@ -1458,6 +1477,30 @@ def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
     ok_fn, fn_reason = validate_function_block(fn, available)
     if not ok_fn:
         return False, fn_reason
+
+    if village_tier is not None:
+        tier = blueprint.get("tier", 1)
+        if tier is None:
+            tier = 1
+        if isinstance(tier, bool) or not isinstance(tier, int) \
+                or not (1 <= tier <= MAX_TECH_TIER):
+            return False, f"tier must be an integer 1-{MAX_TECH_TIER}"
+        for unlock in (fn.get("unlocks") or []) if isinstance(fn, dict) else []:
+            ut = unlock.get("tier")
+            if ut is None:
+                continue
+            if isinstance(ut, bool) or not isinstance(ut, int) \
+                    or not (1 <= ut <= MAX_TECH_TIER):
+                return False, f"unlock tier must be an integer 1-{MAX_TECH_TIER}"
+            if ut > tier + 1:
+                return False, (f"a station unlocking tier {ut} must itself be tier "
+                               f"{ut - 1} or lower, so the chain stays buildable")
+        if tier > village_tier:
+            hint = ("the Forge unlocks tier 2 and is a normal tier-1 build"
+                    if tier == 2 else
+                    f"invent a structure whose function unlocks tier {tier} crafting")
+            return False, (f"tier {tier} tech requires a tier-{tier} station "
+                           f"built first ({hint})")
 
     vec = canonical_effect_vector(fn)
     known = set(known_effect_vectors or [])
@@ -1606,6 +1649,7 @@ def normalize_decision(decision, agent_data):
         ok, reason = validate_blueprint(
             decision.get("blueprint"), known_ids, pending_ids, approved_ids, custom_count,
             rejected_ids, agent_data.get("known_effect_vectors"),
+            village_tier=agent_data.get("village_tech_tier"),
         )
         if not ok:
             fallback = role_fallback_action(agent_data.get("role"), agent_data)
@@ -2096,7 +2140,7 @@ Blueprint ids previously rejected (do NOT reuse): {rejected_ids}
 Resources you may reference in "needs" and "function": {resource_ids}
 You may also introduce up to 3 brand-new resources via "new_resources", each with a gather_zone of farm, forest, village, market, beach, cave, or ocean (or null for crafted-only goods).
 {feedback}
-Design how it LOOKS too: include a "sprite" — 2-5 hex colors in "palette" plus a "grid" of 4-14 rows (4-14 chars each) using . for empty and a-e for palette colors. Make it recognizable at a glance.
+{tech_line}Design how it LOOKS too: include a "sprite" — 2-5 hex colors in "palette" plus a "grid" of 4-14 rows (4-14 chars each) using . for empty and a-e for palette colors. Make it recognizable at a glance.
 {sprite_example}
 Respond with ONLY the JSON decision object: action "propose_blueprint" plus a complete "blueprint" (id, name, needs, required function block, optional new_resources, visual_style, sprite). Invent something with a NEW effect, not a renamed duplicate."""
 
@@ -2138,6 +2182,18 @@ def build_invention_prompt(data):
     resources = [r.get("id") for r in data.get("known_resources") or []
                  if isinstance(r, dict) and r.get("id")]
     feedback = data.get("behavior_nudge") or ""
+    # Phase D (TECH_TREE_ENABLED): one short tier line -- what the current
+    # tech tier allows and how the next tier is reached. Empty (and therefore
+    # byte-identical to the Phase C prompt) when the engine sends no tier.
+    tech_tier = data.get("village_tech_tier")
+    tech_line = ""
+    if tech_tier:
+        tech_line = (f'Village tech tier: {tech_tier}. Your blueprint may set "tier" '
+                     f'1-{tech_tier} (default 1); tier {tech_tier + 1} tech needs a station '
+                     f'whose function unlocks tier {tech_tier + 1} built first.\n'
+                     if tech_tier < MAX_TECH_TIER else
+                     f'Village tech tier: {tech_tier} (the highest). Your blueprint may set '
+                     f'"tier" 1-{tech_tier} (default 1).\n')
     return INVENTION_USER_PROMPT.format(
         agent_name=data.get("agent_name"),
         role=data.get("role"),
@@ -2145,6 +2201,7 @@ def build_invention_prompt(data):
         rejected_ids=", ".join(rejected) or "none",
         resource_ids=", ".join(resources) or "none",
         feedback=feedback,
+        tech_line=tech_line,
         sprite_example=format_sprite_example(data.get("frame_tick")),
     )
 
@@ -2171,6 +2228,16 @@ def build_user_prompt(data, slim=False):
     if season:
         winter_hint = " — stocks do not regrow; rely on stored food" if season == "winter" else ""
         season_line = f"Season: {season}{winter_hint}\n"
+    # Phase D: the era (one line) replaces the vanity level when the engine
+    # sends one (TECH_TREE_ENABLED); with the flag off the engine sends None
+    # and this renders the exact Phase C level line.
+    era = data.get("era")
+    if era:
+        tech_tier = data.get("village_tech_tier")
+        tier_part = f" (tech tier {tech_tier})" if tech_tier else ""
+        level_line = f"Era: {era}{tier_part}\n"
+    else:
+        level_line = f"Civilization level: {data.get('civilization_level', 1)}\n"
 
     return USER_PROMPT_TEMPLATE.format(
         agent_name=data.get("agent_name"),
@@ -2189,7 +2256,7 @@ def build_user_prompt(data, slim=False):
         known_districts=format_known_districts(data.get("known_districts") or []),
         district_stocks=data.get("district_stocks") or "none",
         known_terraform=", ".join(data.get("known_terraform") or []) or "none",
-        civilization_level=data.get("civilization_level", 1),
+        level_line=level_line,
         structures_built=data.get("structures_built", 0),
         active_project=data.get("active_project", "none"),
         project_progress=data.get("project_progress", "none"),
@@ -2223,14 +2290,22 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
     if self_prompt:
         system_content += f"\n\nYOUR PERSONA (act in character): {self_prompt}"
+    max_tokens, temperature = 512, 0.4
+    if data.get("invention_only"):
+        # Phase D experiment hook: per-call overrides for invention-only turns
+        # (None = keep the defaults; the Part 6 replay flips them).
+        if INVENTION_MAX_TOKENS is not None:
+            max_tokens = INVENTION_MAX_TOKENS
+        if INVENTION_TEMPERATURE is not None:
+            temperature = INVENTION_TEMPERATURE
     payload = {
         "model": model_for_decision(data) if _model_routing_enabled else "local-model",
         "messages": [
             {"role": "system", "content": system_content},
             {"role": "user", "content": build_user_prompt(data, slim=slim)},
         ],
-        "max_tokens": 512,
-        "temperature": 0.4,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
         "stream": False,
         "thinking": {"type": "disabled", "budget_tokens": 0},
     }
@@ -2440,6 +2515,37 @@ AVAILABLE_ACTIONS = list(DECISION_ACTIONS)
 import sys as _sys  # noqa: E402
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sim_engine as _sim_engine  # noqa: E402
+
+# Phase D (TECH_TREE_ENABLED) prompt/schema amendments, applied only when the
+# engine flag is on so that flag-off prompts and request payloads stay
+# byte-identical to Phase C. The blueprint schema line teaches the optional
+# "tier" field; the "verdict" decision field carries the elder's comparative
+# council judgment (approve-the-best + reject-the-rest-with-reasons in one
+# decision -- the engine's COUNCIL VERDICT nudge explains when to use it).
+# Bug fix (found by the Phase D live smoke): SEED_PROJECT_IDS was a hardcoded
+# subset that never included the granary (or now the forge), so a blueprint
+# with id "granary" validated and its approval OVERWROTE the seed registry
+# entry (cheaper needs, wrong tier). Protect every seed template id.
+SEED_PROJECT_IDS.update(_sim_engine.PROJECT_TEMPLATES.keys())
+
+if _sim_engine.TECH_TREE_ENABLED:
+    DECISION_SCHEMA["properties"]["verdict"] = {
+        "type": ["object", "null"],
+        "properties": {"rejections": {"type": "object"}},
+    }
+    DECISION_SCHEMA["properties"]["blueprint"]["properties"]["tier"] = {
+        "type": ["integer", "null"],
+    }
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
+        '  "visual_style": "house",               // house | farm_plot | workshop | wall | generic\n',
+        '  "tier": 1,                             // OPTIONAL tech tier (1-3, default 1); tier N>1 needs a tier-N station built\n'
+        '  "visual_style": "house",               // house | farm_plot | workshop | wall | generic\n',
+    )
+    _SYSTEM_PROMPT_EXAMPLES_IDX = SYSTEM_PROMPT.find("\nEXAMPLE (")
+    SYSTEM_PROMPT_SLIM = (
+        SYSTEM_PROMPT[:_SYSTEM_PROMPT_EXAMPLES_IDX]
+        if _SYSTEM_PROMPT_EXAMPLES_IDX != -1 else SYSTEM_PROMPT
+    )
 
 
 def _llm_decide(payload):

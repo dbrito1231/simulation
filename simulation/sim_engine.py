@@ -415,6 +415,39 @@ SEASON_FRAMES = 54000
 SEASONS = ["spring", "summer", "autumn", "winter"]
 SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}
 
+# --- Phase D: technology tiers & eras (TECH_TREE_ENABLED) ---
+# Every structure type and recipe carries a `tier` (default 1; the granary and
+# cart are tier 2). A station structure's `unlocks` effect gains an optional
+# `tier`: the village tech tier is the highest unlock tier among built WORKING
+# stations (workshop=1, the seed Forge=2). Proposing/starting/crafting tier-T
+# tech requires village tier >= T, with every refusal surfaced; the
+# deterministic escape is that the tier-T station is itself tier T-1 or lower
+# (the Forge is a plain tier-1 build needing workshop-crafted planks). With the
+# flag off: no tier fields, no gates, no era/council prompt lines -- prompts
+# are byte-identical to Phase C.
+TECH_TREE_ENABLED = True
+MAX_TECH_TIER = 3
+# The wagon (tier-2 vehicle, crafted at the Forge, consumes the Phase C cart):
+# query-time effects on its holder, same pattern as the cart.
+WAGON_CARRY_BONUS = 40
+WAGON_SPEED_MULT = 1.4
+# Invention council (diegetic LLM-council, plan Part 6): when the invention
+# backstop fires, up to this many idle villagers get parallel invention-only
+# turns (their council turn REPLACES their normal think turn -- no added call
+# volume). Never fans out when fewer than 2 villagers are idle.
+INVENTION_COUNCIL_SIZE = 3
+COUNCIL_LOG_CAP = 12                      # persisted debate records (viewer panel)
+COUNCIL_TTL_FRAMES = STALL_THRESHOLD * 10  # a council with no verdict dissolves (~5.5 min)
+# Era ladder: the highest capability rung held names the era (monotonic -- a
+# lost capability never regresses the era). Replaces the vanity level in
+# prompts/UI; `level` stays in state for back-compat.
+ERA_LADDER = [
+    ("Founding Era", None),
+    ("Craftsman Era", "crafting"),     # a working craft station (workshop)
+    ("Forge Era", "metallurgy"),       # a working tier-2 station (the Forge)
+    ("Wagon Era", "vehicles"),         # a vehicle (cart/wagon) in village hands
+]
+
 # --- Registries (ported from index.html) ---
 PROJECT_TEMPLATES = {
     "house": {"name": "House", "needs": {"wood": 3, "stone": 1, "food": 1, "fish": 1}, "visualStyle": "house"},
@@ -551,6 +584,44 @@ if CRAFTING_ENABLED and GOODS_ENABLED:
                                  "color": "#A1887F", "crafted": True}
     SEED_RECIPES["cart"] = {"name": "Cart", "inputs": {"planks": 2, "wood": 2},
                             "station": "workshop"}
+
+if TECH_TREE_ENABLED:
+    # Phase D seed tiers: seeds default to tier 1; the granary and cart are the
+    # first tier-2 tech (reachable only once the Forge raises the village tier).
+    for _tid, _tmpl in PROJECT_TEMPLATES.items():
+        _tmpl["tier"] = 2 if _tid == "granary" else 1
+    for _rid, _recipe in SEED_RECIPES.items():
+        _recipe["tier"] = 2 if _rid == "cart" else 1
+    # The Forge: the seed tier-2 STATION. Itself plain tier-1 tech (the
+    # deterministic escape: the station for tier N is always buildable at tier
+    # N-1) -- its planks come from the workshop, closing the chain
+    # workshop -> planks -> Forge -> tier-2 tech (cart, wagon, tier-2 blueprints).
+    PROJECT_TEMPLATES["forge"] = {
+        "name": "Forge",
+        "needs": ({"stone": 3, "planks": 2, "gold": 1} if CRAFTING_ENABLED
+                  else {"stone": 3, "wood": 2, "gold": 1}),
+        "visualStyle": "workshop", "tier": 1,
+    }
+    PROJECT_ORDER.append("forge")
+    PROJECT_KIND["forge"] = "village"
+    SEED_STRUCTURE_FUNCTIONS["forge"] = {
+        "unlocks": [{"kind": "craft", "station": "forge", "tier": 2}],
+        "produces": [{"resource": "tools", "amount": 1, "every_ticks": 2400,
+                      "scope": "village"}] if CRAFTING_ENABLED else [],
+    }
+    if CRAFTING_ENABLED and GOODS_ENABLED:
+        # The wagon: the cart's tier-2 upgrade path (consumes the cart).
+        # Crafted at the Forge; query-time effects on the holder: a bigger
+        # carry cap than the cart AND faster movement (_carry_cap /
+        # _vehicle_speed_mult). The audit's "cars" answer -- reachable only
+        # through workshop -> planks -> forge -> cart -> wagon.
+        CRAFTED_RESOURCES["wagon"] = {"name": "Wagon", "gatherZone": None,
+                                      "color": "#8D6E63", "crafted": True}
+        # Station stays the workshop ZONE (stations are zone kinds); the Forge
+        # requirement is expressed through the tier-2 gate, not the zone.
+        SEED_RECIPES["wagon"] = {"name": "Wagon",
+                                 "inputs": {"cart": 1, "planks": 2, "tools": 1},
+                                 "station": "workshop", "tier": 2}
 
 AGENT_DEFS = [
     {"id": 1, "name": "Aria", "role": "farmer", "personality": "hardworking and cautious", "color": "#4CAF50", "zone": "farm_north"},
@@ -783,6 +854,7 @@ class SimEngine:
                 "lastBlueprintRejection": None, "lastGatherRejection": None,
                 "lastProjectRejection": None, "lastTerraformRejection": None,
                 "lastCraftRejection": None, "lastRepairRejection": None,
+                "lastRecipeRejection": None,
                 "lastShelterNote": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
@@ -799,7 +871,8 @@ class SimEngine:
         return agents
 
     def _reset_world(self, roster_size):
-        self.RECIPES = {k: {"name": v["name"], "inputs": dict(v["inputs"]), "station": v["station"]}
+        self.RECIPES = {k: {"name": v["name"], "inputs": dict(v["inputs"]), "station": v["station"],
+                            **({"tier": v.get("tier", 1)} if TECH_TREE_ENABLED else {})}
                         for k, v in SEED_RECIPES.items()}
         districts = json.loads(json.dumps(STARTER_DISTRICTS))
         road_nodes = json.loads(json.dumps(STARTER_ROAD_NODES))
@@ -856,6 +929,11 @@ class SimEngine:
             "approvedCustomEscalationLogged": False,
             "projectAbandonStreak": {},
             "deferredProjectTypes": {},
+            # Phase D (TECH_TREE_ENABLED): era + invention-council state.
+            "era": None,
+            "eraIndex": 0,
+            "councilActive": None,
+            "councilLog": [],
         }
         self._effect_period_fired = 0
         self._last_effect_benchmark_fired = 0
@@ -1110,7 +1188,8 @@ class SimEngine:
         dx = agent["targetX"] - agent["x"]
         dy = agent["targetY"] - agent["y"]
         dist = math.sqrt(dx * dx + dy * dy)
-        step = agent["speed"] * scale
+        # Phase D: wagon holders travel faster (query-time vehicle effect).
+        step = agent["speed"] * scale * self._vehicle_speed_mult(agent)
         if dist <= step:
             agent["x"] = agent["targetX"]
             agent["y"] = agent["targetY"]
@@ -1493,7 +1572,9 @@ class SimEngine:
 
     def _unbuilt_customs_blocking_invention(self):
         c = self.civilization
-        return any(pid not in c["builtTypes"] and not self._is_project_type_deferred(pid)[0]
+        return any(pid not in c["builtTypes"]
+                   and not self._is_project_type_deferred(pid)[0]
+                   and not self._type_tier_locked(pid)[0]
                    for pid in self._custom_project_ids())
 
     def _seed_project_from_stockpile(self, district_id, project):
@@ -1582,6 +1663,8 @@ class SimEngine:
             if pid in c["builtTypes"]:
                 continue
             if self._is_project_type_deferred(pid)[0]:
+                continue
+            if self._type_tier_locked(pid)[0]:
                 continue
             if any(p and p.get("type") == pid for p in c["districtProjects"].values()):
                 continue
@@ -1826,10 +1909,138 @@ class SimEngine:
 
     def _carry_cap(self, agent):
         """Per-agent carry cap: COLLECT_CAP, +CART_CARRY_BONUS while holding a
-        cart (query-time vehicle effect, like _gather_yield_bonus)."""
+        cart (query-time vehicle effect, like _gather_yield_bonus). Phase D:
+        the wagon (the cart's tier-2 upgrade) grants the larger bonus."""
+        if TECH_TREE_ENABLED and agent["resources"].get("wagon", 0) > 0:
+            return COLLECT_CAP + WAGON_CARRY_BONUS
         if GOODS_ENABLED and agent["resources"].get("cart", 0) > 0:
             return COLLECT_CAP + CART_CARRY_BONUS
         return COLLECT_CAP
+
+    # --- Phase D query-time helpers (TECH_TREE_ENABLED) ---
+    def _vehicle_speed_mult(self, agent):
+        """Movement speed multiplier for vehicle holders (query-time, applied
+        in _move_agent). Only the wagon moves faster; the cart only carries."""
+        if TECH_TREE_ENABLED and agent["resources"].get("wagon", 0) > 0:
+            return WAGON_SPEED_MULT
+        return 1.0
+
+    def _type_tier(self, type_):
+        """Tech tier of a structure type: live registry entry first, then the
+        seed template (covers registries restored from pre-Phase-D saves,
+        whose entries carry no tier field), else 1."""
+        c = self.civilization
+        tier = (c["projectRegistry"].get(type_) or {}).get("tier")
+        if tier is None:
+            tier = (PROJECT_TEMPLATES.get(type_) or {}).get("tier")
+        return tier if isinstance(tier, int) and tier >= 1 else 1
+
+    def _village_tech_tier(self):
+        """Highest tier unlocked by a built, WORKING station structure
+        (floor 1). The workshop's craft unlock is tier 1; the Forge's is
+        tier 2; blueprints may declare higher unlock tiers (bounded by
+        validate_blueprint's escape rule: unlock tier <= blueprint tier + 1)."""
+        if not TECH_TREE_ENABLED:
+            return MAX_TECH_TIER  # gate disabled: nothing is ever tier-locked
+        best = 1
+        for type_id in {s["type"] for s in self.civilization["structures"]}:
+            fn = self._get_structure_function(type_id)
+            for unlock in fn.get("unlocks") or []:
+                if unlock.get("kind") != "craft":
+                    continue
+                t = unlock.get("tier", 1)
+                if isinstance(t, int) and t > best and self._working_structure_count(type_id) > 0:
+                    best = t
+        return best
+
+    def _tier_gate_reason(self, tier):
+        """Human-readable refusal for tier-locked tech, always naming the
+        deterministic escape."""
+        if tier <= 2:
+            return (f"tier {tier} tech needs a tier-{tier} station built first "
+                    f"(the Forge unlocks tier 2 and is a normal tier-1 build)")
+        return (f"tier {tier} tech needs a tier-{tier} station built first "
+                f"(invent a structure whose function unlocks tier {tier} crafting)")
+
+    def _type_tier_locked(self, type_):
+        """(locked, reason) for starting a project of this type."""
+        if not TECH_TREE_ENABLED:
+            return False, None
+        tier = self._type_tier(type_)
+        if tier <= self._village_tech_tier():
+            return False, None
+        return True, self._tier_gate_reason(tier)
+
+    def _function_summary(self, fn):
+        """Compact one-line summary of a function block, for the elder's
+        comparative council prompt and the persisted councilLog records."""
+        parts = []
+        for p in (fn or {}).get("produces") or []:
+            parts.append(f"produces {p.get('amount', 1)} {p.get('resource')}")
+        for b in (fn or {}).get("boosts") or []:
+            res = "/".join(b.get("resources") or []) if b.get("kind") == "gather" \
+                else f"@{b.get('station')}"
+            parts.append(f"boosts {b.get('kind')} {res}")
+        for u in (fn or {}).get("unlocks") or []:
+            t = u.get("tier")
+            parts.append(f"unlocks {u.get('station')}" + (f" (tier {t})" if t else ""))
+        for s in (fn or {}).get("stores") or []:
+            parts.append(f"stores {s.get('capacity')} {s.get('resource')}")
+        if (fn or {}).get("houses"):
+            parts.append("houses villagers")
+        return "; ".join(parts) or "no effect"
+
+    # --- Phase D eras ---
+    def _era_capabilities(self):
+        caps = set()
+        c = self.civilization
+        for type_id in {s["type"] for s in c["structures"]}:
+            fn = self._get_structure_function(type_id)
+            if (fn.get("unlocks") or []) and self._working_structure_count(type_id) > 0:
+                caps.add("crafting")
+                break
+        if self._village_tech_tier() >= 2:
+            caps.add("metallurgy")
+        vehicles = ("cart", "wagon")
+        if any(a["resources"].get(v, 0) > 0 for a in self.agents for v in vehicles) \
+                or any(c["stockpile"].get(v, 0) > 0 for v in vehicles):
+            caps.add("vehicles")
+        return caps
+
+    def _current_era_index(self):
+        caps = self._era_capabilities()
+        idx = 0
+        for i, (_, cap) in enumerate(ERA_LADDER):
+            if cap is None or cap in caps:
+                idx = i
+        return idx
+
+    def _current_era_name(self):
+        if not TECH_TREE_ENABLED:
+            return None
+        c = self.civilization
+        return c.get("era") or ERA_LADDER[max(0, min(len(ERA_LADDER) - 1,
+                                                     c.get("eraIndex") or 0))][0]
+
+    def _maybe_era_transition(self):
+        """Tick-gated era check. Monotonic: capabilities only ever advance the
+        era (a broken forge doesn't un-name the age). Transitions are logged
+        dramatically and benchmarked (`era`)."""
+        if not TECH_TREE_ENABLED:
+            return
+        c = self.civilization
+        idx = self._current_era_index()
+        stored = c.get("eraIndex") or 0
+        if idx > stored or not c.get("era"):
+            advanced = idx > stored
+            c["eraIndex"] = max(idx, stored)
+            c["era"] = ERA_LADDER[c["eraIndex"]][0]
+            if advanced:
+                self._push_activity(
+                    f"A new age dawns — the village enters the {c['era']}!")
+                self._log_benchmark("era", c["eraIndex"],
+                                    {"era": c["era"],
+                                     "tech_tier": self._village_tech_tier()})
 
     def _storage_capacity(self, resource_id):
         """Village-wide storage capacity for a resource: the base camp pile
@@ -2343,7 +2554,8 @@ class SimEngine:
         prefs = pref if isinstance(pref, list) else [pref]
         prefs = prefs or ["house"]
         open_prefs = [p for p in prefs if not self._type_saturated(p)
-                      and not self._is_project_type_deferred(p)[0]]
+                      and not self._is_project_type_deferred(p)[0]
+                      and not self._type_tier_locked(p)[0]]
         if open_prefs:
             return random.choice(open_prefs)
         # Every preferred type is saturated: fall back to any unsaturated
@@ -2351,7 +2563,8 @@ class SimEngine:
         # granary and approved customs once the basics are overbuilt).
         fallback = [tid for tid in self.civilization["projectRegistry"]
                     if not self._type_saturated(tid)
-                    and not self._is_project_type_deferred(tid)[0]]
+                    and not self._is_project_type_deferred(tid)[0]
+                    and not self._type_tier_locked(tid)[0]]
         if fallback:
             return random.choice(fallback)
         return prefs[0]
@@ -2371,6 +2584,11 @@ class SimEngine:
         if tid in c["builtTypes"] or self._type_saturated(tid):
             return True
         if self._is_project_type_deferred(tid)[0]:
+            return True
+        # Phase D: a tier-locked seed (the granary before the Forge exists)
+        # can't be started, so it must not hold the invention gate shut --
+        # same reasoning as the deferred clause above.
+        if self._type_tier_locked(tid)[0]:
             return True
         if not STRUCTURE_EFFECTS_ENABLED:
             return False
@@ -2414,6 +2632,7 @@ class SimEngine:
             biased = next((pid for pid in self._custom_project_ids()
                            if pid not in c["builtTypes"]
                            and not self._is_project_type_deferred(pid)[0]
+                           and not self._type_tier_locked(pid)[0]
                            and PROJECT_KIND.get(pid, "village") == preferred_kind), None)
             if biased:
                 type_ = biased
@@ -2428,6 +2647,17 @@ class SimEngine:
                 "frame": self.frameTick,
             }
             return (f"{agent['name']} cannot start {name} — deferred after repeated abandonments")
+        locked, lock_reason = self._type_tier_locked(type_)
+        if locked:
+            name = tmpl.get("name", type_)
+            agent["lastProjectRejection"] = {
+                "reason": f"the {name} is tier-locked: {lock_reason}",
+                "frame": self.frameTick,
+            }
+            self._log_benchmark("tier_gate_rejection", self._type_tier(type_),
+                                {"kind": "project", "target": type_,
+                                 "village_tier": self._village_tech_tier()})
+            return f"{agent['name']} cannot start {name} — {lock_reason}"
         if self._invention_required() and not tmpl.get("custom"):
             return (f"{agent['name']} wants to build, but the village needs a NEW invention "
                     f"(propose_blueprint)")
@@ -2439,6 +2669,7 @@ class SimEngine:
             alt = next((tid for tid in c["projectRegistry"]
                         if not self._type_saturated(tid)
                         and not self._is_project_type_deferred(tid)[0]
+                        and not self._type_tier_locked(tid)[0]
                         and not any(p and p.get("type") == tid
                                     for p in c["districtProjects"].values())), None)
             if alt:
@@ -2548,6 +2779,17 @@ class SimEngine:
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop" \
                 and not self._craft_station_unlocked("workshop"):
             return f"{agent['name']} cannot craft {recipe_id} -- the village has no Workshop built yet"
+        if TECH_TREE_ENABLED:
+            tier = recipe.get("tier", 1)
+            village_tier = self._village_tech_tier()
+            if isinstance(tier, int) and tier > village_tier:
+                reason = self._tier_gate_reason(tier)
+                agent["lastCraftRejection"] = {"reason": reason, "frame": self.frameTick}
+                self._log_benchmark("tier_gate_rejection", tier,
+                                    {"kind": "craft", "target": recipe_id,
+                                     "village_tier": village_tier})
+                return (f"{agent['name']} cannot craft {recipe_id} — it is tier {tier} "
+                        f"tech and the village is tier {village_tier} ({reason})")
         if not self._has_inputs(agent, recipe["inputs"]):
             self._craft_input_reflex(agent, recipe_id, recipe)
             missing = self._largest_missing_input(agent, recipe["inputs"])
@@ -2607,12 +2849,32 @@ class SimEngine:
         c = self.civilization
         if rc and rc.get("id") in c["rejectedRecipeIds"]:
             return f"{agent['name']}'s recipe {rc.get('id')} was already rejected"
+        if TECH_TREE_ENABLED and isinstance(rc, dict):
+            # Phase D: recipes may declare a tech tier (default 1). Declaring a
+            # tier above the village's station-unlocked tier is refused with a
+            # surfaced reason (the escape: build the tier's station first).
+            tier = rc.get("tier", 1)
+            if tier is not None and (isinstance(tier, bool) or not isinstance(tier, int)
+                                     or not (1 <= tier <= MAX_TECH_TIER)):
+                reason = f"recipe tier must be an integer 1-{MAX_TECH_TIER}"
+                agent["lastRecipeRejection"] = {"reason": reason, "frame": self.frameTick}
+                return f"{agent['name']} drafted an invalid recipe ({reason})"
+            village_tier = self._village_tech_tier()
+            if (tier or 1) > village_tier:
+                reason = self._tier_gate_reason(tier)
+                agent["lastRecipeRejection"] = {"reason": reason, "frame": self.frameTick}
+                self._log_benchmark("tier_gate_rejection", tier,
+                                    {"kind": "recipe", "target": rc.get("id"),
+                                     "village_tier": village_tier})
+                return f"{agent['name']}'s recipe {rc.get('id')} was refused — {reason}"
         if not self._validate_recipe(rc):
             return f"{agent['name']} drafted an invalid recipe"
+        agent["lastRecipeRejection"] = None
         c["pendingRecipes"].append({
             "id": rc["id"], "name": rc["name"], "inputs": dict(rc["inputs"]),
             "station": rc.get("station"), "color": rc.get("color", "#BCAAA4"),
             "proposedBy": agent["name"],
+            **({"tier": rc.get("tier") or 1} if TECH_TREE_ENABLED else {}),
         })
         c["lastBlueprintActivityFrame"] = self.frameTick
         needs_str = ", ".join(f"{k}x{v}" for k, v in rc["inputs"].items())
@@ -2635,7 +2897,8 @@ class SimEngine:
             return f"{agent['name']} rejected the {rc['name']} recipe"
         c["resourceRegistry"][rc["id"]] = {"name": rc["name"], "gatherZone": None,
                                            "color": rc["color"], "crafted": True}
-        self.RECIPES[rc["id"]] = {"name": rc["name"], "inputs": dict(rc["inputs"]), "station": rc["station"]}
+        self.RECIPES[rc["id"]] = {"name": rc["name"], "inputs": dict(rc["inputs"]), "station": rc["station"],
+                                  **({"tier": rc.get("tier") or 1} if TECH_TREE_ENABLED else {})}
         c["lastCraftActivityFrame"] = self.frameTick
         return f"{agent['name']} approved the {rc['name']} recipe"
 
@@ -2774,6 +3037,7 @@ class SimEngine:
             self._custom_resource_count(),
             list(c["rejectedBlueprintIds"]),
             list(self._known_effect_vectors()),
+            village_tier=self._village_tech_tier() if TECH_TREE_ENABLED else None,
         )
 
     # --- relationships / helpers ---
@@ -3352,6 +3616,132 @@ class SimEngine:
                 f"The unused resource {name} ({retired}) has faded from village life -- "
                 f"its slot is free for new inventions")
 
+    # --- Phase D invention council (diegetic LLM-council; TECH_TREE_ENABLED) ---
+    def _record_council_proposal(self, agent, bp, decision):
+        """A propose_blueprint that lands while a council is in session becomes
+        part of the debate record, and appears in-world as a speech bubble
+        (staged debate: existing message/bubble mechanics only)."""
+        c = self.civilization
+        council = c.get("councilActive")
+        if not council:
+            return
+        council.setdefault("proposals", []).append({
+            "proposer": agent["name"], "id": bp["id"], "name": bp["name"],
+            "needs": dict(bp["needs"]),
+            "function_summary": self._function_summary(bp.get("function")),
+        })
+        if not decision.get("message"):
+            agent["message"] = f"I propose the {bp['name']}!"
+            agent["messageTimer"] = 240
+        self._push_activity(
+            f"Council: {agent['name']} lays the {bp['name']} before the elder "
+            f"({len(council['proposals'])} proposal(s) on the table)")
+
+    def _council_reject_pending(self, elder, target_id, reason):
+        """Reject one pending blueprint as part of a comparative verdict:
+        pops it, records the rejection (amnesty clock included), and routes
+        the reason back to the proposer's next prompt -- the same feedback
+        loop a standalone reject_blueprint uses, plus the per-candidate
+        reason the council pattern requires."""
+        c = self.civilization
+        idx = next((i for i, p in enumerate(c["pendingBlueprints"])
+                    if p["id"] == target_id), -1)
+        if idx == -1:
+            return None
+        bp = c["pendingBlueprints"].pop(idx)
+        c["rejectedBlueprintIds"].add(bp["id"])
+        c.setdefault("rejectedBlueprintFrames", {})[bp["id"]] = self.frameTick
+        proposer = self._find_agent(bp.get("proposedBy"))
+        if proposer:
+            proposer["lastBlueprintRejection"] = {
+                "reason": f"the elder chose another design: {reason}",
+                "frame": self.frameTick}
+        return bp
+
+    def _record_council_verdict(self, elder, approved_bp, decision):
+        """Conclude a comparative judgment: process the optional
+        verdict.rejections map (reject-the-rest-with-reasons in the same
+        decision), log the comparison as a village event, persist the debate
+        to councilLog (the viewer's Council panel), and stage the verdict
+        as a longer-lived elder speech bubble."""
+        c = self.civilization
+        council = c.get("councilActive")
+        verdict = decision.get("verdict")
+        rejections = {}
+        if isinstance(verdict, dict) and isinstance(verdict.get("rejections"), dict):
+            for rid, reason in verdict["rejections"].items():
+                if rid == approved_bp["id"]:
+                    continue
+                reason = str(reason or "the approved design served the village better")[:160]
+                if self._council_reject_pending(elder, rid, reason):
+                    rejections[rid] = reason
+        if not council and not rejections:
+            return  # plain single-blueprint approval: not a council event
+        # Build the debate record. Prefer the live council's proposal list;
+        # fall back to what we know (approved + rejected candidates).
+        proposals = list((council or {}).get("proposals") or [])
+        known_ids = {p["id"] for p in proposals}
+        for bp in [approved_bp]:
+            if bp["id"] not in known_ids:
+                proposals.append({
+                    "proposer": bp.get("proposedBy", "?"), "id": bp["id"],
+                    "name": bp["name"], "needs": dict(bp.get("needs") or {}),
+                    "function_summary": self._function_summary(bp.get("function")),
+                })
+        loser_names = [rid for rid in rejections]
+        outcome = f"{approved_bp['name']} approved"
+        if loser_names:
+            outcome += f"; {len(loser_names)} rejected"
+            first_reason = rejections[loser_names[0]]
+            self._push_activity(
+                f"Elder {elder['name']} chose the {approved_bp['name']} over "
+                f"{', '.join(loser_names)}: {first_reason}")
+        record = {
+            "frame": self.frameTick,
+            "trigger": (council or {}).get("trigger") or "elder_review",
+            "proposals": proposals,
+            "verdict": {"approved_id": approved_bp["id"],
+                        "reasons_per_candidate": rejections},
+            "outcome": outcome,
+        }
+        log = c.setdefault("councilLog", [])
+        log.insert(0, record)
+        del log[COUNCIL_LOG_CAP:]
+        if council:
+            c["councilActive"] = None
+        # Staged verdict: a longer-lived elder bubble naming winner and losers.
+        if not decision.get("message"):
+            losers_part = f" over {', '.join(loser_names)}" if loser_names else ""
+            elder["message"] = (f"The council has spoken: we build the "
+                                f"{approved_bp['name']}{losers_part}!")
+        elder["messageTimer"] = 480
+
+    def _maybe_dissolve_council(self):
+        """A council whose verdict never lands (elder offline, proposals all
+        invalid) dissolves after COUNCIL_TTL_FRAMES -- the deterministic
+        escape from a stuck councilActive state. Pending proposals stay in
+        pendingBlueprints for the normal (non-comparative) review path."""
+        if not TECH_TREE_ENABLED:
+            return
+        c = self.civilization
+        council = c.get("councilActive")
+        if not council:
+            return
+        if self.frameTick - council.get("frame", 0) < COUNCIL_TTL_FRAMES:
+            return
+        record = {
+            "frame": self.frameTick,
+            "trigger": council.get("trigger") or "invention_backstop",
+            "proposals": list(council.get("proposals") or []),
+            "verdict": None,
+            "outcome": "dissolved without a verdict",
+        }
+        log = c.setdefault("councilLog", [])
+        log.insert(0, record)
+        del log[COUNCIL_LOG_CAP:]
+        c["councilActive"] = None
+        self._push_activity("The invention council disperses without a verdict")
+
     # --- invention-demand backstop (#5.2) ---
     def _maybe_invention_backstop(self):
         """Deterministic elder backstop, same tick-gated _maybe_* shape as
@@ -3375,11 +3765,13 @@ class SimEngine:
             return
         if c["pendingBlueprints"]:
             return
+        if TECH_TREE_ENABLED and c.get("councilActive"):
+            return  # a council is already deliberating
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
         if not elder:
             return
-        target = next((a for a in self._idle_agents_for_elder() if a["name"] != elder["name"]), None)
-        if c.get("inventionBackstopFires", 0) >= INVENTION_ELDER_TAKEOVER or not target:
+        idle = [a for a in self._idle_agents_for_elder() if a["name"] != elder["name"]]
+        if c.get("inventionBackstopFires", 0) >= INVENTION_ELDER_TAKEOVER or not idle:
             c["inventionRequiredStreak"] = 0
             c["inventionBackstopFires"] = 0
             elder["inventionTurn"] = True
@@ -3387,6 +3779,37 @@ class SimEngine:
             return
         c["inventionRequiredStreak"] = 0
         c["inventionBackstopFires"] = c.get("inventionBackstopFires", 0) + 1
+        if TECH_TREE_ENABLED and len(idle) >= 2:
+            # Invention COUNCIL (plan Part 6): 2-3 idle villagers get parallel
+            # invention-only turns (each REPLACES that villager's next normal
+            # think turn -- no added LLM call volume) and walk to the elder;
+            # the elder judges the proposals comparatively when they land.
+            members = idle[:INVENTION_COUNCIL_SIZE]
+            names = [m["name"] for m in members]
+            for m in members:
+                m["inventionTurn"] = True
+                m["goal"] = None
+                m["assignedTask"] = "bring the council a new structure blueprint (propose_blueprint)"
+                m["lastTaskedFrame"] = self.frameTick
+                self._set_agent_target_to_agent(m, elder["name"])
+            c["councilActive"] = {
+                "frame": self.frameTick,
+                "trigger": "invention_backstop",
+                "proposers": names,
+                "proposals": [],
+            }
+            elder["message"] = f"The council convenes! {', '.join(names)}, bring me your inventions."
+            elder["messageTimer"] = 360
+            self._push_communication(
+                "directive", elder["name"], "everyone",
+                f"Invention council: {', '.join(names)} will each draft a blueprint")
+            self._push_activity(
+                f"Elder {elder['name']} convenes an invention council — "
+                f"{', '.join(names)} will each draft a proposal")
+            return
+        # Legacy single-delegation path (flag off, or only one villager idle --
+        # the council never fans out in that case, per the cost guard).
+        target = idle[0]
         target["inventionTurn"] = True
         self.apply_decision(elder, {
             "action": "assign_task", "target": target["name"],
@@ -3582,6 +4005,9 @@ class SimEngine:
             "effectThroughput": self._effect_period_fired,
             "ecologyScarcity": self._ecology_scarcity_index(),
         }
+        if TECH_TREE_ENABLED:
+            self.lastBenchmarks["era"] = self._current_era_name()
+            self.lastBenchmarks["techTier"] = self._village_tech_tier()
         role_counts = {}
         for a in self.agents:
             role_counts[a["role"]] = role_counts.get(a["role"], 0) + 1
@@ -3604,6 +4030,10 @@ class SimEngine:
             if scarcity is not None:
                 self._log_benchmark("ecology_scarcity_index", scarcity,
                                     {"period_ticks": BENCHMARK_TICK_FRAMES})
+        if TECH_TREE_ENABLED:
+            self._log_benchmark("era", self.civilization.get("eraIndex") or 0,
+                                {"era": self._current_era_name(),
+                                 "tech_tier": self._village_tech_tier()})
         if GOODS_ENABLED:
             c = self.civilization
             caps = {rid: self._storage_capacity(rid) for rid in EDIBLE_RESOURCES}
@@ -3893,6 +4323,7 @@ class SimEngine:
                         "visualStyle": bp.get("visual_style") or "generic",
                         "sprite": bp.get("sprite"),
                         "proposedBy": agent["name"],
+                        **({"tier": bp.get("tier") or 1} if TECH_TREE_ENABLED else {}),
                     })
                     if decision.get("message"):
                         agent["message"] = decision["message"]
@@ -3902,9 +4333,16 @@ class SimEngine:
                     c["inventionBackstopFires"] = 0
                     agent["lastBlueprintRejection"] = None
                     summary = f"{agent['name']} proposed {bp['name']} (needs {needs_str})"
+                    if TECH_TREE_ENABLED:
+                        self._record_council_proposal(agent, bp, decision)
                 else:
                     agent["lastBlueprintRejection"] = {"reason": reason, "frame": self.frameTick}
                     summary = f"{agent['name']} drafted an invalid blueprint ({reason})"
+                    if TECH_TREE_ENABLED and "tier" in (reason or ""):
+                        self._log_benchmark(
+                            "tier_gate_rejection", (bp or {}).get("tier") or 0,
+                            {"kind": "blueprint", "target": (bp or {}).get("id"),
+                             "village_tier": self._village_tech_tier()})
 
         elif action == "approve_blueprint":
             idx = next((i for i, p in enumerate(c["pendingBlueprints"]) if p["id"] == decision.get("target")), -1)
@@ -3922,6 +4360,7 @@ class SimEngine:
                     "visualStyle": bp["visualStyle"], "custom": True,
                     "sprite": bp.get("sprite"),
                     "function": dict(bp.get("function") or {}),
+                    **({"tier": bp.get("tier") or 1} if TECH_TREE_ENABLED else {}),
                 }
                 c.setdefault("approvedCustomApprovedFrame", {})[bp["id"]] = self.frameTick
                 c["pendingBlueprints"].pop(idx)
@@ -3930,6 +4369,8 @@ class SimEngine:
                     agent["message"] = decision["message"]
                     agent["messageTimer"] = 180
                 summary = f"{agent['name']} approved {bp['name']} blueprint"
+                if TECH_TREE_ENABLED:
+                    self._record_council_verdict(agent, bp, decision)
             else:
                 summary = f"{agent['name']} could not approve that blueprint"
 
@@ -4135,6 +4576,10 @@ class SimEngine:
         if craft_rejection and self.frameTick - craft_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last craft failed: {craft_rejection['reason']}. "
                           f"Gather the missing input first.")
+        if TECH_TREE_ENABLED:
+            recipe_rejection = agent.get("lastRecipeRejection")
+            if recipe_rejection and self.frameTick - recipe_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: Your last recipe proposal was refused: {recipe_rejection['reason']}.")
         project_rejection = agent.get("lastProjectRejection")
         if project_rejection and self.frameTick - project_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
@@ -4224,6 +4669,19 @@ class SimEngine:
             elif (not c["rules"] and not c["pendingRules"]
                   and self.frameTick - c["lastRuleActivityFrame"] > BLUEPRINT_STALL_THRESHOLD):
                 nudges.append("NOTE: The village has no shared rules yet. Consider propose_rule (a small resource_tax builds a shared stockpile).")
+        if TECH_TREE_ENABLED and agent["role"] == "elder" and len(c["pendingBlueprints"]) >= 2:
+            # Comparative council judgment: the elder sees the competing
+            # proposals side by side and rules on all of them in ONE decision.
+            briefs = "; ".join(
+                f"{b['id']} by {b['proposedBy']} (needs "
+                + ", ".join(f"{k} {v}" for k, v in (b.get('needs') or {}).items())
+                + f"; {self._function_summary(b.get('function'))})"
+                for b in c["pendingBlueprints"])
+            nudges.append(
+                f"COUNCIL VERDICT NEEDED: {len(c['pendingBlueprints'])} blueprint proposals "
+                f"compete: {briefs}. Compare them and approve the BEST with approve_blueprint "
+                f'(target = its id), rejecting the rest IN THE SAME decision by adding '
+                f'"verdict": {{"rejections": {{"<id>": "<one-line reason it lost>"}}}}.')
         if agent["role"] == "elder" and actives:
             stalled_district = next((did for did in actives
                                      if self.frameTick - c["districtLastContribution"].get(did, 0) > STALL_THRESHOLD), None)
@@ -4331,6 +4789,11 @@ class SimEngine:
             # Phase C: one short prompt line (server renders it only when set,
             # so flag-off prompts stay byte-identical to Phase B).
             "season": self._current_season(),
+            # Phase D: era replaces the level line and the tech tier feeds the
+            # blueprint tier gate + invention prompt. Both None when the flag
+            # is off, so the server renders Phase C prompts byte-identically.
+            "era": self._current_era_name() if TECH_TREE_ENABLED else None,
+            "village_tech_tier": self._village_tech_tier() if TECH_TREE_ENABLED else None,
             "pending_rules": [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
                                "yes": list(r["votes"].values()).count("yes"),
                                "no": list(r["votes"].values()).count("no"),
@@ -4398,8 +4861,18 @@ class SimEngine:
                         # normalize_decision swapped an invalid propose_blueprint
                         # for a fallback; remember why so the next prompt can
                         # tell the model instead of failing silently again.
+                        note = decision["rejection_note"]
                         agent["lastBlueprintRejection"] = {
-                            "reason": decision["rejection_note"], "frame": self.frameTick}
+                            "reason": note, "frame": self.frameTick}
+                        if TECH_TREE_ENABLED and "tier" in (note or "").lower():
+                            # Phase D observability: tier-gate rejections are
+                            # village events, not just private prompt nudges.
+                            self._push_activity(
+                                f"Tech tree: {agent['name']}'s blueprint was "
+                                f"refused — {note}")
+                            self._log_benchmark(
+                                "tier_gate_rejection", self._village_tech_tier(),
+                                {"kind": "blueprint_normalize", "agent": agent["name"]})
                     self.apply_decision(agent, decision)
                     agent["goal"] = self._goal_for_decision(decision)
         except Exception:
@@ -4469,6 +4942,9 @@ class SimEngine:
                 self._maybe_invention_backstop()
                 self._maybe_found_district()
                 self._maybe_welcome_newcomer()
+                if TECH_TREE_ENABLED:
+                    self._maybe_era_transition()
+                    self._maybe_dissolve_council()
             if STRUCTURE_EFFECTS_ENABLED and ft % EFFECT_TICK_FRAMES == 0:
                 self._tick_structure_effects()
             if ECOLOGY_ENABLED and ft % ECOLOGY_REGROW_FRAMES == 0:
@@ -4673,6 +5149,21 @@ class SimEngine:
                 # deliberately have NO migration -- every read defaults via
                 # .get(cond, 100), so pre-Phase-C structures start pristine.
                 civ.setdefault("lastSpoilage", None)
+                # Phase D: era + council state; registry entries from pre-D
+                # saves carry no tier field (read via _type_tier's seed-template
+                # fallback), and the new seed types (Forge, wagon resource)
+                # merge into restored registries so an old save can build them.
+                civ.setdefault("era", None)
+                civ.setdefault("eraIndex", 0)
+                civ.setdefault("councilActive", None)
+                civ.setdefault("councilLog", [])
+                if TECH_TREE_ENABLED:
+                    for tid, tmpl in PROJECT_TEMPLATES.items():
+                        if isinstance(civ.get("projectRegistry"), dict):
+                            civ["projectRegistry"].setdefault(tid, dict(tmpl))
+                    for rid, rdef in CRAFTED_RESOURCES.items():
+                        if isinstance(civ.get("resourceRegistry"), dict):
+                            civ["resourceRegistry"].setdefault(rid, dict(rdef))
                 if ECOLOGY_ENABLED and not civ.get("districtStocks"):
                     civ["districtStocks"] = self._init_district_stocks(
                         civ.get("districts") or {}, civ.get("resourceRegistry"))
@@ -4690,6 +5181,7 @@ class SimEngine:
                     a.setdefault("lastTerraformRejection", None)
                     a.setdefault("lastCraftRejection", None)
                     a.setdefault("lastRepairRejection", None)
+                    a.setdefault("lastRecipeRejection", None)
                     a.setdefault("lastShelterNote", None)
                     # state.json may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
@@ -4808,6 +5300,20 @@ class SimEngine:
                 "taxDue": c["taxDue"], "taxPaid": c["taxPaid"],
                 "collectAttempts": c["collectAttempts"], "collectSuccesses": c["collectSuccesses"],
             }
+            if TECH_TREE_ENABLED:
+                # Phase D: era chip, council banner, and the persisted debate
+                # records for the viewer's Council panel.
+                civ["era"] = self._current_era_name()
+                civ["techTier"] = self._village_tech_tier()
+                council = c.get("councilActive")
+                civ["councilActive"] = ({
+                    "active": True,
+                    "trigger": council.get("trigger"),
+                    "proposers": list(council.get("proposers") or []),
+                    "proposals": len(council.get("proposals") or []),
+                } if council else None)
+                civ["councilLog"] = json.loads(json.dumps(
+                    (c.get("councilLog") or [])[:COUNCIL_LOG_CAP], default=str))
             benchmarks = dict(self.lastBenchmarks)
             activity = list(self.activityLog)
             conversation = list(self.conversationLog[:30])
@@ -4830,6 +5336,7 @@ class SimEngine:
                         "ROADS_ENABLED": ROADS_ENABLED,
                         "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
                         "GOODS_ENABLED": GOODS_ENABLED,
+                        "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
                     },
                 },
             }

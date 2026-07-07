@@ -619,6 +619,59 @@ can only be *reached*, never named into existence.
 tier-3 "wagon" — with each step consuming the previous one's output.
 **Flag:** `TECH_TREE_ENABLED`.
 
+**Implementation log (2026-07-07, morning batch — landed the Night 2 item
+carried over from cycle 3.evening):** Found already implemented, uncommitted,
+in the working tree at slot start — a prior session had built the full scope
+of `.cursor/next-prompt.md` behind `TECH_TREE_ENABLED` but ended before
+committing, leaving `simulation/state.json.phaseD.bak` /
+`.recovery_hold` backups and a reset-to-fresh live `state.json` (frameTick
+10,643, 5 structures) from its own forced smoke test. Tiers/unlocks/eras/wagon
+land per spec: `_type_tier_locked` gates tier-N recipes/blueprints behind a
+built tier-(N-1) station with a surfaced reason ("requires a forge (tier 2)
+first"); Forge is a normal tier-1 build (the deterministic escape — nothing
+gates the gate); `_village_tech_tier`/`_craft_station_unlocked` are tier-aware;
+era is computed from capability set (Craftsman → Forge → Wagon Era) and
+replaces the vanity level in prompts/UI (`level` kept for back-compat, unused);
+wagon is the cart's tier-2 upgrade (consumes the cart, crafted at the Forge),
+with both carry-cap and movement-speed bonuses wired at query time. The
+diegetic invention council (added to scope 2026-07-06) also landed: 2–3 idle
+villagers fan out parallel proposals (no added LLM volume — replaces their
+normal turn), the elder's judgment is comparative (side-by-side needs/function
+summary, approve-one + reject-the-rest-with-reasons in one call), verdicts log
+as village events ("Elder Sage chose the Windmill over fish_smokery: ..."),
+`civilization["councilLog"]`/`councilActive` are served over `GET /state` and
+rendered by a new thin-viewer-only Council sidebar panel (winner highlighted,
+losers greyed with reasons, collapsible history) plus a live
+"Council in session" banner — index.html holds no new simulation logic.
+Model-experiment hook (`INVENTION_TEMPERATURE`/`INVENTION_MAX_TOKENS` in
+server.py) defaults to current behavior, ready for the Part 6 replay to flip.
+**Review finding (this slot):** the implementer had left a
+`POST /debug/exec` route in server.py — an unauthenticated arbitrary-`exec()`
+endpoint added as a forced-condition injector for its own smoke test, marked
+"REMOVED BEFORE COMMIT" but not actually removed. Deleted before commit;
+flagged as a process gap (implementer subagents must not ship debug scaffolding,
+smoke-test harnesses belong in a throwaway script/session, never a live route).
+**Forced live smoke (sessions `2026-07-07T01-41-36` through `01-48-49`, run
+against a fresh throwaway world after backing up the real save):** tier-2
+blueprint rejected pre-Forge with the surfaced reason, then accepted once the
+Forge stood; Craftsman → Forge → Wagon Era transitions all logged; a wagon was
+crafted from a cart; council convened multiple times with 2 proposals side by
+side and a comparative verdict logged with reasons both ways. Two follow-ups
+for the next slot: (1) one early smoke attempt logged a same-frame
+"council disperses without a verdict" — traced to the now-deleted
+`/debug/exec` harness driving the engine outside its normal tick loop
+(`frame_tick 0`, empty `lm_studio.jsonl` for that session), not reproducible
+via the real tick gates by static reread; worth a quiet eye on `councilLog`
+during the real soak rather than fully closed. (2) the recovery-arc soak this
+slot was supposed to audit (queued at the end of cycle 3.evening, hot-fix
+793c598) never ran — the server was redirected to Phase D smoke testing ~10
+minutes after the hot-fix commit and was found DOWN at this slot's start;
+zero hours of recovery-arc data exist. Real state.json (6,484,775 frames,
+416 structures, 410 ruins) restored from backup for tonight's soak, which
+must now serve BOTH still-open tests: the Phase C recovery-arc escape hatch
+AND live Phase D exercise (tier gate, era transitions, council) on the same
+run. py_compile clean; committed together as one change.
+
 ### Phase E — Market & property (I2, I3)
 Market structure posts prices from district stocks and stockpile levels; gold
 mediates; plots/homes claimable; inheritance recorded. Adopted from the

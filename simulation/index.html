@@ -261,6 +261,37 @@
     color: #aaa;
   }
   #actList li { padding: 3px 0; }
+  /* --- Phase D: council banner + Council sidebar panel --- */
+  #councilBanner {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    padding: 6px 18px; font: 600 13px system-ui, sans-serif;
+    background: rgba(90, 62, 20, 0.92); color: #ffe9b0;
+    border: 1px solid #c8a24a; border-radius: 4px;
+    z-index: 11; display: none; pointer-events: none;
+  }
+  #councilPanel summary {
+    cursor: pointer; font-size: 13px; font-weight: 600; color: #fff;
+    margin-bottom: 6px; outline: none;
+  }
+  #councilCards { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .council-card {
+    flex: 1 1 45%; min-width: 130px; box-sizing: border-box;
+    background: #1b1b26; border: 1px solid #2a2a35; border-radius: 4px;
+    padding: 6px 8px; font-size: 11px; line-height: 1.45; color: #bbb;
+  }
+  .council-card .cc-name { color: #e3c87e; font-weight: 600; }
+  .council-card .cc-by { color: #7ec8e3; }
+  .council-card .cc-fn { color: #9a9aa8; display: block; }
+  .council-card .cc-reason { color: #c0867e; display: block; font-style: italic; }
+  .council-card.winner { border-color: #4CAF50; background: #16211a; }
+  .council-card.winner .cc-verdict { color: #7bd88a; font-weight: 600; }
+  .council-card.loser { opacity: 0.62; }
+  #councilMeta { font-size: 11px; color: #8a8a99; margin-bottom: 6px; }
+  #councilHistory {
+    list-style: none; margin: 0; padding: 0;
+    font-size: 11px; color: #8a8a99; max-height: 110px; overflow-y: auto;
+  }
+  #councilHistory li { padding: 2px 0; border-bottom: 1px solid #22222c; }
   @media (max-width: 900px) {
     #wrap { flex-direction: column; height: auto; padding: 0; }
     #world { height: auto; max-height: 70vh; width: 100%; }
@@ -290,6 +321,7 @@
     <button id="zoomInBtn" title="Zoom in">+</button>
     <button id="zoomFitBtn" title="Fit whole world">Fit</button>
     <canvas id="minimap" width="220" height="160"></canvas>
+    <div id="councilBanner"></div>
   </div>
   <aside id="sidebar">
     <h1>AI Simulation World</h1>
@@ -299,7 +331,7 @@
     </div>
     <section class="panel-section" id="civPanel">
       <h2>Civilization</h2>
-      <div class="civ-row"><span class="civ-label">Level:</span> <span class="civ-value" id="civLevel">1</span></div>
+      <div class="civ-row"><span class="civ-label" id="civLevelLabel">Level:</span> <span class="civ-value" id="civLevel">1</span></div>
       <div class="civ-row"><span class="civ-label">Structures:</span> <span class="civ-value" id="civStructures">0</span></div>
       <div class="civ-project-row">
         <canvas id="civProjectSprite" width="80" height="80"></canvas>
@@ -333,6 +365,14 @@
         <span class="civ-label">Pending:</span>
         <div id="civPending"></div>
       </div>
+    </section>
+    <section class="panel-section" id="councilSection" style="display:none">
+      <details id="councilPanel" open>
+        <summary>Council</summary>
+        <div id="councilMeta"></div>
+        <div id="councilCards"></div>
+        <ul id="councilHistory"></ul>
+      </details>
     </section>
     <section class="panel-section">
       <h2>Agents</h2>
@@ -813,6 +853,12 @@ const civPendingRow = document.getElementById("civPendingRow");
 const civPendingEl = document.getElementById("civPending");
 const civProjectSprite = document.getElementById("civProjectSprite");
 const civProjectSpriteCtx = civProjectSprite.getContext("2d");
+const civLevelLabelEl = document.getElementById("civLevelLabel");
+const councilBannerEl = document.getElementById("councilBanner");
+const councilSectionEl = document.getElementById("councilSection");
+const councilMetaEl = document.getElementById("councilMeta");
+const councilCardsEl = document.getElementById("councilCards");
+const councilHistoryEl = document.getElementById("councilHistory");
 
 function escapeHtml(text) {
   return String(text)
@@ -993,15 +1039,35 @@ function renderSidebar() {
       ? '<span class="hint">Showing last frame; retrying /state…</span>'
       : ""));
 
-  civLevelEl.textContent = civ.level != null ? civ.level : 1;
+  // Phase D: the era replaces the vanity level when the server sends one
+  // (TECH_TREE_ENABLED); otherwise the classic level chip renders unchanged.
+  if (civ.era) {
+    civLevelLabelEl.textContent = "Era:";
+    civLevelEl.textContent = civ.techTier ? `${civ.era} (tier ${civ.techTier})` : civ.era;
+  } else {
+    civLevelLabelEl.textContent = "Level:";
+    civLevelEl.textContent = civ.level != null ? civ.level : 1;
+  }
   civStructuresEl.textContent = (civ.structures || []).length;
   renderProjectsList();
+
+  // Phase D: "Council in session" banner, driven by civ.councilActive.
+  const councilActive = civ.councilActive;
+  if (councilActive && councilActive.active) {
+    councilBannerEl.style.display = "block";
+    councilBannerEl.textContent =
+      `Council in session — ${councilActive.proposals || 0} proposal(s)` +
+      (councilActive.proposers ? ` (${councilActive.proposers.join(", ")})` : "");
+  } else {
+    councilBannerEl.style.display = "none";
+  }
 
   // --- Civilization detail rows (change-detected) ---
   const sidebarKey = JSON.stringify([
     civ.resourceRegistry, villageResourceBreakdown(), customProjectIds(),
     civ.recipes, civ.rules, civ.pendingRules, civ.pendingBlueprints,
     world.benchmarks, civ.collectAttempts, civ.collectSuccesses,
+    civ.councilLog, civ.era, civ.techTier,
     CRAFTING_ENABLED, RULES_ENABLED, BENCHMARKS_ENABLED, MEMES_ENABLED, MEMORY_ENABLED
   ]);
   if (sidebarKey !== lastSidebarKey) {
@@ -1061,6 +1127,8 @@ function renderSidebar() {
       civBenchRow.style.display = "none";
     }
 
+    renderCouncil(civ);
+
     const pendingBp = civ.pendingBlueprints || [];
     if (pendingBp.length > 0) {
       civPendingRow.style.display = "block";
@@ -1104,6 +1172,49 @@ function renderSidebar() {
       `<li>${escapeHtml(line)}</li>`
     ).join("");
   }
+}
+
+// =====================================================================
+// Phase D — Council panel (pure renderer over civ.councilLog, the engine's
+// persisted debate records). Latest debate renders as a thread of proposal
+// cards (winner highlighted, losers greyed with their rejection reasons);
+// older debates collapse to a one-line history list.
+// =====================================================================
+function councilCardHtml(p, verdict) {
+  const approvedId = verdict && verdict.approved_id;
+  const reasons = (verdict && verdict.reasons_per_candidate) || {};
+  const isWinner = approvedId && p.id === approvedId;
+  const reason = reasons[p.id];
+  const needs = Object.entries(p.needs || {}).map(([k, v]) => `${k}×${v}`).join(", ");
+  const cls = isWinner ? "council-card winner" : (verdict ? "council-card loser" : "council-card");
+  return `<div class="${cls}">` +
+    `<span class="cc-name">${escapeHtml(p.name || p.id)}</span> ` +
+    `<span class="cc-by">by ${escapeHtml(p.proposer || "?")}</span>` +
+    `<span class="cc-fn">${escapeHtml(p.function_summary || "")}${needs ? " · needs " + escapeHtml(needs) : ""}</span>` +
+    (isWinner ? `<span class="cc-verdict">✔ approved</span>` : "") +
+    (reason ? `<span class="cc-reason">✘ ${escapeHtml(reason)}</span>` : "") +
+    `</div>`;
+}
+
+function renderCouncil(civ) {
+  const log = civ.councilLog || [];
+  if (!log.length) {
+    councilSectionEl.style.display = "none";
+    return;
+  }
+  councilSectionEl.style.display = "block";
+  const latest = log[0];
+  councilMetaEl.textContent =
+    `Latest debate (frame ${latest.frame != null ? latest.frame : "?"}, ` +
+    `${latest.trigger || "?"}): ${latest.outcome || "in progress"}`;
+  const proposals = latest.proposals || [];
+  councilCardsEl.innerHTML = proposals.length
+    ? proposals.map((p) => councilCardHtml(p, latest.verdict)).join("")
+    : '<span class="civ-label">no proposals recorded</span>';
+  councilHistoryEl.innerHTML = log.slice(1, 8).map((r) => {
+    const n = (r.proposals || []).length;
+    return `<li>frame ${r.frame != null ? r.frame : "?"} — ${n} proposal(s) — ${escapeHtml(r.outcome || "?")}</li>`;
+  }).join("");
 }
 
 // =====================================================================
