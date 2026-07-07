@@ -483,6 +483,59 @@ RIVAL_PRICE_SURCHARGE = 1.5
 # nearest-N shelter slots.
 HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
 
+# --- Phase F: population lifecycle & governance depth (LIFECYCLE_ENABLED) ---
+# Aging, birth, natural death (elder included -- succession is the design, not
+# an edge case), and two rule kinds with teeth (harvest_quota, rationing) that
+# bind on the ecology/goods systems Phases B/C built. All deterministic tick
+# mechanics gated on one slow tick; the ONLY LLM involvement is exactly one
+# lm_complete call per birth event (persona authoring) and one per succession
+# candidacy is NOT needed (candidates are deterministic; villagers vote via the
+# existing propose_rule/vote_rule scaffold, reused verbatim). With the flag
+# off, no agent carries an age, no birth/death/election code runs, and
+# RULE_KINDS stays exactly {resource_tax, custom} -- prompts/behavior are
+# byte-identical to Phase E.
+LIFECYCLE_ENABLED = True
+# Aging: 1 "year" per LIFECYCLE_TICK_FRAMES (~10s at 30 ticks/s) is far too
+# fast for a multi-day soak to show generational turnover in real time, so
+# ages advance in small fractional steps -- tuned so a village soaking for
+# hours plausibly sees a birth or death, not so fast a single overnight run
+# blows through several generations. Smoke-testing forces this by temporarily
+# shrinking the gate/increment, never by waiting.
+LIFECYCLE_TICK_FRAMES = 300
+AGE_YEARS_PER_TICK = 0.02          # ~1 year per 15,000 frames (~8.3 min) at the gate cadence
+ADULT_AGE = 18                      # below this, an agent cannot be a birth parent or election candidate
+ELDER_AGE = 55                      # life-stage label switches to "elder" (age word only, not the elder ROLE)
+MAX_LIFE_EXPECTANCY = 90            # death chance saturates approaching this age
+DEATH_CHANCE_START_AGE = 65         # natural death rolls begin at this age
+DEATH_CHANCE_PER_TICK = 0.0006      # base per-gate roll once past DEATH_CHANCE_START_AGE, scaled by age
+POPULATION_FLOOR = 4                # never below this many non-incapacitated adults; death defers, logged
+# Birth: needs housing headroom (population cap > current population, the
+# same signal _maybe_welcome_newcomer uses), a food surplus (stockpile+held
+# edibles above a small multiple of the roster), and two ally adults sharing a
+# district. Gated to at most one birth per interval so a housing boom can't
+# spawn a crowd in one tick.
+BIRTH_CHECK_FRAMES = LIFECYCLE_TICK_FRAMES
+BIRTH_FOOD_SURPLUS_PER_AGENT = 4    # stockpile+carried edibles must exceed this * population
+BIRTH_MIN_INTERVAL_FRAMES = STALL_THRESHOLD * 6  # ~2 min cooldown between births village-wide
+BIRTH_STARTING_SKILL_PENALTY = True  # newborns start at the "young" life stage (see _life_stage)
+NEWBORN_GOODS_SHARE = 0.15          # newborn inherits this fraction of a parent's held goods
+# Succession: on the elder's death, an election runs on the existing
+# propose_rule/vote_rule machinery -- one pending rule per eligible candidate
+# (kind "succession"), same quorum tally as resource_tax. Deterministic tie
+# break (see _resolve_succession_tie) guarantees the arc always completes.
+SUCCESSION_ELECTION_TTL_FRAMES = STALL_THRESHOLD * 8  # ~13 min: any candidate short of quorum by then, deterministic tiebreak decides
+# Governance (I4): harvest_quota caps an agent's gathers of one resource in one
+# district per rationing period; rationing caps stockpile withdrawals when
+# storage is low. Both proposable/votable exactly like resource_tax.
+HARVEST_QUOTA_PERIOD_FRAMES = STALL_THRESHOLD * 3   # ~5 min per quota period
+RATIONING_STORAGE_LOW_RATIO = 0.5   # rationing only actually restricts below this storage-utilization ratio
+RATIONING_WITHDRAW_CAP = 3          # max units withdrawn from stockpile per agent per rationing check while low
+if LIFECYCLE_ENABLED:
+    # New governable rule kinds (I4) + the deterministic succession-ballot
+    # kind, layered onto the existing set so a flag-off village keeps exactly
+    # {resource_tax, custom} and byte-identical propose_rule validation.
+    RULE_KINDS = RULE_KINDS | {"harvest_quota", "rationing", "succession"}
+
 # --- Registries (ported from index.html) ---
 PROJECT_TEMPLATES = {
     "house": {"name": "House", "needs": {"wood": 3, "stone": 1, "food": 1, "fish": 1}, "visualStyle": "house"},
@@ -915,6 +968,26 @@ class SimEngine:
                 "homeStructureId": None, "lastTradeRejection": None,
                 "lastHomelessNudgeFrame": None,
             }
+            if LIFECYCLE_ENABLED:
+                # Phase F: staggered starting ages so the roster isn't a single
+                # generation -- the elder starts oldest (just past ELDER_AGE,
+                # so Sage is mortal from frame 0 but not on the brink), the
+                # rest spread across young/adult so aging/succession has
+                # texture from the first soak rather than needing weeks to
+                # differentiate. Deterministic (seeded by roster index), not
+                # random, so a fresh cold-start is reproducible.
+                if d["role"] == "elder":
+                    a["age"] = float(ELDER_AGE + 5)
+                else:
+                    a["age"] = float(ADULT_AGE + 2 + (i * 7) % 30)
+                a["lastQuotaResetFrame"] = 0
+                a["gatherCountThisPeriod"] = {}
+                a["lastQuotaRejection"] = None
+                a["lastRationingRejection"] = None
+                a["parents"] = None
+                a["deathFrame"] = None
+            else:
+                a["age"] = None
             agents.append(a)
         # post-build setup (index.html lines ~1037)
         for i, a in enumerate(agents):
@@ -990,6 +1063,17 @@ class SimEngine:
             "eraIndex": 0,
             "councilActive": None,
             "councilLog": [],
+            # Phase F (LIFECYCLE_ENABLED): population lifecycle + governance.
+            "lastBirthFrame": 0,
+            "lastDeathActivityFrame": 0,
+            "births": 0,
+            "deaths": 0,
+            "nextGeneratedAgentId": 1000,  # synthetic ids for generated villagers once AGENT_DEFS is exhausted
+            "pendingSuccession": None,     # {electionId, candidates:[names], startFrame, deadline}
+            "lastSuccessionActivityFrame": 0,
+            "harvestQuotas": {},            # rule id -> {"district": id|None, "resource": id|None, "value": n}
+            "rationingActive": {},          # rule id -> {"value": n}
+            "populationFloorHeld": False,   # last death-deferred-at-floor state, for the nudge
         }
         self._effect_period_fired = 0
         self._last_effect_benchmark_fired = 0
@@ -1302,6 +1386,14 @@ class SimEngine:
     def _update_survival(self, agent):
         if not SURVIVAL_ENABLED:
             return
+        if LIFECYCLE_ENABLED and agent.get("deathFrame") is not None:
+            # Phase F: death is permanent, unlike a survival collapse. Without
+            # this guard the COLLAPSE_REGEN/COLLAPSE_REVIVE_HEALTH path below
+            # (designed for a temporarily incapacitated agent) would
+            # eventually heal a corpse back past the revive threshold and
+            # resurrect it -- "{name} recovered" on someone already dead,
+            # who then resumes moving/thinking/voting with a stale role.
+            return
         edible = self._first_edible(agent) if agent["hunger"] < EAT_THRESHOLD else None
         if edible:
             agent["resources"][edible] -= 1
@@ -1338,12 +1430,20 @@ class SimEngine:
     def _sage_emergency(self):
         if not SURVIVAL_ENABLED:
             return None
-        sage = next((a for a in self.agents if a["role"] == "elder"), None)
+        # Phase F: the elder is mortal. A dead elder is permanently
+        # incapacitated (no revival path applies post-mortem), so without this
+        # guard a deceased Sage would look like a standing emergency forever
+        # -- responders would rush to a corpse instead of working, and no
+        # amount of healing ever clears it. Once dead, there is no emergency
+        # to respond to; _agent_dies has already started succession, which is
+        # the correct next step, not a rescue.
+        sage = next((a for a in self.agents
+                    if a["role"] == "elder" and a.get("deathFrame") is None), None)
         if not sage:
             return None
         if not sage["incapacitated"] and sage["health"] >= SAGE_CRITICAL_HEALTH:
             return None
-        healer = next((a for a in self.agents if a["role"] == "healer"), None)
+        healer = next((a for a in self.agents if a["role"] == "healer" and a.get("deathFrame") is None), None)
         return healer if (healer and healer["incapacitated"]) else sage
 
     def _sage_responders(self, target):
@@ -1633,12 +1733,17 @@ class SimEngine:
                    and not self._type_tier_locked(pid)[0]
                    for pid in self._custom_project_ids())
 
-    def _seed_project_from_stockpile(self, district_id, project):
-        """Transfer matching stockpile materials into a newly started project."""
+    def _seed_project_from_stockpile(self, district_id, project, agent=None):
+        """Transfer matching stockpile materials into a newly started project.
+        Phase F (I4): a rationing rule caps how much of an EDIBLE resource
+        this can pull out per call while village storage is low -- the
+        deterministic "stockpile withdrawal" the plan's rationing kind
+        governs. Non-edible materials (wood/stone/etc.) are never rationed."""
         c = self.civilization
         needs = project.get("needs") or {}
         contributed = project.setdefault("contributed", {})
         seeds = []
+        capped_note = None
         for res, need in needs.items():
             short = need - contributed.get(res, 0)
             if short <= 0:
@@ -1647,6 +1752,12 @@ class SimEngine:
             if available <= 0:
                 continue
             take = min(short, available)
+            if LIFECYCLE_ENABLED and res in EDIBLE_RESOURCES:
+                take, reason = self._rationing_gate(agent, res, take)
+                if reason and take < min(short, available):
+                    capped_note = reason
+            if take <= 0:
+                continue
             c["stockpile"][res] = available - take
             contributed[res] = contributed.get(res, 0) + take
             seeds.append((take, res))
@@ -1654,6 +1765,8 @@ class SimEngine:
             parts = ", ".join(f"{amt} {res}" for amt, res in seeds)
             self._push_activity(
                 f"The village stockpile supplied {parts} toward the {project['name']}")
+        if capped_note and agent is not None:
+            agent["lastRationingRejection"] = {"reason": capped_note, "frame": self.frameTick}
         return bool(seeds)
 
     def _largest_missing_input(self, agent, inputs):
@@ -1834,7 +1947,7 @@ class SimEngine:
             "contributed": {res: 0 for res in tmpl["needs"]},
             "districtId": district_id, "isTerraform": True,
         }
-        self._seed_project_from_stockpile(district_id, c["districtProjects"][district_id])
+        self._seed_project_from_stockpile(district_id, c["districtProjects"][district_id], agent=agent)
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         return f"{agent['name']} started {tmpl['name']} terraform in {district_id}"
@@ -2695,6 +2808,15 @@ class SimEngine:
                 if houses:
                     every_n = houses.get("every_n", HOUSES_PER_NEW_VILLAGER)
                     cap += self._working_structure_count(type_id) // every_n
+        if LIFECYCLE_ENABLED:
+            # Phase F: once every AGENT_DEFS name is in use (all 12 named
+            # slots occupied by long-lived villagers), housing headroom can
+            # still exist -- births then use a generated villager (see
+            # _next_agent_slot) instead of stalling at the fixed roster size.
+            # Without this, _population_cap topping out at len(AGENT_DEFS)
+            # would make birth impossible the moment the named roster fills,
+            # even with houses to spare.
+            return cap
         return min(len(AGENT_DEFS), cap)
 
     def _type_saturated(self, type_):
@@ -2713,7 +2835,17 @@ class SimEngine:
         if houses:
             base = c.get("basePopulation") or len(self.agents)
             every_n = houses.get("every_n", HOUSES_PER_NEW_VILLAGER)
-            return count >= (len(AGENT_DEFS) - base) * every_n + 3
+            headroom = len(AGENT_DEFS)
+            if LIFECYCLE_ENABLED:
+                # _population_cap() is uncapped past len(AGENT_DEFS) under
+                # this flag (generated villagers can be born once every named
+                # slot is full) -- without matching headroom here, the house
+                # soft cap would flag "enough houses" before there's actually
+                # room for the next birth, throttling population growth for
+                # no mechanical reason. Current agent count is the simplest
+                # lower bound that tracks any already-realized growth.
+                headroom = max(headroom, len(self.agents) + HOUSES_PER_NEW_VILLAGER)
+            return count >= (headroom - base) * every_n + 3
         for boost in fn.get("boosts") or []:
             if boost.get("kind") == "gather":
                 every_n = boost.get("every_n", FARM_PLOTS_PER_EXTRA)
@@ -2793,6 +2925,18 @@ class SimEngine:
     def _perform_gather(self, agent, resource):
         """Ecology-aware gather with structure boosts. Returns summary string."""
         c = self.civilization
+        if LIFECYCLE_ENABLED:
+            # Governance (I4): a harvest_quota rule binds before the ecology
+            # gate -- this is a policy refusal, not a depletion one, so it
+            # deliberately does NOT trigger _scarcity_reflex_on_depletion
+            # (there's nothing to terraform/relocate away from; the escape
+            # is waiting out the period, a different resource, or a district
+            # move, all surfaced in the reason text).
+            quota_ok, quota_reason = self._harvest_quota_gate(agent, resource)
+            if not quota_ok:
+                agent["lastQuotaRejection"] = {"reason": quota_reason, "frame": self.frameTick}
+                return f"{agent['name']} found nothing — {quota_reason}"
+            agent["lastQuotaRejection"] = None
         allowed, reason, scale = self._ecology_gather_gate(agent, resource)
         if not allowed:
             agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
@@ -2811,6 +2955,8 @@ class SimEngine:
             if did:
                 self._deplete_district_stock(
                     did, resource, amount * STOCK_DEPLETE_MULTIPLIER)
+        if LIFECYCLE_ENABLED:
+            self._record_harvest_quota_use(agent, resource, amount)
         agent["lastGatherRejection"] = None
         bonus_note = ""
         if amount > 1:
@@ -2972,7 +3118,7 @@ class SimEngine:
             "sprite": tmpl.get("sprite"),
             "districtId": district_id,
         }
-        self._seed_project_from_stockpile(district_id, c["districtProjects"][district_id])
+        self._seed_project_from_stockpile(district_id, c["districtProjects"][district_id], agent=agent)
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         if agent["role"] == "elder":
@@ -3004,7 +3150,11 @@ class SimEngine:
         # elder again, so the MAIN RULE can't spend every elder turn
         # re-announcing directives at the same villagers (the 2026-07-02
         # session logged 1,556 elder directives vs 19 villager speeches).
-        idle = [a for a in self.agents if self._is_idle(a)
+        # Phase F: incapacitated is no longer always transient (a dead agent
+        # stays incapacitated forever), so this must exclude it explicitly --
+        # otherwise a deceased villager could sit in the elder's idle list
+        # indefinitely and get assign_task'd to a corpse every gate.
+        idle = [a for a in self.agents if not a["incapacitated"] and self._is_idle(a)
                 and (a["lastTaskedFrame"] is None
                      or self.frameTick - a["lastTaskedFrame"] > ELDER_RETASK_COOLDOWN_FRAMES)]
         idle.sort(key=lambda a: (a["lastTaskedFrame"] if a["lastTaskedFrame"] is not None
@@ -3201,12 +3351,32 @@ class SimEngine:
         kind = rule.get("kind") or "custom"
         if kind not in RULE_KINDS:
             return False
+        if kind == "succession":
+            # Succession ballots are created deterministically by
+            # _start_succession_election on the elder's death, never by an
+            # agent's propose_rule call -- keeps the election tamper-proof
+            # (no one can nominate themselves mid-arc or spam candidacies).
+            return False
         if kind == "resource_tax":
             try:
                 v = float(rule.get("value"))
             except (TypeError, ValueError):
                 return False
             if not (0 <= v <= 3):
+                return False
+        if LIFECYCLE_ENABLED and kind == "harvest_quota":
+            try:
+                v = float(rule.get("value"))
+            except (TypeError, ValueError):
+                return False
+            if not (1 <= v <= 20):
+                return False
+        if LIFECYCLE_ENABLED and kind == "rationing":
+            try:
+                v = float(rule.get("value"))
+            except (TypeError, ValueError):
+                return False
+            if not (1 <= v <= RATIONING_WITHDRAW_CAP * 4):
                 return False
         return True
 
@@ -3219,10 +3389,24 @@ class SimEngine:
         if yes >= quorum:
             rule["enacted"] = True
             c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
-            c["rules"].append(rule)
             c["lastRuleActivityFrame"] = self.frameTick
-            self._push_activity(f'Rule "{rule["name"]}" enacted by vote ({yes} yes)')
-            self._log_benchmark("rule_enacted", len(c["rules"]), {"id": rule["id"], "yes": yes, "no": no})
+            if LIFECYCLE_ENABLED and rule["kind"] == "succession":
+                # Succession ballots are a leadership record, not an ongoing
+                # governance constraint -- they deliberately do NOT join
+                # c["rules"] (which has no repeal mechanism and a small
+                # MAX_ACTIVE_RULES budget shared with resource_tax/
+                # harvest_quota/rationing). Elder deaths recur naturally over
+                # a long soak; letting every succession permanently consume
+                # that budget would crowd out real governance over time.
+                # activity.jsonl + the "succession" benchmark are the
+                # permanent record instead.
+                self._enact_succession_winner(rule)
+            else:
+                c["rules"].append(rule)
+                self._push_activity(f'Rule "{rule["name"]}" enacted by vote ({yes} yes)')
+                self._log_benchmark("rule_enacted", len(c["rules"]), {"id": rule["id"], "yes": yes, "no": no})
+                if LIFECYCLE_ENABLED:
+                    self._apply_governance_rule(rule)
             return "enacted"
         if no >= quorum:
             c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
@@ -3230,6 +3414,32 @@ class SimEngine:
             self._push_activity(f'Rule "{rule["name"]}" rejected by vote ({no} no)')
             return "rejected"
         return "pending"
+
+    def _apply_governance_rule(self, rule):
+        """Phase F (I4): give harvest_quota/rationing mechanical teeth the
+        moment they're enacted. Both stay in effect as long as the rule is
+        in civilization["rules"]; a rule can be repealed the same way any
+        rule kind would be (out of scope here -- MAX_ACTIVE_RULES/existing
+        scaffold applies), and rationing additionally self-lifts once storage
+        recovers (checked at withdrawal time in _rationing_gate, not here) --
+        the deterministic escape so it never permanently binds."""
+        c = self.civilization
+        if rule["kind"] == "harvest_quota":
+            try:
+                value = int(float(rule.get("value")))
+            except (TypeError, ValueError):
+                value = HARVEST_QUOTA_PERIOD_FRAMES and 5
+            c["harvestQuotas"][rule["id"]] = {"value": max(1, value)}
+            self._push_activity(f'Harvest quota "{rule["name"]}" now limits gathers to '
+                                f'{max(1, value)} per resource per {HARVEST_QUOTA_PERIOD_FRAMES // 30}s per district')
+        elif rule["kind"] == "rationing":
+            try:
+                value = int(float(rule.get("value")))
+            except (TypeError, ValueError):
+                value = RATIONING_WITHDRAW_CAP
+            c["rationingActive"][rule["id"]] = {"value": max(1, value)}
+            self._push_activity(f'Rationing "{rule["name"]}" now caps stockpile withdrawals to '
+                                f'{max(1, value)} while storage is low')
 
     def _propose_rule(self, agent, decision):
         c = self.civilization
@@ -3261,6 +3471,18 @@ class SimEngine:
             return f"{agent['name']} found no such pending rule"
         vote = "no" if decision.get("vote") == "no" else "yes"
         rule["votes"][agent["name"]] = vote
+        if LIFECYCLE_ENABLED and rule["kind"] == "succession" and vote == "yes":
+            # An election is N candidate ballots, not N independent yes/no
+            # referenda: voting yes for one candidate is implicitly a no for
+            # every other candidate in the same election, so a villager's
+            # ballot can't count toward two winners at once.
+            election_id = (c.get("pendingSuccession") or {}).get("electionId")
+            for sibling in c["pendingRules"]:
+                if sibling is not rule and sibling["kind"] == "succession" \
+                        and sibling.get("electionId") == election_id:
+                    sibling["votes"].setdefault(agent["name"], "no")
+                    if sibling["votes"][agent["name"]] == "yes":
+                        sibling["votes"][agent["name"]] = "no"
         c["lastRuleActivityFrame"] = self.frameTick
         self._push_communication("vote", agent["name"], "everyone", f"{vote} on {rule['name']}")
         outcome = self._tally_and_maybe_enact(rule)
@@ -3287,6 +3509,466 @@ class SimEngine:
             agent["resources"][res] -= pay
             c["stockpile"][res] = c["stockpile"].get(res, 0) + pay
             c["taxPaid"] += pay
+
+    # --- Phase F: population lifecycle (aging / birth / death / succession) ---
+    def _life_stage(self, agent):
+        """One-word life stage for prompt identity (#1). Distinct from the
+        elder ROLE (Sage may be young if succession just landed; an aged
+        villager who never held the elder role is still labeled 'elder')."""
+        age = agent.get("age")
+        if age is None:
+            return None
+        if age < ADULT_AGE:
+            return "young"
+        if age >= ELDER_AGE:
+            return "elder"
+        return "adult"
+
+    def _tick_lifecycle(self):
+        """Gate for aging + natural death, tick-gated like every other
+        _maybe_* backstop. Birth and succession are handled by their own
+        gated methods so each has an isolated, independently testable
+        forcing path (age-to-death, kill-the-elder, enact-a-quota)."""
+        if not LIFECYCLE_ENABLED:
+            return
+        for a in self.agents:
+            if a.get("deathFrame") is not None:
+                continue
+            a["age"] = (a.get("age") or 0.0) + AGE_YEARS_PER_TICK * (LIFECYCLE_TICK_FRAMES / 30.0)
+        self._maybe_natural_death()
+        self._maybe_birth()
+
+    def _eligible_adults(self, exclude=None):
+        return [a for a in self.agents
+                if a.get("deathFrame") is None and not a["incapacitated"]
+                and (a.get("age") or 0) >= ADULT_AGE and a is not exclude]
+
+    def _maybe_natural_death(self):
+        c = self.civilization
+        for agent in list(self.agents):
+            if agent.get("deathFrame") is not None or agent["incapacitated"]:
+                continue
+            age = agent.get("age") or 0.0
+            if age < DEATH_CHANCE_START_AGE:
+                continue
+            # Linear ramp from 0 at DEATH_CHANCE_START_AGE to a saturating
+            # multiple of the base roll at MAX_LIFE_EXPECTANCY -- deterministic
+            # curve, stochastic roll (matches the plan's "deterministic curve").
+            span = max(1.0, MAX_LIFE_EXPECTANCY - DEATH_CHANCE_START_AGE)
+            progress = min(1.0, (age - DEATH_CHANCE_START_AGE) / span)
+            chance = DEATH_CHANCE_PER_TICK * (1 + progress * 9)
+            if random.random() >= chance:
+                continue
+            # Population floor: dying would drop non-incapacitated adults to
+            # or below the floor -- defer (never permanently; re-rolled every
+            # gate until either the population grows or this agent is no
+            # longer the one keeping it above floor). Logged, not silent.
+            living_adults = len(self._eligible_adults())
+            if living_adults <= POPULATION_FLOOR:
+                if not c.get("populationFloorHeld"):
+                    c["populationFloorHeld"] = True
+                    self._push_activity(
+                        f"{agent['name']} is frail with age, but the village is too small to "
+                        f"bear a loss (population at the floor of {POPULATION_FLOOR}) -- death defers.")
+                continue
+            c["populationFloorHeld"] = False
+            self._agent_dies(agent, cause="old age")
+            return  # one death per gate keeps the arc easy to follow/test
+
+    def _agent_dies(self, agent, cause="old age"):
+        """Natural death (#3): never mid-emergency (Sage-priority logic only
+        ever incapacitates, and _sage_emergency short-circuits when no elder
+        exists -- see CLAUDE.md), always logged, always followed by
+        inheritance + a memorial memory pushed to every living agent. The
+        elder's death additionally starts a succession election (#4)."""
+        c = self.civilization
+        was_elder = agent["role"] == "elder"
+        agent["deathFrame"] = self.frameTick
+        agent["incapacitated"] = True
+        agent["goal"] = None
+        agent["assignedTask"] = None
+        c["deaths"] = c.get("deaths", 0) + 1
+        c["lastDeathActivityFrame"] = self.frameTick
+        age_txt = f" at age {int(agent.get('age') or 0)}" if agent.get("age") is not None else ""
+        self._push_activity(f"{agent['name']} has died of {cause}{age_txt}.")
+        self._log_benchmark("death", c["deaths"], {"name": agent["name"], "cause": cause,
+                                                     "age": agent.get("age"), "role": agent["role"]})
+        memorial = f"{agent['name']} has passed away. The village will remember them."
+        for other in self.agents:
+            if other is agent or other.get("deathFrame") is not None:
+                continue
+            self._push_memory(other, memorial, kind="memorial")
+        self._inherit_from(agent)
+        if was_elder:
+            # Every "find the elder" lookup across the codebase (assign_task,
+            # the directive broadcast, _maybe_advance_rules, the invention
+            # backstop, ...) is a bare `role == "elder"` scan with no
+            # deathFrame check -- rather than audit every call site, demote
+            # the deceased elder's own role here so "elder" uniquely
+            # identifies the living leader again everywhere, immediately,
+            # for the whole (deterministic, bounded) span of the election.
+            agent["role"] = "retired_elder"
+            self._start_succession_election()
+
+    def _heirs_of(self, agent):
+        """Heirs are the deceased's children (parents[] linkage) if any exist
+        and are alive; otherwise every living adult shares equally (a village
+        this small has no formal family tree yet -- #Phase G territory)."""
+        children = [a for a in self.agents
+                    if a.get("deathFrame") is None and a.get("parents")
+                    and agent["name"] in a["parents"]]
+        if children:
+            return children
+        return self._eligible_adults(exclude=agent) or [a for a in self.agents if a is not agent]
+
+    def _inherit_from(self, agent):
+        """Goods/home flow to heirs (#3, Phase E inheritance records finally
+        consumed). Beliefs (memes) were already shared in life via proximity/
+        talk (#Phase G is full lineage); here we guarantee the deceased's
+        beliefs survive them by handing the full set to every heir, which is
+        what makes 'someone who never met Sage cites a rule he enacted'
+        (Part 4's civilization test) mechanically possible even without a
+        direct conversation."""
+        c = self.civilization
+        heirs = self._heirs_of(agent)
+        if not heirs:
+            return
+        share = {res: amt for res, amt in agent.get("resources", {}).items() if amt > 0}
+        if share:
+            # Integer split (remainder to the first heir) -- resource counts
+            # are integers everywhere else in the game (gather/contribute/
+            # trade amounts), so this avoids introducing float stockpiles
+            # that quota/rationing/display code elsewhere doesn't expect.
+            for res, amt in share.items():
+                base_each, remainder = divmod(int(amt), len(heirs))
+                for i, heir in enumerate(heirs):
+                    give = base_each + (remainder if i == 0 else 0)
+                    if give:
+                        heir["resources"][res] = heir["resources"].get(res, 0) + give
+            agent["resources"] = {}
+        if MEMES_ENABLED and agent.get("beliefs"):
+            for heir in heirs:
+                heir["beliefs"] |= agent["beliefs"]
+        home_id = agent.get("homeStructureId")
+        if home_id:
+            structure = next((s for s in c["structures"] if s["id"] == home_id), None)
+            new_owner = heirs[0]
+            if structure and not new_owner.get("homeStructureId"):
+                structure["homeOf"] = new_owner["name"]
+                new_owner["homeStructureId"] = home_id
+                self._push_activity(f"{new_owner['name']} inherits {agent['name']}'s home.")
+            elif structure and structure.get("homeOf") == agent["name"]:
+                structure["homeOf"] = None
+            agent["homeStructureId"] = None
+        self._push_activity(
+            f"{agent['name']}'s belongings pass to " +
+            (heirs[0]["name"] if len(heirs) == 1 else f"{len(heirs)} villagers") + ".")
+
+    # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
+    def _start_succession_election(self):
+        """One pending 'succession' rule per eligible candidate (adults,
+        excluding the just-deceased elder, capped to keep MAX_PENDING_RULES
+        headroom for ordinary governance). Candidates are the eligible-adult
+        set -- deterministic, no LLM involved in nomination. Villagers vote
+        via the existing vote_rule action; _vote_on_rule's exclusivity logic
+        (above) makes a "yes" on one candidate a "no" on the rest."""
+        c = self.civilization
+        candidates = self._eligible_adults()
+        if not candidates:
+            # No adult left at all (extreme edge case): fall back to any
+            # living agent so the village is never leaderless.
+            candidates = [a for a in self.agents if a.get("deathFrame") is None]
+        if not candidates:
+            return  # truly no one left; nothing to elect (village-extinction edge case)
+        candidates = candidates[:max(2, MAX_PENDING_RULES)]
+        election_id = f"succession_{self.frameTick}"
+        c["pendingRules"] = [r for r in c["pendingRules"] if r["kind"] != "succession"]
+        entries = []
+        for cand in candidates:
+            entry = {
+                "id": f"{election_id}_{cand['name'].lower()}", "name": f"Elect {cand['name']}",
+                "kind": "succession", "value": cand["name"],
+                "description": f"{cand['name']} succeeds as village elder.",
+                "proposedBy": "the village", "enacted": False, "votes": {},
+                "electionId": election_id, "candidateName": cand["name"],
+            }
+            entries.append(entry)
+            c["pendingRules"].append(entry)
+        c["pendingSuccession"] = {
+            "electionId": election_id,
+            "candidates": [cand["name"] for cand in candidates],
+            "startFrame": self.frameTick,
+            "deadline": self.frameTick + SUCCESSION_ELECTION_TTL_FRAMES,
+        }
+        c["lastSuccessionActivityFrame"] = self.frameTick
+        c["lastRuleActivityFrame"] = self.frameTick
+        self._push_activity(
+            f"The village must choose a new elder. Candidates: {', '.join(c['pendingSuccession']['candidates'])}.")
+        self._push_communication("election", "the village", "everyone",
+                                 f"Succession election opened: {', '.join(c['pendingSuccession']['candidates'])}")
+
+    def _enact_succession_winner(self, rule):
+        """Promotes the winning candidate to elder (direct role assignment --
+        succession is a deterministic engine act, not an LLM decision, same
+        as _found_district or any other backstop mutation) and clears the
+        rest of the election's ballots. Called from _tally_and_maybe_enact
+        once a candidate's rule crosses quorum."""
+        c = self.civilization
+        winner_name = rule.get("candidateName") or rule.get("value")
+        winner = self._find_agent(winner_name)
+        election_id = rule.get("electionId")
+        c["pendingRules"] = [r for r in c["pendingRules"]
+                             if not (r["kind"] == "succession" and r.get("electionId") == election_id)]
+        c["pendingSuccession"] = None
+        c["lastSuccessionActivityFrame"] = self.frameTick
+        if winner and (winner.get("deathFrame") is not None or winner["incapacitated"]):
+            # Edge case: the winning candidate died (of old age) or collapsed
+            # during the ~13 min TTL window between nomination and tiebreak.
+            # Crowning a corpse (or a currently-incapacitated agent) would
+            # leave the village silently leaderless -- no other code path
+            # re-triggers an election for an agent that was never actually
+            # made elder. Re-open a fresh election among the remaining
+            # candidates instead; the arc still cannot stall, it just takes
+            # one more round.
+            self._push_activity(
+                f"{winner['name']} could not take up the elder's mantle -- "
+                f"the village must choose again.")
+            self._start_succession_election()
+            return
+        if winner:
+            old_role = winner["role"]
+            winner["role"] = "elder"
+            winner["thinkInterval"] = 240
+            self._push_activity(f"{winner['name']} (formerly {old_role}) is chosen as the new village elder!")
+            self._push_communication("election", "the village", "everyone",
+                                     f"{winner['name']} is the new elder")
+            self._log_benchmark("succession", 1, {"winner": winner["name"], "electionId": election_id})
+
+    def _maybe_resolve_stalled_succession(self):
+        """Deterministic escape hatch: an election cannot stall forever. Once
+        SUCCESSION_ELECTION_TTL_FRAMES elapses with no candidate at quorum,
+        pick the one with the most yes votes (ties broken by lowest agent id,
+        fully deterministic) and enact it directly -- the arc always
+        completes, matching the hard rule that succession cannot softlock."""
+        c = self.civilization
+        pending = c.get("pendingSuccession")
+        if not pending or self.frameTick < pending["deadline"]:
+            return
+        entries = [r for r in c["pendingRules"]
+                  if r["kind"] == "succession" and r.get("electionId") == pending["electionId"]]
+        if not entries:
+            c["pendingSuccession"] = None
+            return
+        def _yes_count(r):
+            return list(r["votes"].values()).count("yes")
+        def _candidate_id(r):
+            cand = self._find_agent(r.get("candidateName"))
+            return cand["id"] if cand else 1 << 30
+        entries.sort(key=lambda r: (-_yes_count(r), _candidate_id(r)))
+        winner_rule = entries[0]
+        winner_rule["enacted"] = True
+        self._push_activity(
+            f"The succession vote stalled without a majority -- by village custom, "
+            f"{winner_rule['candidateName']} (most votes, tie broken by seniority) becomes elder.")
+        self._enact_succession_winner(winner_rule)
+
+    # --- birth (#2): reuses the newcomer machinery, adds a birth persona ---
+    def _birth_food_surplus(self):
+        c = self.civilization
+        held = sum(a["resources"].get(rid, 0) for a in self.agents for rid in EDIBLE_RESOURCES)
+        stocked = sum(c["stockpile"].get(rid, 0) for rid in EDIBLE_RESOURCES)
+        return held + stocked
+
+    def _find_ally_birth_pair(self):
+        """Two adults, ally-linked (either direction), sharing a district."""
+        adults = self._eligible_adults()
+        by_district = {}
+        for a in adults:
+            by_district.setdefault(a.get("currentDistrict"), []).append(a)
+        for district_agents in by_district.values():
+            if len(district_agents) < 2:
+                continue
+            for i, a in enumerate(district_agents):
+                for b in district_agents[i + 1:]:
+                    if a["relationships"].get(b["name"]) == "ally" or b["relationships"].get(a["name"]) == "ally":
+                        return a, b
+        return None
+
+    def _maybe_birth(self):
+        """Birth (#2): housing headroom + food surplus + two ally adults
+        sharing a district. Gated to at most one birth per interval so a
+        housing boom can't spawn a crowd in one tick. The ONLY LLM call in
+        the whole lifecycle system happens here (persona authoring) -- an
+        event, never a tick."""
+        c = self.civilization
+        if self.frameTick - c.get("lastBirthFrame", 0) < BIRTH_MIN_INTERVAL_FRAMES:
+            return
+        if len(self.agents) >= self._population_cap():
+            return  # no housing headroom
+        if self._birth_food_surplus() < BIRTH_FOOD_SURPLUS_PER_AGENT * max(1, len(self.agents)):
+            return  # no food surplus
+        pair = self._find_ally_birth_pair()
+        if not pair:
+            return
+        parent_a, parent_b = pair
+        self._spawn_newborn(parent_a, parent_b)
+
+    def _next_agent_slot(self):
+        """An unused AGENT_DEFS entry if one exists (mirrors
+        _maybe_welcome_newcomer); otherwise a generated villager beyond the
+        fixed 12-name roster, so births never stall just because every named
+        slot is occupied by long-lived retirees."""
+        unused = next((d for d in AGENT_DEFS if d["name"] not in self.agent_names), None)
+        if unused:
+            return dict(unused), False
+        c = self.civilization
+        gen_id = c.get("nextGeneratedAgentId", 1000)
+        c["nextGeneratedAgentId"] = gen_id + 1
+        roles = list(self.d["ROLES"].keys()) or ["gatherer"]
+        role = random.choice([r for r in roles if r != "elder"] or roles)
+        zone = random.choice(list(self.civilization["districts"].keys()))
+        return {"id": gen_id, "name": f"Villager{gen_id}", "role": role,
+                "personality": "newly born", "color": "#%06x" % random.randint(0, 0xFFFFFF),
+                "zone": zone}, True
+
+    def _spawn_newborn(self, parent_a, parent_b):
+        c = self.civilization
+        slot, generated = self._next_agent_slot()
+        newborn = self._make_agents([slot])[0]
+        newborn["age"] = 0.0
+        newborn["parents"] = [parent_a["name"], parent_b["name"]]
+        # Low-skill start (#2): a newborn's specialty carries no structure/
+        # role bonus differently from an adult -- it starts at the young
+        # life stage, which _life_stage already surfaces in prompts, and
+        # begins with empty resources rather than the usual starter stash.
+        newborn["resources"] = {"food": 0, "wood": 0, "gold": 0}
+        if MEMES_ENABLED:
+            newborn["beliefs"] = set(parent_a.get("beliefs") or set()) | set(parent_b.get("beliefs") or set())
+        # Inherit a share of goods from both parents (#2). Integer amounts --
+        # resource counts are integers everywhere else in the game.
+        for parent in (parent_a, parent_b):
+            for res, amt in list(parent["resources"].items()):
+                share = int(amt * NEWBORN_GOODS_SHARE)
+                if share <= 0:
+                    continue
+                parent["resources"][res] = amt - share
+                newborn["resources"][res] = newborn["resources"].get(res, 0) + share
+        # Inherit a home claim if either parent has one and the newborn
+        # doesn't yet (Phase E property, finally consumed).
+        home_id = parent_a.get("homeStructureId") or parent_b.get("homeStructureId")
+        if home_id:
+            newborn["homeStructureId"] = None  # child doesn't claim outright while parents live; breadcrumb only
+        self.agents.append(newborn)
+        self.agent_names.add(newborn["name"])
+        c["lastBirthFrame"] = self.frameTick
+        c["births"] = c.get("births", 0) + 1
+        # Persona authoring (#2): exactly ONE lm_complete call, this event
+        # only -- never per tick. A failed/empty call falls back to the
+        # deterministic slot name so birth never blocks on the LLM.
+        persona = None
+        try:
+            persona = self.d["lm_complete"](
+                "You write a one-sentence birth announcement for a village simulation. "
+                "Given the two parents' names and roles, invent a short first name for "
+                "the newborn and one brief personality trait. Output ONLY the sentence, "
+                "no preamble, in the form: NAME is a NAME_'s child, TRAIT.",
+                f"Parents: {parent_a['name']} ({parent_a['role']}) and "
+                f"{parent_b['name']} ({parent_b['role']}).",
+                max_tokens=60, temperature=0.8,
+            )
+        except Exception:
+            persona = None
+        if persona:
+            newborn["persona"] = persona.strip()[:200]
+            announce = persona.strip()
+        else:
+            announce = f"{newborn['name']} is born to {parent_a['name']} and {parent_b['name']}."
+        self._push_activity(announce)
+        self._push_communication("birth", parent_a["name"], "everyone", announce)
+        for a in self.agents:
+            if a is newborn:
+                continue
+            self._push_memory(a, f"{newborn['name']} was born to {parent_a['name']} and {parent_b['name']}.")
+        self._log_benchmark("birth", c["births"], {"name": newborn["name"], "generated": generated,
+                                                     "parents": [parent_a["name"], parent_b["name"]]})
+
+    # --- governance gates (#5): harvest_quota / rationing enforcement ---
+    def _active_harvest_quota(self):
+        if not LIFECYCLE_ENABLED:
+            return None
+        quotas = self.civilization.get("harvestQuotas") or {}
+        if not quotas:
+            return None
+        # If the village has enacted more than one harvest_quota rule, they
+        # compose as "must satisfy all of them" -- the strictest (lowest)
+        # value binds, not the most permissive, so a later lenient vote can
+        # never silently override an earlier, intentionally tight one.
+        return min(q["value"] for q in quotas.values())
+
+    def _harvest_quota_gate(self, agent, resource):
+        """Returns (allowed, reason). Caps an agent's gathers of ONE resource
+        in their current district per HARVEST_QUOTA_PERIOD_FRAMES window.
+        Deterministic escape: the counter resets every period, so a refusal
+        is never permanent -- wait out the period, gather a different
+        resource, or move to another district."""
+        quota = self._active_harvest_quota()
+        if quota is None:
+            return True, None
+        if self.frameTick - agent.get("lastQuotaResetFrame", 0) >= HARVEST_QUOTA_PERIOD_FRAMES:
+            agent["gatherCountThisPeriod"] = {}
+            agent["lastQuotaResetFrame"] = self.frameTick
+        counts = agent.setdefault("gatherCountThisPeriod", {})
+        district = agent.get("currentDistrict") or "?"
+        key = f"{district}:{resource}"
+        if counts.get(key, 0) >= quota:
+            remaining = HARVEST_QUOTA_PERIOD_FRAMES - (self.frameTick - agent["lastQuotaResetFrame"])
+            return False, (f"harvest quota reached for {resource} in {district} "
+                           f"({quota}/period) -- resets in ~{max(1, remaining // 30)}s")
+        return True, None
+
+    def _record_harvest_quota_use(self, agent, resource, amount):
+        if self._active_harvest_quota() is None:
+            return
+        counts = agent.setdefault("gatherCountThisPeriod", {})
+        district = agent.get("currentDistrict") or "?"
+        key = f"{district}:{resource}"
+        counts[key] = counts.get(key, 0) + amount
+
+    def _rationing_active_cap(self):
+        if not LIFECYCLE_ENABLED:
+            return None
+        active = self.civilization.get("rationingActive") or {}
+        if not active:
+            return None
+        # Deterministic escape: rationing only actually restricts while
+        # storage utilization is low -- once storage recovers, withdrawals
+        # are unrestricted again even with the rule still enacted (matches
+        # "rationing lifts when storage recovers" in the hard rules).
+        if not self._storage_low():
+            return None
+        return min(v["value"] for v in active.values())
+
+    def _storage_low(self):
+        if not GOODS_ENABLED:
+            return False
+        caps = {rid: self._storage_capacity(rid) for rid in EDIBLE_RESOURCES}
+        total_cap = sum(caps.values()) or 1
+        c = self.civilization
+        stored = sum(c["stockpile"].get(rid, 0) + sum(a["resources"].get(rid, 0) for a in self.agents)
+                    for rid in EDIBLE_RESOURCES)
+        return (stored / total_cap) < RATIONING_STORAGE_LOW_RATIO
+
+    def _rationing_gate(self, agent, resource, amount):
+        """Returns (allowed_amount, reason|None) for a stockpile withdrawal
+        (contribute_resources reversed, trade, etc. all funnel through here
+        when they pull FROM the shared stockpile). Caps rather than outright
+        refuses so a partial withdrawal still gets through when possible."""
+        cap = self._rationing_active_cap()
+        if cap is None or resource not in EDIBLE_RESOURCES:
+            return amount, None
+        if amount <= cap:
+            return amount, None
+        return cap, f"rationing limits {resource} withdrawals to {cap} while storage is low"
 
     # --- blueprint validation ---
     def _custom_resource_count(self):
@@ -4217,6 +4899,26 @@ class SimEngine:
         if not RULES_ENABLED:
             return
         c = self.civilization
+        if LIFECYCLE_ENABLED and c.get("pendingSuccession"):
+            # Election backstop: cast a ballot for the first still-eligible
+            # candidate found (deterministic, round-robins across candidates
+            # rule-by-rule rather than always favoring pendingRules[0], so a
+            # quiet soak doesn't mechanically crown whichever candidate
+            # happened to be listed first). This guarantees the arc completes
+            # even with zero organic LLM votes; _maybe_resolve_stalled_succession
+            # is the final backstop if even this never fires.
+            succession_rules = [r for r in c["pendingRules"] if r["kind"] == "succession"]
+            for pending in succession_rules:
+                eligible = [a for a in self.agents
+                           if not a["incapacitated"] and a["role"] != "elder"
+                           and a["name"] not in pending["votes"]]
+                voter = next((a for a in eligible if self._is_idle(a)), None) or (eligible[0] if eligible else None)
+                if voter:
+                    self.apply_decision(voter, {
+                        "action": "vote_rule", "target": pending["id"], "vote": "yes",
+                        "reasoning": f'Casting my vote for {pending["candidateName"]} as the new elder.'})
+                    return
+            return
         pending = c["pendingRules"][0] if c["pendingRules"] else None
         if pending:
             eligible = [a for a in self.agents
@@ -4333,6 +5035,20 @@ class SimEngine:
                 self._log_benchmark("wealth_gini", gini,
                                     {"market_active": self._market_active(),
                                      "homeowners": homeowners, "agents": len(self.agents)})
+        if LIFECYCLE_ENABLED:
+            c = self.civilization
+            ages = sorted(a["age"] for a in self.agents if a.get("age") is not None)
+            living = [a for a in self.agents if a.get("deathFrame") is None]
+            if ages:
+                median_age = ages[len(ages) // 2] if len(ages) % 2 else \
+                    (ages[len(ages) // 2 - 1] + ages[len(ages) // 2]) / 2
+                self._log_benchmark(
+                    "population_median_age", round(median_age, 1),
+                    {"population": len(living), "cap": self._population_cap(),
+                     "births": c.get("births", 0), "deaths": c.get("deaths", 0),
+                     "elder_age": round(next((a["age"] for a in self.agents
+                                              if a["role"] == "elder"), 0) or 0, 1),
+                     "population_floor_held": c.get("populationFloorHeld", False)})
 
     # --- memory maintenance (round-robin summarizer + periodic cleaner) ---
     def _run_memory_maintenance(self):
@@ -4901,6 +5617,30 @@ class SimEngine:
                 else:
                     nudges.append("NOTE: You have no home and no house is unclaimed. "
                                   "Consider start_project to build a house -- the builder claims it.")
+        if LIFECYCLE_ENABLED:
+            quota_rejection = agent.get("lastQuotaRejection")
+            if quota_rejection and self.frameTick - quota_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: {quota_rejection['reason']}. "
+                              f"Try a different resource or district, or wait for the quota to reset.")
+            ration_rejection = agent.get("lastRationingRejection")
+            if ration_rejection and self.frameTick - ration_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: {ration_rejection['reason']}. "
+                              f"Gather more or wait for storage to recover.")
+            pending_succession = c.get("pendingSuccession")
+            if pending_succession and agent["name"] not in \
+                    next((r["votes"] for r in c["pendingRules"]
+                         if r["kind"] == "succession"
+                         and r.get("electionId") == pending_succession["electionId"]
+                         and r.get("candidateName") == agent["name"]), {}):
+                # An agent votes with vote_rule targeting the candidate's own
+                # succession rule id (not the election as a whole) -- listing
+                # every candidate's rule id here so the model has what it
+                # needs without a new action verb.
+                candidate_ids = ", ".join(
+                    f"{r['candidateName']} (id {r['id']})" for r in c["pendingRules"]
+                    if r["kind"] == "succession" and r.get("electionId") == pending_succession["electionId"])
+                nudges.append(f"NOTE: The village elder has died. Vote for the next elder with vote_rule: "
+                              f"{candidate_ids}. Set target to your preferred candidate's id and vote yes.")
         abandonment = c.get("lastProjectAbandonment")
         if abandonment and self.frameTick - abandonment.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: {abandonment['reason']}.")
@@ -5048,6 +5788,7 @@ class SimEngine:
             "role": agent["role"],
             "role_skill": self.d["ROLE_SKILLS"].get(agent["role"], "helps the village"),
             "personality": agent["personality"],
+            "life_stage": self._life_stage(agent) if LIFECYCLE_ENABLED else None,
             "memory": self._memory_for_prompt(agent),
             "resources": dict(agent["resources"]),
             "hunger": agent["hunger"],
@@ -5231,6 +5972,13 @@ class SimEngine:
                 self._maybe_auto_switch_role()
             if RULES_ENABLED and ft % RULES_TICK_FRAMES == 0:
                 self._maybe_advance_rules()
+            if LIFECYCLE_ENABLED and ft % RULES_TICK_FRAMES == 0:
+                # Deterministic escape hatch for a stalled succession vote --
+                # checked on the same fast cadence as rule advancement so a
+                # quorum-less election can't linger past its TTL.
+                self._maybe_resolve_stalled_succession()
+            if LIFECYCLE_ENABLED and ft % LIFECYCLE_TICK_FRAMES == 0:
+                self._tick_lifecycle()
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_feed_starving()
                 self._maybe_abandon_stalled_projects()
@@ -5480,6 +6228,24 @@ class SimEngine:
                         civ["projectRegistry"].setdefault("market", dict(PROJECT_TEMPLATES["market"]))
                     for s in (civ.get("structures") or []):
                         s.setdefault("homeOf", None)
+                if LIFECYCLE_ENABLED:
+                    # Phase F: population lifecycle + governance state. A save
+                    # from before this phase has none of this -- setdefault is
+                    # purely additive (no migration needed, matching every
+                    # prior phase's back-compat pattern). Gated on the flag
+                    # like every other phase's restore block, so a flag-off
+                    # restore introduces none of this state (byte-identical
+                    # to Phase E).
+                    civ.setdefault("lastBirthFrame", 0)
+                    civ.setdefault("lastDeathActivityFrame", 0)
+                    civ.setdefault("births", 0)
+                    civ.setdefault("deaths", 0)
+                    civ.setdefault("nextGeneratedAgentId", 1000)
+                    civ.setdefault("pendingSuccession", None)
+                    civ.setdefault("lastSuccessionActivityFrame", 0)
+                    civ.setdefault("harvestQuotas", {})
+                    civ.setdefault("rationingActive", {})
+                    civ.setdefault("populationFloorHeld", False)
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
@@ -5499,6 +6265,28 @@ class SimEngine:
                     a.setdefault("homeStructureId", None)
                     a.setdefault("lastTradeRejection", None)
                     a.setdefault("lastHomelessNudgeFrame", None)
+                    if LIFECYCLE_ENABLED:
+                        # Phase F: every restored agent gets an age (staggered
+                        # by roster position, same deterministic spread
+                        # _make_agents uses for a cold start; the elder starts
+                        # oldest) so a long-lived save (e.g. the live
+                        # 416-structure world) can turn LIFECYCLE_ENABLED on
+                        # with no migration step. Gated on the flag so a
+                        # flag-off restore never introduces an age field --
+                        # matching every other phase's discipline.
+                        if a.get("age") is None:
+                            if a.get("role") == "elder":
+                                a["age"] = float(ELDER_AGE + 5)
+                            else:
+                                a["age"] = float(ADULT_AGE + 2 + (len(agents) * 7) % 30)
+                        a.setdefault("lastQuotaResetFrame", 0)
+                        a.setdefault("gatherCountThisPeriod", {})
+                        a.setdefault("lastQuotaRejection", None)
+                        a.setdefault("lastRationingRejection", None)
+                        a.setdefault("parents", None)
+                        a.setdefault("deathFrame", None)
+                    else:
+                        a["age"] = None
                     # state.json may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
                     # saved agent's memory.longTerm list can carry leaked
@@ -5586,6 +6374,8 @@ class SimEngine:
                 "incapacitated": a["incapacitated"], "message": a["message"],
                 "isThinking": a["isThinking"], "beliefs": [self._belief_text(b) for b in a["beliefs"]],
                 "lastAction": a["lastAction"], "assignedTask": a["assignedTask"],
+                "age": round(a["age"], 1) if LIFECYCLE_ENABLED and a.get("age") is not None else None,
+                "lifeStage": self._life_stage(a) if LIFECYCLE_ENABLED else None,
             } for a in self.agents]
             civ = {
                 "level": c["level"],
@@ -5662,6 +6452,7 @@ class SimEngine:
                         "GOODS_ENABLED": GOODS_ENABLED,
                         "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
                         "ECONOMY_ENABLED": ECONOMY_ENABLED,
+                        "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
                     },
                 },
             }

@@ -787,6 +787,16 @@ MARKET, TRADE & PROPERTY (when a Market exists):
    home shelters you every night automatically. If a NOTE says you're homeless,
    prioritize claiming or building one.
 
+POPULATION & GOVERNANCE (when lifecycle is enabled):
+23. Villagers age and, rarely, pass away of old age -- including the elder. If a
+   NOTE says the village must choose a new elder, use vote_rule targeting the
+   candidate's rule id listed in the NOTE with "vote":"yes" (a majority wins).
+24. propose_rule also accepts kind "harvest_quota" (value = max gathers of one
+   resource per district per period, e.g. 3-8) and "rationing" (value = max
+   stockpile withdrawal while storage is low, e.g. 2-6) — vote on these the same
+   way as a resource_tax. If a NOTE says you hit a quota or ration limit, try a
+   different resource/district or wait for it to reset.
+
 Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
 Do not use chain-of-thought or reasoning — output the JSON object immediately.
 The JSON must match this structure exactly:
@@ -834,11 +844,14 @@ RULE object schema (only for propose_rule):
 {
   "id": "resource_tax",                  // ^[a-z][a-z0-9_]{1,24}$, not a duplicate
   "name": "Resource Tax",                // 1-32 chars
-  "kind": "resource_tax",                // resource_tax | custom
-  "value": 1,                            // tax magnitude (0-3) for resource_tax
+  "kind": "resource_tax",                // resource_tax | custom | harvest_quota | rationing
+  "value": 1,                            // tax magnitude (0-3) for resource_tax; 1-20 for harvest_quota; 1+ for rationing
   "description": "Contributors add 1 to the shared stockpile."
 }
 For vote_rule set "target" to the rule id and "vote" to "yes" or "no".
+Succession ballots (kind "succession") are created automatically by the
+village when the elder dies -- never propose_rule one yourself; just vote_rule
+on the candidate ids a NOTE gives you.
 
 EXAMPLE (farmer, no one nearby):
 {"action":"collect_resource","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"I should gather food for the village."}
@@ -2253,12 +2266,20 @@ def build_user_prompt(data, slim=False):
     # stay byte-identical to Phase D.
     prices_raw = data.get("prices_line")
     prices_line = f"Prices: {prices_raw}\n" if prices_raw else ""
+    # Phase F: one-word life stage folded into the existing personality line
+    # (no new template line -- near-zero token cost, and with the flag off
+    # the engine sends life_stage=None so this renders byte-identical to
+    # Phase E).
+    life_stage = data.get("life_stage")
+    personality_text = data.get("personality") or ""
+    if life_stage:
+        personality_text = f"{life_stage}, {personality_text}" if personality_text else life_stage
 
     return USER_PROMPT_TEMPLATE.format(
         agent_name=data.get("agent_name"),
         role=data.get("role"),
         role_skill=data.get("role_skill", ""),
-        personality=data.get("personality"),
+        personality=personality_text,
         memory="none" if slim else compose_memory(data),
         hunger=data.get("hunger", 100),
         health=data.get("health", 100),

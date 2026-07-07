@@ -797,6 +797,40 @@ organic `trade_resource` call happened to land in that window (agents favor
 collect/contribute/talk), so the rival-refusal/surcharge/ally paths were
 proven by the direct-call harness above rather than caught organically.
 
+**Audit verdict (2026-07-07, morning slot — cycle 5.morning).** Slot hygiene
+anomaly first: the server was found UP at slot start (correct), but the
+newest log folder showed ~20 sub-minute session restarts between 08:45 and
+09:02 (no exceptions in any `lm_studio.jsonl`, all HTTP 200; no Windows
+Application-error events for python.exe; disk 558 GB free; no uncommitted
+code) before self-stabilizing at session `2026-07-07T09-02-04`, which then
+ran cleanly. Root cause not identified — most consistent with an external
+restart loop (not a code exception or data corruption); flagged for
+observation, not treated as a phase FAIL since no mechanic evidence
+contradicts prior verdicts. Usable clean soak this slot: ~16 min combined
+(`08-57-53` + `09-02-04`, 96 decisions, 0 fallbacks, 0 context overflows) —
+provisional per the <4h rule.
+`GOODS_ENABLED` recovery-arc: **provisional PASS, trend continuing.** Ruins
+409→408, 6 more `repair_structure` successes, stockpile-funding still firing;
+pace matches the expected multi-day arc (only 8/416 structures currently
+working — recovery this slow is by design per the retuned 0.1 decay/tick,
+not a regression).
+`TECH_TREE_ENABLED`: **still organically dormant** (0 tier-gate/era/wagon/
+council mentions this slot, third consecutive quiet soak). Core mechanics
+verdict unchanged (PASS, proven by forced smoke); organic exercise stays
+OPEN.
+`ECONOMY_ENABLED`: **root cause of the organic-soak gap found — not a bug.**
+Checked `state.json` directly: 0 structures of type `market` exist yet (the
+16 `market_hall` instances are an unrelated custom-invented type that only
+produces gold, not the seed `market`/`pricing` structure), so
+`_market_active()` is correctly `False` village-wide (`wealth_gini` samples
+all read `market_active: false, homeowners: 0`) — every economy mechanic is
+gated behind a structure nobody has built yet, which tracks given 408/416
+structures are ruins and the village is prioritizing repair over new builds.
+Not a design flaw; flagging for the next slot to watch for a `start_project`
+targeting `market` once repair pressure eases. Given no design-level FAIL
+across all three flags, proceeding straight to the Day-3→Night-3 batch item,
+**Phase F** (population lifecycle & governance), per the Part 8 schedule.
+
 ### Phase F — Population lifecycle (I1) & governance depth (I4)
 Births (surplus + housing + paired agents), aging, natural death (elder
 included — with succession by inheritance/election using the existing vote
@@ -807,6 +841,175 @@ zoning, rationing, tariff.
 deadlocking; a generation later, someone who never met Sage cites a rule he
 enacted.
 **Flag:** `LIFECYCLE_ENABLED`.
+
+**Implementation log (2026-07-07, Night-3 batch item, landed on
+`feat/server-authoritative-engine`):** All five scope items landed behind
+`LIFECYCLE_ENABLED` in `sim_engine.py`, one new slow tick gate
+(`LIFECYCLE_TICK_FRAMES`, ~10s) plus a fast-cadence stall-check reusing
+`RULES_TICK_FRAMES`. (1) Aging: every agent gains `age` (staggered at
+cold-start/newcomer/restore-backfill — the elder starts oldest, just past
+`ELDER_AGE`; the rest spread young→adult so a fresh soak shows life-stage
+texture immediately, not after weeks), advancing by `AGE_YEARS_PER_TICK` per
+gate. `_life_stage()` maps age to one word (young < `ADULT_AGE` 18, elder >=
+`ELDER_AGE` 55, else adult) folded into the existing `personality` prompt
+line server-side (`build_user_prompt`) at zero template/token cost — with the
+flag off `life_stage` is `None` and the line is byte-identical to Phase E.
+(2) Birth: `_maybe_birth` fires when housing headroom exists
+(`_population_cap() > len(agents)` — the same signal `_maybe_welcome_newcomer`
+uses, now uncapped past `len(AGENT_DEFS)` under the flag so generated
+villagers have room), a food surplus (`BIRTH_FOOD_SURPLUS_PER_AGENT` ×
+population, stockpile + carried edibles), and two ally adults sharing a
+district (`_find_ally_birth_pair`), gated to one birth per
+`BIRTH_MIN_INTERVAL_FRAMES` (~2 min). `_next_agent_slot` reuses an unused
+`AGENT_DEFS` name first (the newcomer template); once all 12 are in use it
+generates a synthetic villager (`Villager<id>`, random non-elder role) so
+birth never stalls just because the named roster is full of long-lived
+retirees. The ONLY LLM call in the whole system is here: one `lm_complete`
+per birth event authoring a one-line persona/name (falls back to the
+deterministic slot name on any failure/empty response — birth never blocks on
+the model). The newborn starts at age 0 (`young` stage, low-skill by
+definition of that stage), inherits a `NEWBORN_GOODS_SHARE` (15%) of each
+parent's held goods, both parents' memes (Phase G's belief-cluster work
+inherits a real substrate), and a `parents` breadcrumb for future heir lookup.
+(3) Natural death: `_maybe_natural_death` rolls a per-agent chance once age
+passes `DEATH_CHANCE_START_AGE` (65), ramping toward `MAX_LIFE_EXPECTANCY`
+(90) — one death per gate check, logged, followed by a memorial memory
+(`_push_memory(..., kind="memorial")`) pushed to every living agent and
+`_inherit_from()`: goods split across heirs (the deceased's children if any
+exist, else every living adult), beliefs unioned onto every heir (so a
+villager born after Sage dies can still "cite a rule he enacted" — the
+civilization test — via inherited belief text, not a conversation), and a
+home claim transferred to the first heir (Phase E's `homeOf`/
+`homeStructureId`, finally consumed). **The elder can die**: same
+`_agent_dies` path, plus the deceased elder's own `role` is demoted off
+`"elder"` immediately (to `retired_elder`) so every other `role == "elder"`
+lookup across the codebase — `assign_task`, the directive broadcast,
+`_maybe_advance_rules`, the invention backstop — resolves to the living
+elder (or none) without needing an audit of every call site. (4) Succession:
+`_start_succession_election` opens one `pendingRules` entry per eligible
+adult candidate (kind `"succession"`, capped to `MAX_PENDING_RULES`) the
+instant the elder dies, reusing `propose_rule`/`vote_rule`/
+`_tally_and_maybe_enact` verbatim — no new action verb. `_vote_on_rule` gained
+one exclusivity rule scoped to `kind == "succession"`: a "yes" on one
+candidate auto-registers "no" on every sibling in the same `electionId`, so a
+ballot can't count toward two winners. The first candidate to reach quorum is
+promoted via a direct `agent["role"] = "elder"` mutation
+(`_enact_succession_winner`, a deterministic engine act like
+`_found_district`, not an LLM decision) and the rest of that election's
+ballots are cleared. Two deterministic escape hatches guarantee the arc can
+never stall: `_maybe_advance_rules` casts a backstop ballot for the first
+eligible candidate each fast-tick gate even with zero organic LLM
+engagement, and `_maybe_resolve_stalled_succession` force-resolves by
+most-yes-votes (ties broken by lowest agent id) once
+`SUCCESSION_ELECTION_TTL_FRAMES` (~13 min) elapses with no quorum. (5)
+Governance: `RULE_KINDS` gains `harvest_quota`, `rationing`, and the
+internal-only `succession` (rejected by `_validate_rule` if an agent tries to
+`propose_rule` one — elections are village-started, not nominated).
+`harvest_quota` (value 1-20) caps an agent's gathers of one resource in one
+district per `HARVEST_QUOTA_PERIOD_FRAMES` (~5 min) window
+(`_harvest_quota_gate`, checked first in `_perform_gather` — a policy
+refusal, deliberately NOT triggering the ecology scarcity reflex since
+there's nothing to terraform away from), surfaced via `lastQuotaRejection`
+and reset automatically every period (the escape hatch). `rationing` (value)
+caps stockpile withdrawals of edibles via `_rationing_gate`, wired into
+`_seed_project_from_stockpile` (the only stockpile-withdrawal path in the
+codebase — repairs/tax/trade never pull edibles out), and — the deterministic
+escape the hard rules require — only actually binds while
+`_storage_low()` (< `RATIONING_STORAGE_LOW_RATIO` = 50% of GOODS storage
+capacity) is true, lifting automatically the moment storage recovers even
+with the rule still enacted; surfaced via `lastRationingRejection`. Safety
+rails: `POPULATION_FLOOR` (4) — `_maybe_natural_death` defers (never skips
+permanently; re-rolled every gate) any death that would drop living adults to
+or below the floor, logging once via `populationFloorHeld` and clearing the
+moment population is above it again; `_sage_emergency` now excludes a dead
+elder/healer (`deathFrame is not None`) so a deceased Sage can't look like a
+standing rescue target forever (a real bug caught by the forced smoke test,
+fixed before commit) — the emergency clears the instant Sage dies and
+succession takes over, exactly the handoff the hard rules require.
+Observability: `_sample_benchmarks` logs `population_median_age` every
+`BENCHMARK_TICK_FRAMES` (population, cap, births, deaths, elder age,
+floor-held flag); births/deaths/succession also log dedicated `birth`/
+`death`/`succession` benchmark rows and `activity.jsonl` events. Back-compat:
+`restore_state()` `setdefault`s `age` (staggered by roster position, same
+scheme as cold-start) plus every new per-agent (`parents`, `deathFrame`,
+`gatherCountThisPeriod`, quota/ration rejection fields) and civilization-level
+(`harvestQuotas`, `rationingActive`, `pendingSuccession`, `births`, `deaths`,
+...) field, purely additive — the live 416-structure, frame-6,556,314 save
+loads under the flag with zero migration. SYSTEM_PROMPT gained two numbered
+rules (succession voting, the two new `propose_rule` kinds) and the RULE
+object schema comment; no changes to `DECISION_ACTIONS`/`DECISION_SCHEMA`/
+`ACTION_LABELS` were needed (harvest_quota/rationing/succession are all
+`kind` values on the existing `propose_rule`/`vote_rule` actions).
+**Verification:** py_compile clean. Forced smoke test via a standalone script
+importing `sim_engine`/`server` directly against a scratch copy of the live
+save (`sim_engine.STATE_PATH` monkeypatched before import so `restore_state`/
+`save_state` never touch the real file; the real `simulation/state.json` was
+diffed byte-identical — same md5 — after the run; no server process or port
+5001 listener was started at any point) with every slow-tick constant
+temporarily shrunk for the duration of the script only (never committed):
+confirmed (a) young/adult/elder life-stage labels at the age boundaries; (b)
+a harvest_quota rule enacting, a second gather in the same
+district/resource/period refused with a surfaced reason, and the quota
+lifting automatically after the period; (c) a rationing rule capping a
+stockpile withdrawal to the enacted value with a surfaced reason, and
+withdrawals returning to normal the instant `_storage_low()` was forced back
+to false; (d) a natural death deferring at the population floor (logged) and
+proceeding once population rose above it; (e) inheritance — goods flowing to
+a living heir and a memorial memory present in the heir's memory store; (f)
+an elder death starting a succession election, `_sage_emergency()` correctly
+returning `None` for the now-leaderless village (this caught the dead-elder
+lookup bug above), a candidate reaching quorum and being promoted to
+`role == "elder"`, `pendingSuccession` clearing, and the new elder
+successfully using `assign_task` on another villager; (g) a second,
+deliberately-stalled election (TTL forced to expire with no quorum)
+resolving via the deterministic most-votes/lowest-id tiebreak with no
+softlock; (h) a forced birth producing a newborn at age 0, `young` stage,
+correct `parents` linkage, inherited parent beliefs, a reduced parent
+resource share, and (via a monkeypatched `lm_complete` standing in for the
+one real network call) a persona string. All temporary test-only constant
+overrides lived in the throwaway script's own module attributes, never
+touched the committed constants, and no debug/exec route was added to
+`server.py`. A follow-up independent review pass (a fresh subagent reading
+only the diff, no context from the implementation) found and this session
+fixed five further gaps before commit, all confirmed by additional forced
+tests: (i) a genuinely serious one -- `_update_survival`'s `COLLAPSE_REGEN`
+path had no `deathFrame` guard, so a dead agent's health would eventually
+cross `COLLAPSE_REVIVE_HEALTH` and **resurrect them** ("recovered" on a
+corpse, resuming movement/thinking with a stale role); now short-circuits
+immediately for any agent with a `deathFrame`. (ii) A succession winner could
+be a candidate who died or collapsed during the ~13 min election TTL;
+`_enact_succession_winner` now checks liveness before promoting and simply
+re-opens a fresh election (via `_start_succession_election`, whose candidate
+pool is always freshly filtered) if the "winner" isn't actually able to lead
+-- one more round, never a stall. (iii) Succession wins were being appended
+to `civilization["rules"]` alongside real governance rules, and since no
+repeal mechanism exists anywhere in the codebase (confirmed: the only rule
+count ever shrinks is `MAX_ACTIVE_RULES` refusing new proposals), recurring
+elder deaths over a long soak would eventually crowd out `resource_tax`/
+`harvest_quota`/`rationing` from ever being enactable again; successions no
+longer touch `civilization["rules"]` at all (they're a leadership record via
+`activity.jsonl` + the `succession` benchmark, not an ongoing governance
+constraint). (iv) `_type_saturated`'s house soft-cap formula still derived
+headroom from `len(AGENT_DEFS)` (12), which under `LIFECYCLE_ENABLED`'s
+uncapped `_population_cap()` could flag houses "saturated" before there was
+actually room for the next generated-villager birth; it now extends headroom
+to track current population when the flag is on. (v) Inheritance/newborn
+goods transfers used float division/multiplication (`amt / len(heirs)`,
+`amt * NEWBORN_GOODS_SHARE`), inconsistent with every other resource-count
+operation in the game being an integer; both now use integer arithmetic
+(`divmod` with the remainder to the first heir; `int(amt * SHARE)`).
+Also, while implementing, the original code was found to have two of its own
+gaps needing fixes before the smoke test could pass cleanly: `_sage_emergency`
+didn't exclude a dead elder/healer (a corpse looked like a standing rescue
+target forever) and a deceased elder's `role` field wasn't demoted off
+`"elder"` (so "find the elder" lookups elsewhere kept finding the corpse
+instead of the newly-elected successor) -- both fixed as described above in
+the Sage-priority section of CLAUDE.md. `_idle_agents_for_elder` also gained
+an explicit `incapacitated` filter (a permanently-dead agent could otherwise
+sit in the elder's idle-villager list and be `assign_task`'d forever, wasteful
+though not unsafe). Final py_compile clean; the full smoke-test suite
+(now 10 scenarios) re-run and passing after every fix; real `state.json`
+confirmed byte-identical (same md5) throughout.
 
 ### Phase G — Knowledge, culture, factions, diplomacy (E2–E5)
 Skills by practice + teaching; library/school structures persist knowledge
