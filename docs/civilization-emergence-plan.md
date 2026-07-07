@@ -672,6 +672,51 @@ must now serve BOTH still-open tests: the Phase C recovery-arc escape hatch
 AND live Phase D exercise (tier gate, era transitions, council) on the same
 run. py_compile clean; committed together as one change.
 
+**Audit verdict (2026-07-07, evening slot — cycle 4.evening, session
+`2026-07-07T07-48-29`, only 44 min — the server was found UP and correctly
+continuing the restored world at slot start, but the morning slot's own
+restart left less than an hour before this slot fired; PROVISIONAL only per
+the compressed-cadence <4h rule).** Recovery-arc (`GOODS_ENABLED`
+repair-funding hot-fix, commit 793c598) **provisional PASS**: 13
+`repair_structure` successes vs. 36 honest "lacks wood" refusals (up from
+17/282 = 6% pre-fix to 13/49 = 27% this slot), stockpile-funded repairs
+firing repeatedly ("The village stockpile supplied 1.0 wood for ...'s
+repair"), one full ruin rebuilt at half-cost (Market Hall, village_5),
+`structure_condition` benchmark moved the right direction (ruins 410→409,
+disrepair 2→0, avg condition 0.7→1.6). Recovery pace is slow by design (409
+ruins remain; at this rate full recovery is a multi-day arc, matching the
+plan's "sprawl still decays across days" intent) — needs a longer soak to
+confirm the trend holds rather than plateaus, but the escape hatch is
+unambiguously reachable now, which was the FAIL being fixed. Standing
+invariants held: 0 fallbacks, 0 context overflows over 293 decisions, elder
+`assign_task` share down to 27% (78/293, vs. 40% flagged Cycle 3.evening —
+provisional improvement, small sample). Seasons ticked correctly (spring→
+summer transition logged, reaching prompts).
+Phase D (`TECH_TREE_ENABLED`) live exercise: **still zero organic
+tier-gate/era/wagon/council events this slot** (0 mentions of any), a second
+consecutive soak with no live firing (5h Cycle-3.evening + 44min tonight).
+Investigated the reachability concern flagged this morning by reading
+`_invention_required()`/`_maybe_invention_backstop()` and the persisted
+state: `inventionRequiredStreak` and `inventionBackstopFires` are both 0,
+confirming `_invention_required()` correctly stayed False the whole slot —
+**not a bug**. Of 14 approved custom blueprints, 12 are built; the remaining
+two are `trade_hub` (an active project underway in village_13 — legitimately
+still being pursued, the precondition `_unbuilt_customs_blocking_invention`
+is doing its job) and `fishery` (deferred, cooldown expires frame 6,544,650,
+~7,650 frames after this slot ended). The invention/council path is
+reachable and unblocked in principle; it simply hasn't had a slot where the
+precondition (all seeds exhausted AND no unbuilt/in-progress custom) held
+long enough to fire. Verdict: Phase D core mechanics remain PASS (per Cycle
+4.morning's forced live smoke — tier rejection/acceptance, era transitions,
+wagon craft, council convening with a comparative verdict, all demonstrated
+against the real engine code); the *organic* council/tier-gate exercise
+stays OPEN, expected to trigger once `trade_hub` completes and `fishery`'s
+cooldown lapses (both plausible within the next slot's soak window) — not a
+blocker for batch progression since the mechanics themselves are proven.
+Given both open tests are PASS/provisional-PASS with no design-level FAIL,
+proceeding to the Day-3 batch item, **Phase E** (market & property), per the
+Part 8 schedule.
+
 ### Phase E — Market & property (I2, I3)
 Market structure posts prices from district stocks and stockpile levels; gold
 mediates; plots/homes claimable; inheritance recorded. Adopted from the
@@ -681,6 +726,76 @@ system mechanical instead of decorative.
 **Test:** a price spike after a shortage changes what agents gather next tick;
 `benchmarks.jsonl` gains a wealth-Gini metric that moves.
 **Flag:** `ECONOMY_ENABLED`.
+
+**Implementation log (2026-07-07, Day-3 batch item, landed on
+`feat/server-authoritative-engine`):** All five scope items landed behind
+`ECONOMY_ENABLED` in `sim_engine.py`, query-time only (no new tick). (1)
+Prices: a seed `market` structure (tier 1, `needs` wood 2/stone 2/gold 2,
+`unlocks` a new effect kind `"pricing"`, buildable in any village-kind
+district like house/wall) gates `_market_active()`; while one is WORKING,
+`_resource_price(rid)` derives a deterministic multiplier from up to two
+scarcity signals — the average ecology district-stock ratio for that
+resource (`ECOLOGY_ENABLED`) and village stockpile-vs-storage-capacity depth
+for edibles (`GOODS_ENABLED`) — taking the minimum (scarcer signal wins),
+mapped onto `BASE_PRICE[rid]` (1-6g) × up to `PRICE_SCARCITY_MULT` (4×) at
+full depletion, floored at `PRICE_MIN` (1g). Rendered as one `Prices: wood
+1g, food 4g, ...` line (`_format_prices_for_prompt`) only when a market
+exists — measured ~48 tokens on the live 18-resource save, well under the
+200-token budget, and the server drops it (empty `prices_line`) when no
+market exists so those prompts stay byte-identical to Phase D. (2) Gold as
+medium: `trade_resource` (`apply_decision`, sim_engine ~4444) branches to
+`_priced_trade()` when a market is active — the buyer pays gold at the
+current (relationship-adjusted) price, both amounts logged to
+`activity.jsonl`; with no market it's the unchanged Phase A-D 1-for-1 barter
+swap. (3) Relationships get teeth (audit C2): `_priced_trade_terms()` applies
+`ALLY_PRICE_DISCOUNT` (0.75×) or `RIVAL_PRICE_SURCHARGE` (1.5×) from the
+seller's opinion of the buyer; a rival trade the buyer can't afford even
+surcharged is refused outright (`activity.jsonl`: "Aria refused to trade with
+his rival Marco"; `lastTradeRejection` surfaced next prompt) — the escape
+hatch is that refusal touches neither agent's inventory, so gathering more
+gold, waiting for price to move, or trading with someone else all stay
+reachable; an ally/neutral trade that's merely short on gold falls back to
+barter rather than blocking. (4) Property: first agent to `build_structure`
+or `repair_structure`-from-ruin a house claims it (`homeOf` on the
+structure, `homeStructureId` on the agent, one home each — claiming a new
+one releases the old); `_tick_shelter` (Phase C) now reserves each
+homeowner's own bed regardless of proximity before filling remaining slots
+nearest-first, so property has a mechanical consequence, not just a log
+line; a ruined home clears `homeOf` and pushes the ex-owner homeless
+(logged); a `homeless` NOTE nudge (10 min cooldown, `HOMELESS_NUDGE_FRAMES`)
+points agents at an unclaimed house or `start_project`. Inheritance is
+recording-only this phase (`homeOf`/`homeStructureId` persist through
+death — consumed by Phase F). (5) Wealth benchmark: `_wealth_gini()` values
+each agent's gold + goods at current prices (0 signal with no market, so
+barter-era saves read flat) and logs the standard Gini coefficient as
+`wealth_gini` in `benchmarks.jsonl` every `BENCHMARK_TICK_FRAMES`.
+Back-compat: `restore_state()` merges the market template into old
+`projectRegistry`s, `setdefault`s `homeOf: None` on every restored structure
+and `homeStructureId`/`lastTradeRejection`/`lastHomelessNudgeFrame: None` on
+every restored agent — the live 416-structure, frame-6,536,998 save loads
+and can build a market with no migration. **Verification:** py_compile
+clean. Forced smoke test against a scratch copy of that live save (never the
+real `state.json` — diffed byte-identical after): direct engine calls
+(`_priced_trade`, `_tick_shelter`, `_sample_benchmarks`) against the restored
+engine confirmed (a) a rival refusal — `"Aria refused to trade with rival
+Marco"`, `lastTradeRejection` reason `"Marco can't afford Aria's rival
+surcharge for wood (2g, has 0g)"`; (b) an affordable rival surcharge
+succeeding at 2g (1g base × 1.5, rounded) with gold moving both ways; (c) an
+ally discount at 1g (floored from 0.75×); (d) depleting a district's wood
+stock to 0 moved its price 1g → 4g (the full `PRICE_SCARCITY_MULT`); (e) a
+homeowner placed equidistant-and-far from every house was shielded from the
+nightly shelter penalty while a homeless control agent in the same spot lost
+6 hunger, proving the benefit is ownership-driven, not just proximity; (f)
+`wealth_gini` logged twice (0.177 → 0.269) after concentrating gold in one
+agent. Additionally ran the real Flask+SimEngine server for several minutes
+against the same scratch save with a market and a forced rival pair seeded
+at boot (`GOODS_TICK_FRAMES`/`DAY_FRAMES`/`BENCHMARK_TICK_FRAMES` temporarily
+shrunk, reverted before commit): confirmed a live LLM prompt actually
+contained the `Prices:` line, the shrunk goods/shelter ticks fired
+repeatedly with no errors, and `wealth_gini` kept logging every ~5s — no
+organic `trade_resource` call happened to land in that window (agents favor
+collect/contribute/talk), so the rival-refusal/surcharge/ally paths were
+proven by the direct-call harness above rather than caught organically.
 
 ### Phase F — Population lifecycle (I1) & governance depth (I4)
 Births (surplus + housing + paired agents), aging, natural death (elder

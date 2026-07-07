@@ -448,6 +448,41 @@ ERA_LADDER = [
     ("Wagon Era", "vehicles"),         # a vehicle (cart/wagon) in village hands
 ]
 
+# --- Phase E: market, property & mechanical relationships (ECONOMY_ENABLED) ---
+# While a market structure exists (kind="village" so it fits the same
+# build_grid districts as house/wall), trade_resource stops bartering 1-for-1
+# and becomes a priced exchange in gold, and relationships condition the deal
+# (ally discount, rival surcharge/refusal). Prices are a pure query-time
+# function of district stock ratio + stockpile depth -- no new tick. With the
+# flag off, trade_resource stays exactly the Phase B/C/D barter swap and no
+# market/property/wealth code runs, so flag-off prompts/behavior are
+# byte-identical.
+ECONOMY_ENABLED = True
+# Price curve: BASE_PRICE at "comfortable" stock, scaling up as stock (district
+# ratio and/or village stockpile depth) drops toward zero -- scarce = expensive.
+# Sizing: at full stock (ratio 1.0) price == BASE_PRICE; at zero stock price
+# caps at BASE_PRICE * PRICE_SCARCITY_MULT, so no resource can ever demand more
+# gold than a villager could plausibly gather toward across a few turns
+# (COLLECT_CAP=20, so a 4x spike on a BASE_PRICE=1-3 good tops out under 12g).
+BASE_PRICE = {"food": 1, "fish": 1, "water": 1, "wood": 1, "herbs": 1,
+              "stone": 2, "planks": 2, "bricks": 2, "tools": 3, "cart": 4, "wagon": 6}
+PRICE_SCARCITY_MULT = 4.0
+PRICE_MIN = 1
+# Relationship modifiers on the priced-trade path (audit C2 -- the first
+# mechanical consumer of agent["relationships"]). Allies get a break, rivals
+# pay/charge more; REFUSAL is a hard stop only for rival-priced trades the
+# buyer can't afford even at the surcharge (never for barter -- that stays the
+# deterministic escape when gold is short or no market exists).
+ALLY_PRICE_DISCOUNT = 0.75
+RIVAL_PRICE_SURCHARGE = 1.5
+# Property: the first agent to build OR repair-from-ruin a house claims it as
+# home (stored on the structure as "homeOf"; an agent can hold only one home
+# at a time -- claiming a new one releases the old). Homeowners get the Phase
+# C nightly shelter benefit automatically (their own house, regardless of
+# proximity), so a homeless villager is the one actually competing for the
+# nearest-N shelter slots.
+HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
+
 # --- Registries (ported from index.html) ---
 PROJECT_TEMPLATES = {
     "house": {"name": "House", "needs": {"wood": 3, "stone": 1, "food": 1, "fish": 1}, "visualStyle": "house"},
@@ -622,6 +657,24 @@ if TECH_TREE_ENABLED:
         SEED_RECIPES["wagon"] = {"name": "Wagon",
                                  "inputs": {"cart": 1, "planks": 2, "tools": 1},
                                  "station": "workshop", "tier": 2}
+
+if ECONOMY_ENABLED:
+    # The market: the seed price-unlock STATION. Plain tier-1 (buildable in
+    # any village-kind district, same as house/wall) -- the deterministic
+    # escape means a village never needs an uninvented resource to reach
+    # pricing. Its "unlocks" effect is a new kind ("pricing") consulted by
+    # _market_active(); it produces nothing on its own.
+    PROJECT_TEMPLATES["market"] = {
+        "name": "Market",
+        "needs": {"wood": 2, "stone": 2, "gold": 2},
+        "visualStyle": "workshop",
+        **({"tier": 1} if TECH_TREE_ENABLED else {}),
+    }
+    PROJECT_ORDER.append("market")
+    PROJECT_KIND["market"] = "village"
+    SEED_STRUCTURE_FUNCTIONS["market"] = {
+        "unlocks": [{"kind": "pricing", "station": "market"}],
+    }
 
 AGENT_DEFS = [
     {"id": 1, "name": "Aria", "role": "farmer", "personality": "hardworking and cautious", "color": "#4CAF50", "zone": "farm_north"},
@@ -858,6 +911,9 @@ class SimEngine:
                 "lastShelterNote": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
+                # Phase E: home structure id (None = homeless) + refusal nudges.
+                "homeStructureId": None, "lastTradeRejection": None,
+                "lastHomelessNudgeFrame": None,
             }
             agents.append(a)
         # post-build setup (index.html lines ~1037)
@@ -2114,6 +2170,189 @@ class SimEngine:
                 bonus += min(max_bonus, (count // every_n) * boost.get("bonus", 1))
         return bonus
 
+    # --- Phase E: market pricing, priced trade, property (ECONOMY_ENABLED) ---
+    def _market_active(self):
+        """True while at least one WORKING market unlocks pricing (same
+        query-time unlock pattern as craft stations)."""
+        if not ECONOMY_ENABLED or not STRUCTURE_EFFECTS_ENABLED:
+            return False
+        for type_id in {s["type"] for s in self.civilization["structures"]}:
+            fn = self._get_structure_function(type_id)
+            for unlock in fn.get("unlocks") or []:
+                if unlock.get("kind") == "pricing" and self._working_structure_count(type_id) > 0:
+                    return True
+        return False
+
+    def _resource_price(self, resource_id):
+        """Deterministic price in gold, no persisted state. base * a scarcity
+        multiplier derived from (a) the average district-stock ratio for this
+        resource village-wide (ECOLOGY_ENABLED) and (b) the village stockpile
+        depth relative to storage capacity (GOODS_ENABLED) -- either signal
+        alone is enough to move price; both compound. Gold itself is priced at
+        1 (the medium doesn't price itself)."""
+        if resource_id == "gold":
+            return 1
+        base = BASE_PRICE.get(resource_id, 2)
+        scarcity = 1.0  # 1.0 = comfortable stock, 0.0 = fully depleted
+        signals = 0
+        if ECOLOGY_ENABLED:
+            self._ensure_district_stocks()
+            ratios = []
+            for stocks in self.civilization["districtStocks"].values():
+                if resource_id in stocks:
+                    max_s = self._stock_max(resource_id)
+                    ratios.append(min(1.0, stocks[resource_id] / max_s) if max_s else 1.0)
+            if ratios:
+                scarcity = min(scarcity, sum(ratios) / len(ratios))
+                signals += 1
+        if GOODS_ENABLED and resource_id in EDIBLE_RESOURCES:
+            cap = self._storage_capacity(resource_id)
+            if cap:
+                c = self.civilization
+                held = c["stockpile"].get(resource_id, 0) + \
+                    sum(a["resources"].get(resource_id, 0) for a in self.agents)
+                scarcity = min(scarcity, min(1.0, held / cap))
+                signals += 1
+        if signals == 0:
+            scarcity = 1.0
+        mult = 1.0 + (1.0 - scarcity) * (PRICE_SCARCITY_MULT - 1.0)
+        return max(PRICE_MIN, round(base * mult))
+
+    def _format_prices_for_prompt(self):
+        """One compact prompt line, rendered only while a market exists (flag-
+        off / no-market prompts are unaffected)."""
+        if not self._market_active():
+            return None
+        ids = sorted(self.civilization["resourceRegistry"].keys())
+        parts = [f"{rid} {self._resource_price(rid)}g" for rid in ids if rid != "gold"]
+        return ", ".join(parts) if parts else None
+
+    def _relationship_between(self, agent, other_name):
+        return agent["relationships"].get(other_name, "neutral")
+
+    def _priced_trade_terms(self, seller, buyer_name, resource_id):
+        """Returns (unit_price, refused, refusal_reason). Relationship
+        modifiers apply from the SELLER's perspective (their opinion of the
+        buyer): ally = discount, rival = surcharge, and a rival trade is
+        refused outright if the buyer can't afford even the surcharged price
+        -- never for any other reason, so barter/other partners/waiting for
+        price to move all remain reachable."""
+        price = self._resource_price(resource_id)
+        rel = self._relationship_between(seller, buyer_name)
+        if rel == "ally":
+            price = max(PRICE_MIN, round(price * ALLY_PRICE_DISCOUNT))
+        elif rel == "rival":
+            price = max(PRICE_MIN, round(price * RIVAL_PRICE_SURCHARGE))
+        return price, rel
+
+    def _priced_trade(self, agent, target, resource_id):
+        """Priced exchange (market active): target buys 1 unit of resource_id
+        from agent at the relationship-adjusted price, in gold. Refusals are
+        NEVER silent: every one sets lastTradeRejection (read by the next
+        prompt) and logs an in-world activity line. Deterministic escapes:
+        a rival refusal doesn't touch either agent's inventory (both keep
+        everything they came with -- gather more gold, wait for price to
+        move, or approach a different, non-rival partner); an ally/neutral
+        trade the buyer can't afford falls back to the barter swap (never
+        blocked just because gold is short)."""
+        price, rel = self._priced_trade_terms(agent, target["name"], resource_id)
+        buyer_gold = target["resources"].get("gold", 0)
+        if rel == "rival" and buyer_gold < price:
+            reason = (f"{target['name']} can't afford {agent['name']}'s rival surcharge "
+                      f"for {resource_id} ({price}g, has {buyer_gold}g)")
+            agent["lastTradeRejection"] = {"reason": reason, "frame": self.frameTick}
+            self._push_activity(f"{agent['name']} refused to trade with his rival {target['name']}")
+            return f"{agent['name']} refused to trade with rival {target['name']}"
+        if buyer_gold < price:
+            # Ally/neutral, gold short: barter fallback (the deterministic
+            # escape -- a thin gold supply never blocks trade outright).
+            agent["resources"][resource_id] -= 1
+            target["resources"][resource_id] = target["resources"].get(resource_id, 0) + 1
+            self._nudge_ally(agent, target["name"])
+            self._nudge_ally(target, agent["name"])
+            self._push_memory(target, f"Received {resource_id} from {agent['name']} (bartered, short on gold)")
+            agent["lastTradeRejection"] = None
+            return f"{agent['name']} bartered {resource_id} to {target['name']} (short on gold)"
+        agent["resources"][resource_id] -= 1
+        target["resources"][resource_id] = target["resources"].get(resource_id, 0) + 1
+        target["resources"]["gold"] = buyer_gold - price
+        agent["resources"]["gold"] = agent["resources"].get("gold", 0) + price
+        self._nudge_ally(agent, target["name"])
+        self._nudge_ally(target, agent["name"])
+        self._push_memory(target, f"Bought {resource_id} from {agent['name']} for {price}g")
+        agent["lastTradeRejection"] = None
+        term = f" ({rel} price)" if rel != "neutral" else ""
+        self._push_activity(
+            f"{target['name']} bought {resource_id} from {agent['name']} for {price}g{term}")
+        return f"{agent['name']} sold {resource_id} to {target['name']} for {price}g"
+
+    def _find_house_to_claim(self, agent):
+        """The nearest WORKING, unclaimed house -- built houses first-come."""
+        c = self.civilization
+        candidates = [s for s in c["structures"]
+                      if (self._get_structure_function(s.get("type")) or {}).get("houses")
+                      and not s.get("isRuin") and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD
+                      and not s.get("homeOf")]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda s: _dist(agent["x"], agent["y"], s["x"], s["y"]))
+
+    def _claim_home(self, agent, structure):
+        """First-come home claim (called on build/repair-from-ruin, and by an
+        explicit claim). Releases any previous home the agent held (an agent
+        can hold only one home at a time) and logs it. `homeOf`/`prevHomeOf`
+        are inheritance breadcrumbs only -- Phase F consumes them."""
+        old_id = agent.get("homeStructureId")
+        if old_id and old_id != structure["id"]:
+            prev = next((s for s in self.civilization["structures"] if s["id"] == old_id), None)
+            if prev and prev.get("homeOf") == agent["name"]:
+                prev["homeOf"] = None
+        structure["homeOf"] = agent["name"]
+        agent["homeStructureId"] = structure["id"]
+        agent["lastHomelessNudgeFrame"] = None
+        name = structure.get("name") or structure.get("type")
+        self._push_activity(f"{agent['name']} claimed the {name} in {structure.get('districtId')} as home")
+
+    def _maybe_auto_claim_home(self, agent, structure):
+        """Called right after a house is built or rebuilt from ruin: the
+        builder/repairer claims it first-come if they're homeless. Doesn't
+        force a claim on someone who already has a home -- leaves the new
+        house open for the next homeless villager (_find_house_to_claim /
+        the homeless nudge)."""
+        if not ECONOMY_ENABLED:
+            return
+        if (self._get_structure_function(structure.get("type")) or {}).get("houses") \
+                and not agent.get("homeStructureId"):
+            self._claim_home(agent, structure)
+
+    def _agent_wealth(self, agent):
+        """gold + goods valued at current prices (0 signal when no market
+        exists -- goods are worth nothing tradeable yet, matching barter-only
+        reality)."""
+        gold = agent["resources"].get("gold", 0)
+        if not self._market_active():
+            return gold
+        value = gold
+        for rid, amt in agent["resources"].items():
+            if rid == "gold" or amt <= 0:
+                continue
+            value += amt * self._resource_price(rid)
+        return value
+
+    def _wealth_gini(self):
+        """Standard Gini coefficient over per-agent wealth (gold + priced
+        goods). 0 = perfect equality, ~1 = maximal inequality. None when there
+        are no agents (never during a live session)."""
+        if not self.agents:
+            return None
+        values = sorted(self._agent_wealth(a) for a in self.agents)
+        n = len(values)
+        total = sum(values)
+        if total <= 0:
+            return 0.0
+        cum = sum((i + 1) * v for i, v in enumerate(values))
+        return round((2 * cum) / (n * total) - (n + 1) / n, 3)
+
     def _deposit_produced(self, resource, amount, type_id, district_id=None):
         c = self.civilization
         if resource not in c["resourceRegistry"]:
@@ -2250,6 +2489,12 @@ class SimEngine:
                 self._push_activity(
                     f"The {name} in {did} has collapsed into a ruin! "
                     f"repair_structure can rebuild it for half the original materials")
+                if ECONOMY_ENABLED and s.get("homeOf"):
+                    owner = self._find_agent(s["homeOf"])
+                    if owner and owner.get("homeStructureId") == s["id"]:
+                        owner["homeStructureId"] = None
+                    self._push_activity(f"{s['homeOf']} is left homeless — the {name} they lived in is a ruin")
+                    s["homeOf"] = None
 
     def _maybe_disaster(self):
         """Rare random structure damage (DISASTER_PROB per goods tick), so
@@ -2280,7 +2525,12 @@ class SimEngine:
         everyone else spends the night outside and loses a little hunger --
         a surfaced nudge, never a hard punishment (floored at
         SHELTER_HUNGER_FLOOR, above the starvation band). This is what makes
-        houses consumed nightly instead of just population math."""
+        houses consumed nightly instead of just population math.
+        Phase E (ECONOMY_ENABLED): a homeowner is guaranteed a bed in THEIR
+        OWN house regardless of proximity -- property has to mean something
+        mechanically, not just log a claim message. Remaining beds (any house
+        minus its live-in owner's reserved bed) go to the homeless, nearest
+        first, exactly as before."""
         if not GOODS_ENABLED or not SURVIVAL_ENABLED:
             return
         c = self.civilization
@@ -2296,12 +2546,24 @@ class SimEngine:
             self._push_activity("Night falls -- every villager has a roof tonight")
             return
 
+        sheltered_names = set()
+        remaining_slots = slots
+        if ECONOMY_ENABLED:
+            owned_ids = {s["id"] for s in house_structs if s.get("homeOf")}
+            for a in self.agents:
+                if a.get("homeStructureId") in owned_ids:
+                    sheltered_names.add(a["name"])
+            remaining_slots = max(0, slots - len(sheltered_names))
+
         def dist_to_house(a):
             if not house_structs:
                 return float("inf")
             return min(_dist(a["x"], a["y"], s["x"], s["y"]) for s in house_structs)
 
-        unsheltered = sorted(self.agents, key=dist_to_house)[slots:]
+        others = [a for a in self.agents if a["name"] not in sheltered_names]
+        sheltered_names.update(a["name"] for a in
+                               sorted(others, key=dist_to_house)[:remaining_slots])
+        unsheltered = [a for a in self.agents if a["name"] not in sheltered_names]
         penalized = 0
         for a in unsheltered:
             if a["incapacitated"] or a["hunger"] <= SHELTER_HUNGER_FLOOR:
@@ -2312,6 +2574,10 @@ class SimEngine:
                            f"house(s) shelter only {slots} of {len(self.agents)} villagers"),
                 "frame": self.frameTick,
             }
+            if ECONOMY_ENABLED and not a.get("homeStructureId") \
+                    and (self.frameTick - (a.get("lastHomelessNudgeFrame") or -HOMELESS_NUDGE_FRAMES)) \
+                    >= HOMELESS_NUDGE_FRAMES:
+                a["lastHomelessNudgeFrame"] = self.frameTick
             penalized += 1
         if penalized:
             self._push_activity(
@@ -2408,6 +2674,7 @@ class SimEngine:
             s["condition"] = 100.0
             s["isRuin"] = False
             summary = f"{agent['name']} rebuilt the {name} from its ruins in {s.get('districtId')}"
+            self._maybe_auto_claim_home(agent, s)
         else:
             s["condition"] = min(100.0, s.get("condition", 100.0) + REPAIR_CONDITION_RESTORE)
             summary = (f"{agent['name']} repaired the {name} in {s.get('districtId')} "
@@ -2496,7 +2763,7 @@ class SimEngine:
         if not spot:
             return f"{agent['name']} finds {district_id} has no room left to build"
         struct_type = project["type"]
-        c["structures"].append({
+        new_structure = {
             "id": c["nextStructureId"], "type": struct_type,
             "x": spot["x"], "y": spot["y"],
             "visualStyle": project.get("visualStyle") or "generic",
@@ -2505,7 +2772,10 @@ class SimEngine:
             # Phase C decay stat; every read uses .get(default 100) so
             # structures from pre-Phase-C saves need no migration.
             "condition": 100.0, "isRuin": False,
-        })
+            # Phase E property: None until claimed (see _maybe_auto_claim_home).
+            "homeOf": None,
+        }
+        c["structures"].append(new_structure)
         c["nextStructureId"] += 1
         built_name = project["name"]
         c["districtProjects"][district_id] = None
@@ -2517,6 +2787,7 @@ class SimEngine:
         c["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         self._check_civilization_level()
+        self._maybe_auto_claim_home(agent, new_structure)
         return f"{agent['name']} built {built_name} in {district_id}"
 
     def _perform_gather(self, agent, resource):
@@ -4055,6 +4326,13 @@ class SimEngine:
                      "disrepair": sum(1 for v in conds
                                       if 0 < v < STRUCTURE_DISREPAIR_THRESHOLD),
                      "structures": len(conds)})
+        if ECONOMY_ENABLED:
+            gini = self._wealth_gini()
+            if gini is not None:
+                homeowners = sum(1 for a in self.agents if a.get("homeStructureId"))
+                self._log_benchmark("wealth_gini", gini,
+                                    {"market_active": self._market_active(),
+                                     "homeowners": homeowners, "agents": len(self.agents)})
 
     # --- memory maintenance (round-robin summarizer + periodic cleaner) ---
     def _run_memory_maintenance(self):
@@ -4217,7 +4495,10 @@ class SimEngine:
                 self._auto_move_toward_target(agent, target["name"])
             nearby = target and self._distance_to(agent, target) <= 80
             give = self._most_abundant_resource(agent)
-            if nearby and give:
+            if nearby and give and ECONOMY_ENABLED and self._market_active():
+                summary = self._priced_trade(agent, target, give)
+                resource_acted = give if "refused" not in summary else None
+            elif nearby and give:
                 agent["resources"][give] -= 1
                 target["resources"][give] = target["resources"].get(give, 0) + 1
                 self._nudge_ally(agent, target["name"])
@@ -4225,6 +4506,8 @@ class SimEngine:
                 self._push_memory(target, f"Received {give} from {agent['name']}")
                 summary = f"{agent['name']} traded {give} to {target['name']}"
                 resource_acted = give
+                if ECONOMY_ENABLED:
+                    agent["lastTradeRejection"] = None
             elif target:
                 summary = f"{agent['name']} moves to trade with {target['name']}"
             else:
@@ -4602,6 +4885,22 @@ class SimEngine:
                 nudges.append(f"NOTE: The {worst_local.get('name') or worst_local.get('type')} here is "
                               f"{state_word} (condition {int(worst_local.get('condition', 0))}). "
                               f"Use repair_structure to restore it.")
+        if ECONOMY_ENABLED:
+            trade_rejection = agent.get("lastTradeRejection")
+            if trade_rejection and self.frameTick - trade_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: Your last trade was refused: {trade_rejection['reason']}.")
+            if not agent.get("homeStructureId") \
+                    and (self.frameTick - (agent.get("lastHomelessNudgeFrame") or -HOMELESS_NUDGE_FRAMES)) \
+                    >= HOMELESS_NUDGE_FRAMES:
+                claimable = self._find_house_to_claim(agent)
+                agent["lastHomelessNudgeFrame"] = self.frameTick
+                if claimable:
+                    nudges.append("NOTE: You have no home, but an unclaimed house exists. "
+                                  "Be the one to repair_structure it (if damaged) or help build the "
+                                  "next house to claim it as your own.")
+                else:
+                    nudges.append("NOTE: You have no home and no house is unclaimed. "
+                                  "Consider start_project to build a house -- the builder claims it.")
         abandonment = c.get("lastProjectAbandonment")
         if abandonment and self.frameTick - abandonment.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: {abandonment['reason']}.")
@@ -4794,6 +5093,10 @@ class SimEngine:
             # is off, so the server renders Phase C prompts byte-identically.
             "era": self._current_era_name() if TECH_TREE_ENABLED else None,
             "village_tech_tier": self._village_tech_tier() if TECH_TREE_ENABLED else None,
+            # Phase E: rendered as one compact "Prices: ..." line only when a
+            # market exists (server renders it only when set, so flag-off /
+            # no-market prompts stay byte-identical to Phase D).
+            "prices_line": self._format_prices_for_prompt() if ECONOMY_ENABLED else None,
             "pending_rules": [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
                                "yes": list(r["votes"].values()).count("yes"),
                                "no": list(r["votes"].values()).count("no"),
@@ -5167,6 +5470,16 @@ class SimEngine:
                 if ECOLOGY_ENABLED and not civ.get("districtStocks"):
                     civ["districtStocks"] = self._init_district_stocks(
                         civ.get("districts") or {}, civ.get("resourceRegistry"))
+                if ECONOMY_ENABLED:
+                    # Phase E: the market seed joins existing registries (old
+                    # saves can build it); structures/houses from pre-Phase-E
+                    # saves have no "homeOf" -- every read uses .get(homeOf)
+                    # so this setdefault is cosmetic (keeps snapshot/JSON
+                    # shape consistent) rather than load-bearing.
+                    if isinstance(civ.get("projectRegistry"), dict):
+                        civ["projectRegistry"].setdefault("market", dict(PROJECT_TEMPLATES["market"]))
+                    for s in (civ.get("structures") or []):
+                        s.setdefault("homeOf", None)
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
@@ -5183,6 +5496,9 @@ class SimEngine:
                     a.setdefault("lastRepairRejection", None)
                     a.setdefault("lastRecipeRejection", None)
                     a.setdefault("lastShelterNote", None)
+                    a.setdefault("homeStructureId", None)
+                    a.setdefault("lastTradeRejection", None)
+                    a.setdefault("lastHomelessNudgeFrame", None)
                     # state.json may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
                     # saved agent's memory.longTerm list can carry leaked
@@ -5278,7 +5594,8 @@ class SimEngine:
                                 "sprite": s.get("sprite"),
                                 "districtId": s.get("districtId"),
                                 "condition": s.get("condition", 100),
-                                "isRuin": bool(s.get("isRuin"))}
+                                "isRuin": bool(s.get("isRuin")),
+                                "homeOf": s.get("homeOf")}
                                for s in c["structures"]],
                 "districtProjects": district_projects,
                 "completedProjects": c["completedProjects"],
@@ -5314,6 +5631,13 @@ class SimEngine:
                 } if council else None)
                 civ["councilLog"] = json.loads(json.dumps(
                     (c.get("councilLog") or [])[:COUNCIL_LOG_CAP], default=str))
+            if ECONOMY_ENABLED:
+                # Phase E: market status + a live prices dict for the viewer
+                # (thin-viewer-only rendering -- no simulation logic moves).
+                civ["marketActive"] = self._market_active()
+                civ["prices"] = ({rid: self._resource_price(rid)
+                                  for rid in c["resourceRegistry"] if rid != "gold"}
+                                 if civ["marketActive"] else {})
             benchmarks = dict(self.lastBenchmarks)
             activity = list(self.activityLog)
             conversation = list(self.conversationLog[:30])
@@ -5337,6 +5661,7 @@ class SimEngine:
                         "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
                         "GOODS_ENABLED": GOODS_ENABLED,
                         "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
+                        "ECONOMY_ENABLED": ECONOMY_ENABLED,
                     },
                 },
             }

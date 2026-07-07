@@ -777,6 +777,16 @@ UPKEEP & SEASONS (when repair_structure is available):
    storage (granary, or a blueprint with a "stores" function). Winter stops
    district stock regrowth: stockpile food before it. Craft a cart to carry more.
 
+MARKET, TRADE & PROPERTY (when a Market exists):
+21. If Prices is shown, trade_resource is a SALE, not a swap: target buys 1 unit
+   of your most abundant resource for gold at the listed price, adjusted by your
+   relationship with them (ally = discount, rival = surcharge, and you may refuse
+   a rival outright if they can't afford the surcharge). If Prices is not shown,
+   trade_resource stays a 1-for-1 barter swap.
+22. Build or repair_structure a house to claim it as your home (first-come). A
+   home shelters you every night automatically. If a NOTE says you're homeless,
+   prioritize claiming or building one.
+
 Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
 Do not use chain-of-thought or reasoning — output the JSON object immediately.
 The JSON must match this structure exactly:
@@ -871,7 +881,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-{season_line}{level_line}Structures built: {structures_built}
+{season_line}{prices_line}{level_line}Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
@@ -2238,6 +2248,11 @@ def build_user_prompt(data, slim=False):
         level_line = f"Era: {era}{tier_part}\n"
     else:
         level_line = f"Civilization level: {data.get('civilization_level', 1)}\n"
+    # Phase E: one short prices line, rendered ONLY when the engine sends one
+    # (ECONOMY_ENABLED and a market exists) so flag-off / no-market prompts
+    # stay byte-identical to Phase D.
+    prices_raw = data.get("prices_line")
+    prices_line = f"Prices: {prices_raw}\n" if prices_raw else ""
 
     return USER_PROMPT_TEMPLATE.format(
         agent_name=data.get("agent_name"),
@@ -2273,6 +2288,7 @@ def build_user_prompt(data, slim=False):
         pending_rules=format_pending_rules(data.get("pending_rules") or []),
         active_rules=format_active_rules(data.get("active_rules") or []),
         season_line=season_line,
+        prices_line=prices_line,
         recent_conversations="none" if slim else data.get("recent_conversations", "none"),
         inbox=data.get("inbox", "none"),
         module_reports=data.get("module_reports", "none"),
