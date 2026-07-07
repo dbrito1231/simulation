@@ -1,0 +1,187 @@
+[
+ {
+  "palette": [
+   "#5A6988",
+   "#3F2631",
+   "#B6B1B5",
+   "#BD6C4A",
+   "#763B36"
+  ],
+  "grid": [
+   "cccccccccccccb",
+   "aaaaaaaaaaaaab",
+   "caaaaaccaccaab",
+   "caaaaaccacaaab",
+   "aaaccccaaacccb",
+   "aaaccccaaacccb",
+   "aaaaaaaaaaaaab",
+   "bbbbbbbddddddd",
+   "beeeedbbbbbbbd",
+   "becdcdbbdeeebd",
+   "becdcdbbdeeebd",
+   "becdcdbbdceebd",
+   "bddddebbdbeebd",
+   "bbbbbbdbdeeebd"
+  ],
+  "name": "blue_roof_cottage",
+  "note": "peaked blue roof over stone wall, window left, door right"
+ },
+ {
+  "palette": [
+   "#C34B35",
+   "#D67755",
+   "#3F2631",
+   "#D0B6A6",
+   "#763B36"
+  ],
+  "grid": [
+   "dddddddddddddc",
+   "aaaaaaaaaaaaac",
+   "baaaaabbabbaac",
+   "daaaaaddadaaac",
+   "aaabbbbaaabbbc",
+   "aaabddbaaabddc",
+   "aaaaaaaaaaaaac",
+   "bbbbbbbccccccc",
+   "bccccccceeeebc",
+   "bceeeebcedbdbc",
+   "bceeeebcedbdbc",
+   "bceeedbcedbdbc",
+   "bceeecbcbbbbec",
+   "bceeeebccccccd"
+  ],
+  "name": "red_roof_cottage",
+  "note": "red tiled roof, door left, shuttered window right"
+ },
+ {
+  "palette": [
+   "#8B9BB4",
+   "#3F2631",
+   "#505D79",
+   "#C0CBDC",
+   "#5A6988"
+  ],
+  "grid": [
+   "bdbdbdbbdbdbdb",
+   "eaeaeaeeaeaeab",
+   "aaaaaaaaaaaaeb",
+   "dddddddddddddb",
+   "bbbbbbbbbbbbeb",
+   "edededeedededb",
+   "aaaaaaaaaaaaab",
+   "abbbbaaaacccca",
+   "cbddabcccccccc",
+   "ababdbaaaaacaa",
+   "cbabdbcccccccc",
+   "abaadbacccaaac",
+   "cbbbbbcccccccc",
+   "aaaacaaaaaacaa"
+  ],
+  "name": "stone_keep",
+  "note": "crenellated stone keep with arrow window"
+ },
+ {
+  "palette": [
+   "#824D46",
+   "#8C9CB5",
+   "#DAB599",
+   "#3D212D",
+   "#1FAEE5"
+  ],
+  "grid": [
+   "daaaaaccaaaacd",
+   "daaaccaaccaacd",
+   "daccaaaaaacccd",
+   "dcaaaaccaaaacd",
+   "daaabbbbbbaaad",
+   "daaabbbbbbaaad",
+   "dccceeeeeecccd",
+   "dccceeeebecccd",
+   "dccceebeeecccd",
+   "dacceeeeeeccad",
+   "dabbccccccbbad",
+   "dabbbbbbbbbbad",
+   "dabbbbbbbbbbad",
+   "ddbbbbbbbbbbdd"
+  ],
+  "name": "village_well",
+  "note": "small roofed well with water"
+ },
+ {
+  "palette": [
+   "#3F2631",
+   "#E38628",
+   "#FDBE53"
+  ],
+  "grid": [
+   "...aaaaaaaa...",
+   "..aaaaaaaaaa..",
+   ".aaaccccccaaa.",
+   "aaabccccccbaaa",
+   "aabbbbbbbbbbaa",
+   "aaabbbbbbbbaaa",
+   "abccccccccccba",
+   "abccccccccccba",
+   "abbbbbaabbbbba",
+   "aabbbaaaabbbaa",
+   "abbccaaaaccbba",
+   "abbccaaaaccbba",
+   "aabbbbaabbbbaa"
+  ],
+  "name": "beehive",
+  "note": "domed straw beehive"
+ },
+ {
+  "palette": [
+   "#3F2631",
+   "#BD6C4A",
+   "#EAA56C",
+   "#763B36"
+  ],
+  "grid": [
+   ".....aaaa.....",
+   ".aaaaaaaaaaaa.",
+   "aaaaaaccaaaaaa",
+   "aaccccbbccccaa",
+   "aaccccccccccaa",
+   "aabbbbbbbbbbaa",
+   "aabbdbddddbbaa",
+   "aabbbbbbbbbbaa",
+   "aabbddddbdbbaa",
+   "aabbbbbbbbbbaa",
+   "aaaaaaddaaaaaa",
+   ".aaaaabbaaaaa.",
+   "....aabbaa....",
+   "....aabbaa...."
+  ],
+  "name": "sign_post",
+  "note": "wooden sign on a post"
+ },
+ {
+  "palette": [
+   "#3F2631",
+   "#BD6C4A",
+   "#773833",
+   "#BAC6D8",
+   "#52607C"
+  ],
+  "grid": [
+   ".aaaaaaaaaaaa.",
+   "aaaddeddeddaaa",
+   "aadaaaaaaaadaa",
+   "adabbbbbbbbada",
+   "adbbccccccbbda",
+   "adbcaaaaaacbda",
+   "adbcaaaaaacbda",
+   "adbbaaaaaabbda",
+   "aacbbbbbbbbcaa",
+   "aabccccccccbaa",
+   "aabbbbbbbbbbaa",
+   "aabbbbbbbbbbaa",
+   "aaabbbbbbbbaaa",
+   ".aaaaaaaaaaaa."
+  ],
+  "name": "supply_cart",
+  "note": "small wooden cart"
+ }
+]

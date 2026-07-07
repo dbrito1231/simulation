@@ -2096,7 +2096,32 @@ Resources you may reference in "needs" and "function": {resource_ids}
 You may also introduce up to 3 brand-new resources via "new_resources", each with a gather_zone of farm, forest, village, market, beach, cave, or ocean (or null for crafted-only goods).
 {feedback}
 Design how it LOOKS too: include a "sprite" — 2-5 hex colors in "palette" plus a "grid" of 4-14 rows (4-14 chars each) using . for empty and a-e for palette colors. Make it recognizable at a glance.
+{sprite_example}
 Respond with ONLY the JSON decision object: action "propose_blueprint" plus a complete "blueprint" (id, name, needs, required function block, optional new_resources, visual_style, sprite). Invent something with a NEW effect, not a renamed duplicate."""
+
+# Few-shot sprite references derived from Kenney's CC0 "Tiny Town" pack (see
+# simulation/sprite_examples/LICENSE.md). One example is shown per invention
+# turn — enough to teach the grid format and pixel-art idioms (outline, roof
+# band, symmetric openings) without bloating the prompt.
+SPRITE_EXAMPLES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "sprite_examples", "examples.json")
+try:
+    with open(SPRITE_EXAMPLES_PATH, encoding="utf-8") as _f:
+        SPRITE_EXAMPLES = json.load(_f)
+except Exception:
+    SPRITE_EXAMPLES = []
+
+
+def format_sprite_example(frame_tick):
+    """One rotating few-shot sprite example (deterministic per frame window so
+    retries see the same example but successive inventions see variety)."""
+    if not SPRITE_EXAMPLES:
+        return ""
+    ex = SPRITE_EXAMPLES[(int(frame_tick or 0) // 600) % len(SPRITE_EXAMPLES)]
+    body = json.dumps({"palette": ex["palette"], "grid": ex["grid"]},
+                      separators=(",", ":"))
+    return (f'Example of a good sprite (a {ex["name"].replace("_", " ")} — '
+            f'{ex["note"]}): {body}')
 
 
 def build_invention_prompt(data):
@@ -2119,6 +2144,7 @@ def build_invention_prompt(data):
         rejected_ids=", ".join(rejected) or "none",
         resource_ids=", ".join(resources) or "none",
         feedback=feedback,
+        sprite_example=format_sprite_example(data.get("frame_tick")),
     )
 
 
