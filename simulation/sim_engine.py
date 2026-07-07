@@ -388,15 +388,17 @@ SHELTER_HUNGER_PENALTY = 6
 SHELTER_HUNGER_FLOOR = 20
 # Decay & repair: the designed consumer for the build-rate sprawl (2026-07-06
 # audit: ~30 builds/hour with nothing consuming structures). condition is 100
-# at build and decays 0.5 per goods tick (30s): ~70 min of neglect to
-# disrepair (<30: the structure stops producing/boosting/housing), ~100 min to
-# ruin (0). One repair (+50 condition) costs 1 unit of the structure's primary
-# material, so keeping a structure standing costs ~1 resource per ~50 min --
-# with ~50 structures standing that is ~1 repair/minute village-wide, a real
-# competing use of gathering time that should bend the build rate down. A ruin
-# is rebuilt via repair_structure for half the original needs (min 1 each) --
-# cheaper than new, the deterministic escape for total collapse.
-STRUCTURE_DECAY_PER_GOODS_TICK = 0.5
+# at build and decays STRUCTURE_DECAY_PER_GOODS_TICK per goods tick (30s).
+# 2026-07-07 audit retune: 0.5/tick ruined a 416-structure town in one night
+# (~100 min per structure, needing ~4 successful repairs per 30s village-wide
+# to hold -- unpayable by 12 agents; 409/416 became ruins, throughput 0). Now
+# 0.1/tick: ~5.8h of neglect to disrepair (<30: stops producing/boosting/
+# housing), ~8.3h to ruin -- a structure survives an unattended overnight soak,
+# sprawl still decays across days, upkeep stays a real competing use of
+# gathering time. A ruin is rebuilt via repair_structure for half the original
+# needs (min 1 each) -- cheaper than new, the deterministic escape for total
+# collapse.
+STRUCTURE_DECAY_PER_GOODS_TICK = 0.1
 STRUCTURE_DISREPAIR_THRESHOLD = 30
 REPAIR_CONDITION_RESTORE = 50
 # Disaster: rare random damage so decay isn't perfectly predictable. 0.005 per
@@ -2108,8 +2110,13 @@ class SimEngine:
     # --- Phase C: repair_structure (the decay escape hatch) ---
     def _find_repair_target(self, agent, target):
         """Resolve a repair target: explicit structure id/type/name first
-        (worst-condition match wins), else the worst damaged structure in the
-        agent's district, else village-wide."""
+        (worst-condition match wins), else the worst STANDING damaged structure
+        (cheap 1-unit upkeep that keeps it working -- the Phase C test is
+        'repairs a decaying structure BEFORE it collapses'), falling back to
+        ruins (expensive half-rebuild) only when nothing standing is damaged.
+        2026-07-07 audit: plain min(condition) always chose a ruin, so every
+        repair turn hit the multi-resource rebuild cost and failed. District
+        preference applies within each tier."""
         c = self.civilization
         damaged = [s for s in c["structures"]
                    if s.get("isRuin") or s.get("condition", 100) < 100]
@@ -2123,8 +2130,11 @@ class SimEngine:
                        or (s.get("name") or "").lower() == t]
             if matches:
                 return min(matches, key=lambda s: s.get("condition", 100))
-        local = [s for s in damaged if s.get("districtId") == agent.get("currentDistrict")]
-        pool = local or damaged
+        standing = [s for s in damaged
+                    if not s.get("isRuin") and s.get("condition", 100) > 0]
+        tier = standing or damaged
+        local = [s for s in tier if s.get("districtId") == agent.get("currentDistrict")]
+        pool = local or tier
         return min(pool, key=lambda s: s.get("condition", 100))
 
     def _repair_cost(self, structure):
@@ -2148,15 +2158,40 @@ class SimEngine:
             return f"{agent['name']} found nothing that needs repair"
         cost = self._repair_cost(s)
         name = s.get("name") or s.get("type")
-        missing = [res for res, amt in cost.items() if agent["resources"].get(res, 0) < amt]
+        # Fund each resource from the agent's inventory first, then the village
+        # stockpile (2026-07-07 audit: repairs drew from personal inventory
+        # only, so 320 repair attempts failed while the stockpile held 29k
+        # planks -- the gather->contribute loop could never fund the escape
+        # hatch). Refuse only when both together fall short.
+        c = self.civilization
+        plan = {}
+        missing = []
+        for res, amt in cost.items():
+            held = agent["resources"].get(res, 0)
+            from_agent = min(held, amt)
+            from_stock = amt - from_agent
+            if from_stock > int(c["stockpile"].get(res, 0)):
+                missing.append(res)
+            else:
+                plan[res] = (from_agent, from_stock)
         if missing:
             cost_str = ", ".join(f"{amt} {res}" for res, amt in cost.items())
             agent["lastRepairRejection"] = {
-                "reason": f"repairing the {name} needs {cost_str} -- you lack {', '.join(missing)}",
+                "reason": (f"repairing the {name} needs {cost_str} -- you and the "
+                           f"village stockpile together lack {', '.join(missing)}"),
                 "frame": self.frameTick}
             return f"{agent['name']} lacks {', '.join(missing)} to repair the {name}"
-        for res, amt in cost.items():
-            agent["resources"][res] -= amt
+        stock_parts = []
+        for res, (from_agent, from_stock) in plan.items():
+            if from_agent:
+                agent["resources"][res] -= from_agent
+            if from_stock:
+                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
+                stock_parts.append(f"{from_stock} {res}")
+        if stock_parts:
+            self._push_activity(
+                f"The village stockpile supplied {', '.join(stock_parts)} for "
+                f"{agent['name']}'s repair of the {name}")
         was_ruin = bool(s.get("isRuin")) or s.get("condition", 100) <= 0
         if was_ruin:
             s["condition"] = 100.0

@@ -758,7 +758,8 @@ UPKEEP & SEASONS (when repair_structure is available):
 19. Structures decay: below 30 condition they stop working; at 0 they collapse
    into ruins. Use repair_structure (target a structure name/type/id, or null
    for the most damaged one nearby). A repair costs 1 of the structure's main
-   material; rebuilding a ruin costs half its original materials.
+   material; rebuilding a ruin costs half its original materials. Materials you
+   hold are used first; the village stockpile covers any shortfall.
 20. Food spoils when the village holds more than its storage capacity — build
    storage (granary, or a blueprint with a "stores" function). Winter stops
    district stock regrowth: stockpile food before it. Craft a cart to carry more.

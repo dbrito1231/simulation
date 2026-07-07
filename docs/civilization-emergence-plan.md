@@ -569,6 +569,45 @@ success paths (repair +50, ruin rebuild at half cost) are covered by the
 deterministic offline checks through the same engine code. Temp constants
 reverted before commit.
 
+**Audit verdict (2026-07-07, evening slot — cycle 3.evening, session
+`2026-07-06T20-07-19`, 5h03m, 1,987 decisions, all six flags on):**
+`GOODS_ENABLED` **FAIL — balance/interface, hot-fixed in this slot.** Every
+Phase C mechanic fired and logged: 160 spoilage events, 7 season turns
+(~30 min cadence, winter 0× regrowth reaching prompts), 26 shelterless-night
+events, 2 disasters, `storage_utilization`/`structure_condition` streaming
+with detail, 0 silent rejections, 0 context overflows, 0 fallbacks. But decay
+ate the town: **409/416 structures were ruins by 01:00**,
+`structure_effect_throughput` 0, 0 working houses — and the escape hatch was
+economically unreachable: 282 `repair_structure` decisions (14.2% of ALL
+turns — the model heard the nudges and did the right thing) produced only 17
+successes against ~320 honest "lacks materials" refusals. Three precise
+causes, all fixed in-session: (1) repair paid from the agent's personal
+inventory only, while the village stockpile held 29,521 planks — the
+gather→contribute loop could never fund the escape; now agent-first-then-
+stockpile (activity line when the stockpile pays; refusal only when both fall
+short, still surfaced); (2) `_find_repair_target`'s plain `min(condition)`
+always chose a ruin (multi-resource half-rebuild) over cheap 1-unit upkeep of
+a standing structure — now standing-damaged first, ruins as fallback (the
+civ test says "before it collapses"); (3) decay 0.5/goods-tick = ruin in
+~100 min, so 416 structures needed ~4 successful repairs per 30 s
+village-wide — arithmetically unpayable by 12 agents; retuned to **0.1**
+(~5.8 h to disrepair, ~8.3 h to ruin: a structure survives an unattended
+overnight soak, sprawl still decays across days). 5 offline checks through
+the real engine code pass; py_compile clean. Storage/spoilage/seasons/
+shelter/cart sub-mechanics individually PASS. The flag re-soaks tonight as a
+**recovery-arc test**: the world resumes at 409 ruins + a full stockpile, so
+half-cost rebuilds are now fundable — the escape hatch at scale. Secondary
+observations for the morning slot: (a) the elder took **40% of all LLM
+turns** (793/1,987; 591 `assign_task`) — consider an assign-cadence cap;
+(b) invention fully dormant (0 proposals, 0 invention-only turns in 5 h), so
+the new council code path got **zero live exercise** — council verdict
+INCONCLUSIVE, must be provoked or observed in the Phase D soak; (c) ecology
+held (scarcity reflexes firing, 16 terraform starts, honest depletion
+messages — Phase B verdict unchanged). Slot hygiene note: the server was
+found DOWN at slot start (process exited ~01:10 with a clean state flush;
+~20 h of soak lost) and both the 2.evening and 3.morning scheduled slots
+never ran — the 5 h window above is all the data there was.
+
 ### Phase D — Technology tiers & eras (E1)
 `tier` on recipes/structures/blueprints; stations unlock the next tier;
 blueprint validator requires tier-appropriate prerequisites; era computed from
