@@ -544,6 +544,58 @@ SUCCESSION_ELECTION_TTL_FRAMES = STALL_THRESHOLD * 8  # ~13 min: any candidate s
 HARVEST_QUOTA_PERIOD_FRAMES = STALL_THRESHOLD * 3   # ~5 min per quota period
 RATIONING_STORAGE_LOW_RATIO = 0.5   # rationing only actually restricts below this storage-utilization ratio
 RATIONING_WITHDRAW_CAP = 3          # max units withdrawn from stockpile per agent per rationing check while low
+# --- Phase G: knowledge, culture, factions (CULTURE_ENABLED) ---
+# Skills-by-practice + teaching, a library that persists a dead agent's
+# knowledge, a village chronicle folded into prompts, meme mutation (ONE
+# event-driven lm_complete call, capped per session, mirroring Phase F's
+# one-call-per-birth discipline), and deterministic personality drift from
+# life events. All deterministic mechanics ride the existing slow tick gates
+# (no new per-tick LLM calls); the only LLM involvement is the capped meme
+# mutation. With the flag off, no agent carries a "skills" dict, no chronicle/
+# library state exists, and prompts are byte-identical to Phase F.
+CULTURE_ENABLED = True
+# Skills: one float level (0..SKILL_MAX_LEVEL) per practiced verb, rising a
+# small fixed amount on each successful use (deterministic -- no roll needed,
+# matching the "practice raises it" framing) and feeding a small yield/output
+# bonus so skill is legible in the numbers, not just flavor text.
+SKILL_KINDS = ("gather", "craft", "build", "heal")
+SKILL_MAX_LEVEL = 10.0
+SKILL_PRACTICE_GAIN = 0.15           # per successful practice of that verb
+SKILL_BONUS_DIVISOR = 4.0            # +1 yield/output per this many skill levels (see _skill_bonus)
+SKILL_HEAL_BONUS_PER_LEVEL = 0.6     # extra health restored per heal skill level
+# Teaching: a talk_to_nearby message containing a teach-intent keyword and a
+# recognized skill kind transfers a fraction of the SPEAKER's level in that
+# skill to the recipient (apprenticeship) -- deterministic keyword check, no
+# extra LLM call, no new action verb (mirrors the plan's change-map hint).
+TEACH_KEYWORDS = ("teach", "train", "show you how", "apprentice", "mentor")
+TEACH_TRANSFER_FRACTION = 0.3
+# Library: a seed structure (see SEED_STRUCTURE_FUNCTIONS) that, while
+# working, persists a dying agent's best skill so children/newcomers can
+# still study it (a goal, not a new action) -- death stops mattering as total
+# knowledge loss. Capped so the registry can't grow unbounded over a long
+# soak (oldest entry retires first, the same discipline as blueprint/resource
+# retirement elsewhere in the file).
+LIBRARY_KNOWLEDGE_CAP = 12
+LIBRARY_STUDY_GAIN = 0.4             # skill gained per study session at the library
+# Chronicle: a capped ring of major village-level events, summarized into one
+# prompt line ("Village history: ...") so a long-running village develops a
+# legible past without growing the prompt unboundedly.
+CHRONICLE_CAP = 20
+CHRONICLE_PROMPT_ENTRIES = 3         # how many recent entries to fold into the prompt line
+# Memes: mutation is capped and event-driven -- at most one lm_complete call
+# per mutation ATTEMPT (itself gated to a low probability on ordinary
+# proximity spread), and a hard per-session ceiling so a long soak can never
+# turn this into a background LLM-spam loop.
+MEME_MUTATION_PROB = 0.08            # chance an ordinary belief transmission also mutates the text
+MEME_MUTATION_SESSION_CAP = 30        # hard ceiling on lm_complete calls for meme mutation, this process's lifetime
+# Belief-driven bias: believers in the seed harvest_spirit meme contribute
+# food more readily (a deterministic behavioral tilt, not a new action) --
+# folded into _pick_contribution_resource so it costs no new template line.
+HARVEST_SPIRIT_CONTRIB_BOOST = True
+# Personality drift: major life events append one short trait clause to the
+# agent's existing persona/personality text (deterministic templates only).
+# Capped so a long-lived elder doesn't accumulate an unbounded run-on string.
+PERSONALITY_DRIFT_CAP = 3
 if LIFECYCLE_ENABLED:
     # New governable rule kinds (I4) + the deterministic succession-ballot
     # kind, layered onto the existing set so a flag-off village keeps exactly
@@ -741,6 +793,26 @@ if ECONOMY_ENABLED:
     PROJECT_KIND["market"] = "village"
     SEED_STRUCTURE_FUNCTIONS["market"] = {
         "unlocks": [{"kind": "pricing", "station": "market"}],
+    }
+
+if CULTURE_ENABLED:
+    # The Library: the seed knowledge-persistence STATION. Plain tier-1,
+    # buildable like house/wall/market (the deterministic escape -- a village
+    # never needs an uninvented resource to preserve knowledge). Its "unlocks"
+    # effect is a new kind ("knowledge") consulted by _library_active(); the
+    # actual persistence mechanic (surviving a dead agent's best skill) lives
+    # in civilization["libraryKnowledge"], not in the function block, so it
+    # needs no new produces/boosts vector.
+    PROJECT_TEMPLATES["library"] = {
+        "name": "Library",
+        "needs": {"wood": 3, "stone": 1, "gold": 1},
+        "visualStyle": "workshop",
+        **({"tier": 1} if TECH_TREE_ENABLED else {}),
+    }
+    PROJECT_ORDER.append("library")
+    PROJECT_KIND["library"] = "village"
+    SEED_STRUCTURE_FUNCTIONS["library"] = {
+        "unlocks": [{"kind": "knowledge", "station": "library"}],
     }
 
 AGENT_DEFS = [
@@ -1002,6 +1074,15 @@ class SimEngine:
                 a["deathFrame"] = None
             else:
                 a["age"] = None
+            if CULTURE_ENABLED:
+                # Phase G: per-agent skill levels (float, starts at 0 -- a
+                # newborn/newcomer has no practice yet, matching "children
+                # lack skills and inherit them slowly" from the plan). Life
+                # events append to personalityTraits, folded into the
+                # personality prompt line at build time (see build_user_prompt).
+                a["skills"] = {k: 0.0 for k in SKILL_KINDS}
+                a["personalityTraits"] = []
+                a["lastTeachFrame"] = 0
             agents.append(a)
         # post-build setup (index.html lines ~1037)
         for i, a in enumerate(agents):
@@ -1088,6 +1169,13 @@ class SimEngine:
             "harvestQuotas": {},            # rule id -> {"district": id|None, "resource": id|None, "value": n}
             "rationingActive": {},          # rule id -> {"value": n}
             "populationFloorHeld": False,   # last death-deferred-at-floor state, for the nudge
+            # Phase G (CULTURE_ENABLED): knowledge, chronicle, meme mutation.
+            "chronicle": [],                # capped ring: {"text": str, "frame": int, "kind": str}
+            "libraryKnowledge": [],         # capped ring: {"agent": name, "skill": kind, "level": float, "frame": int}
+            "memeTexts": {},                # belief id -> mutated text override (see _belief_text)
+            "memeMutations": 0,             # session-lifetime count, enforces MEME_MUTATION_SESSION_CAP
+            "skillPracticeCount": 0,        # benchmark helper for skill_spread
+            "teachCount": 0,                # benchmark helper for skill_spread
         }
         self._effect_period_fired = 0
         self._last_effect_benchmark_fired = 0
@@ -1431,6 +1519,8 @@ class SimEngine:
                 agent["incapacitated"] = True
                 agent["goal"] = None
                 self._push_activity(f"{agent['name']} collapsed from starvation")
+                if CULTURE_ENABLED:
+                    self._drift_personality(agent, "wary of hunger since a collapse")
 
     def _neediest_nearby(self, agent):
         nearby = [self._find_agent(n) for n in self._get_nearby_agents(agent)]
@@ -2014,13 +2104,25 @@ class SimEngine:
         have = p["contributed"].get(res, 0)
         if have >= need or agent["resources"].get(res, 0) <= 0:
             return None
-        agent["resources"][res] -= 1
-        p["contributed"][res] = have + 1
+        # Phase G: a practiced builder contributes a bit more efficiently per
+        # action -- the "build" skill's mechanical payoff, capped by what the
+        # project still needs and what the agent actually holds (never over-
+        # contributes past the requirement or below zero resources).
+        amount = 1
+        if CULTURE_ENABLED:
+            amount += self._skill_bonus(agent, "build")
+        amount = max(1, min(amount, need - have, agent["resources"].get(res, 0)))
+        agent["resources"][res] -= amount
+        p["contributed"][res] = have + amount
         agent["lastContributedFrame"] = self.frameTick
         self.civilization["districtLastContribution"][district_id] = self.frameTick
         self._touch_kind_activity(self.civilization["districts"][district_id]["kind"])
         self._enforce_resource_tax(agent, res)
-        return f"{agent['name']} contributed {res} to {p['name']} ({district_id})"
+        if CULTURE_ENABLED:
+            self._practice_skill(agent, "build")
+        bonus_note = " (skilled builder)" if amount > 1 else ""
+        return f"{agent['name']} contributed {res} x{amount}{bonus_note} to {p['name']} ({district_id})" \
+            if amount > 1 else f"{agent['name']} contributed {res} to {p['name']} ({district_id})"
 
     def _is_project_complete(self, district_id):
         p = self.civilization["districtProjects"].get(district_id) if district_id else None
@@ -2935,6 +3037,8 @@ class SimEngine:
         self._touch_kind_activity(c["districts"][district_id]["kind"])
         self._check_civilization_level()
         self._maybe_auto_claim_home(agent, new_structure)
+        if CULTURE_ENABLED:
+            self._practice_skill(agent, "build")
         return f"{agent['name']} built {built_name} in {district_id}"
 
     def _perform_gather(self, agent, resource):
@@ -2960,6 +3064,8 @@ class SimEngine:
         amount = 1
         if STRUCTURE_EFFECTS_ENABLED:
             amount += self._gather_yield_bonus(agent, resource)
+        if CULTURE_ENABLED:
+            amount += self._skill_bonus(agent, "gather")
         if ECOLOGY_ENABLED and scale < 1.0:
             amount = max(1, int(amount * scale))
         amount = max(1, min(amount, self._carry_cap(agent) - agent["resources"].get(resource, 0)))
@@ -2972,6 +3078,8 @@ class SimEngine:
                     did, resource, amount * STOCK_DEPLETE_MULTIPLIER)
         if LIFECYCLE_ENABLED:
             self._record_harvest_quota_use(agent, resource, amount)
+        if CULTURE_ENABLED:
+            self._practice_skill(agent, "gather")
         agent["lastGatherRejection"] = None
         bonus_note = ""
         if amount > 1:
@@ -3236,9 +3344,13 @@ class SimEngine:
         output = 1
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop":
             output += self._craft_output_bonus(recipe, agent.get("currentDistrict"))
+        if CULTURE_ENABLED:
+            output += self._skill_bonus(agent, "craft")
         agent["resources"][recipe_id] = agent["resources"].get(recipe_id, 0) + output
         agent["lastCraftRejection"] = None
         self.civilization["lastCraftActivityFrame"] = self.frameTick
+        if CULTURE_ENABLED:
+            self._practice_skill(agent, "craft")
         return f"{agent['name']} crafted {recipe_id}" \
             + (f" x{output} (well-equipped workshops)" if output > 1 else "")
 
@@ -3614,6 +3726,16 @@ class SimEngine:
             if other is agent or other.get("deathFrame") is not None:
                 continue
             self._push_memory(other, memorial, kind="memorial")
+        if CULTURE_ENABLED:
+            self._push_chronicle(f"{agent['name']} died of {cause}{age_txt}.", kind="death")
+            self._store_knowledge_on_death(agent)
+            # Bereavement (#4): the closest surviving ally drifts, deterministic
+            # template only -- a life event, not an LLM call.
+            bereaved = next((o for o in self.agents
+                             if o is not agent and o.get("deathFrame") is None
+                             and o.get("relationships", {}).get(agent["name"]) == "ally"), None)
+            if bereaved:
+                self._drift_personality(bereaved, f"grieving the loss of {agent['name']}")
         self._inherit_from(agent)
         if was_elder:
             # Every "find the elder" lookup across the codebase (assign_task,
@@ -3733,6 +3855,9 @@ class SimEngine:
         winner_name = rule.get("candidateName") or rule.get("value")
         winner = self._find_agent(winner_name)
         election_id = rule.get("electionId")
+        other_candidates = [r.get("candidateName") for r in c["pendingRules"]
+                            if r["kind"] == "succession" and r.get("electionId") == election_id
+                            and r.get("candidateName") != winner_name]
         c["pendingRules"] = [r for r in c["pendingRules"]
                              if not (r["kind"] == "succession" and r.get("electionId") == election_id)]
         c["pendingSuccession"] = None
@@ -3759,6 +3884,13 @@ class SimEngine:
             self._push_communication("election", "the village", "everyone",
                                      f"{winner['name']} is the new elder")
             self._log_benchmark("succession", 1, {"winner": winner["name"], "electionId": election_id})
+            if CULTURE_ENABLED:
+                self._push_chronicle(f"{winner['name']} was elected the new village elder.", kind="election")
+                self._drift_personality(winner, "emboldened by winning the election")
+                for name in other_candidates:
+                    loser = self._find_agent(name)
+                    if loser and loser.get("deathFrame") is None:
+                        self._drift_personality(loser, "humbled by losing the election")
 
     def _maybe_resolve_stalled_succession(self):
         """Deterministic escape hatch: an election cannot stall forever. Once
@@ -4034,6 +4166,17 @@ class SimEngine:
         if target and target in self.civilization["resourceRegistry"]:
             if agent["resources"].get(target, 0) > 0 and p["contributed"].get(target, 0) < p["needs"].get(target, 0):
                 return target
+        # Phase G belief-driven bias (deterministic, no new action): a
+        # harvest_spirit believer prefers contributing an EDIBLE resource the
+        # project still needs, ahead of the generic need-order scan below --
+        # "beliefs influence a deterministic bias" from the plan, at zero
+        # token cost (it reads the existing beliefs set, no new prompt line).
+        if CULTURE_ENABLED and HARVEST_SPIRIT_CONTRIB_BOOST and MEME_SEED_ID in agent.get("beliefs", ()):
+            for res in EDIBLE_RESOURCES:
+                need = p["needs"].get(res, 0)
+                have = p["contributed"].get(res, 0)
+                if need > have and agent["resources"].get(res, 0) > 0:
+                    return res
         for res in p["needs"]:
             need = p["needs"].get(res, 0)
             have = p["contributed"].get(res, 0)
@@ -4043,6 +4186,15 @@ class SimEngine:
 
     # --- memes ---
     def _belief_text(self, bid):
+        # Phase G: a mutated belief's text lives in civilization["memeTexts"]
+        # (per-world override), checked before the module-level seed MEMES
+        # dict so mutation never touches shared state across civilizations/
+        # resets. Absent CULTURE_ENABLED or with no mutation yet, this is
+        # exactly the Phase A-F lookup.
+        if CULTURE_ENABLED:
+            override = self.civilization.get("memeTexts", {}).get(bid)
+            if override:
+                return override
         return MEMES.get(bid, bid)
 
     def _seed_beliefs(self):
@@ -4065,6 +4217,8 @@ class SimEngine:
         if belief in recipient["beliefs"]:
             return None
         recipient["beliefs"].add(belief)
+        if CULTURE_ENABLED:
+            self._maybe_mutate_meme(belief, speaker, recipient)
         self._push_activity(f'{recipient["name"]} adopted "{self._belief_text(belief)}" from {speaker["name"]}')
         self._push_communication("belief", speaker["name"], recipient["name"], self._belief_text(belief))
         self._push_memory(recipient, f"Came to believe: {self._belief_text(belief)}")
@@ -4110,6 +4264,266 @@ class SimEngine:
         if not MEMES_ENABLED:
             return 0
         return len([a for a in self.agents if MEME_SEED_ID in a["beliefs"]])
+
+    def _maybe_mutate_meme(self, belief_id, speaker, recipient):
+        """Event-driven, capped mutation of a belief's text on spread (#3).
+        Exactly one lm_complete call per mutation attempt, itself gated by a
+        low probability AND a hard session-lifetime cap
+        (MEME_MUTATION_SESSION_CAP) so a long soak can never turn ordinary
+        proximity chatter into a background LLM-spam loop -- the same
+        discipline as Phase F's one-call-per-birth. A failed/empty call is a
+        silent no-op (the belief keeps its prior text), never a blocker."""
+        c = self.civilization
+        if random.random() > MEME_MUTATION_PROB:
+            return
+        if c.get("memeMutations", 0) >= MEME_MUTATION_SESSION_CAP:
+            return
+        current_text = self._belief_text(belief_id)
+        try:
+            # Few-shot form: a thinking-class model (qwen) measured live to be
+            # unreliable at following an abstract "reword this, don't explain"
+            # instruction -- it kept emitting meta-commentary about the task
+            # instead of doing it, even with generous max_tokens. Worked
+            # examples of INPUT/OUTPUT pairs are more reliable at constraining
+            # a small/thinking model to plain output than instructions alone.
+            mutated = self.d["lm_complete"](
+                "Rewrite a village rumor with slightly different wording, same "
+                "meaning, under 15 words. Reply with the rewritten sentence only.",
+                "Input: The river spirit blesses fishers at dawn.\n"
+                "Output: Fishers who rise at dawn are blessed by the river spirit.\n\n"
+                "Input: Strangers from the hills bring bad luck.\n"
+                "Output: Bad luck follows strangers who come from the hills.\n\n"
+                f"Input: {current_text}\n"
+                "Output:",
+                max_tokens=120, temperature=0.7,
+            )
+        except Exception:
+            mutated = None
+        if not mutated:
+            return
+        mutated = mutated.split("\n\n")[0].strip().strip('"').strip()
+        # A thinking-class model (qwen, measured live) frequently prefixes a
+        # one-or-two-word analysis label before the actual answer ("Subject:
+        # ...", "Meaning: ...", "Object/Condition: ..."). Strip a single
+        # leading "<ShortLabel>:" rather than reject the whole response --
+        # the content after the colon is usually the real rewrite.
+        label_match = re.match(r"^[A-Za-z][A-Za-z /]{0,24}:\s*", mutated)
+        if label_match:
+            mutated = mutated[label_match.end():].strip().strip('"').strip()
+        mutated = mutated[:120]
+        # Reject a remaining instruction-echo/meta-commentary/few-shot-repeat
+        # leak (a known failure mode of thinking-class models -- lm_complete's
+        # own is_scaffold_text already screens the raw response, but a
+        # *clean-looking* single sentence can still be the model talking
+        # ABOUT the task, or echoing the worked examples, rather than
+        # producing a new one). Treat either signal exactly like an empty
+        # response: a silent no-op, never a corrupted belief.
+        low = mutated.lower()
+        looks_meta = any(w in low for w in
+                         ("context hint", "reword", "rumor sentence", "task:",
+                          "instruction", "i should", "the model", "as an ai",
+                          "input", "output:", "sentence:", "example", "generate"))
+        has_words = bool(re.search(r"[A-Za-z]{3,}\s+[A-Za-z]{3,}", mutated))
+        if not mutated or mutated == current_text or looks_meta or not has_words \
+                or self.d["is_scaffold_text"](mutated):
+            return
+        c.setdefault("memeTexts", {})[belief_id] = mutated
+        c["memeMutations"] = c.get("memeMutations", 0) + 1
+        self._push_activity(f'The belief "{current_text}" drifted into "{mutated}" as it spread through the village.')
+        self._push_chronicle(f'A belief mutated: "{mutated}"', kind="meme_mutation")
+
+    # --- Phase G: skills by practice + teaching (CULTURE_ENABLED) ---
+    def _skill_level(self, agent, kind):
+        if not CULTURE_ENABLED:
+            return 0.0
+        return (agent.get("skills") or {}).get(kind, 0.0)
+
+    def _skill_bonus(self, agent, kind):
+        """Integer yield/output bonus from a practiced skill -- +1 per
+        SKILL_BONUS_DIVISOR levels, so early practice is legible but the cap
+        (SKILL_MAX_LEVEL / SKILL_BONUS_DIVISOR, e.g. 2 at defaults) stays
+        modest next to structure-effect bonuses."""
+        if not CULTURE_ENABLED:
+            return 0
+        return int(self._skill_level(agent, kind) // SKILL_BONUS_DIVISOR)
+
+    def _practice_skill(self, agent, kind):
+        """Deterministic practice-raises-skill (#1): every successful use of
+        a practiced verb nudges that skill up by a fixed amount, capped at
+        SKILL_MAX_LEVEL. Called from the existing success paths of
+        gather/craft/build/heal -- no new tick, no new action."""
+        if not CULTURE_ENABLED or kind not in SKILL_KINDS:
+            return
+        skills = agent.setdefault("skills", {k: 0.0 for k in SKILL_KINDS})
+        before = skills.get(kind, 0.0)
+        skills[kind] = min(SKILL_MAX_LEVEL, before + SKILL_PRACTICE_GAIN)
+        self.civilization["skillPracticeCount"] = self.civilization.get("skillPracticeCount", 0) + 1
+
+    def _maybe_teach(self, teacher, recipient_name, message):
+        """Teaching (#1 apprenticeship): a talk_to_nearby message containing
+        a teach-intent keyword (TEACH_KEYWORDS) and a recognized skill kind
+        transfers TEACH_TRANSFER_FRACTION of the teacher's level in that
+        skill to the recipient -- deterministic keyword check, no extra LLM
+        call, no new action verb (the plan's change-map hint). No silent
+        rejection: a failed match is simply not a teaching event (the talk
+        still lands as ordinary conversation)."""
+        if not CULTURE_ENABLED or not message or not recipient_name or recipient_name == "everyone":
+            return
+        text_lower = message.lower()
+        if not any(kw in text_lower for kw in TEACH_KEYWORDS):
+            return
+        recipient = self._find_agent(recipient_name)
+        if not recipient or recipient is teacher or recipient["incapacitated"]:
+            return
+        skill_kind = next((k for k in SKILL_KINDS if k in text_lower), None)
+        if not skill_kind:
+            # No specific skill named -- teach whichever the teacher is best at.
+            teacher_skills = teacher.get("skills") or {}
+            skill_kind = max(SKILL_KINDS, key=lambda k: teacher_skills.get(k, 0.0))
+        teacher_level = self._skill_level(teacher, skill_kind)
+        if teacher_level <= 0:
+            return
+        recipient_skills = recipient.setdefault("skills", {k: 0.0 for k in SKILL_KINDS})
+        transfer = teacher_level * TEACH_TRANSFER_FRACTION
+        before = recipient_skills.get(skill_kind, 0.0)
+        recipient_skills[skill_kind] = min(SKILL_MAX_LEVEL, before + transfer)
+        if recipient_skills[skill_kind] <= before:
+            return
+        teacher["lastTeachFrame"] = self.frameTick
+        self.civilization["teachCount"] = self.civilization.get("teachCount", 0) + 1
+        self._push_activity(f"{teacher['name']} taught {recipient['name']} some {skill_kind} skill.")
+        self._push_memory(recipient, f"Learned {skill_kind} from {teacher['name']}")
+
+    # --- Phase G: library knowledge persistence (CULTURE_ENABLED) ---
+    def _library_active(self, district_id=None):
+        if not CULTURE_ENABLED or not STRUCTURE_EFFECTS_ENABLED:
+            return False
+        return self._working_structure_count("library", district_id) > 0
+
+    def _store_knowledge_on_death(self, agent):
+        """Library (#2): while a working Library exists, a dying agent's
+        single best (non-trivial) skill is preserved in
+        civilization["libraryKnowledge"] so it remains learnable via
+        _study_at_library even though the agent is gone -- "death matters
+        without erasing progress". Capped (LIBRARY_KNOWLEDGE_CAP): the
+        weakest stored entry retires first, the same discipline as blueprint/
+        custom-resource retirement elsewhere in the file, so a long soak
+        can't grow this list forever."""
+        if not CULTURE_ENABLED or not self._library_active():
+            return
+        skills = agent.get("skills") or {}
+        best_kind = max(SKILL_KINDS, key=lambda k: skills.get(k, 0.0), default=None)
+        if not best_kind or skills.get(best_kind, 0.0) < SKILL_PRACTICE_GAIN:
+            return
+        c = self.civilization
+        knowledge = c.setdefault("libraryKnowledge", [])
+        knowledge.append({"agent": agent["name"], "skill": best_kind,
+                          "level": round(skills[best_kind], 2), "frame": self.frameTick})
+        while len(knowledge) > LIBRARY_KNOWLEDGE_CAP:
+            weakest = min(range(len(knowledge)), key=lambda i: knowledge[i]["level"])
+            knowledge.pop(weakest)
+        self._push_activity(f"{agent['name']}'s knowledge of {best_kind} is preserved in the Library.")
+        self._push_chronicle(f"{agent['name']}'s {best_kind} knowledge was preserved in the Library.",
+                             kind="knowledge_preserved")
+
+    def _maybe_study_at_library(self):
+        """Deterministic backstop (#2, the "study there via a goal" idiom
+        without a new decision action/schema field): any living agent
+        currently standing in a district with a working Library who has room
+        to learn a stored skill studies it for free, tick-gated like every
+        other _maybe_* backstop. A newcomer/child naturally has the most
+        headroom (skills start at 0), so this is exactly the mechanism by
+        which death stops being total knowledge loss."""
+        if not CULTURE_ENABLED or not self._library_active():
+            return
+        library_districts = {s.get("districtId") for s in self.civilization["structures"]
+                             if s.get("type") == "library" and not s.get("isRuin")
+                             and (not GOODS_ENABLED or s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)}
+        for agent in self.agents:
+            if agent.get("deathFrame") is not None or agent["incapacitated"]:
+                continue
+            if agent.get("currentDistrict") not in library_districts:
+                continue
+            summary = self._study_at_library(agent)
+            if summary:
+                self._push_activity(summary)
+                self._push_memory(agent, summary)
+
+    def _study_at_library(self, agent):
+        """A living agent studying at a working Library gains
+        LIBRARY_STUDY_GAIN toward the strongest stored skill they don't
+        already exceed -- the mechanism by which a newcomer/child can still
+        learn a dead specialist's craft. Returns a summary string, or None if
+        there's nothing to study (deterministic escape: no knowledge stored
+        yet, or the agent already exceeds every stored entry)."""
+        if not CULTURE_ENABLED or not self._library_active():
+            return None
+        knowledge = self.civilization.get("libraryKnowledge") or []
+        if not knowledge:
+            return None
+        agent_skills = agent.setdefault("skills", {k: 0.0 for k in SKILL_KINDS})
+        best = max(knowledge, key=lambda k: k["level"]
+                   if k["level"] > agent_skills.get(k["skill"], 0.0) else -1)
+        if best["level"] <= agent_skills.get(best["skill"], 0.0):
+            return None
+        before = agent_skills.get(best["skill"], 0.0)
+        agent_skills[best["skill"]] = min(SKILL_MAX_LEVEL, before + LIBRARY_STUDY_GAIN)
+        return f"{agent['name']} studied {best['skill']} at the Library (from {best['agent']}'s preserved knowledge)"
+
+    # --- Phase G: chronicle (CULTURE_ENABLED) ---
+    def _push_chronicle(self, text, kind="event"):
+        """Village-level ring of major events (#3), STORED in civilization
+        state (not just activity.jsonl) so it survives restarts and can be
+        summarized into prompts. Capped at CHRONICLE_CAP; oldest drops first."""
+        if not CULTURE_ENABLED:
+            return
+        chronicle = self.civilization.setdefault("chronicle", [])
+        chronicle.append({"text": text, "frame": self.frameTick, "kind": kind})
+        if len(chronicle) > CHRONICLE_CAP:
+            del chronicle[:-CHRONICLE_CAP]
+
+    def _chronicle_prompt_line(self):
+        """Compact 'Village history: ...' line folding the most recent
+        CHRONICLE_PROMPT_ENTRIES entries -- the whole reason the chronicle is
+        stored rather than just logged (the civilization test needs it
+        legible to the LLM, not just to a human reading activity.jsonl)."""
+        if not CULTURE_ENABLED:
+            return None
+        chronicle = self.civilization.get("chronicle") or []
+        if not chronicle:
+            return None
+        recent = chronicle[-CHRONICLE_PROMPT_ENTRIES:]
+        return "; ".join(e["text"] for e in recent)
+
+    # --- Phase G: personality drift (CULTURE_ENABLED) ---
+    def _drift_personality(self, agent, trait):
+        """Major life events append one short deterministic trait clause to
+        the agent's persona (#4) -- persona already flows into the prompt's
+        personality line at zero extra template cost, matching Phase F's
+        life-stage fold-in. Capped (PERSONALITY_DRIFT_CAP) so a long-lived
+        elder's persona string can't grow without bound; a new trait bumps
+        out the oldest once at the cap."""
+        if not CULTURE_ENABLED or not trait:
+            return
+        traits = agent.setdefault("personalityTraits", [])
+        if trait in traits:
+            return
+        traits.append(trait)
+        if len(traits) > PERSONALITY_DRIFT_CAP:
+            del traits[:-PERSONALITY_DRIFT_CAP]
+
+    def _personality_with_drift(self, agent):
+        """Folds drift traits into the existing personality string at build
+        time -- no new prompt template line (matching Phase F's life-stage
+        fold-in), so flag-off/no-drift-yet prompts render byte-identically
+        to the base personality text."""
+        base = agent.get("personality") or ""
+        if not CULTURE_ENABLED:
+            return base
+        traits = agent.get("personalityTraits") or []
+        if not traits:
+            return base
+        return f"{base}, {', '.join(traits)}" if base else ", ".join(traits)
 
     # --- message bus / inbox ---
     def _deliver_message(self, from_name, to_name, text, kind):
@@ -5068,6 +5482,19 @@ class SimEngine:
                      "elder_age": round(next((a["age"] for a in self.agents
                                               if a["role"] == "elder"), 0) or 0, 1),
                      "population_floor_held": c.get("populationFloorHeld", False)})
+        if CULTURE_ENABLED:
+            c = self.civilization
+            living = [a for a in self.agents if a.get("deathFrame") is None]
+            avg_skills = {k: round(sum(a["skills"].get(k, 0.0) for a in living) / len(living), 2)
+                         for k in SKILL_KINDS} if living else {k: 0.0 for k in SKILL_KINDS}
+            self._log_benchmark(
+                "skill_spread", round(sum(avg_skills.values()), 2),
+                {"avg_by_kind": avg_skills, "teach_count": c.get("teachCount", 0),
+                 "practice_count": c.get("skillPracticeCount", 0),
+                 "library_knowledge_entries": len(c.get("libraryKnowledge") or [])})
+            self._log_benchmark(
+                "chronicle_size", len(c.get("chronicle") or []),
+                {"meme_mutations": c.get("memeMutations", 0)})
 
     # --- memory maintenance (round-robin summarizer + periodic cleaner) ---
     def _run_memory_maintenance(self):
@@ -5219,6 +5646,8 @@ class SimEngine:
                 self._deliver_message(agent["name"], recipient, decision["message"], "speech")
                 self._maybe_spread_beliefs(agent, recipient, decision["message"])
                 self._maybe_form_commitment(agent, recipient, decision["message"])
+                if CULTURE_ENABLED:
+                    self._maybe_teach(agent, recipient, decision["message"])
                 summary = f"{agent['name']} talked to {recipient}"
             else:
                 self._push_communication("talk_attempt", agent["name"], recipient, None, "no_message")
@@ -5456,6 +5885,8 @@ class SimEngine:
                 summary = f"{agent['name']} moves to help {patient['name']}"
             else:
                 boost = HEAL_AMOUNT * 2 if agent["role"] == "healer" else HEAL_AMOUNT
+                if CULTURE_ENABLED:
+                    boost += self._skill_level(agent, "heal") * SKILL_HEAL_BONUS_PER_LEVEL
                 patient["health"] = min(100, patient["health"] + boost)
                 donate = self._first_edible(agent) if patient["incapacitated"] else None
                 if donate:
@@ -5468,6 +5899,8 @@ class SimEngine:
                     self._push_activity(f"{patient['name']} was revived by {agent['name']}")
                 self._nudge_ally(agent, patient["name"])
                 self._push_memory(patient, f"Healed by {agent['name']}")
+                if CULTURE_ENABLED:
+                    self._practice_skill(agent, "heal")
                 summary = f"{agent['name']} healed {patient['name']}"
 
         # rest / default: summary already set
@@ -5820,7 +6253,7 @@ class SimEngine:
             "frame_tick": self.frameTick,
             "role": agent["role"],
             "role_skill": self.d["ROLE_SKILLS"].get(agent["role"], "helps the village"),
-            "personality": agent["personality"],
+            "personality": self._personality_with_drift(agent),
             "life_stage": self._life_stage(agent) if LIFECYCLE_ENABLED else None,
             "memory": self._memory_for_prompt(agent),
             "resources": dict(agent["resources"]),
@@ -5883,6 +6316,12 @@ class SimEngine:
             "self_prompt": "",
             "module_reports": "none",
             "behavior_nudge": behavior_nudge,
+            # Phase G: compact skills summary (folded into the existing "Your
+            # skill:" line server-side, zero new template line) and a short
+            # rotating village-history line (server renders it only when set,
+            # so flag-off prompts stay byte-identical to Phase F).
+            "skills": {k: round(v, 1) for k, v in agent["skills"].items()} if CULTURE_ENABLED else None,
+            "chronicle_line": self._chronicle_prompt_line() if CULTURE_ENABLED else None,
             "available_actions": [a for a in self.d["AVAILABLE_ACTIONS"]
                                   if (a != "start_terraform" or ECOLOGY_ENABLED)
                                   and (a != "repair_structure" or GOODS_ENABLED)],
@@ -6035,6 +6474,8 @@ class SimEngine:
                 if TECH_TREE_ENABLED:
                     self._maybe_era_transition()
                     self._maybe_dissolve_council()
+                if CULTURE_ENABLED:
+                    self._maybe_study_at_library()
             if STRUCTURE_EFFECTS_ENABLED and ft % EFFECT_TICK_FRAMES == 0:
                 self._tick_structure_effects()
             if ECOLOGY_ENABLED and ft % ECOLOGY_REGROW_FRAMES == 0:
@@ -6285,6 +6726,19 @@ class SimEngine:
                     civ.setdefault("harvestQuotas", {})
                     civ.setdefault("rationingActive", {})
                     civ.setdefault("populationFloorHeld", False)
+                if CULTURE_ENABLED:
+                    # Phase G: knowledge/culture state. Purely additive --
+                    # matches every prior phase's setdefault-only back-compat
+                    # (no migration step), so the live save loads with the
+                    # flag on and simply starts with an empty chronicle/library.
+                    if isinstance(civ.get("projectRegistry"), dict):
+                        civ["projectRegistry"].setdefault("library", dict(PROJECT_TEMPLATES["library"]))
+                    civ.setdefault("chronicle", [])
+                    civ.setdefault("libraryKnowledge", [])
+                    civ.setdefault("memeTexts", {})
+                    civ.setdefault("memeMutations", 0)
+                    civ.setdefault("skillPracticeCount", 0)
+                    civ.setdefault("teachCount", 0)
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
@@ -6326,6 +6780,14 @@ class SimEngine:
                         a.setdefault("deathFrame", None)
                     else:
                         a["age"] = None
+                    if CULTURE_ENABLED:
+                        # Phase G: an agent restored from a pre-Phase-G save
+                        # (or with the flag freshly turned on) starts with no
+                        # practiced skill and no drift traits -- additive only.
+                        skills = a.get("skills")
+                        a["skills"] = {k: float((skills or {}).get(k, 0.0)) for k in SKILL_KINDS}
+                        a.setdefault("personalityTraits", [])
+                        a.setdefault("lastTeachFrame", 0)
                     # state.json may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
                     # saved agent's memory.longTerm list can carry leaked
@@ -6415,6 +6877,8 @@ class SimEngine:
                 "lastAction": a["lastAction"], "assignedTask": a["assignedTask"],
                 "age": round(a["age"], 1) if LIFECYCLE_ENABLED and a.get("age") is not None else None,
                 "lifeStage": self._life_stage(a) if LIFECYCLE_ENABLED else None,
+                "skills": {k: round(v, 1) for k, v in a["skills"].items()} if CULTURE_ENABLED else None,
+                "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
             } for a in self.agents]
             civ = {
                 "level": c["level"],
@@ -6446,6 +6910,12 @@ class SimEngine:
                 "taxDue": c["taxDue"], "taxPaid": c["taxPaid"],
                 "collectAttempts": c["collectAttempts"], "collectSuccesses": c["collectSuccesses"],
             }
+            if CULTURE_ENABLED:
+                # Phase G: chronicle + library knowledge for the viewer (thin,
+                # read-only -- no simulation logic moves to the browser).
+                civ["chronicle"] = list((c.get("chronicle") or [])[-CHRONICLE_CAP:])
+                civ["libraryKnowledge"] = list(c.get("libraryKnowledge") or [])
+                civ["memeMutations"] = c.get("memeMutations", 0)
             if TECH_TREE_ENABLED:
                 # Phase D: era chip, council banner, and the persisted debate
                 # records for the viewer's Council panel.
@@ -6492,6 +6962,7 @@ class SimEngine:
                         "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
                         "ECONOMY_ENABLED": ECONOMY_ENABLED,
                         "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
+                        "CULTURE_ENABLED": CULTURE_ENABLED,
                     },
                 },
             }

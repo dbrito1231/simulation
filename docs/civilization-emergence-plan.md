@@ -1103,6 +1103,77 @@ though not unsafe). Final py_compile clean; the full smoke-test suite
 (now 10 scenarios) re-run and passing after every fix; real `state.json`
 confirmed byte-identical (same md5) throughout.
 
+**Two more Phase F bugs found and fixed live (2026-07-07 night, interactive,
+not a scheduled slot), both root-caused from the actually-running world:**
+(1) **Aging ran 10x too fast** (`8902465`): `_tick_lifecycle()` multiplied
+`AGE_YEARS_PER_TICK` by an extra `LIFECYCLE_TICK_FRAMES / 30.0` factor left
+over from an earlier draft, so agents aged 1 year per 1,500 frames instead of
+the documented 1 year per 15,000. Consequence in the live world: 8 of 12
+agents blew past `DEATH_CHANCE_START_AGE` (65) and `MAX_LIFE_EXPECTANCY` (90)
+within ~30 real minutes and died in a cluster, crashing population straight
+to `POPULATION_FLOOR` (4) where it stayed wedged for ~9 hours -- the floor's
+defer-not-skip behavior held correctly the whole time (the safety rail
+worked; the rate was the bug). Fixed to the plain per-gate increment; the 4
+survivors' corrupted ages (676-701 "years") were one-time recomputed from
+seeded start age + elapsed gates at the corrected rate. (2) **`heal_agent`
+could resurrect corpses into zombies** (`6e930ca`): neither `heal_agent`'s
+target resolution nor `_neediest_nearby` checked `deathFrame`, so a healer
+could flip a dead agent's `incapacitated` back to `False`, letting a corpse
+resume moving, thinking, and getting `assign_task`'d -- including invention-
+council turns it could never complete (2 of 3 proposers in the live world's
+active council turned out to be long-dead, which is how this was found). All
+8 dead agents in the live world had been corrupted this way; both call sites
+plus `_idle_agents_for_elder` now check `deathFrame` directly rather than
+relying solely on the derived `incapacitated` flag, and the corrupted agents
+were one-time re-patched to `incapacitated=True`.
+
+**Audit verdict (2026-07-08, evening slot -- cycle 6.evening, session
+`2026-07-08T00-02-39`): PROVISIONAL PASS on all active flags, no design-level
+FAIL found.** Slot-hygiene note first: 2.5 minutes into this session
+(04:05:11 UTC) `frameTick` drops from 990300 straight to 0 with no server
+restart (same `session_id` throughout, sub-second gap between the last old-
+world line and the first new-world line) -- traced to a `POST
+/control/reset` call, the only other caller of `_reset_world` besides
+`__init__`. Given the immediately-preceding interactive session had just hand-
+patched a population crashed to the floor (4 survivors, corrupted ages) and
+shipped the two fixes above, this reads as a deliberate manual reset to start
+clean on a healthy 12-agent roster with both fixes live, not a bug -- `reset()`
+worked exactly as designed. Net effect: this slot's usable soak is the
+~64 real-minute (~42 sim-minute) fresh-world tail from frame 0 to 74984, well
+under the ~4h threshold, hence PROVISIONAL rather than a full verdict.
+Per-flag, from that window: **Phase A/B (`STRUCTURE_EFFECTS_ENABLED`/
+`ECOLOGY_ENABLED`)** unchanged/healthy -- produces fired continuously
+(Woodmill, Cistern, Fishery, Water Pump, Drying Rack, Storage House), 4
+terraform starts including a scarcity-reflex-initiated one, a couple of
+honest "could not start that terraform project" rejections. **Phase C
+(`GOODS_ENABLED`)**: storage overflow + spoilage fired correctly (food 41/25
+capacity, 3 spoiled that period), `structure_condition` stayed pristine (95.3
+avg, 0 ruins/disrepair) as expected for a 42-minute-old world against the
+retuned 0.1/tick decay rate. **Phase D (`TECH_TREE_ENABLED`)**: the tier gate
+fired live and correctly (`tier_gate_rejection` recorded a rejected `cart`
+craft at village tier 1, needing the tier-2 Forge) -- council/invention stayed
+dormant this window (fresh world, seeds not yet exhausted), expected, not a
+regression. **Phase E (`ECONOMY_ENABLED`)**: still no market built
+(`wealth_gini` detail confirms `market_active: false`) -- unexercised, not a
+bug, same as every prior slot's finding. **Phase F (`LIFECYCLE_ENABLED`,
+the two fixes above under direct test for the first time)**: **aging rate
+confirmed correct** -- every agent's `state.json` age matches its staggered
+seed age plus exactly `frames_elapsed / 15000` years (verified by hand for
+all 12 agents, e.g. Sage 60 + 74984/15000 = 64.98, exact match) -- the 10x
+bug is gone. **heal_agent zombie fix**: two `heal_agent` calls this window
+(both healing Sage, presumably from a collapse, not a death -- `deaths: 0`
+all session) completed normally with no corpse-resurrection signal; a live
+end-to-end regression test (heal attempted on an actual corpse) did not occur
+this window since nobody died yet -- stays open for a future soak with an
+actual death. `rule_enacted` fired once (`resource_tax`, 7-0). 0 LM errors, 0
+fallbacks, 0 context overflows across 405 decisions. **Watch item for the
+next slot**: Sage is at age 64.98, one gate below `DEATH_CHANCE_START_AGE`
+(65) -- the corrected-rate death-roll path should fire for the first time
+very soon; worth checking whether it produces a clean succession (Phase F's
+own civilization test) rather than assuming PASS from the forced smoke test
+alone. No design-level FAIL found this slot, so proceeding straight to the
+next batch item, **Phase G** (culture), per the batch schedule.
+
 ### Phase G — Knowledge, culture, factions, diplomacy (E2–E5)
 Skills by practice + teaching; library/school structures persist knowledge
 past death; event chronicle + agent-authored lore; meme mutation; belief
@@ -1112,9 +1183,172 @@ via F3+I1 migration) and inter-village trade/treaties/rivalry.
 rules, tech paths) from identical starting conditions.
 **Flags:** `CULTURE_ENABLED`, `DIPLOMACY_ENABLED`.
 
----
+**Implementation log (2026-07-08, Day-4 batch item, landed on
+`feat/server-authoritative-engine`):** Scope items 1-4 (skills/teaching,
+library, chronicle/memes, personality drift) landed behind `CULTURE_ENABLED`
+in `sim_engine.py`. Item 5 (`DIPLOMACY_ENABLED`, second settlement +
+inter-village trade/treaties) was deliberately NOT started this slot -- see
+"Deferred" below. (1) **Skills by practice + teaching**: every agent gets a
+`skills` dict (`gather`/`craft`/`build`/`heal`, float 0-`SKILL_MAX_LEVEL`=10)
+that rises by a fixed `SKILL_PRACTICE_GAIN` (0.15) on each successful use of
+that verb (`_practice_skill`, called from `_perform_gather`, `_craft_item`,
+`_build_active_structure`'s companion `_try_contribute_resource`, and
+`heal_agent`'s branch in `apply_decision`) -- deterministic, no roll needed.
+`_skill_bonus` (+1 yield/output per `SKILL_BONUS_DIVISOR`=4 levels) folds into
+gather amount, craft output, and contribution amount; `heal_agent`'s boost
+gets `+skill_level * SKILL_HEAL_BONUS_PER_LEVEL` directly (finer-grained than
+the integer-bonus helper since heal has no "amount" concept to bonus). No new
+prompt line: nonzero skills are appended to the existing "Your skill:" line
+server-side (`(practiced: gather 1.5)`), so an unpracticed agent's prompt is
+byte-identical to Phase F. **Teaching**: `_maybe_teach`, called from the
+`talk_to_nearby` branch of `apply_decision`, does a deterministic keyword
+check (`TEACH_KEYWORDS`: teach/train/show you how/apprentice/mentor) on the
+message text -- no new action verb, matching the change-map hint. On a match
+it transfers `TEACH_TRANSFER_FRACTION` (0.3) of the teacher's level in the
+named (or, if unnamed, the teacher's strongest) skill to the recipient. A
+failed match is simply not a teaching event, never a rejection (ordinary
+conversation still lands). (2) **Library**: a new seed structure
+(`PROJECT_TEMPLATES["library"]`, tier 1, buildable like house/wall/market --
+the deterministic escape) whose function block only `unlocks` a cosmetic
+`"knowledge"` kind; the real mechanic is `civilization["libraryKnowledge"]`,
+a capped ring (`LIBRARY_KNOWLEDGE_CAP`=12, weakest entry retires first) that
+`_store_knowledge_on_death` (called from `_agent_dies`) appends the dying
+agent's single best skill to, IF a working Library exists (`_library_active`,
+built on the existing `_working_structure_count`). `_maybe_study_at_library`
+is a new tick-gated backstop (reusing the `RULES_TICK_FRAMES` cadence, no new
+tick) that lets any living agent standing in a district with a working
+Library passively study the strongest stored skill they don't already
+exceed, gaining `LIBRARY_STUDY_GAIN` (0.4) per check -- the "study there via
+a goal" idiom without adding a new decision action or schema field. (3)
+**Chronicle & memes**: `civilization["chronicle"]` is a capped ring
+(`CHRONICLE_CAP`=20) of major events (`_push_chronicle`, called on death,
+election, and meme mutation) rendered as one rotating "Village history: ..."
+line (`_chronicle_prompt_line`, last `CHRONICLE_PROMPT_ENTRIES`=3 entries
+joined) -- a genuinely new template line (unlike the skill fold-in), but
+rendered only when the chronicle is non-empty, so a fresh flag-off-equivalent
+world's first prompt is unaffected. Meme mutation: `_maybe_mutate_meme`,
+called from `_transmit_belief` on every successful spread, rolls
+`MEME_MUTATION_PROB` (8%) and a hard session-lifetime `memeMutations` counter
+against `MEME_MUTATION_SESSION_CAP` (30) before making exactly ONE
+`lm_complete` call (few-shot INPUT/OUTPUT reword prompt) -- event-driven and
+capped, same discipline as Phase F's one-call-per-birth; a mutated belief's
+text is stored as a per-civilization override in `civilization["memeTexts"]`
+(never touches the shared module-level `MEMES` dict, so a mutation in one
+world/reset can't bleed into another), consulted first by `_belief_text`.
+Belief-driven bias: `_pick_contribution_resource` now checks
+`HARVEST_SPIRIT_CONTRIB_BOOST` -- a `harvest_spirit` believer prefers
+contributing an edible resource the active project still needs, ahead of the
+generic need-order scan -- a deterministic tilt reading the EXISTING beliefs
+set, at zero new token cost. (4) **Personality drift**: `_drift_personality`
+appends one short deterministic trait clause (capped at
+`PERSONALITY_DRIFT_CAP`=3, oldest bumped out) to `agent["personalityTraits"]`
+on four life events: collapse ("wary of hunger since a collapse", in
+`_update_survival`), bereavement (the deceased's nearest surviving ally
+grieves, in `_agent_dies`), and succession win/loss (winner "emboldened",
+losing candidates "humbled", in `_enact_succession_winner`). Folded into the
+personality prompt line at build time via `_personality_with_drift` (same
+fold-in idiom as Phase F's life-stage prefix, zero new template cost) --
+`_build_think_payload` now sends `_personality_with_drift(agent)` instead of
+the raw `agent["personality"]` string. **Prompt token growth measured on a
+real built prompt** (forced smoke test, section 8): the two additions
+(skill-practiced parenthetical + one chronicle line) added under 90
+characters (~20 tokens) to a baseline ~3,800-character prompt when both are
+populated -- well inside the ≤200-token budget for the whole flag, and BOTH
+render as empty/absent when unpracticed/no-history (an unpracticed agent's
+"Your skill:" line and a chronicle-less world's prompt are byte-identical to
+Phase F). **Observability**: new `activity.jsonl` events for teaching,
+knowledge preservation/study, belief mutation, and personality-drift life
+events (reusing existing `_push_activity`); two new benchmarks in
+`_sample_benchmarks` -- `skill_spread` (avg skill per kind across living
+agents, teach/practice counts, library-knowledge-entry count) and
+`chronicle_size` (ring length + cumulative meme-mutation count). `/state`
+gained `config.flags.CULTURE_ENABLED`, per-agent `skills`/`personalityTraits`
+in the snapshot, and civ-level `chronicle`/`libraryKnowledge`/`memeMutations`
+(thin, read-only viewer fields -- no simulation logic moved to the browser;
+index.html needs no changes to keep working, it simply doesn't render the
+new fields yet). **Back-compat**: `restore_state()` merges the `library`
+seed template into old `projectRegistry`s, `setdefault`s the five new
+civilization fields (`chronicle`, `libraryKnowledge`, `memeTexts`,
+`memeMutations`, `skillPracticeCount`, `teachCount`) to empty/zero, and
+backfills every agent's `skills` dict to all-zero plus
+`personalityTraits`/`lastTeachFrame` defaults -- purely additive, matching
+every prior phase's setdefault-only discipline, so the live save loads under
+the flag with no migration and simply starts with an unpracticed populace and
+an empty chronicle/library. With the flag off, no agent carries a `skills`
+dict or `personalityTraits`, no chronicle/library/meme-override state exists,
+and prompts are byte-identical to Phase F.
 
-## Part 5 — The re-analysis loop (run after every phase)
+**Deferred: `DIPLOMACY_ENABLED` (second settlement + inter-village
+trade/treaties) was not implemented this slot.** Per the phase brief's
+explicit scope decision, CULTURE_ENABLED was to be implemented in full depth
+first and DIPLOMACY_ENABLED only attempted with time to spare after a clean
+smoke test; iterating the meme-mutation prompt against the live
+`qwen/qwen3.5-9b` model (see verification below) used the remaining slot time
+productively rather than half-implementing a second, much larger mechanic
+(new district-group modeling, a second stockpile/elder-elect, caravan goals,
+treaty/rivalry state) that the hard rules explicitly forbid shipping
+partially. `DIPLOMACY_ENABLED` remains open for a future slot; the change-map
+hints in `.cursor/phase-prompts/phase-G.md` (reuse `_found_district` +
+`_maybe_welcome_newcomer` patterns, caravan as a `_step_goal` family member,
+not a new tick loop) still apply and were not invalidated by anything landed
+here.
+
+**Verification:** `py_compile` clean. Forced smoke test via a standalone
+script (`phase_g_smoke.py`, throwaway, never committed) importing
+`sim_engine`/`server` directly with `sim_engine.STATE_PATH` monkeypatched to
+a scratch path BEFORE import (so `restore_state`/`save_state` never touch the
+real `simulation/state.json` -- verified byte-identical, same md5, before and
+after the run); no server process or port 5001 listener was started at any
+point (`server.py`'s `engine.start()`/`app.run()` are both guarded by
+`if __name__ == "__main__"`, so importing the module is inert for the tick
+thread and Flask). `SKILL_BONUS_DIVISOR` and `MEME_MUTATION_PROB` were
+temporarily overridden as module attributes on the imported `sim_engine`
+object for the duration of the script only (never the committed constants) to
+force the bonus/mutation thresholds within a handful of calls rather than
+waiting. Confirmed: (a) 10 forced `_perform_gather` calls raised
+`farmer["skills"]["gather"]` from 0 to 1.5 and `_skill_bonus` returned a
+nonzero bonus, reflected in the actual gather amount; (b) `_maybe_teach` with
+a "teach you to gather" message transferred skill from a practiced teacher
+(gather 1.5) to a zero-skill student (gather 0 -> 0.45, exactly 0.3x the
+teacher's level); (c) a chronicle entry pushed via `_push_chronicle` appeared
+in `_chronicle_prompt_line()` AND in the real `build_user_prompt()` output as
+a "Village history: ..." line; (d) a working Library structure built
+directly into `civilization["structures"]`, a `_agent_dies(dying, "test")`
+call with `dying["skills"]["craft"]=5.0` preserved that skill into
+`libraryKnowledge`, and a separate zero-craft-skill living agent standing in
+the Library's district gained craft skill via `_study_at_library` reading
+that entry -- death-survives-knowledge confirmed end-to-end; (e) meme
+mutation against a LIVE LM Studio call (confirmed reachable at
+`localhost:1234/v1/models`, `qwen/qwen3.5-9b` loaded) exercised the real
+`lm_complete` path and the session cap (`MEME_MUTATION_SESSION_CAP`=30
+forced via `memeMutations` set to the cap) correctly blocked a further
+mutation attempt with no further lm_complete call; (f) personality drift
+appended a trait and `_personality_with_drift` folded it into the rendered
+personality line; (g) a `harvest_spirit` believer's `_pick_contribution_resource`
+picked an edible resource over other project needs. **A genuine model-quality
+finding, not a code defect, surfaced and was iterated on live**: qwen3.5-9b
+(a thinking-class model) repeatedly leaked reasoning-scaffold/meta-commentary
+text into its `lm_complete` reply for the meme-mutation task specifically --
+at `max_tokens=40` it burned the entire budget on `reasoning_content` before
+answering (`finish_reason: "length"`, confirmed via a raw HTTP probe outside
+the smoke script) even with `"thinking": {"type": "disabled"}` set; raising
+the budget to 120 fixed the truncation but the model still intermittently
+prefixed a short analysis label ("Subject:", "Meaning:", "Object/Condition:")
+or echoed the few-shot examples instead of producing a clean rewrite. Fixed
+in three layers, all in `_maybe_mutate_meme`, none of them silent: strip a
+leading `<ShortLabel>:` prefix (the common case), reject via a keyword
+denylist for remaining instruction-echo/meta-commentary, and a final
+`has_words`/`is_scaffold_text` sanity gate -- any rejection is treated exactly
+like an empty `lm_complete` response (silent no-op, the belief keeps its
+prior text, never a corrupted or garbage mutation, never a blocker). Six
+repeated live runs after the fix: 4 correctly no-op'd on unusable output, 2
+produced genuine meaning-preserving rewordings -- the mechanism is proven
+safe under real model flakiness even though output quality on this specific
+micro-task is mediocre with the current model; this is a candidate for a
+future model/prompt revisit (Part 6 replay methodology), not a Phase G
+blocker, since the plan only requires the mutation path to be capped and
+non-corrupting, not high-quality. No design-level bug was found in the
+skill/teaching/library/chronicle/drift mechanics themselves.
 
 This plan is the *first iteration* of the cycle the whole effort follows:
 

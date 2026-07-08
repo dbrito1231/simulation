@@ -809,6 +809,14 @@ POPULATION & GOVERNANCE (when lifecycle is enabled):
    way as a resource_tax. If a NOTE says you hit a quota or ration limit, try a
    different resource/district or wait for it to reset.
 
+KNOWLEDGE & CULTURE (when practiced skills are shown):
+25. Practicing gather/craft/build/heal raises that skill over time (shown in
+   "Your skill"), giving a small yield/output bonus. To teach a nearby agent,
+   talk_to_nearby with a message containing a word like "teach" or "train"
+   (optionally name the skill, e.g. "let me teach you to craft") — this
+   transfers some of your skill to them. A Library preserves a dead agent's
+   best skill so others can still study it there.
+
 Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
 Do not use chain-of-thought or reasoning — output the JSON object immediately.
 The JSON must match this structure exactly:
@@ -906,7 +914,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-{season_line}{prices_line}{level_line}Structures built: {structures_built}
+{season_line}{prices_line}{chronicle_line}{level_line}Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
@@ -2286,11 +2294,25 @@ def build_user_prompt(data, slim=False):
     personality_text = data.get("personality") or ""
     if life_stage:
         personality_text = f"{life_stage}, {personality_text}" if personality_text else life_stage
+    # Phase G: practiced skill levels folded into the existing "Your skill:"
+    # line (no new template line) -- only nonzero levels are shown so an
+    # unpracticed agent's line stays exactly the Phase F role_skill text.
+    role_skill_text = data.get("role_skill", "")
+    skills = data.get("skills")
+    if skills:
+        practiced = ", ".join(f"{k} {v}" for k, v in skills.items() if v > 0)
+        if practiced:
+            role_skill_text = f"{role_skill_text} (practiced: {practiced})"
+    # Phase G: one short rotating "Village history: ..." line, rendered ONLY
+    # when the engine sends one (CULTURE_ENABLED and the chronicle has an
+    # entry) so flag-off / empty-chronicle prompts stay byte-identical.
+    chronicle_line_raw = data.get("chronicle_line")
+    chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
 
     return USER_PROMPT_TEMPLATE.format(
         agent_name=data.get("agent_name"),
         role=data.get("role"),
-        role_skill=data.get("role_skill", ""),
+        role_skill=role_skill_text,
         personality=personality_text,
         memory="none" if slim else compose_memory(data),
         hunger=data.get("hunger", 100),
@@ -2322,6 +2344,7 @@ def build_user_prompt(data, slim=False):
         active_rules=format_active_rules(data.get("active_rules") or []),
         season_line=season_line,
         prices_line=prices_line,
+        chronicle_line=chronicle_line,
         recent_conversations="none" if slim else data.get("recent_conversations", "none"),
         inbox=data.get("inbox", "none"),
         module_reports=data.get("module_reports", "none"),
