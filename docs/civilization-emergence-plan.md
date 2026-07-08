@@ -1350,6 +1350,97 @@ blocker, since the plan only requires the mutation path to be capped and
 non-corrupting, not high-quality. No design-level bug was found in the
 skill/teaching/library/chronicle/drift mechanics themselves.
 
+**Audit verdict (2026-07-08, morning slot -- cycle 7.morning, session
+`2026-07-08T01-42-03`): PASS on all active flags (first full, non-provisional
+verdict of the cadence -- ~6h real / frame 0->509,100, ~4.7 sim-hours, well
+past the 4h threshold), one hot-fixed prompt bug, no design-level FAIL.**
+Server was found UP at slot start (standing rule intact), stopped cleanly.
+**Phase A/B** unchanged/healthy (not separately re-audited this slot, no
+signal of regression in the action mix or produces). **Phase C
+(`GOODS_ENABLED`)**: `structure_condition` (724 samples) drifted 95.3 avg
+(frame 75,000, 34 structures) -> 69.7 avg (frame 508,800, 123 structures) as
+the village nearly quadrupled in size; ruins stayed at 0 throughout (the
+repair/rebuild escape held) and disrepair peaked at only 1-2 structures
+transiently -- this is the designed ~5.8h-to-disrepair decay curve (see the
+`STRUCTURE_DECAY_PER_GOODS_TICK` comment) working exactly as tuned for a
+world this young, not a bug; only 5 `structure_repaired` events fired against
+123 live structures because the repair nudge is intentionally reactive (fires
+once something is already broken), so this reads as PASS with a **watch
+item**: confirm over a longer soak that condition stabilizes rather than
+trending toward the 30 disrepair floor as the structure count keeps growing.
+**Phase D (`TECH_TREE_ENABLED`)**: tier gating fired correctly live (tier-2
+`cart` craft rejected at tier 1, needing the Forge); Forge built at frame
+95,367 ("the village enters the Forge Era!") and a second transition landed
+at frame 361,950 ("the village enters the Wagon Era!") -- ordinary tier
+progression is healthy. The diegetic invention council itself under-
+delivered: it convened 20 times but dispersed without a verdict 17/20 times,
+with only 5 proposals ever reaching pending and zero comparative
+elder judgments this session. **Root-caused and hot-fixed in this slot**: of
+142 total `rejection_note`s this session, 117 (82%) were "id collides with a
+seed template" -- and the regular (non-invention-only) turn's prompt template
+never told agents which ids were reserved. `Approved custom builds:` in
+`USER_PROMPT_TEMPLATE` (server.py) only ever listed player-INVENTED custom
+structures; the base seed templates (forge/granary/market/library, plus
+house/farm_plot/workshop/wall) were invisible to any agent proposing a
+blueprint on an ordinary turn -- exactly the plausible, common village-noun
+names an LLM reaches for, and exactly why the council's proposers kept
+getting killed before two could go pending (the invention-ONLY prompt already
+had this list correctly, via `structure_counts`; only the far-more-common
+regular-turn path was blind). Fix: a new `format_reserved_structure_ids()`
+helper (unions the always-current `SEED_PROJECT_IDS` global with approved-
+custom and pending-blueprint ids, mirroring `build_invention_prompt`'s
+`taken` set) feeds a new `Reserved structure ids: ...` line in
+`USER_PROMPT_TEMPLATE`, ~15-20 tokens, rendered on every turn (propose_blueprint
+is always available, not gated to invention-only turns). Verified live via a
+standalone `build_user_prompt()` call: the new line correctly lists all 8
+seed ids (farm_plot, forge, granary, house, library, market, wall, workshop)
+plus a supplied pending id, and correctly EXCLUDES `cart`/`wagon` (those are
+`RECIPES` entries, not `PROJECT_TEMPLATES` -- an early draft of this fix
+wrongly assumed they were structures; caught and corrected before commit by
+checking `sim_engine.PROJECT_TEMPLATES.keys()` directly against
+`sim_engine.RECIPES`). `py_compile` clean both files. This is a prompt-only
+change (no gate/validation logic touched), so next slot's audit should show
+the 82%-cause collision rate drop and, ideally, the council actually reaching
+a comparative judgment for the first time. **Phase E (`ECONOMY_ENABLED`)**:
+first organic Market build this cadence (frame 156,600, after one abandoned
+attempt at 112,950) -- `wealth_gini` fell from 0.772 pre-market to 0.503 by
+session end (11/19 agents housed), but priced trade is barely exercised (one
+buy/sell pair the whole session, frame 372,601); mechanism works, still thin.
+**Phase F (`LIFECYCLE_ENABLED`)**: first natural deaths under the corrected
+aging rate observed and clean -- Sage died of old age at frame 321,900 ("Sage
+has died of old age at age 81"), succession resolved fast and cleanly (Aria
+elected new elder, `electionId: succession_321900`, same session); two more
+natural deaths followed (Luna age 78 @455,100, Rex age 72 @470,400), neither
+requiring succession. **heal_agent zombie-fix regression test now closed**:
+explicitly checked all three deaths for post-death `heal_agent` targeting or
+incapacitation-flag flips -- none found; only correct refusals ("Luna found
+no one to heal") and benign Library-knowledge-study mentions of the deceased
+appear after each death. **Phase G (`CULTURE_ENABLED`)**: first organic soak
+confirms skills-by-practice (`skill_spread` benchmark: gather avg 0.01->9.97,
+practice_count 1->2838) and Library knowledge (3 entries captured across the
+3 deaths, passive study firing repeatedly from frame 345,750) are both live
+and working under real play. Teaching (`teach_count` stayed 0 -- no
+`talk_to_nearby` message this session matched a `TEACH_KEYWORDS` term) and
+meme mutation (0 mutations, no meme-tagged `lm_complete` calls) remain
+organically unexercised -- consistent with the implementation log's own
+"known-low-signal" framing (deterministic keyword/probability gates that need
+the right dialogue or spread event to fire), not a confirmed defect; still
+open for a future soak. Chronicle grew 0->7 entries. **General health**:
+2,016 LM calls, 99.3% HTTP 200, 14 scattered self-recovering "LM Studio
+offline" errors (0.7%, no clustering), 0 `context_overflow` retries. Both
+standing invariants held: all 142 rejections were surfaced via
+`rejection_note`/nudges (none silent), and every gate checked (tier lock,
+blueprint validation, market/rival-trade refusal, decay/ruin, tech tier) has
+a working deterministic escape. No design-level FAIL -- per the batch
+schedule this cadence's phase table is now exhausted (Phase G was the last
+scheduled row; `DIPLOMACY_ENABLED` was deliberately deferred out of the
+5-phase batch entirely, see above), so this slot's dedicated work was the
+audit + the one hot-fix rather than a new phase; the next slot should be a
+straight soak-and-audit pass focused on the two watch items above (Phase C's
+condition trend, Phase D's post-fix council-verdict rate) plus continued
+opportunistic coverage of Phase G's dormant paths, with `DIPLOMACY_ENABLED`
+remaining the only unstarted item on the original batch list.
+
 This plan is the *first iteration* of the cycle the whole effort follows:
 
 1. **Run** a long session (8h+) with the new phase enabled.
