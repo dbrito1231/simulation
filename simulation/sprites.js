@@ -979,6 +979,59 @@ const AGENT_SPRITES = {
   ]),
 };
 
+// Generic fallback body for any agent name not in AGENT_SPRITES above (e.g.
+// Phase F/G newcomers/births -- "Villager1000" etc -- created after the fixed
+// roster was hand-drawn). Every hand-drawn entry above shares this exact body
+// shape and only varies by color palette, so reusing it here + palette-izing
+// off the agent's own `color` field gives every future agent a real sprite
+// instead of silently rendering nothing (see drawAgentSprite below -- the
+// same "no more decorative fallback" principle as drawGenericStructure).
+const GENERIC_AGENT_STAND = [
+  "....kkkkkkkk....",
+  "...kaaaaaaaa...",
+  "..kaaaaaaaaaa..",
+  "..kaassssskaa..",
+  "..kaassssskaa..",
+  "..kaassssskaa..",
+  "...kmmmmmmk....",
+  "..kmmmmmmmmk..",
+  "..kmmmmmmmmk..",
+  "..kmmmmmmmmk..",
+  "...kmmmmmmk....",
+  "...kmm..mmk....",
+  "...kmm..mmk....",
+  "...khh..hhk....",
+  "...khh..hhk....",
+  "....hh..hh....",
+];
+const GENERIC_AGENT_WALK = [
+  "....kkkkkkkk....",
+  "...kaaaaaaaa...",
+  "..kaaaaaaaaaa..",
+  "..kaassssskaa..",
+  "..kaassssskaa..",
+  "..kaassssskaa..",
+  "...kmmmmmmk....",
+  "..kmmmmmmmmk..",
+  "..kmmmmmmmmk..",
+  "..kmmmmmmmmk..",
+  "...kmmmmmmk....",
+  "..kmm....mmk..",
+  ".kmm......mmk.",
+  ".khh......hhk.",
+  "..khh....hhk..",
+  "...hh....hh...",
+];
+const _genericAgentSpriteCache = {};
+function genericAgentSprite(agent) {
+  const cached = _genericAgentSpriteCache[agent.name];
+  if (cached && cached.color === agent.color) return cached.sprite;
+  const palette = makeAgentPalette(agent.color || "#9E9E9E", "#FFD54F", "#8D6E63");
+  const sprite = buildAgentSprite(palette, GENERIC_AGENT_STAND, GENERIC_AGENT_WALK);
+  _genericAgentSpriteCache[agent.name] = { color: agent.color, sprite };
+  return sprite;
+}
+
 const ACCESSORIES = {
   Aria: tileFromStrings(["..a.a...",".aaaaaa.","..aaaa..","...aa...","....e..."], makeAgentPalette("#FFD54F", "#8D6E63")),
   Marco: tileFromStrings(["...aa...","..aaaa..",".aaaaaa.","..aa...."], makeAgentPalette("#FFC107", "#795548")),
@@ -995,8 +1048,7 @@ const ACCESSORIES = {
 };
 
 function drawAgentSprite(ctx, agent, frameTick) {
-  const data = AGENT_SPRITES[agent.name];
-  if (!data) return;
+  const data = AGENT_SPRITES[agent.name] || genericAgentSprite(agent);
   const moving = Math.abs(agent.targetX - agent.x) > 1 || Math.abs(agent.targetY - agent.y) > 1;
   const walkFrame = moving && Math.floor(frameTick / 12) % 2 === 1;
   const grid = walkFrame ? data.walk : data.stand;
