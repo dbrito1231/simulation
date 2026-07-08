@@ -348,6 +348,14 @@ RULE_KINDS = {"resource_tax", "custom"}
 
 MAX_CONCURRENT_LLM = 2
 LLM_MIN_GAP_MS = 250
+# When _schedule_think can't dispatch (worker pool full, cooldown, min-gap),
+# the agent retries this soon instead of waiting a full thinkInterval (up to
+# 600 frames = 20s) -- a full pool used to silently cost an agent an entire
+# cycle, which is how a flagged council member (one invention-only turn per
+# debate, no retry) could miss its slot inside COUNCIL_TTL_FRAMES entirely
+# (found live 2026-07-08: Sage never got dispatched in a 3-member debate).
+# 15 frames = 0.5s, comfortably above LLM_MIN_GAP_MS so it won't self-block.
+THINK_RETRY_FRAMES = 15
 
 # Concurrent district builds: how many districts may have an active build
 # project at once, village-wide. Start conservative -- with a fixed 8-12 agent
@@ -5954,15 +5962,20 @@ class SimEngine:
                 self._inflight.discard(agent_name)
 
     def _schedule_think(self, agent):
+        """Returns True if a think job was actually submitted, False if
+        skipped (pool full / cooldown / min-gap) -- the caller uses this to
+        retry soon (THINK_RETRY_FRAMES) instead of waiting a full
+        thinkInterval, so a busy worker pool doesn't silently cost an agent
+        an entire cycle."""
         if agent["name"] in self._inflight:
-            return
+            return False
         if len(self._inflight) >= MAX_CONCURRENT_LLM:
-            return
+            return False
         now_ms = time.time() * 1000.0
         if time.time() < self.llm_cooldown_until:
-            return
+            return False
         if now_ms - self.last_llm_dispatch_ms < LLM_MIN_GAP_MS:
-            return
+            return False
         if agent["role"] == "elder":
             c = self.civilization
             c["inventionRequiredStreak"] = (c.get("inventionRequiredStreak", 0) + 1) \
@@ -5971,6 +5984,7 @@ class SimEngine:
         self._inflight.add(agent["name"])
         agent["isThinking"] = True
         self._executor.submit(self._think_job, agent["name"])
+        return True
 
     # --- the per-frame tick (ported tick(), minus rendering) ---
     def _tick_once(self):
@@ -6056,8 +6070,8 @@ class SimEngine:
                         continuing = self._step_goal(a)
                         a["thinkTimer"] = GOAL_STEP_FRAMES if continuing else 1
                     else:
-                        self._schedule_think(a)
-                        a["thinkTimer"] = a["thinkInterval"]
+                        dispatched = self._schedule_think(a)
+                        a["thinkTimer"] = a["thinkInterval"] if dispatched else THINK_RETRY_FRAMES
 
     def _run_loop(self):
         while not self._stop.is_set():

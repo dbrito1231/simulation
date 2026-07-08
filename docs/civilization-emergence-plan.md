@@ -782,8 +782,32 @@ now mostly-addressed causes:
    Verified: py_compile clean; `storage_house` confirmed still queued in
    `pendingBlueprints` across the restart that loaded this fix, so Marco's
    next elder turn should surface it. Net effect of tonight's two fixes:
-   proposals can now both LAND (timeout fix) and be SEEN (this fix) —
-   Sage's dispatch-starvation item (#2) remains the one known gap.
+   proposals can now both LAND (timeout fix) and be SEEN (this fix).
+
+**Fixed (2026-07-08): item #2, the dispatch-starvation bug.** Root cause
+found in `_schedule_think` / the per-tick scheduling loop
+(`sim_engine.py` ~5964, ~6067): when an agent's `thinkTimer` expired but
+both `MAX_CONCURRENT_LLM=2` worker slots were already busy,
+`_schedule_think` silently returned without submitting a job — and the
+call site *unconditionally* reset `thinkTimer` back to the FULL
+`thinkInterval` (up to 600 frames / 20s+) regardless of whether dispatch
+actually happened. A normal agent just thinks slightly less often; a
+FLAGGED council member (one invention-only attempt per debate, no retry —
+see the two entries above) could lose its only shot entirely if unlucky
+timing repeatedly collided with two long-running invention calls (now
+~50-75s each) occupying both slots — exactly what happened to Sage. Fix:
+`_schedule_think` now returns whether it actually dispatched; the call
+site only resets to the full `thinkInterval` on a real dispatch, otherwise
+retries in `THINK_RETRY_FRAMES` (15 frames / 0.5s, comfortably above
+`LLM_MIN_GAP_MS=250ms` so it can't self-block) — turning "silently give up
+for a whole cycle" into "keep trying every half-second until a slot
+frees." Applies to every agent, not just council members, so this should
+also make round-robin scheduling under load fairer generally. Verified:
+py_compile clean; a duck-typed unit test confirmed `_schedule_think`
+returns `True` on an empty pool and `False` on a full one, without
+needing a live LM Studio call. Server restarted with the fix live. This
+closes all three causes found in the "why do councils dissolve" audit —
+watch the next debate for whether all 2-3 flagged members now get a turn.
 
 ### Phase E — Market & property (I2, I3)
 Market structure posts prices from district stocks and stockpile levels; gold
