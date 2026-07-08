@@ -56,6 +56,18 @@ MODEL_FAST = "qwen/qwen3.5-9b"
 INVENTION_TEMPERATURE = None
 INVENTION_MAX_TOKENS = None
 
+# Request timeout (seconds). Routine decisions measured median ~18s / p90 ~22s
+# in the 2026-07-07 session, well under the old flat 30s -- but invention-only
+# turns (bigger prompt: function-block schema, tier rules, sprite instructions
+# + few-shot example) measured median ~32s / max ~33.6s, so ~71% of them were
+# timing out, logged as "LM Studio offline", and silently falling back to a
+# non-propose action -- the actual reason invention councils kept dissolving
+# with zero proposals (12 dissolutions, only 2 successful proposals logged).
+# Invention turns are rare (a few per hour) so a generous timeout costs
+# nothing; DEFAULT_TIMEOUT_S stays tight so routine throughput is unaffected.
+DEFAULT_TIMEOUT_S = 30
+INVENTION_TIMEOUT_S = 75
+
 
 def model_for_decision(data):
     if data.get("invention_only"):
@@ -2368,6 +2380,7 @@ def run_agent_decision(data):
         self_prompt = (data.get("self_prompt") or "").strip()
         response_format = build_response_format()
         payload = build_decision_payload(data, self_prompt, response_format)
+        request_timeout = INVENTION_TIMEOUT_S if data.get("invention_only") else DEFAULT_TIMEOUT_S
 
         known_resources = data.get("known_resources") or []
         pending_blueprints = data.get("pending_blueprints") or []
@@ -2404,7 +2417,7 @@ def run_agent_decision(data):
 
         start = datetime.now()
         try:
-            resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
+            resp = requests.post(LM_STUDIO_URL, json=payload, timeout=request_timeout)
         except requests.exceptions.RequestException:
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
             log_lm(latency_ms, error="LM Studio offline")
@@ -2430,7 +2443,7 @@ def run_agent_decision(data):
             response_format = None
             start = datetime.now()
             try:
-                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
+                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=request_timeout)
             except requests.exceptions.RequestException:
                 latency_ms = int((datetime.now() - start).total_seconds() * 1000)
                 log_lm(latency_ms, error="LM Studio offline")
@@ -2454,7 +2467,7 @@ def run_agent_decision(data):
             payload["model"] = "local-model"
             start = datetime.now()
             try:
-                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
+                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=request_timeout)
             except requests.exceptions.RequestException:
                 latency_ms = int((datetime.now() - start).total_seconds() * 1000)
                 log_lm(latency_ms, error="LM Studio offline")
@@ -2492,7 +2505,7 @@ def run_agent_decision(data):
             payload = slim_payload
             retry_start = datetime.now()
             try:
-                resp = requests.post(LM_STUDIO_URL, json=slim_payload, timeout=30)
+                resp = requests.post(LM_STUDIO_URL, json=slim_payload, timeout=request_timeout)
             except requests.exceptions.RequestException:
                 latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
                 log_lm(latency_ms, error=error_kind)

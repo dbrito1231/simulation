@@ -717,6 +717,32 @@ Given both open tests are PASS/provisional-PASS with no design-level FAIL,
 proceeding to the Day-3 batch item, **Phase E** (market & property), per the
 Part 8 schedule.
 
+**Bug found and fixed interactively (2026-07-07): invention-turn HTTP timeout.**
+The user reported seeing the "Council in session" banner but never any
+proposal cards. Root cause, found by comparing latency distributions in the
+live session's `lm_studio.jsonl`: invention-only calls (bigger prompt —
+function-block schema, tier rules, sprite instructions + few-shot example)
+measured median 32.0s / p90 32.1s / max 33.6s, just over the flat 30s
+`requests.post(..., timeout=30)` used for every decision call. Result: 159 of
+223 invention-only calls (71%) timed out, were logged as "LM Studio offline",
+and silently fell back to a non-propose action — so councils kept convening
+(`councilActive` correctly showed 3 proposers) but 10 of 12 recorded debates
+dissolved with zero proposals before `COUNCIL_TTL_FRAMES` expired. The GUI
+(banner + panel, both from the 2026-07-06 session) was rendering correctly
+the whole time — it had nothing to render because proposals never arrived.
+Fix: `server.py` now computes `request_timeout` per call — `INVENTION_TIMEOUT_S`
+(75s) when `invention_only`, `DEFAULT_TIMEOUT_S` (30s, unchanged) otherwise —
+threaded through all four `requests.post` call sites inside
+`run_agent_decision` (the initial call and its three retry paths); the
+unrelated `lm_complete` background-cognition path keeps its own 30s.
+`COUNCIL_TTL_FRAMES` raised from ×10 to ×20 `STALL_THRESHOLD` (~3.3 min →
+~6.7 min) since the old TTL was sized around calls that mostly failed fast
+rather than the ~75s a real invention turn can now take to complete, times
+up to 3 members queued behind `MAX_CONCURRENT_LLM=2`. Verified: py_compile
+clean, all four call sites confirmed patched and none reverted to the literal
+`30`, `lm_complete` confirmed untouched. Server restarted with the fix live;
+next council convened should be watched for an actual populated debate.
+
 ### Phase E — Market & property (I2, I3)
 Market structure posts prices from district stocks and stockpile levels; gold
 mediates; plots/homes claimable; inheritance recorded. Adopted from the

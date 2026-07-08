@@ -437,7 +437,13 @@ WAGON_SPEED_MULT = 1.4
 # volume). Never fans out when fewer than 2 villagers are idle.
 INVENTION_COUNCIL_SIZE = 3
 COUNCIL_LOG_CAP = 12                      # persisted debate records (viewer panel)
-COUNCIL_TTL_FRAMES = STALL_THRESHOLD * 10  # a council with no verdict dissolves (~5.5 min)
+# A council with no verdict dissolves after this many frames (STALL_THRESHOLD=600
+# frames = 20s at 30fps, so x20 = ~6.7 min). Sized for INVENTION_TIMEOUT_S=75s
+# per member (server.py) queued behind MAX_CONCURRENT_LLM=2 workers, plus the
+# elder's own verdict turn -- was x10 (~3.3 min), too tight once the 2026-07-07
+# timeout fix let invention calls actually run to completion instead of
+# failing fast, which had been masking how little runway a debate really had.
+COUNCIL_TTL_FRAMES = STALL_THRESHOLD * 20
 # Era ladder: the highest capability rung held names the era (monotonic -- a
 # lost capability never regresses the era). Replaces the vanity level in
 # prompts/UI; `level` stays in state for back-compat.
