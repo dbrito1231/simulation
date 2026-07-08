@@ -3550,7 +3550,7 @@ class SimEngine:
         for a in self.agents:
             if a.get("deathFrame") is not None:
                 continue
-            a["age"] = (a.get("age") or 0.0) + AGE_YEARS_PER_TICK * (LIFECYCLE_TICK_FRAMES / 30.0)
+            a["age"] = (a.get("age") or 0.0) + AGE_YEARS_PER_TICK
         self._maybe_natural_death()
         self._maybe_birth()
 
