@@ -599,6 +599,9 @@ DECISION_ACTIONS = [
     "craft_item", "propose_recipe", "approve_recipe", "reject_recipe",
     # CMA + Sid enhancement actions (emergent roles + collective rules/voting).
     "switch_role", "propose_rule", "vote_rule",
+    # Cemetery/burial (permanent-death handling): the engine filters it from
+    # available_actions when CEMETERY_ENABLED is off, same pattern as repair_structure.
+    "bury_agent",
 ]
 
 # Loose shape only; validate_blueprint() stays the authority on blueprint detail.
@@ -808,6 +811,11 @@ POPULATION & GOVERNANCE (when lifecycle is enabled):
    stockpile withdrawal while storage is low, e.g. 2-6) — vote on these the same
    way as a resource_tax. If a NOTE says you hit a quota or ration limit, try a
    different resource/district or wait for it to reset.
+26. When a villager dies permanently (not a survival collapse), they should be
+   laid to rest. If no Cemetery exists yet, use start_project with target
+   cemetery. Once one exists, use bury_agent (target the deceased's name, or
+   omit target to bury whoever is nearest) to lay them to rest there — you
+   must be close to the body first, so bury_agent will walk you there.
 
 KNOWLEDGE & CULTURE (when practiced skills are shown):
 25. Practicing gather/craft/build/heal raises that skill over time (shown in

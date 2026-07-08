@@ -385,6 +385,14 @@ const STRUCTURE_GRIDS = {
     "brbrbrbrbrbrbrbr",
     "brbrbrbrbrbrbrbr",
   ], C),
+  cemetery: tileFromStrings([
+    "fnfnfnfnfnfn",
+    "g1g1g1g1g1g1",
+    "g1g1rkrkg1g1",
+    "g1rkowowrkg1",
+    "g2g2g2g2g2g2",
+    "fnfnfnfnfnfn",
+  ], C),
 };
 
 function colorFromId(id) {
@@ -1032,6 +1040,43 @@ function genericAgentSprite(agent) {
   return sprite;
 }
 
+// Tombstone: replaces the agent body entirely (not an overlay -- see
+// drawAgentSprite below) once a permanent death (CEMETERY_ENABLED/
+// LIFECYCLE_ENABLED, `agent.deceased`) is confirmed. Grey stone arch on a
+// grass mound, sized to the same 16x16 footprint as every living sprite so
+// drawPixelSprite's existing origin math needs no changes. The small moss
+// tuft is tinted with the agent's own color as a quiet personal touch, but
+// the stone itself stays a uniform grey regardless of who's buried.
+const _tombstoneSpriteCache = {};
+function tombstoneSprite(agent) {
+  const cached = _tombstoneSpriteCache[agent.name];
+  if (cached && cached.color === agent.color) return cached.grid;
+  const palette = {
+    ".": null, k: "#111111", s: "#9E9E9E", h: "#BDBDBD",
+    d: "#5c3a1a", g: "#5ea830", m: agent.color || "#5ea830",
+  };
+  const grid = tileFromStrings([
+    "................",
+    "....kkkkkkkk....",
+    "...kssssssssk...",
+    "..kssssssssssk..",
+    "..kshhhhhhhssk..",
+    "..ksh......hssk..",
+    "..ksh......hssk..",
+    "..kssssssssssk..",
+    "..kssssssssssk..",
+    "..kssssssssssk..",
+    "..kssssssssssk..",
+    "..kkkkkkkkkkkk..",
+    "...gggggggggg...",
+    "..gggmggggmggg..",
+    "..gggggggggggg..",
+    "................",
+  ], palette);
+  _tombstoneSpriteCache[agent.name] = { color: agent.color, grid };
+  return grid;
+}
+
 const ACCESSORIES = {
   Aria: tileFromStrings(["..a.a...",".aaaaaa.","..aaaa..","...aa...","....e..."], makeAgentPalette("#FFD54F", "#8D6E63")),
   Marco: tileFromStrings(["...aa...","..aaaa..",".aaaaaa.","..aa...."], makeAgentPalette("#FFC107", "#795548")),
@@ -1048,12 +1093,18 @@ const ACCESSORIES = {
 };
 
 function drawAgentSprite(ctx, agent, frameTick) {
+  const scale = 2;
+  if (agent.deceased) {
+    // Permanent death: a tombstone entirely replaces the living body (no
+    // walk/stand distinction -- a corpse doesn't move -- and no accessory).
+    drawPixelSprite(ctx, agent.x, agent.y, tombstoneSprite(agent), scale, false);
+    return;
+  }
   const data = AGENT_SPRITES[agent.name] || genericAgentSprite(agent);
   const moving = Math.abs(agent.targetX - agent.x) > 1 || Math.abs(agent.targetY - agent.y) > 1;
   const walkFrame = moving && Math.floor(frameTick / 12) % 2 === 1;
   const grid = walkFrame ? data.walk : data.stand;
   const flipX = agent.targetX < agent.x - 0.5;
-  const scale = 2;
   drawPixelSprite(ctx, agent.x, agent.y, grid, scale, flipX);
 
   const acc = ACCESSORIES[agent.name];

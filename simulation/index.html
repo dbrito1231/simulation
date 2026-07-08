@@ -776,19 +776,8 @@ function drawHealthBar(ctx, agent) {
   ctx.fillRect(bx, by, Math.round(w * frac), h);
 }
 
-function drawAgent(ctx, agent, frameTick) {
-  drawAgentSprite(ctx, agent, frameTick);
-  if (agent.incapacitated) {
-    // Grey out collapsed agents and tag them.
-    ctx.fillStyle = "rgba(60, 60, 70, 0.55)";
-    ctx.fillRect(agent.x - 12, agent.y - 26, 24, 30);
-    ctx.fillStyle = "#fff";
-    ctx.font = "12px monospace";
-    ctx.textAlign = "center";
-    ctx.fillText("☠", agent.x, agent.y - 14);
-  }
-  drawHealthBar(ctx, agent);
-  const label = `${agent.role.charAt(0).toUpperCase()}·${agent.name}`;
+function drawAgentLabel(ctx, agent, prefix) {
+  const label = `${prefix}·${agent.name}`;
   ctx.font = "10px monospace";
   ctx.textAlign = "center";
   const labelW = Math.ceil(ctx.measureText(label).width + 10);
@@ -800,6 +789,31 @@ function drawAgent(ctx, agent, frameTick) {
   ctx.fillRect(labelX, labelY, 5, 14);
   ctx.fillStyle = "#fff";
   ctx.fillText(label, agent.x + 2, labelY + 10);
+}
+
+function drawAgent(ctx, agent, frameTick) {
+  drawAgentSprite(ctx, agent, frameTick);
+  if (agent.deceased) {
+    // Permanent death (LIFECYCLE_ENABLED): drawAgentSprite already drew a
+    // tombstone in place of the usual body (sprites.js). No health bar,
+    // resource dots, thinking indicator, or speech bubble for a corpse --
+    // just a name marker so a grave in the Cemetery is still identifiable.
+    // A temporary survival collapse (below) is NOT this path -- it keeps its
+    // living sprite + grey overlay, since it's recoverable.
+    drawAgentLabel(ctx, agent, "†");
+    return;
+  }
+  if (agent.incapacitated) {
+    // Grey out collapsed agents and tag them.
+    ctx.fillStyle = "rgba(60, 60, 70, 0.55)";
+    ctx.fillRect(agent.x - 12, agent.y - 26, 24, 30);
+    ctx.fillStyle = "#fff";
+    ctx.font = "12px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("☠", agent.x, agent.y - 14);
+  }
+  drawHealthBar(ctx, agent);
+  drawAgentLabel(ctx, agent, agent.role.charAt(0).toUpperCase());
   drawResourceDots(ctx, agent, agent.x, agent.y + 42);
   if (agent.isThinking) {
     ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
@@ -942,6 +956,7 @@ const ACTION_LABELS = {
   propose_recipe: "proposing a recipe",
   approve_recipe: "reviewing a recipe",
   reject_recipe: "reviewing a recipe",
+  bury_agent: "burying the dead",
   rest: "resting"
 };
 function humanizeAction(agent) {

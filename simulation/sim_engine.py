@@ -596,6 +596,23 @@ HARVEST_SPIRIT_CONTRIB_BOOST = True
 # agent's existing persona/personality text (deterministic templates only).
 # Capped so a long-lived elder doesn't accumulate an unbounded run-on string.
 PERSONALITY_DRIFT_CAP = 3
+# --- Cemetery & burial (permanent-death handling, CEMETERY_ENABLED) ---
+# A permanent death (LIFECYCLE_ENABLED) used to leave the corpse lying
+# wherever it fell -- incapacitated forever, at a random world position, with
+# no in-fiction acknowledgement. This closes that gap: a seed Cemetery
+# structure (station pattern, like Market/Library) + a deterministic backstop
+# that (a) has the village build one the first time it's needed and (b)
+# either an agent organically bury_agent's the dead or, after a grace window,
+# the backstop does it itself -- so no corpse waits forever. A collapsed-but-
+# not-dead agent (deathFrame is None) is never eligible; burial is strictly
+# for LIFECYCLE_ENABLED's permanent death.
+CEMETERY_ENABLED = True
+GRAVE_COLS = 4
+GRAVE_ROWS = 3                        # 12 slots/cemetery; index wraps past that (never a hard cap)
+GRAVE_SLOT_DX = 18
+GRAVE_SLOT_DY = 22
+BURY_CONTACT_DIST = 80                # matches heal_agent's contact radius
+BURIAL_BACKSTOP_FRAMES = STALL_THRESHOLD * 3  # ~1 min grace for organic bury_agent before the backstop buries directly
 if LIFECYCLE_ENABLED:
     # New governable rule kinds (I4) + the deterministic succession-ballot
     # kind, layered onto the existing set so a flag-off village keeps exactly
@@ -813,6 +830,25 @@ if CULTURE_ENABLED:
     PROJECT_KIND["library"] = "village"
     SEED_STRUCTURE_FUNCTIONS["library"] = {
         "unlocks": [{"kind": "knowledge", "station": "library"}],
+    }
+
+if CEMETERY_ENABLED:
+    # The Cemetery: the seed burial STATION. Plain tier-1, buildable like
+    # house/wall/market/library (the deterministic escape -- a village never
+    # needs an uninvented resource to bury its dead). Its "unlocks" effect is
+    # a new kind ("burial") consulted by _working_cemeteries(); the actual
+    # burial mechanic (moving a corpse to a grave slot) lives in
+    # _bury_agent_at, not in the function block.
+    PROJECT_TEMPLATES["cemetery"] = {
+        "name": "Cemetery",
+        "needs": {"stone": 3, "wood": 1},
+        "visualStyle": "cemetery",
+        **({"tier": 1} if TECH_TREE_ENABLED else {}),
+    }
+    PROJECT_ORDER.append("cemetery")
+    PROJECT_KIND["cemetery"] = "village"
+    SEED_STRUCTURE_FUNCTIONS["cemetery"] = {
+        "unlocks": [{"kind": "burial", "station": "cemetery"}],
     }
 
 AGENT_DEFS = [
@@ -1046,7 +1082,7 @@ class SimEngine:
                 "lastBlueprintRejection": None, "lastGatherRejection": None,
                 "lastProjectRejection": None, "lastTerraformRejection": None,
                 "lastCraftRejection": None, "lastRepairRejection": None,
-                "lastRecipeRejection": None,
+                "lastRecipeRejection": None, "lastBurialRejection": None,
                 "lastShelterNote": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
@@ -1072,6 +1108,10 @@ class SimEngine:
                 a["lastRationingRejection"] = None
                 a["parents"] = None
                 a["deathFrame"] = None
+                # Cemetery/burial: unset until a permanent death is buried
+                # (see CEMETERY_ENABLED above); irrelevant while alive.
+                a["buried"] = False
+                a["restingPlaceId"] = None
             else:
                 a["age"] = None
             if CULTURE_ENABLED:
@@ -3802,6 +3842,141 @@ class SimEngine:
             f"{agent['name']}'s belongings pass to " +
             (heirs[0]["name"] if len(heirs) == 1 else f"{len(heirs)} villagers") + ".")
 
+    # --- Cemetery & burial (CEMETERY_ENABLED): permanent death shouldn't
+    # leave a corpse lying wherever it fell. ---
+    def _working_cemeteries(self):
+        """Cemetery structures still functional under decay (same condition/
+        ruin check _working_structure_count uses, but returns the structures
+        themselves since burial needs their position, not just a count)."""
+        if not CEMETERY_ENABLED:
+            return []
+        return [s for s in self.civilization["structures"]
+                if s.get("type") == "cemetery" and not s.get("isRuin")
+                and (not GOODS_ENABLED or s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)]
+
+    def _grave_slot_for(self, cemetery, index):
+        """Deterministic grid of resting places around a cemetery's plot.
+        GRAVE_COLS*GRAVE_ROWS slots visually fit a small village; index wraps
+        past that (never a hard cap -- a full cemetery still buries, it just
+        starts reusing slot positions, same "no permanent block" discipline
+        every other capacity in this file follows)."""
+        col = index % GRAVE_COLS
+        row = (index // GRAVE_COLS) % GRAVE_ROWS
+        return (cemetery["x"] + 10 + col * GRAVE_SLOT_DX,
+                cemetery["y"] + 45 + row * GRAVE_SLOT_DY)
+
+    def _nearest_unburied_corpse(self, agent):
+        """Auto-target fallback for bury_agent, mirroring _neediest_nearby's
+        restraint: only agents already NEARBY are auto-picked. A corpse
+        farther away must be named explicitly as `target` (which then drives
+        the move-closer-first branch in apply_decision, same as heal_agent)."""
+        nearby = [self._find_agent(n) for n in self._get_nearby_agents(agent)]
+        nearby = [a for a in nearby if a and a.get("deathFrame") is not None and not a.get("buried")]
+        if not nearby:
+            return None
+        nearby.sort(key=lambda a: self._distance_to(agent, a))
+        return nearby[0]
+
+    def _bury_agent_at(self, cemetery, corpse, buried_by=None):
+        """Move a corpse to its resting place. buried_by is the agent who
+        performed the burial (organic bury_agent), or None when the
+        BURIAL_BACKSTOP_FRAMES grace window expires and the village buries
+        its own dead without a named actor -- both paths funnel through here
+        so the mutation only happens in one place."""
+        existing = sum(1 for a in self.agents if a.get("restingPlaceId") == cemetery["id"])
+        x, y = self._grave_slot_for(cemetery, existing)
+        corpse["x"] = x
+        corpse["y"] = y
+        corpse["targetX"] = x
+        corpse["targetY"] = y
+        corpse["buried"] = True
+        corpse["restingPlaceId"] = cemetery["id"]
+        who = f"{buried_by['name']} buried" if buried_by else "The village buried"
+        self._push_activity(f"{who} {corpse['name']} in the Cemetery.")
+        if CULTURE_ENABLED:
+            self._push_chronicle(f"{corpse['name']} was laid to rest in the Cemetery.", kind="burial")
+        if buried_by:
+            self._push_memory(buried_by, f"Buried {corpse['name']} in the Cemetery")
+
+    def _maybe_build_cemetery(self):
+        """Deterministic backstop (mirrors _maybe_start_approved_custom): once
+        at least one agent has died with nowhere to be laid to rest, the
+        elder starts a Cemetery project, founding new village land if the
+        existing district is full -- same escape hatch as every other
+        structure backstop, so this can never deadlock."""
+        c = self.civilization
+        if self.frameTick < c.get("cemeteryBackoffUntil", 0):
+            return
+        if self.frameTick - c.get("lastCemeteryCheckFrame", 0) < STALL_THRESHOLD:
+            return
+        if len(self._active_project_districts()) >= MAX_CONCURRENT_PROJECTS:
+            return
+        if self._project_type_active("cemetery"):
+            return
+        c["lastCemeteryCheckFrame"] = self.frameTick
+        elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
+        if not elder:
+            return
+        elder["goal"] = None
+        decision = {"action": "start_project", "target": "cemetery",
+                    "reasoning": "The village has dead awaiting burial and no cemetery exists."}
+
+        def _try_start():
+            self.apply_decision(elder, decision)
+            return self._project_type_active("cemetery")
+
+        if _try_start():
+            c["cemeteryBackstopFailures"] = 0
+            c["cemeteryEscalationLogged"] = False
+            c["cemeteryBackoffUntil"] = 0
+            self._push_activity(f"Elder {elder['name']} directs the village to build a Cemetery for the dead.")
+            return
+
+        kind = PROJECT_KIND.get("cemetery", "village")
+        tmpl = DISTRICT_KIND_TEMPLATES.get(kind)
+        if tmpl:
+            plot = self._claim_frontier_plot()
+            if plot:
+                self._found_district(kind, tmpl, plot)
+                if _try_start():
+                    c["cemeteryBackstopFailures"] = 0
+                    c["cemeteryEscalationLogged"] = False
+                    c["cemeteryBackoffUntil"] = 0
+                    self._push_activity(
+                        f"Elder {elder['name']} opens new {kind} land and starts the Cemetery.")
+                    return
+
+        c["cemeteryBackstopFailures"] = c.get("cemeteryBackstopFailures", 0) + 1
+        if not c.get("cemeteryEscalationLogged"):
+            self._push_activity(
+                f"Cannot start the Cemetery — all {kind} districts are blocked; "
+                f"backing off until land opens")
+            c["cemeteryEscalationLogged"] = True
+        c["cemeteryBackoffUntil"] = self.frameTick + APPROVED_CUSTOM_BACKOFF_FRAMES
+
+    def _maybe_handle_burials(self):
+        """Tick-gated backstop: build a Cemetery if the village needs one and
+        doesn't have one; once one exists, give bury_agent an organic grace
+        window (nudged in the prompt) before burying the dead itself so no
+        corpse waits forever. Never touches a non-permanent collapse
+        (deathFrame is None) -- only LIFECYCLE_ENABLED's permanent death is
+        eligible, matching "any non-permanent death should not be in the
+        cemetery"."""
+        if not CEMETERY_ENABLED or not LIFECYCLE_ENABLED:
+            return
+        unburied = [a for a in self.agents if a.get("deathFrame") is not None and not a.get("buried")]
+        if not unburied:
+            return
+        cemeteries = self._working_cemeteries()
+        if not cemeteries:
+            self._maybe_build_cemetery()
+            return
+        cemetery = cemeteries[0]
+        for corpse in unburied:
+            if self.frameTick - corpse["deathFrame"] < BURIAL_BACKSTOP_FRAMES:
+                continue
+            self._bury_agent_at(cemetery, corpse, buried_by=None)
+
     # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
     def _start_succession_election(self):
         """One pending 'succession' rule per eligible candidate (adults,
@@ -5903,6 +6078,30 @@ class SimEngine:
                     self._practice_skill(agent, "heal")
                 summary = f"{agent['name']} healed {patient['name']}"
 
+        elif action == "bury_agent":
+            corpse = self._find_agent(decision.get("target")) if decision.get("target") else None
+            if corpse is not None and (corpse.get("deathFrame") is None or corpse.get("buried")):
+                corpse = None
+            if not corpse:
+                corpse = self._nearest_unburied_corpse(agent)
+            if not corpse:
+                summary = f"{agent['name']} found no one awaiting burial"
+            else:
+                cemeteries = self._working_cemeteries()
+                if not cemeteries:
+                    agent["lastBurialRejection"] = {
+                        "reason": "no cemetery has been built yet",
+                        "frame": self.frameTick,
+                    }
+                    summary = f"{agent['name']} wants to bury {corpse['name']} but no cemetery exists"
+                elif self._distance_to(agent, corpse) > BURY_CONTACT_DIST:
+                    self._auto_move_toward_target(agent, corpse["name"])
+                    summary = f"{agent['name']} moves to lay {corpse['name']} to rest"
+                else:
+                    cemetery = min(cemeteries, key=lambda s: self._distance_to(agent, s))
+                    self._bury_agent_at(cemetery, corpse, buried_by=agent)
+                    summary = f"{agent['name']} buried {corpse['name']} in the Cemetery"
+
         # rest / default: summary already set
 
         agent["lastAction"] = action
@@ -6095,6 +6294,20 @@ class SimEngine:
                     if r["kind"] == "succession" and r.get("electionId") == pending_succession["electionId"])
                 nudges.append(f"NOTE: The village elder has died. Vote for the next elder with vote_rule: "
                               f"{candidate_ids}. Set target to your preferred candidate's id and vote yes.")
+        if CEMETERY_ENABLED:
+            burial_rejection = agent.get("lastBurialRejection")
+            if burial_rejection and self.frameTick - burial_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: {burial_rejection['reason']}. "
+                              f"Use start_project with target cemetery to build one.")
+            unburied = next((a for a in self.agents
+                             if a.get("deathFrame") is not None and not a.get("buried")), None)
+            if unburied:
+                if self._working_cemeteries():
+                    nudges.append(f"NOTE: {unburied['name']} awaits burial. "
+                                  f"Use bury_agent (target {unburied['name']}) to lay them to rest in the Cemetery.")
+                else:
+                    nudges.append(f"NOTE: {unburied['name']} awaits burial but the village has no Cemetery yet. "
+                                  f"Use start_project with target cemetery.")
         abandonment = c.get("lastProjectAbandonment")
         if abandonment and self.frameTick - abandonment.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: {abandonment['reason']}.")
@@ -6324,7 +6537,8 @@ class SimEngine:
             "chronicle_line": self._chronicle_prompt_line() if CULTURE_ENABLED else None,
             "available_actions": [a for a in self.d["AVAILABLE_ACTIONS"]
                                   if (a != "start_terraform" or ECOLOGY_ENABLED)
-                                  and (a != "repair_structure" or GOODS_ENABLED)],
+                                  and (a != "repair_structure" or GOODS_ENABLED)
+                                  and (a != "bury_agent" or CEMETERY_ENABLED)],
         }
 
     def _recent_conversations_text(self):
@@ -6476,6 +6690,8 @@ class SimEngine:
                     self._maybe_dissolve_council()
                 if CULTURE_ENABLED:
                     self._maybe_study_at_library()
+                if CEMETERY_ENABLED:
+                    self._maybe_handle_burials()
             if STRUCTURE_EFFECTS_ENABLED and ft % EFFECT_TICK_FRAMES == 0:
                 self._tick_structure_effects()
             if ECOLOGY_ENABLED and ft % ECOLOGY_REGROW_FRAMES == 0:
@@ -6739,6 +6955,16 @@ class SimEngine:
                     civ.setdefault("memeMutations", 0)
                     civ.setdefault("skillPracticeCount", 0)
                     civ.setdefault("teachCount", 0)
+                if CEMETERY_ENABLED:
+                    # Cemetery/burial state: purely additive, same discipline
+                    # as every other phase's setdefault-only back-compat --
+                    # an old save can build a Cemetery with no migration step.
+                    if isinstance(civ.get("projectRegistry"), dict):
+                        civ["projectRegistry"].setdefault("cemetery", dict(PROJECT_TEMPLATES["cemetery"]))
+                    civ.setdefault("lastCemeteryCheckFrame", 0)
+                    civ.setdefault("cemeteryBackoffUntil", 0)
+                    civ.setdefault("cemeteryBackstopFailures", 0)
+                    civ.setdefault("cemeteryEscalationLogged", False)
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
@@ -6758,6 +6984,7 @@ class SimEngine:
                     a.setdefault("homeStructureId", None)
                     a.setdefault("lastTradeRejection", None)
                     a.setdefault("lastHomelessNudgeFrame", None)
+                    a.setdefault("lastBurialRejection", None)
                     if LIFECYCLE_ENABLED:
                         # Phase F: every restored agent gets an age (staggered
                         # by roster position, same deterministic spread
@@ -6778,6 +7005,8 @@ class SimEngine:
                         a.setdefault("lastRationingRejection", None)
                         a.setdefault("parents", None)
                         a.setdefault("deathFrame", None)
+                        a.setdefault("buried", False)
+                        a.setdefault("restingPlaceId", None)
                     else:
                         a["age"] = None
                     if CULTURE_ENABLED:
@@ -6879,6 +7108,12 @@ class SimEngine:
                 "lifeStage": self._life_stage(a) if LIFECYCLE_ENABLED else None,
                 "skills": {k: round(v, 1) for k, v in a["skills"].items()} if CULTURE_ENABLED else None,
                 "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
+                # Cemetery/burial (viewer-only booleans, not the raw frame --
+                # same discipline as councilActive's "frame" omission): lets
+                # the renderer tell a permanent death (tombstone sprite) apart
+                # from a temporary survival collapse (grey overlay, same body).
+                "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
+                "buried": bool(CEMETERY_ENABLED and a.get("buried")),
             } for a in self.agents]
             civ = {
                 "level": c["level"],
@@ -6963,6 +7198,7 @@ class SimEngine:
                         "ECONOMY_ENABLED": ECONOMY_ENABLED,
                         "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
                         "CULTURE_ENABLED": CULTURE_ENABLED,
+                        "CEMETERY_ENABLED": CEMETERY_ENABLED,
                     },
                 },
             }
