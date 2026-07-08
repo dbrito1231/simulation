@@ -926,6 +926,7 @@ Known recipes (craft_item targets): {known_recipes}
 Pending blueprints: {pending_blueprints}
 Pending recipes: {pending_recipes}
 Approved custom builds: {approved_custom_projects}
+Reserved structure ids (propose_blueprint id must avoid ALL of these -- includes unbuilt seed types like forge/granary/market/library): {reserved_structure_ids}
 Rejected blueprints (do NOT re-propose these ids): {rejected_blueprints}
 Pending rules (vote with vote_rule): {pending_rules}
 Enacted rules: {active_rules}
@@ -1127,6 +1128,22 @@ def format_approved_custom(approved):
         return "none"
     ids = [str(a) for a in approved if a]
     return ", ".join(ids) if ids else "none"
+
+
+def format_reserved_structure_ids(approved, pending):
+    """Every structure id a new propose_blueprint id must avoid: the seed
+    templates (SEED_PROJECT_IDS -- includes tier-2+ ones like forge/granary/
+    market/library, which is exactly what agents keep re-proposing since
+    "Approved custom builds" below only lists CUSTOM ids) plus every
+    already-approved custom and currently-pending blueprint id. Mirrors the
+    invention-only prompt's `taken` set (build_invention_prompt) so ordinary
+    turns get the same collision guidance the council already had."""
+    ids = set(SEED_PROJECT_IDS)
+    if isinstance(approved, list):
+        ids.update(str(a) for a in approved if a)
+    if isinstance(pending, list):
+        ids.update(b.get("id") for b in pending if isinstance(b, dict) and b.get("id"))
+    return ", ".join(sorted(ids)) if ids else "none"
 
 
 def format_rejected_blueprints(rejected):
@@ -2339,6 +2356,7 @@ def build_user_prompt(data, slim=False):
         pending_blueprints=format_pending_blueprints(pending_blueprints),
         pending_recipes=format_pending_recipes(data.get("pending_recipes") or []),
         approved_custom_projects=format_approved_custom(approved_custom_projects),
+        reserved_structure_ids=format_reserved_structure_ids(approved_custom_projects, pending_blueprints),
         rejected_blueprints=format_rejected_blueprints(rejected_blueprints),
         pending_rules=format_pending_rules(data.get("pending_rules") or []),
         active_rules=format_active_rules(data.get("active_rules") or []),
