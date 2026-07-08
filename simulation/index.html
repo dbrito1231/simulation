@@ -269,7 +269,7 @@
     color: #aaa;
   }
   #actList li { padding: 3px 0; }
-  /* --- Phase D: council banner + Council sidebar panel --- */
+  /* --- Phase D: council banner + Council panel (lives in the left convPanel column) --- */
   #councilBanner {
     position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
     padding: 6px 18px; font: 600 13px system-ui, sans-serif;
@@ -324,6 +324,14 @@
       <h2>Activity</h2>
       <ul id="actList"></ul>
     </section>
+    <section class="panel-section" id="councilSection" style="display:none">
+      <details id="councilPanel" open>
+        <summary>Council</summary>
+        <div id="councilMeta"></div>
+        <div id="councilCards"></div>
+        <ul id="councilHistory"></ul>
+      </details>
+    </section>
   </aside>
   <div id="canvasWrap">
     <canvas id="world" width="1600" height="1000"></canvas>
@@ -377,14 +385,6 @@
         <span class="civ-label">Pending:</span>
         <div id="civPending"></div>
       </div>
-    </section>
-    <section class="panel-section" id="councilSection" style="display:none">
-      <details id="councilPanel" open>
-        <summary>Council</summary>
-        <div id="councilMeta"></div>
-        <div id="councilCards"></div>
-        <ul id="councilHistory"></ul>
-      </details>
     </section>
     <section class="panel-section">
       <h2>Agents</h2>

@@ -12,6 +12,12 @@
       "runtimeExecutable": "cmd",
       "runtimeArgs": ["/c", "set SIM_PORT=5062 && set SIM_HOST=127.0.0.1 && uv run python simulation/server.py"],
       "port": 5062
+    },
+    {
+      "name": "gui-static-preview",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "cd simulation && uv run python -m http.server 8899"],
+      "port": 8899
     }
   ]
 }
