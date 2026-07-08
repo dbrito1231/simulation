@@ -1434,7 +1434,8 @@ class SimEngine:
 
     def _neediest_nearby(self, agent):
         nearby = [self._find_agent(n) for n in self._get_nearby_agents(agent)]
-        nearby = [a for a in nearby if a and (a["incapacitated"] or a["health"] < 60)]
+        nearby = [a for a in nearby if a and a.get("deathFrame") is None
+                  and (a["incapacitated"] or a["health"] < 60)]
         if not nearby:
             return None
         nearby.sort(key=lambda a: (0 if a["incapacitated"] else 1, a["health"]))
@@ -3168,7 +3169,8 @@ class SimEngine:
         # stays incapacitated forever), so this must exclude it explicitly --
         # otherwise a deceased villager could sit in the elder's idle list
         # indefinitely and get assign_task'd to a corpse every gate.
-        idle = [a for a in self.agents if not a["incapacitated"] and self._is_idle(a)
+        idle = [a for a in self.agents if a.get("deathFrame") is None and not a["incapacitated"]
+                and self._is_idle(a)
                 and (a["lastTaskedFrame"] is None
                      or self.frameTick - a["lastTaskedFrame"] > ELDER_RETASK_COOLDOWN_FRAMES)]
         idle.sort(key=lambda a: (a["lastTaskedFrame"] if a["lastTaskedFrame"] is not None
@@ -5443,6 +5445,8 @@ class SimEngine:
 
         elif action == "heal_agent":
             patient = self._find_agent(decision.get("target")) if decision.get("target") else None
+            if patient is not None and patient.get("deathFrame") is not None:
+                patient = None
             if not patient or (patient["health"] >= 100 and not patient["incapacitated"]):
                 patient = self._neediest_nearby(agent)
             if not patient:
