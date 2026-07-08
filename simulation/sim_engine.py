@@ -5717,19 +5717,31 @@ class SimEngine:
             elif (not c["rules"] and not c["pendingRules"]
                   and self.frameTick - c["lastRuleActivityFrame"] > BLUEPRINT_STALL_THRESHOLD):
                 nudges.append("NOTE: The village has no shared rules yet. Consider propose_rule (a small resource_tax builds a shared stockpile).")
-        if TECH_TREE_ENABLED and agent["role"] == "elder" and len(c["pendingBlueprints"]) >= 2:
-            # Comparative council judgment: the elder sees the competing
-            # proposals side by side and rules on all of them in ONE decision.
+        if agent["role"] == "elder" and c["pendingBlueprints"]:
+            # Was gated at >=2 (the comparative council judgment): a LONE
+            # valid proposal got no nudge at all and could sit unreviewed
+            # indefinitely -- the elder's only other path to it was the
+            # fallback-on-decision-failure branch in role_fallback_action,
+            # which only fires by accident. Found live 2026-07-08: Marco's
+            # "Storage House" validated on his own invention-only turn but
+            # was never surfaced back to him because it was the only one
+            # pending. Now covers n=1 too, with matching singular wording.
             briefs = "; ".join(
                 f"{b['id']} by {b['proposedBy']} (needs "
                 + ", ".join(f"{k} {v}" for k, v in (b.get('needs') or {}).items())
                 + f"; {self._function_summary(b.get('function'))})"
                 for b in c["pendingBlueprints"])
-            nudges.append(
-                f"COUNCIL VERDICT NEEDED: {len(c['pendingBlueprints'])} blueprint proposals "
-                f"compete: {briefs}. Compare them and approve the BEST with approve_blueprint "
-                f'(target = its id), rejecting the rest IN THE SAME decision by adding '
-                f'"verdict": {{"rejections": {{"<id>": "<one-line reason it lost>"}}}}.')
+            if len(c["pendingBlueprints"]) == 1:
+                nudges.append(
+                    f"BLUEPRINT AWAITS YOUR VERDICT: {briefs}. Use approve_blueprint "
+                    f"(target = its id) if it serves the village, or reject_blueprint "
+                    f"with a one-line reason if not.")
+            else:
+                nudges.append(
+                    f"COUNCIL VERDICT NEEDED: {len(c['pendingBlueprints'])} blueprint proposals "
+                    f"compete: {briefs}. Compare them and approve the BEST with approve_blueprint "
+                    f'(target = its id), rejecting the rest IN THE SAME decision by adding '
+                    f'"verdict": {{"rejections": {{"<id>": "<one-line reason it lost>"}}}}.')
         if agent["role"] == "elder" and actives:
             stalled_district = next((did for did in actives
                                      if self.frameTick - c["districtLastContribution"].get(did, 0) > STALL_THRESHOLD), None)

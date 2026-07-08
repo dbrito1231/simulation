@@ -743,6 +743,48 @@ clean, all four call sites confirmed patched and none reverted to the literal
 `30`, `lm_complete` confirmed untouched. Server restarted with the fix live;
 next council convened should be watched for an actual populated debate.
 
+**Root-caused (2026-07-08): why councils kept dissolving even after the
+timeout fix.** User noticed all 12+ debates ended "dissolved without a
+verdict" and asked why. Traced every invention-only call across every
+post-timeout-fix session (3 total so far) and found three independent,
+now mostly-addressed causes:
+1. **Single-shot proposals, no retry.** `agent["inventionTurn"]` is
+   consumed on read (`sim_engine.py` ~5567) regardless of outcome, so each
+   council member gets exactly one attempt per debate. Of 2 real
+   post-timeout-fix council-member attempts, both failed validation on
+   their only shot: Mia's "Barn" used a sprite cell letter outside her own
+   declared palette; Luna's "Granary" reused an id already listed as taken
+   (a seed template) despite her prompt explicitly excluding it — an
+   instruction-following miss, not a system bug. Both correctly surfaced
+   rejection reasons via the existing feedback loop; no fix applied here
+   (working as designed — quality varies attempt to attempt, which is why
+   councils fan out to multiple members).
+2. **A member may never get dispatched before the TTL.** In the
+   Sage/Mia/Luna debate, only Mia and Luna's invention-only calls appear in
+   the logs — Sage (20 other decisions that session) never received his
+   flagged turn before the council dissolved. Likely think-cadence/2-worker
+   queue starvation under the ~50s invention-call latency; flagged as an
+   open item, not yet fixed (would need per-member turn forcing or a wider
+   TTL to confirm/address).
+3. **FIXED — the real bug.** A THIRD attempt, outside any council (the
+   elder-takeover invention path), succeeded: Marco (elder) authored a
+   fully valid "Storage House" blueprint. It sat in `pendingBlueprints`
+   unreviewed for the rest of the session and across a restart. Root cause:
+   the only elder nudge pointing at pending blueprints
+   (`"COUNCIL VERDICT NEEDED"`) required `len(pendingBlueprints) >= 2` —
+   built for Phase D's comparative-judgment case, it silently excluded the
+   much more common case of exactly ONE valid proposal. With no nudge, the
+   elder's only path to noticing it was the accidental
+   fallback-on-decision-failure branch in `role_fallback_action`. Fixed:
+   the nudge now fires at `>= 1` pending (singular wording for n=1, the
+   original comparative wording for n>=2), and the `TECH_TREE_ENABLED` gate
+   was dropped since plain approve/reject doesn't need tier machinery.
+   Verified: py_compile clean; `storage_house` confirmed still queued in
+   `pendingBlueprints` across the restart that loaded this fix, so Marco's
+   next elder turn should surface it. Net effect of tonight's two fixes:
+   proposals can now both LAND (timeout fix) and be SEEN (this fix) —
+   Sage's dispatch-starvation item (#2) remains the one known gap.
+
 ### Phase E — Market & property (I2, I3)
 Market structure posts prices from district stocks and stockpile levels; gold
 mediates; plots/homes claimable; inheritance recorded. Adopted from the
