@@ -67,10 +67,18 @@
        founded mid-session into the open frontier, this is the only way to
        notice new territory came online without scrolling to find it.
        Clickable/draggable: click or drag anywhere on it to jump the main
-       viewport there (see minimap mouse handlers below). */
+       viewport there (see minimap mouse handlers below).
+       Anchored to the bottom-right of the map pane specifically (right:
+       380px = #sidebar's 360px width + the #wrap padding/gap it sits
+       behind), NOT the viewport's left/right edge -- bottom-left used to
+       collide with #convPanel's Activity list, and a plain bottom-right
+       would collide with #sidebar's Agents list. Keep the 380px in sync
+       with #sidebar's width if that ever changes. Reset to the viewport
+       corner on narrow screens (see the max-width:900px block) once
+       convPanel/sidebar stack full-width and stop occupying a side column. */
     position: fixed;
     bottom: 18px;
-    left: 18px;
+    right: 380px;
     width: 220px;
     height: 160px;
     background: #0e0e14;
@@ -297,6 +305,10 @@
     #world { height: auto; max-height: 70vh; width: 100%; }
     #sidebar { width: 100%; flex-shrink: 1; height: 420px; border-left: 0; border-top: 1px solid #2a2a35; }
     #convPanel { width: 100%; flex-shrink: 1; height: 520px; border-right: 0; border-top: 1px solid #2a2a35; order: 3; }
+    /* convPanel/sidebar stack full-width here instead of flanking the map,
+       so the desktop right:380px offset (sized to dodge #sidebar's column)
+       no longer applies -- fall back to the viewport corner. */
+    #minimap { right: auto; left: 18px; }
   }
 </style>
 </head>
