@@ -4657,6 +4657,7 @@ class SimEngine:
                 f"{', '.join(loser_names)}: {first_reason}")
         record = {
             "frame": self.frameTick,
+            "ts": datetime.now(timezone.utc).isoformat(),
             "trigger": (council or {}).get("trigger") or "elder_review",
             "proposals": proposals,
             "verdict": {"approved_id": approved_bp["id"],
@@ -4690,6 +4691,7 @@ class SimEngine:
             return
         record = {
             "frame": self.frameTick,
+            "ts": datetime.now(timezone.utc).isoformat(),
             "trigger": council.get("trigger") or "invention_backstop",
             "proposals": list(council.get("proposals") or []),
             "verdict": None,
@@ -4753,6 +4755,7 @@ class SimEngine:
                 self._set_agent_target_to_agent(m, elder["name"])
             c["councilActive"] = {
                 "frame": self.frameTick,
+                "ts": datetime.now(timezone.utc).isoformat(),
                 "trigger": "invention_backstop",
                 "proposers": names,
                 "proposals": [],

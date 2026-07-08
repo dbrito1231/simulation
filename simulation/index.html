@@ -1192,6 +1192,23 @@ function renderSidebar() {
 // cards (winner highlighted, losers greyed with their rejection reasons);
 // older debates collapse to a one-line history list.
 // =====================================================================
+// Debate records carry a wall-clock "ts" (ISO string) alongside "frame" as
+// of 2026-07-07; records persisted before that change have no "ts", so fall
+// back to the frame number rather than showing a blank/invalid time.
+function formatCouncilTime(ts, frame) {
+  if (ts) {
+    const d = new Date(ts);
+    if (!isNaN(d.getTime())) {
+      const now = new Date();
+      const sameDay = d.toDateString() === now.toDateString();
+      return sameDay
+        ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+        : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    }
+  }
+  return frame != null ? `frame ${frame}` : "unknown time";
+}
+
 function councilCardHtml(p, verdict) {
   const approvedId = verdict && verdict.approved_id;
   const reasons = (verdict && verdict.reasons_per_candidate) || {};
@@ -1217,7 +1234,7 @@ function renderCouncil(civ) {
   councilSectionEl.style.display = "block";
   const latest = log[0];
   councilMetaEl.textContent =
-    `Latest debate (frame ${latest.frame != null ? latest.frame : "?"}, ` +
+    `Latest debate (${formatCouncilTime(latest.ts, latest.frame)}, ` +
     `${latest.trigger || "?"}): ${latest.outcome || "in progress"}`;
   const proposals = latest.proposals || [];
   councilCardsEl.innerHTML = proposals.length
@@ -1225,7 +1242,7 @@ function renderCouncil(civ) {
     : '<span class="civ-label">no proposals recorded</span>';
   councilHistoryEl.innerHTML = log.slice(1, 8).map((r) => {
     const n = (r.proposals || []).length;
-    return `<li>frame ${r.frame != null ? r.frame : "?"} — ${n} proposal(s) — ${escapeHtml(r.outcome || "?")}</li>`;
+    return `<li>${formatCouncilTime(r.ts, r.frame)} — ${n} proposal(s) — ${escapeHtml(r.outcome || "?")}</li>`;
   }).join("");
 }
 
