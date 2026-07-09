@@ -4306,6 +4306,12 @@ class SimEngine:
             )
         except Exception:
             persona = None
+        # Belt-and-suspenders: lm_complete already rejects scaffold, but a
+        # truncated instruction echo that ends in '.' can still slip past
+        # finish_reason==length (cycle 10.morning: 2/36 births).
+        is_scaffold = self.d.get("is_scaffold_text")
+        if persona and is_scaffold and is_scaffold(persona):
+            persona = None
         if persona:
             newborn["persona"] = persona.strip()[:200]
             announce = persona.strip()

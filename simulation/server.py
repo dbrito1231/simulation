@@ -214,7 +214,12 @@ def _cosine(a, b):
 _SCAFFOLD_MARKER_RE = re.compile(
     r"(thinking process|\*\*analyze|let'?s think|let me think|"
     r"chain[- ]of[- ]thought|step[- ]by[- ]step|"
-    r"^(input|given|context|task|prompt)\s*:)",
+    r"^(input|given|context|task|prompt)\s*:|"
+    # Truncated instruction echoes that pass the finish_reason==length
+    # terminal-punctuation check (cycle 9.evening / 10.morning): e.g.
+    # "Invent one brief personality trait for the newborn."
+    r"^(invent|write|create|generate|output)\b|"
+    r"personality trait for the newborn)",
     re.IGNORECASE,
 )
 _SCAFFOLD_LEADING_LIST_RE = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
