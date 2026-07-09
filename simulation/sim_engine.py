@@ -3872,16 +3872,15 @@ class SimEngine:
         return None
 
     def _working_cemeteries(self):
-        """Standing cemetery plots that can receive burials. Unlike produce/
-        boost stations, a disrepaired cemetery still has graves -- only a ruin
-        (condition 0) is excluded, so corpses are not stranded when decay runs
-        ahead of repair."""
+        """Cemetery plots that can receive burials. Burial uses the district
+        grave_grid, not the chapel's produce/boost status -- so a disrepaired
+        or ruined chapel must not strand corpses (the escape is repair, but
+        burial itself stays reachable)."""
         if not CEMETERY_ENABLED:
             return []
         did = self._cemetery_district_id()
         return [s for s in self.civilization["structures"]
-                if s.get("type") == "cemetery" and not s.get("isRuin")
-                and s.get("condition", 100) > 0
+                if s.get("type") == "cemetery"
                 and (not did or s.get("districtId") == did)]
 
     def _grave_grid_position(self, district_id, index):
