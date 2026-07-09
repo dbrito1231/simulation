@@ -1,15 +1,15 @@
-{
-  "lastReviewedCommit": "252ed67",
-  "iteration": 10,
-  "phase": "G",
-  "note": "2026-07-09 ~01:08 (cycle 9.evening, short interim slot ~2h after cycle 8.evening's restart -- see schedule-drift note in memory): Server found UP on 5001 correctly in a titled SimServer window (unlike last slot). AUDIT of session 2026-07-08T23-14-15 (frame 1.593M->1.719M, ~70min real, provisional). NEW FAIL found+hot-fixed: all 17/17 births this session had corrupted persona/announcement text -- raw echo of the LLM prompt input ('Input: Parents' names and roles (...') instead of flavor text, plus 4 poisoned longTerm memory-store summaries (that store is inert -- nothing calls /memory/summarize anymore). Root cause: qwen/qwen3.5-9b doesn't honor thinking:disabled for lm_complete's short free-text prompts -- live-tested max_tokens 100/300/600, model always burns 600-2000+ reasoning tokens on a 1-sentence task and finish_reason is always 'length'; is_scaffold_text only caught known CoT phrases, not an echoed-preamble or truncated fragment. Fix in server.py lm_complete/_SCAFFOLD_MARKER_RE: added ^(input|given|context|task|prompt): marker (with extract_plain_answer second-chance), plus reject any finish_reason=='length' response not ending in terminal punctuation. Verified live: 3/3 previously-garbage birth calls now return None -> existing deterministic fallback fires correctly. Also bumped birth max_tokens 60->100 (sim_engine.py, cosmetic, doesn't change the outcome). py_compile clean. Phase F birth-stall fix (cycle 8.evening) confirmed holding: 17 births this window. Phase C: early positive signal (avg 21.3->28.3, disrepair 40->23) but window too short to call a trend reversal -- ruins still climbed 115->130. No deaths this window so cemetery-grounds layout still unconfirmed under real play. General: 630 decision calls, 98.9% HTTP 200, 7 scattered self-recovering offline blips, 0 context_overflow, 0 fallback_reasons. Both invariants held. No design-level FAIL.",
-  "still_open": [
-    "Phase C: structure_condition trend -- watch on a full soak whether the Phase F population recovery (more repairers) actually bends the ruins-climbing curve; too early to call after only 70min",
-    "Phase D: invention council still reaches 0 comparative elder judgments; id-collision rate improved 82%->~56% but not eliminated",
-    "Phase E: market status not re-checked this slot -- confirm rebuild + organic priced trade once a market is working again",
-    "Phase G: teaching (teach_count 0) and meme mutation (0) still organically unexercised",
-    "Cemetery: still needs a soak with actual deaths post-layout-fix to confirm new burials use cemetery_grounds grave_grid correctly under real play",
-    "lm_complete fix: confirm next slot that birth announcements are clean (no more 'Input:' prefixed garbage) and that legitimate flavor text can still occasionally get through (current live tests suggest qwen3.5-9b may now fall back deterministically ~100% of the time for this prompt shape -- acceptable degradation, not a regression, but worth noting if flavor text never appears again)",
-    "DIPLOMACY_ENABLED (second settlement + inter-village trade/treaties) -- still not started; last unscheduled batch item"
-  ]
+﻿{
+    "lastReviewedCommit":  "5271c1c",
+    "iteration":  11,
+    "phase":  "G",
+    "note":  "2026-07-09 morning (cycle 10.morning): Server found UP in titled SimServer window (standing rule intact). AUDIT of night soak 2026-07-09T01-20-28 (~5h46m real, frames 1.720M-\u003e2.104M) -- full non-provisional. Phase F PASS: living 22-\u003e54, births +36 (27-\u003e63), 4 old-age deaths, 3 clean successions, floor cleared -- cycle 8 birth-stall fix holding under load. Cemetery PASS under real play: 4 new deaths buried on cemetery_grounds grave_grid, 21/21 unique positions, ruined chapel still accepted burials. lm_complete: 0 Input:-prefixed garbage (cycle 9 fix held); 34/36 births used clean deterministic fallback; 2/36 still leaked \u0027Invent one brief personality trait...\u0027 (instruction echo ending in \u0027.\u0027 slipped past finish_reason==length). HOT-FIXED: expand _SCAFFOLD_MARKER_RE + belt-and-suspenders is_scaffold_text in _spawn_newborn. Phase C soft FAIL continues: avg cond 28.3-\u003e31.9 (up) but ruins 130-\u003e160 as structures 254-\u003e323; 71 repairs not enough; Market/Cemetery/Forge still ruined (tech_tier reads 1 while era label stays Wagon -- sticky-era watch). Phase D: council 29/28 disperse, 0 comparative verdicts; id-collision ~57% of rej notes. Phase E dormant (market ruined). Phase G PASS same watches (teach 0, meme 0, library 12, practice 9427). General: 1933 LM calls, 99.7% HTTP 200, 0 context_overflow. Soak-only aside from scaffold hot-fix; DIPLOMACY still deferred. Evening: confirm 0 invent-leak births; watch ruins climb; council/market still open.",
+    "still_open":  [
+                       "Phase C: ruins still climbing (130-\u003e160) despite avg condition edging up (28.3-\u003e31.9) and more repairers -- watch whether climb slows before another decay retune; Market/Cemetery/Forge remain ruined",
+                       "Phase D: invention council still 0 comparative elder judgments; id-collision still ~57% of rejection notes",
+                       "Phase E: sole market still ruined -- watch for rebuild + organic priced trade",
+                       "Phase G: teaching (teach_count 0) and meme mutation (0) still organically unexercised",
+                       "Sticky era label: era stays \u0027Wagon Era\u0027 while working tech_tier drops to 1 when Forge is ruined -- confirm whether intentional; not hot-fixed this slot",
+                       "lm_complete invent-leak hot-fix: confirm next slot that 0 birth announcements are instruction echoes",
+                       "DIPLOMACY_ENABLED (second settlement + inter-village trade/treaties) -- still not started; last unscheduled batch item"
+                   ]
 }

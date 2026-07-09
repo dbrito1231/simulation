@@ -1553,6 +1553,46 @@ birth announcements), continue the Phase C condition watch on a longer soak,
 and check for the first post-cycle-8.evening natural death to confirm the
 cemetery-grounds layout under real play.
 
+**Audit verdict (2026-07-09, morning slot -- cycle 10.morning, session
+`2026-07-09T01-20-28`, ~5h46m real / frames 1.720M→2.104M): PASS on
+lifecycle recovery + cemetery layout; Phase C soft-FAIL holds (not retuned);
+small birth-scaffold leak hot-fixed.** Server found UP in titled `SimServer`
+window (standing rule intact). Full non-provisional soak.
+**Phase F (`LIFECYCLE_ENABLED`) — PASS, recovery confirmed:** living
+population 22→54 (cap 72), births 27→63 this session (+36), deaths +4
+(old age), floor held cleared. Three clean successions
+(`succession_*` → winners including Villager1009). Cycle 8 birth-stall fix
+holding under load.
+**Cemetery — PASS under real play:** 4 new deaths all buried on
+`cemetery_grounds` grave_grid; 21/21 buried, unique positions, no dups;
+ruined chapel (condition 0) still accepted burials (cycle 8 `80c9c03` gate).
+**lm_complete birth text — mostly fixed, residual leak hot-fixed:** 0
+`Input:`-prefixed garbage this soak (cycle 9 fix held); 34/36 birth
+announcements used the deterministic fallback cleanly; **2/36** still
+leaked truncated instruction echoes that end in `.`
+("Invent one brief personality trait for the newborn.") — slipped past
+`finish_reason==length` because they had terminal punctuation. Fix this
+slot: expand `_SCAFFOLD_MARKER_RE` with `^(invent|write|create|generate|output)\b`
+and `personality trait for the newborn`, plus a belt-and-suspenders
+`is_scaffold_text` check in `_spawn_newborn` before accepting persona.
+**Phase C (`GOODS_ENABLED`) — soft FAIL continues, early recovery mixed:**
+avg condition 28.3→31.9 (up), disrepair 23→22 (flat), but ruins 130→160 and
+structures 254→323 — sprawl still outruns repair (71 `structure_repaired`).
+Market + Cemetery remain ruined; Forge working=0 so `tech_tier` reads 1
+while era label stays "Wagon Era" (sticky era — watch, not hot-fixed).
+Not retuning decay this slot.
+**Phase D — still open:** council 29 convene / 28 disperse, 0 comparative
+verdicts; id-collision still ~57% of rejection notes (74/130).
+**Phase E — dormant:** sole market still ruined; `market_active:false` all
+soak; homeowners 15.
+**Phase G — PASS, same watches:** library knowledge 12, practice_count 9427,
+teach_count 0, meme_mutations 0.
+**General:** 1,933 LM calls, 99.7% HTTP 200, 0 context_overflow, 0
+fallback_reasons. No silent rejections. Soak-only slot aside from the
+scaffold hot-fix; `DIPLOMACY_ENABLED` still not started. Evening: confirm
+0 invent-leak birth lines; watch whether ruins climb slows; council /
+market rebuild still open.
+
 This plan is the *first iteration* of the cycle the whole effort follows:
 
 1. **Run** a long session (8h+) with the new phase enabled.
