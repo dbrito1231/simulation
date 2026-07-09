@@ -3,9 +3,7 @@
 _Companion to [HANDOFF.md](HANDOFF.md) (the point-in-time state snapshot)
 and [civilization-emergence-plan.md](civilization-emergence-plan.md) (the
 master plan this document extends). Originally written 2026-07-08;
-rewritten 2026-07-08 (later same day) after the plan's entire original
-scope (Tiers 0-3 below) resolved — mostly via the automated overnight
-cycle, one bug via an interactive session._
+last updated 2026-07-09 after cemetery-layout and viewer UX work._
 
 ## Context
 
@@ -22,7 +20,7 @@ that is now resolved:
 - Phase G's culture half (`CULTURE_ENABLED`) landed (`4889c09`) and is
   confirmed organically working.
 
-Two things happened that the original plan didn't anticipate:
+Several things happened that the original plan didn't anticipate:
 
 1. **Phase G's diplomacy half was never implemented.** The original plan
    (and a decision recorded in this doc's first version) said to implement
@@ -31,17 +29,23 @@ Two things happened that the original plan didn't anticipate:
    explicitly deferred diplomacy as a separate item (see
    `overnight-cycle.json`'s `still_open` list). It remains the only
    unimplemented net-new phase.
-2. **Two real bugs and one new feature emerged from interactive sessions**,
-   outside the original A-G phase structure entirely:
+2. **Interactive-session bugs and features** outside the original A-G phase
+   structure:
    - A "zombie" bug (`6e930ca`): `heal_agent` could resurrect a permanently
-     dead agent's `incapacitated` flag without clearing `deathFrame`,
-     letting corpses move/think/get tasked.
+     dead agent's `incapacitated` flag without clearing `deathFrame`.
    - A 10x-too-fast aging-rate bug (`8902465`) that caused a compressed
      die-off (8 of 12 agents within ~30 minutes of a fresh world).
-   - A user-requested Cemetery/burial feature (`fc04070`,
-     `CEMETERY_ENABLED`) so permanently-dead agents are built a cemetery,
-     buried by the village, and rendered as a tombstone instead of lying
-     wherever they fell.
+   - Cemetery/burial (`fc04070`, `CEMETERY_ENABLED`) — seed chapel,
+     `bury_agent`, deterministic backstop.
+   - **Cemetery layout + viewer polish (uncommitted as of 2026-07-09):**
+     `cemetery_grounds` district with structure-style `grave_grid` (fixes
+     clustered/wrapping tombstones), tombstones only after burial, Agents
+     sidebar deceased modal, page-load stall fix, resource dots on
+     hover/select only. See HANDOFF.md section 4 item 7.
+3. **Manual cycle skills (`879982f`)** at
+   `.cursor/skills/civilization-cycle-{morning,night}/` — same Part 8
+   procedure as the Claude Code scheduled tasks, runnable on demand in
+   Cursor when scheduled-task tokens are exhausted.
 
 Everything below is organized the way this project already organizes
 itself: feature-flagged phases, the Part 7 subagent relay pattern, and
@@ -54,7 +58,7 @@ Part 5's civilization-test-driven audits.
 All of the following are DONE and confirmed; no action needed unless a
 regression is observed. Kept here as a compact record rather than the
 original multi-page blow-by-blow (still in git history at commit
-`33a309a..fc04070`'s docs changes if the full detail is ever needed).
+`33a309a..879982f`'s docs changes if the full detail is ever needed).
 
 | Item | Status | Evidence |
 |---|---|---|
@@ -64,11 +68,35 @@ original multi-page blow-by-blow (still in git history at commit
 | Phase E market exercise | Confirmed: Market built, `wealth_gini` falling (0.772→0.503) | `overnight-cycle.json` cycle 7.morning |
 | Phase F lifecycle soak | Confirmed: natural deaths + succession clean under the corrected aging rate, zombie-fix regression explicitly re-checked and closed | `overnight-cycle.json` cycle 6.evening/7.morning |
 | Phase G culture | Landed (`4889c09`) and confirmed: skills-by-practice, Library knowledge persistence, chronicle all firing organically | `overnight-cycle.json` cycle 7.morning |
-| Zombie-heal bug | Fixed (`6e930ca`), verified live, data-patched | This session |
-| Aging-rate bug | Fixed (`8902465`), verified live, data-patched | This session |
-| Cemetery/burial feature | Implemented (`fc04070`), verified live end-to-end within a ~15 min window | This session |
-| Council panel GUI position | Moved to left column (`be47a60`), verified | This session |
-| Newcomer sprite fallback | Fixed (`16224ee`), verified via pixel inspection | This session |
+| Zombie-heal bug | Fixed (`6e930ca`), verified live, data-patched | Interactive session |
+| Aging-rate bug | Fixed (`8902465`), verified live, data-patched | Interactive session |
+| Cemetery/burial (initial) | Implemented (`fc04070`), verified live end-to-end | Interactive session |
+| Council panel GUI position | Moved to left column (`be47a60`), verified | Interactive session |
+| Newcomer sprite fallback | Fixed (`16224ee`), verified via pixel inspection | Interactive session |
+| Manual Part 8 cycle skills | Added (`879982f`) | `.cursor/skills/civilization-cycle-*/` |
+
+---
+
+## Tier A½ — Pending commit (viewer + cemetery layout, 2026-07-09)
+
+Implemented in the working tree but **not yet committed** as of this
+snapshot. Commit + server restart should be the next housekeeping step
+before the next cycle audit.
+
+| Item | Files | What it does |
+|---|---|---|
+| Cemetery district + grave grid | `sim_engine.py`, `sprites.js` | `cemetery_grounds` starter district; graves on structure-style grid; `restore_state` migration; disrepaired chapel still buries |
+| Tombstone rendering gate | `sprites.js`, `index.html` | Tombstone sprite only when `buried`; unburied dead stay greyed at death site |
+| Agents sidebar UX | `index.html` | Living list only; Deceased modal; `dead` vs `collapsed` labels |
+| Page-load stall | `index.html` | `requestIdleCallback` terrain cache + loading overlay |
+| Resource dot clutter | `index.html` | Dots on canvas hover or sidebar agent select only |
+
+**Verification after commit + restart:**
+- Pan west from village to fenced **CEMETERY** district; chapel at top,
+  tombstones in spaced rows (no overlapping stacks).
+- `deceased` count equals `buried` count (or buried trails by one grace window).
+- Refresh viewer: brief loading overlay, no multi-second freeze.
+- Hover/select an agent: resource dots appear; deselect/hover away: hidden.
 
 ---
 
@@ -101,9 +129,10 @@ recon, not a ready-to-consume prompt.
 4. Review pass, then hand to the automated cycle for its first real soak
    + audit.
 
-**Recommend scheduling this via the normal Part 8 cycle** rather than
-another ad-hoc interactive session — it's large enough to want the full
-recon → implement → smoke-test → review → soak → audit relay.
+**Recommend scheduling this via the normal Part 8 cycle** (scheduled Claude
+Code task or manual `.cursor/skills/civilization-cycle-*/` skill) rather
+than another ad-hoc interactive session — it's large enough to want the
+full recon → implement → smoke-test → review → soak → audit relay.
 
 **Files:** `.cursor/phase-prompts/phase-G.md` (diplomacy section),
 `simulation/sim_engine.py`, `simulation/server.py`,
@@ -128,13 +157,15 @@ defect. All observation-only.
   (`teach_count` and mutation counts still at/near 0). Both are correctly
   gated by keyword-match/low-probability triggers, not confirmed defects
   — watch for natural occurrence over more soak time.
-- **Cemetery/burial (this session's feature) needs a longer soak.**
-  Verified end-to-end over a ~15-minute window (one cemetery built, 5
-  then-dead agents buried); by the time this doc was rewritten the same
-  session, the live world already had 12/12 deceased-and-buried with no
-  incident, which is a good early sign, but a multi-hour cycle audit
-  should still confirm no edge case (e.g., cemetery destroyed/ruined
-  mid-soak, grave-slot wraparound past 12 graves) surfaces.
+- **Cemetery/burial — post-layout soak.** Initial feature (`fc04070`)
+  verified over a short window; live world now 17/17 deceased-and-buried.
+  The 2026-07-09 layout work fixes grave-slot wraparound (duplicate
+  tombstone coordinates past 12 burials) and moves all graves into
+  `cemetery_grounds`. After commit + server restart, confirm: (a) no
+  duplicate `(x,y)` among buried agents, (b) new deaths land in the
+  district grid, (c) a disrepaired chapel (`condition` below 30) still
+  accepts burials, (d) unburied dead show as greyed bodies (not
+  tombstones) until the backstop/`bury_agent` runs.
 
 **Files:** none directly (observation-only); `civilization-emergence-plan.md`
 Part 4/5 gets the audit-log entries as each is confirmed.
@@ -160,16 +191,19 @@ model choice at that point, not adding more phases.
 
 ```
 Tier A (resolved) ─────────────────────────────┐
-                                                 │
+Tier A½ (commit cemetery/viewer, restart) ───┤
+                                             │
 Tier B (diplomacy, the only unimplemented phase)┼─→ Tier D (final acceptance)
-                                                 │
-Tier C (soak watch items, parallel, no deps) ───┘
+                                             │
+Tier C (soak watch items, parallel, no deps) ─┘
 ```
 
 ---
 
 ## Verification
 
+- **Tier A½**: commit the three modified files, restart server, spot-check
+  cemetery district + viewer behaviors listed in that tier's table.
 - **Tier B**: the mandatory forced smoke test IS the verification gate
   before commit (see Tier B process step 3); after landing, the next
   cycle's audit against the diplomacy civilization test is the real-world
@@ -177,11 +211,15 @@ Tier C (soak watch items, parallel, no deps) ───┘
 - **Tier C**: read `civilization-emergence-plan.md` Part 4 after each
   cycle audit for updated verdicts; no manual verification needed beyond
   reading the cycle's own audit log, except for the Cemetery watch item
-  which can also be spot-checked directly: `curl -s
-  http://127.0.0.1:5001/state | python -c "import json,sys; d=json.load(sys.stdin);
-  a=d['agents']; print(sum(x.get('deceased') for x in a), sum(x.get('buried') for x in a))"`
-  — the two counts should stay equal (or buried trailing deceased by at
-  most one grace window's worth).
+  which can also be spot-checked directly:
+
+  ```bash
+  # Deceased vs buried counts (should match, or buried trails by ≤1 grace window)
+  curl -s http://127.0.0.1:5001/state | python -c "import json,sys; d=json.load(sys.stdin); a=d['agents']; print('deceased', sum(x.get('deceased') for x in a), 'buried', sum(x.get('buried') for x in a))"
+
+  # Duplicate grave positions (should print 0 duplicates after layout migration)
+  curl -s http://127.0.0.1:5001/state | python -c "import json,sys; from collections import Counter; a=[(x['x'],x['y']) for x in json.load(sys.stdin)['agents'] if x.get('buried')]; c=Counter(a); print('dupes', sum(v-1 for v in c.values() if v>1))"
+  ```
 - **Tier D**: read two consecutive `civilization-emergence-plan.md`
   Part 5 audit entries and confirm they independently report unanticipated
   emergent events, not just mechanical PASS verdicts.

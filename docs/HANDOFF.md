@@ -11,13 +11,20 @@
 
 ```json
 {
-  "snapshot_generated_utc": "2026-07-08T13:30:00Z",
+  "snapshot_generated_utc": "2026-07-09T01:05:00Z",
   "repo_root": "C:\\Users\\dbadmin\\Desktop\\GitServ\\simulation",
   "git": {
     "branch": "feat/server-authoritative-engine",
-    "head_commit": "fc04070",
-    "head_subject": "feat(lifecycle): cemetery + burial for permanent death (CEMETERY_ENABLED)",
+    "head_commit": "879982f",
+    "head_subject": "docs(skills): add manual morning/evening civilization cycle skills",
+    "uncommitted_changes_at_snapshot": [
+      "simulation/sim_engine.py — cemetery_grounds starter district, structure-style grave_grid, burial migration on restore, PROJECT_KIND cemetery",
+      "simulation/sprites.js — TILE_CEMETERY, cemetery district/road sync, tombstones only when buried, fenced cemetery props",
+      "simulation/index.html — deferred terrain cache + loading overlay, living-only Agents list + Deceased modal, dead vs collapsed labels, resource dots on hover/sidebar-select only"
+    ],
     "recent_commits_newest_first": [
+      "879982f docs(skills): add manual morning/evening civilization cycle skills",
+      "8b81ee5 docs: refresh HANDOFF.md and REMAINING-WORK-PLAN.md to current state",
       "fc04070 feat(lifecycle): cemetery + burial for permanent death (CEMETERY_ENABLED)",
       "16224ee fix(viewer): draw a generic sprite for agents with no hand-drawn entry",
       "b3587aa Cycle 7.morning: PASS all flags on 6h soak; hot-fixed invention-council id-collision blindspot",
@@ -31,7 +38,9 @@
     ],
     "known_untracked_files_at_snapshot": [
       "simulation/sprite_examples/animals.jpg (predates this project's sprite work, origin unknown, leave alone)",
-      "simulation/sprite_examples/houses.jpg (same)"
+      "simulation/sprite_examples/houses.jpg (same)",
+      "simulation/sprite_examples/cemetery_capture.png (session screenshot, optional to commit or gitignore)",
+      "simulation/sprite_examples/cemetery_structure.png (same)"
     ],
     "no_worktrees_no_branches_rule": "ALL work happens directly on feat/server-authoritative-engine. Never create a worktree or a new branch for this project."
   },
@@ -53,13 +62,19 @@
     "quirk": "qwen is a 'thinking' model -- its actual answer usually lands in reasoning_content with content empty. server.py's extractor already handles this."
   },
   "world_state_at_snapshot": {
-    "frame_tick": 1159248,
+    "frame_tick": 1457852,
     "era": "Wagon Era",
     "agent_count": 21,
-    "structure_count": 195,
-    "deceased_agents": 12,
-    "buried_agents": 12,
-    "note": "This is the SAME world reset 2026-07-05 (frame 0, all flags on) that HANDOFF.md's previous snapshot described at frame 736201 -- it has kept running 24/7 since, growing from 12 to 21 agents (newcomer mechanic) and 70 to 195 structures. All 12 agents who have died so far are buried (CEMETERY_ENABLED landed this session, see section 4). The pre-reset 416-structure legacy world remains archived at archive/state.json -- never restore it over the live save without explicit instruction."
+    "structure_count": 224,
+    "deceased_agents": 17,
+    "buried_agents": 17,
+    "cemetery": {
+      "structure_id": 148,
+      "district_id": "cemetery_grounds",
+      "position": [340, 980],
+      "note": "After the uncommitted cemetery-layout work loads (server restart), the chapel sits on cemetery_grounds' build_grid and all 17 buried agents are re-seated on the district grave_grid (structure spacing, no slot wraparound). Prior to that migration the chapel lived in a founded village district with graves clustered on 18px offsets."
+    },
+    "note": "Same 2026-07-05 reset world, still running 24/7. Population grew 12→21 via newcomers; structures 70→224. All 17 deaths so far are buried. Pre-reset 416-structure legacy world remains at archive/state.json — never restore over live save without explicit instruction."
   },
   "feature_flags_all_on_current_world": {
     "SURVIVAL_ENABLED": true, "CRAFTING_ENABLED": true, "USE_GOALS": true,
@@ -73,12 +88,17 @@
     "A_through_F": "All PASSED/CONFIRMED via organic multi-hour soaks logged in .claude/overnight-cycle.json (cycle 6.evening and 7.morning entries) -- Phase D's invention council now reaches organic comparative verdicts (Mine Cart approved among others), Phase E's market is built and exercised (wealth_gini falling), Phase F's aging/death/succession confirmed clean under the corrected rate (see section 4).",
     "G_culture": "LANDED (commit 4889c09, CULTURE_ENABLED=true) and CONFIRMED via organic soak (cycle 7.morning audit): skills-by-practice, Library knowledge persistence, and personality/chronicle all firing live. Teaching (teach_count) and meme mutation remain organically unexercised so far -- low-probability/keyword-gated, not a defect, still an open watch item.",
     "G_diplomacy": "NOT STARTED. The original plan (docs/REMAINING-WORK-PLAN.md as first written) called for implementing CULTURE_ENABLED and DIPLOMACY_ENABLED together in one pass; in practice the automated cycle implemented only culture and explicitly deferred diplomacy out of its batch (see .claude/overnight-cycle.json still_open list, cycle 7.morning). Second settlement, inter-village trade caravans, and treaty/rivalry state remain unimplemented. This is the only unimplemented net-new phase.",
-    "cemetery_burial": "NEW THIS SESSION (commit fc04070, CEMETERY_ENABLED=true, additive to Phase F -- not part of the original A-G plan). See section 4."
+    "cemetery_burial": "LANDED (fc04070) and extended this session with uncommitted viewer/engine polish: dedicated cemetery_grounds district, structure-style grave grid, tombstones only after burial, Agents sidebar cleanup. See section 4 items 7-8."
   },
   "scheduled_tasks": {
     "civilization-cycle-morning": { "cron": "30 7 * * *", "human_schedule": "7:38 AM daily", "enabled": true, "last_run_utc": "2026-07-08T11:38:40Z" },
     "civilization-cycle-night": { "cron": "0 1 * * *", "human_schedule": "1:08 AM daily", "enabled": true, "last_run_utc": "2026-07-08T05:08:14Z", "note": "Schedule drift from the original ~9:38 PM design is a settled, documented decision (see civilization-emergence-plan.md Part 8) -- do not re-flag this as an anomaly." },
-    "both_tasks_use_prompts_that": "read docs/civilization-emergence-plan.md Part 8 as the authoritative procedure at run time."
+    "both_tasks_use_prompts_that": "read docs/civilization-emergence-plan.md Part 8 as the authoritative procedure at run time.",
+    "cursor_manual_alternative": {
+      "location": ".cursor/skills/civilization-cycle-morning/SKILL.md and civilization-cycle-night/SKILL.md",
+      "commit": "879982f",
+      "note": "User runs the same Part 8 morning/evening procedure manually in Cursor when Claude Code scheduled-task tokens are exhausted. disable-model-invocation: true on both skills."
+    }
   },
   "cycle_state_file": ".claude/overnight-cycle.json",
   "cycle_state_at_snapshot": {
@@ -86,7 +106,7 @@
     "iteration": 8,
     "phase": "G",
     "note_summary": "Cycle 7.morning: full PASS on a ~6h/509,100-frame soak across all active flags; hot-fixed a reserved-structure-id blindspot that was causing 82% of invention-council proposal rejections (commit 00df296). Phase G's culture side confirmed organically working. DIPLOMACY_ENABLED explicitly deferred as the last unscheduled batch item. Full verbatim note is long and detailed -- read the file directly.",
-    "STALE_WARNING": "lastReviewedCommit (00df296) predates TWO commits made in this interactive session (16224ee, fc04070) plus the earlier interactive-session commits already reviewed by cycle 6.evening (8902465, be47a60, 6e930ca were folded into d4d59e5's review). The next scheduled cycle run will review 00df296..HEAD, which is correct and by design."
+    "STALE_WARNING": "lastReviewedCommit (00df296) predates commits 879982f (manual cycle skills), 8b81ee5 (doc refresh), fc04070 (cemetery), 16224ee (generic sprite), plus uncommitted cemetery/viewer work. The next scheduled or manual cycle should review 00df296..HEAD including any committed cemetery-layout follow-up."
   },
   "next_prompt_file": ".cursor/next-prompt.md",
   "next_prompt_status": "Does not exist. No follow-up implementation is queued for the next cycle slot beyond DIPLOMACY_ENABLED (not pre-staged as a phase-prompt file the way C-G were).",
@@ -94,14 +114,15 @@
     "location": ".cursor/phase-prompts/phase-{C,D,E,F,G}.md",
     "status": "All consumed/implemented. No phase-H or diplomacy-specific prompt has been pre-staged -- if diplomacy is tackled next, recon-from-scratch (or write a new pre-staged prompt first) rather than expecting one to exist."
   },
-  "session_focus_this_conversation": "Interactive session, several distinct pieces of work: (1) caught up on project state via this handoff + plan doc, (2) found and fixed a live 'zombie' bug where heal_agent could resurrect permanently-dead agents' incapacitated flag, (3) found and fixed a 10x-too-fast aging-rate bug that had caused 8 of 12 agents to die in a ~30-minute cluster early in the fresh world's life, (4) moved the Council GUI panel from the right sidebar to the left Activity/Chat column, (5) user reset the world, (6) found and fixed a bug where newcomer/newborn agents (no hand-drawn sprite entry) rendered as floating names with no body, (7) implemented a full Cemetery/burial feature end-to-end (CEMETERY_ENABLED) after the user asked for dead agents to stop dying in random places. All work committed; server verified running with every fix live.",
+  "session_focus_this_conversation": "Interactive session (continuation): (1) created manual Cursor skills for Part 8 morning/evening cycle (879982f), (2) diagnosed GUI stall on page load (sync terrain cache) and fixed with requestIdleCallback + loading overlay, (3) diagnosed cluttered/scattered tombstones — old 18px grave offsets wrapped after 12 burials and cemetery was built in a random village district, (4) implemented cemetery_grounds starter district with structure-style grave_grid and restore-time migration, (5) tombstones render only after burial (unburied dead stay as greyed bodies at death site), (6) Agents sidebar shows living villagers only with a Deceased modal and dead vs collapsed labels, (7) resource inventory dots hidden by default — shown only on canvas hover or sidebar agent selection. Cemetery/viewer changes are uncommitted as of this snapshot; server restart required to apply grave migration on live state.json.",
   "open_items_ranked_by_priority": [
-    "1. DIPLOMACY_ENABLED (second settlement, inter-village trade caravans, treaty/rivalry state) -- the only unimplemented net-new phase; no pre-staged prompt exists, recon needed first",
-    "2. Watch Phase C's structure_condition trend over a longer soak (95.3->69.7 avg as structure count nearly quadrupled last cycle) -- confirm it stabilizes rather than trending toward the 30 disrepair floor",
-    "3. Priced trade (ECONOMY_ENABLED) is still thin (1 buy/sell pair in a 6h soak) -- watch for more organic market activity, no code change expected yet",
-    "4. Teaching (teach_count) and meme mutation remain organically unexercised (both are correctly gated by keyword/probability, not confirmed defects) -- watch for natural occurrence over more soak time",
-    "5. Once Cemetery/burial (this session's addition) has had a multi-hour soak, confirm via the automated cycle that new deaths keep getting buried without incident -- it's currently only verified over a ~15-minute window",
-    "6. Tier 4 / final acceptance per civilization-emergence-plan.md Part 5: once diplomacy lands and everything above closes out, run the long all-flags-on soak looking for genuinely unanticipated emergent events (two consecutive audits), not just mechanical PASS verdicts"
+    "1. Commit the uncommitted cemetery-layout + viewer UX work (sim_engine.py, sprites.js, index.html) and restart the server so restore_state migration re-seats buried agents",
+    "2. DIPLOMACY_ENABLED (second settlement, inter-village trade caravans, treaty/rivalry state) -- the only unimplemented net-new phase; no pre-staged prompt exists, recon needed first",
+    "3. Watch Phase C's structure_condition trend over a longer soak (95.3->69.7 avg as structure count nearly quadrupled last cycle) -- confirm it stabilizes rather than trending toward the 30 disrepair floor",
+    "4. Priced trade (ECONOMY_ENABLED) is still thin (1 buy/sell pair in a 6h soak) -- watch for more organic market activity, no code change expected yet",
+    "5. Teaching (teach_count) and meme mutation remain organically unexercised (both are correctly gated by keyword/probability, not confirmed defects) -- watch for natural occurrence over more soak time",
+    "6. Cemetery/burial: confirm post-layout soak — new deaths bury into cemetery_grounds grid, no duplicate grave positions, disrepaired chapel (condition can fall below STRUCTURE_DISREPAIR_THRESHOLD) still accepts burials",
+    "7. Tier 4 / final acceptance per civilization-emergence-plan.md Part 5: once diplomacy lands and everything above closes out, run the long all-flags-on soak looking for genuinely unanticipated emergent events (two consecutive audits), not just mechanical PASS verdicts"
   ]
 }
 ```
@@ -151,7 +172,9 @@ Two scheduled Claude Code tasks (`civilization-cycle-morning`,
 `civilization-cycle-night`) each run a full audit → hot-fix/implement →
 review → restart-server cycle, twice a day, autonomously. This is how most
 of Phases B through G got implemented and audited — not through manual
-interactive sessions. Key facts:
+interactive sessions. **Manual alternative:** `.cursor/skills/civilization-cycle-{morning,night}/`
+(commit `879982f`) runs the same Part 8 procedure on demand in Cursor when
+scheduled-task tokens are unavailable. Key facts:
 
 - **The simulation runs 24/7.** Both stages end with the server running,
   no exceptions except LM Studio being down.
@@ -225,11 +248,43 @@ interactive sessions. Key facts:
      seconds of restart, Finn built it, and all 5 then-existing dead agents
      were buried in the same tick with distinct, non-overlapping grave
      slots exactly matching the grid formula. Tombstone and cemetery
-     sprites verified pixel-exact via a static preview server. As of this
-     snapshot the world has grown to 12 dead / 12 buried, all clean.
+     sprites verified pixel-exact via a static preview server. As of the
+     prior snapshot the world had 12 dead / 12 buried; it has since grown
+     to 17/17.
+7. **Cemetery layout + viewer UX follow-up (uncommitted at this snapshot)**:
+   user reported tombstones clustered/scattered (not reading as a cemetery)
+   and several viewer issues. Changes span `sim_engine.py`, `sprites.js`,
+   `index.html`:
+   - **`cemetery_grounds` starter district** west of the village (below
+     beach): muted tile, fenced bounds, road from `beach_gate`, labeled
+     **CEMETERY** on the map. Chapel uses `build_grid` (cap 1); graves use
+     `grave_grid` with the same 100×95 spacing as village structures (no
+     12-slot wraparound that stacked tombstones on duplicate coordinates).
+   - **`PROJECT_KIND["cemetery"] = "cemetery"`** so the chapel builds in
+     that district, not a random founded village plot.
+   - **`restore_state` migration**: injects `cemetery_grounds` into old
+     saves, moves the chapel onto its plot, re-seats all buried agents on
+     the grave grid sorted by `deathFrame`.
+   - **Tombstones only when `buried`** — unburied permanent dead render as
+     a greyed body at the death site until `bury_agent`/backstop runs.
+   - **Agents sidebar**: living list only; **Deceased (N)** button opens a
+     modal; labels distinguish `dead` vs `collapsed` (recoverable).
+   - **Page-load stall fix**: terrain cache built via `requestIdleCallback`
+     with a loading overlay instead of blocking the main thread.
+   - **Resource dots**: inventory dots hidden by default; shown only when
+     hovering an agent on the canvas or selecting them in the Agents list.
+   - **Requires server restart** to run migration on the live `state.json`.
+8. **Manual cycle skills (`879982f`)**: Cursor skills at
+   `.cursor/skills/civilization-cycle-morning/` and `...-night/` mirror the
+   Claude Code scheduled tasks for manual Part 8 runs (`disable-model-invocation:
+   true`).
 
 ## 5. Known gotchas (accumulated project-wide)
 
+- **`drawResourceDots` in `index.html`** shows each carried resource as a
+  colored pixel (up to 5 per type). Dots are **hidden unless** the agent is
+  hovered on the canvas or selected in the Agents sidebar — do not revert
+  to always-on without an explicit request.
 - **`index.html` used to contain a full legacy client-side simulation** —
   removed long ago; if you ever see code there mutating world state instead
   of just rendering `/state`, that's a regression, not a feature.

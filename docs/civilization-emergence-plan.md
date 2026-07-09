@@ -1441,6 +1441,57 @@ condition trend, Phase D's post-fix council-verdict rate) plus continued
 opportunistic coverage of Phase G's dormant paths, with `DIPLOMACY_ENABLED`
 remaining the only unstarted item on the original batch list.
 
+**Audit verdict (2026-07-09, evening slot -- cycle 8.evening, sessions
+`2026-07-08T09-14-04` ~11.3h day soak frame 612k→1.425M plus evening tails
+`20-35-03`/`20-51-23` to frame 1.592M): mixed — Phase F FAIL hot-fixed;
+Phase C condition watch escalated; other flags hold.** Server was found UP
+on port 5001 (standing rule intact) but **not** in a titled `SimServer`
+window — killed by PID; restart will use the canonical titled launch.
+Combined real soak well past the 4h threshold (full verdict).
+**Phase C (`GOODS_ENABLED`) — watch → soft FAIL (balance, not interface):**
+`structure_condition` continued the drift flagged cycle 7.morning:
+63.6 avg / 0 ruins @612k (147 structs) → 25.0 avg / 93 ruins @1.425M
+(222 structs) → 21.4 avg / 115 ruins by evening end (226 structs). Repair
+escape still fires (61 `structure_repaired` day + stockpile-funded repairs
+live) but cannot keep pace with sprawl+decay; Market and Cemetery both
+ruined by session end. Spoilage (260), seasons (16 turns), disasters (4)
+all healthy. **Not hot-fixed this slot** — retuning decay again is
+design-level; morning should watch whether the Phase F population recovery
+(more living repairers) bends the curve before another constant change.
+**Phase D (`TECH_TREE_ENABLED`) — partial:** reserved-structure-ids hot-fix
+(`00df296`) is live in prompts (confirmed in `lm_studio.jsonl`); id-collision
+rejections fell from 82% of all notes (cycle 7) to ~56% (147/≈260) this
+soak — improvement, not elimination. Invention council convened 59× and
+dispersed without verdict 57×; **still zero comparative elder judgments**
+(`chose X over Y`). A few organic blueprint approvals landed outside the
+council path. Watch item remains open.
+**Phase E (`ECONOMY_ENABLED`) — dormant again:** Market was active early
+(291/`wealth_gini` samples with `market_active:true`, last @786k) then the
+sole market structure ruined; priced trade stayed thin (1 barter-style
+trade logged). Mechanism unchanged; needs a working market again.
+**Phase F (`LIFECYCLE_ENABLED`) — FAIL, hot-fixed this slot:** living
+population crashed 16→4 and wedged on `POPULATION_FLOOR` for the rest of
+the soak (`population_floor_held: true`, 0 births after frame 590400).
+Root cause: `_maybe_birth` / `_maybe_welcome_newcomer` / `_tick_shelter`
+used `len(self.agents)` (includes permanent corpses kept for burial), so
+17 dead names consumed housing headroom and inflated the birth food
+threshold; survivors were also scattered across districts so the
+shared-district ally-pair gate never fired. Fix: `_living_agents()` helper;
+birth/newcomer/shelter count only the living; at the population floor,
+ally pairs may match village-wide. Forced smoke on a temp copy of the live
+save: living 4→5 (`Villager1009` born), live `state.json` untouched.
+`py_compile` clean. Cemetery burial itself **PASS** (17/17 buried, unique
+grave positions; layout follow-up committed this slot — dedicated
+`cemetery_grounds` district + structure-style `grave_grid`).
+**Phase G (`CULTURE_ENABLED`) — PASS, same watch items:** skills-by-practice
+live (practice_count 5322→5424, gather capped at 10); Library knowledge 10
+entries; chronicle at cap 20; teach_count still 0; meme_mutations still 0.
+**General:** day soak 3,756 LM calls, 99.7% HTTP 200, 11 offline blips, 0
+context_overflow. No silent rejections. `DIPLOMACY_ENABLED` still not
+started. Next (morning) slot: confirm births resume organically after
+restart+migration; watch structure_condition with a recovering population;
+council comparative verdict still the Phase D open item.
+
 This plan is the *first iteration* of the cycle the whole effort follows:
 
 1. **Run** a long session (8h+) with the new phase enabled.
