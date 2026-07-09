@@ -215,6 +215,18 @@
     gap: 8px;
     padding: 4px 0;
   }
+  #agentList li.agent-row {
+    cursor: pointer;
+    border-radius: 4px;
+    padding: 4px 6px;
+    margin: 0 -6px;
+  }
+  #agentList li.agent-row:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+  #agentList li.agent-selected {
+    background: rgba(255, 255, 255, 0.08);
+  }
   #agentList .dot {
     width: 8px; height: 8px;
     border-radius: 50%;
@@ -224,6 +236,102 @@
   #agentList .agent-main { color: #ddd; }
   #agentList .agent-status { display: block; color: #8a8a99; font-size: 11px; }
   #agentList .agent-vitals { color: #c0867e; white-space: nowrap; }
+  #agentList .agent-vitals.agent-dead { color: #9e9e9e; }
+  .agents-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .agents-panel-head h2 { margin: 0; }
+  #deadAgentsBtn {
+    flex-shrink: 0;
+    padding: 4px 8px;
+    font: 11px sans-serif;
+    background: #2a2a35;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  #deadAgentsBtn:hover { background: #353545; color: #fff; }
+  #deadAgentsModal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0, 0, 0, 0.55);
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  #deadAgentsModal.open { display: flex; }
+  #deadAgentsDialog {
+    width: min(420px, 100%);
+    max-height: min(70vh, 520px);
+    background: #14141c;
+    border: 1px solid #2a2a35;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  }
+  #deadAgentsDialog header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid #2a2a35;
+  }
+  #deadAgentsDialog header h3 {
+    margin: 0;
+    font-size: 14px;
+    color: #fff;
+  }
+  #deadAgentsCloseBtn {
+    padding: 4px 10px;
+    font: 12px sans-serif;
+    background: #333;
+    color: #fff;
+    border: 1px solid #666;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  #deadAgentsList {
+    list-style: none;
+    margin: 0;
+    padding: 8px 14px 14px;
+    overflow-y: auto;
+    font-size: 12px;
+  }
+  #deadAgentsList li {
+    display: flex;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid #22222c;
+  }
+  #deadAgentsList li:last-child { border-bottom: 0; }
+  #deadAgentsList .agent-dead-detail { color: #8a8a99; font-size: 11px; display: block; }
+  #worldLoading {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #1b1b1b;
+    color: #ccc;
+    font: 14px system-ui, sans-serif;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  #worldLoading.hidden {
+    opacity: 0;
+    visibility: hidden;
+  }
   #conversationLog {
     flex: 1 1 0;
     display: flex;
@@ -387,11 +495,24 @@
       </div>
     </section>
     <section class="panel-section">
-      <h2>Agents</h2>
+      <div class="agents-panel-head">
+        <h2>Agents <span id="livingAgentCount" class="civ-label"></span></h2>
+        <button id="deadAgentsBtn" type="button" hidden>Deceased (0)</button>
+      </div>
       <ul id="agentList"></ul>
     </section>
   </aside>
 </div>
+<div id="deadAgentsModal" role="dialog" aria-labelledby="deadAgentsTitle" aria-modal="true">
+  <div id="deadAgentsDialog">
+    <header>
+      <h3 id="deadAgentsTitle">Deceased villagers</h3>
+      <button id="deadAgentsCloseBtn" type="button">Close</button>
+    </header>
+    <ul id="deadAgentsList"></ul>
+  </div>
+</div>
+<div id="worldLoading">Loading world map…</div>
 <script src="roles.js"></script>
 <script src="sprites.js"></script>
 <script>
@@ -421,6 +542,31 @@ const WORLD_H = 5400;
 // of re-tiling ~2M pixels per frame. Invalidated on resize; rebuilt lazily.
 let terrainCanvas = null;   // full static terrain (zones, crops, trees, dock…)
 let oceanFrames = null;     // { bounds, frames:[16 pre-rendered foam phases] } for the ocean district
+let terrainBuildScheduled = false;
+const worldLoadingEl = document.getElementById("worldLoading");
+
+function hideWorldLoading() {
+  if (!worldLoadingEl || worldLoadingEl.classList.contains("hidden")) return;
+  worldLoadingEl.classList.add("hidden");
+}
+
+function scheduleTerrainCacheBuild() {
+  if (terrainCanvas || terrainBuildScheduled) return;
+  terrainBuildScheduled = true;
+  const run = () => {
+    try {
+      buildTerrainCache();
+    } finally {
+      terrainBuildScheduled = false;
+      hideWorldLoading();
+    }
+  };
+  if (typeof requestIdleCallback === "function") {
+    requestIdleCallback(run, { timeout: 1500 });
+  } else {
+    setTimeout(run, 0);
+  }
+}
 
 function setupCanvas() {
   const dpr = Math.max(1, window.devicePixelRatio || 1);
@@ -643,6 +789,8 @@ function findDistrictBounds(kind) {
 // Convenience accessors — render functions below read these like the old globals.
 // =====================================================================
 function getAgents() { return world.agents || []; }
+function getLivingAgents() { return getAgents().filter((a) => !a.deceased); }
+function getDeceasedAgents() { return getAgents().filter((a) => a.deceased); }
 function getCiv() { return world.civilization || {}; }
 function resourceRegistry() { return getCiv().resourceRegistry || {}; }
 
@@ -692,7 +840,12 @@ function buildTerrainCache() {
 const DOCK_RECT = { x: 150, y: 470, w: 144, h: 36 };
 
 function drawWorld(ctx, frameTick) {
-  if (!terrainCanvas) buildTerrainCache();
+  if (!terrainCanvas) {
+    scheduleTerrainCacheBuild();
+    ctx.fillStyle = "#3d6b35";
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+    return;
+  }
   ctx.drawImage(terrainCanvas, 0, 0, WORLD_W, WORLD_H);
   // Animated ocean foam overlay (the only moving terrain): blit the current phase.
   const foamOffset = Math.floor(frameTick / 8) % 16;
@@ -717,7 +870,9 @@ async function pollDistricts() {
     if (key !== districtsKey) {
       districtsKey = key;
       districtsData = data;
-      terrainCanvas = null; // force buildTerrainCache() to rebuild with the new list
+      terrainCanvas = null; // force rebuild with the new district list
+      terrainBuildScheduled = false;
+      scheduleTerrainCacheBuild();
     } else {
       districtsData = data; // road graph could still have grown even if district ids didn't
     }
@@ -792,14 +947,21 @@ function drawAgentLabel(ctx, agent, prefix) {
 }
 
 function drawAgent(ctx, agent, frameTick) {
+  if (agent.deceased && agent.buried) {
+    // Laid to rest in the cemetery: tombstone sprite + name marker only.
+    drawAgentSprite(ctx, agent, frameTick);
+    drawAgentLabel(ctx, agent, "†");
+    return;
+  }
   drawAgentSprite(ctx, agent, frameTick);
-  if (agent.deceased) {
-    // Permanent death (LIFECYCLE_ENABLED): drawAgentSprite already drew a
-    // tombstone in place of the usual body (sprites.js). No health bar,
-    // resource dots, thinking indicator, or speech bubble for a corpse --
-    // just a name marker so a grave in the Cemetery is still identifiable.
-    // A temporary survival collapse (below) is NOT this path -- it keeps its
-    // living sprite + grey overlay, since it's recoverable.
+  if (agent.deceased && !agent.buried) {
+    // Permanent death awaiting burial: body stays where they fell.
+    ctx.fillStyle = "rgba(40, 40, 50, 0.65)";
+    ctx.fillRect(agent.x - 14, agent.y - 28, 28, 34);
+    ctx.fillStyle = "#ccc";
+    ctx.font = "11px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("†", agent.x, agent.y - 12);
     drawAgentLabel(ctx, agent, "†");
     return;
   }
@@ -814,7 +976,9 @@ function drawAgent(ctx, agent, frameTick) {
   }
   drawHealthBar(ctx, agent);
   drawAgentLabel(ctx, agent, agent.role.charAt(0).toUpperCase());
-  drawResourceDots(ctx, agent, agent.x, agent.y + 42);
+  if (isAgentInventoryVisible(agent)) {
+    drawResourceDots(ctx, agent, agent.x, agent.y + 42);
+  }
   if (agent.isThinking) {
     ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
     ctx.fillRect(agent.x + 12, agent.y - 46, 18, 12);
@@ -856,6 +1020,49 @@ function drawStructureLabel(ctx, structure, size) {
 const statusDot = document.getElementById("statusDot");
 const statusLabel = document.getElementById("statusLabel");
 const agentListEl = document.getElementById("agentList");
+const livingAgentCountEl = document.getElementById("livingAgentCount");
+const deadAgentsBtn = document.getElementById("deadAgentsBtn");
+const deadAgentsModal = document.getElementById("deadAgentsModal");
+const deadAgentsListEl = document.getElementById("deadAgentsList");
+const deadAgentsCloseBtn = document.getElementById("deadAgentsCloseBtn");
+let selectedAgentId = null;
+let hoveredAgentId = null;
+const AGENT_HIT_RADIUS = 28;
+
+function clientToWorld(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: ((clientX - rect.left) / rect.width) * WORLD_W,
+    y: ((clientY - rect.top) / rect.height) * WORLD_H,
+  };
+}
+
+function agentAtWorldPoint(wx, wy) {
+  let best = null;
+  let bestDist = AGENT_HIT_RADIUS;
+  for (const a of getLivingAgents()) {
+    const dx = a.x - wx;
+    const dy = a.y - wy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = a;
+    }
+  }
+  return best;
+}
+
+function isAgentInventoryVisible(agent) {
+  const id = agent.id;
+  return (hoveredAgentId != null && hoveredAgentId === id)
+    || (selectedAgentId != null && selectedAgentId === id);
+}
+
+function syncAgentListSelection() {
+  agentListEl.querySelectorAll("li.agent-row").forEach((li) => {
+    li.classList.toggle("agent-selected", Number(li.dataset.agentId) === selectedAgentId);
+  });
+}
 const convListEl = document.getElementById("convList");
 const actListEl = document.getElementById("actList");
 const civLevelEl = document.getElementById("civLevel");
@@ -960,6 +1167,7 @@ const ACTION_LABELS = {
   rest: "resting"
 };
 function humanizeAction(agent) {
+  if (agent.deceased) return agent.buried ? "dead · buried" : "dead · unburied";
   if (agent.incapacitated) return "collapsed";
   if (agent.isThinking) return "thinking…";
   const a = agent.lastAction;
@@ -1049,7 +1257,103 @@ function renderProjectsList() {
 
 // Cheap change-detection so we don't rebuild innerHTML every frame.
 let lastSidebarKey = "";
+let lastAgentPanelKey = "";
 let lastLogKey = "";
+
+function agentVitalsHtml(a) {
+  if (!SURVIVAL_ENABLED) return "";
+  if (a.deceased) {
+    return ` <span class="agent-vitals agent-dead">${a.buried ? "† buried" : "† unburied"}</span>`;
+  }
+  if (a.incapacitated) {
+    return ` <span class="agent-vitals">☠ collapsed</span>`;
+  }
+  return ` <span class="agent-vitals">❤${Math.round(a.health)} 🍗${Math.round(a.hunger)}</span>`;
+}
+
+function renderDeceasedAgentRow(a) {
+  const age = a.age != null ? `, age ${a.age}` : "";
+  const burial = a.buried ? "buried in the Cemetery" : "awaiting burial";
+  return `<li><span class="dot" style="background:${a.color}"></span>` +
+    `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}</span>` +
+    `<span class="agent-dead-detail">dead · ${burial}${age}</span></span></li>`;
+}
+
+function renderAgentPanel() {
+  if (selectedAgentId != null && !getLivingAgents().some((a) => a.id === selectedAgentId)) {
+    selectedAgentId = null;
+  }
+  const living = getLivingAgents();
+  const deceased = getDeceasedAgents();
+  const panelKey = JSON.stringify({
+    living: living.map((a) => [a.id, a.name, a.role, a.incapacitated, a.health, a.hunger, a.lastAction, a.isThinking]),
+    deceased: deceased.map((a) => [a.id, a.name, a.role, a.buried, a.age]),
+  });
+  if (panelKey === lastAgentPanelKey) return;
+  lastAgentPanelKey = panelKey;
+
+  livingAgentCountEl.textContent = living.length ? `(${living.length} living)` : "";
+  if (deceased.length > 0) {
+    deadAgentsBtn.hidden = false;
+    deadAgentsBtn.textContent = `Deceased (${deceased.length})`;
+  } else {
+    deadAgentsBtn.hidden = true;
+  }
+
+  if (living.length === 0) {
+    agentListEl.innerHTML = '<li><span class="civ-label">No living villagers</span></li>';
+  } else {
+    agentListEl.innerHTML = living.map((a) => {
+      const selected = selectedAgentId === a.id;
+      return `<li class="agent-row${selected ? " agent-selected" : ""}" data-agent-id="${a.id}">` +
+        `<span class="dot" style="background:${a.color}"></span>` +
+        `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}</span>` +
+        `<span class="agent-status">${escapeHtml(humanizeAction(a))}${agentVitalsHtml(a)}</span></span></li>`;
+    }).join("");
+  }
+
+  if (deadAgentsModal.classList.contains("open")) {
+    deadAgentsListEl.innerHTML = deceased.length
+      ? deceased.map(renderDeceasedAgentRow).join("")
+      : '<li><span class="civ-label">No deceased villagers</span></li>';
+  }
+}
+
+function openDeadAgentsModal() {
+  deadAgentsListEl.innerHTML = getDeceasedAgents().map(renderDeceasedAgentRow).join("")
+    || '<li><span class="civ-label">No deceased villagers</span></li>';
+  deadAgentsModal.classList.add("open");
+}
+
+function closeDeadAgentsModal() {
+  deadAgentsModal.classList.remove("open");
+}
+
+deadAgentsBtn.addEventListener("click", openDeadAgentsModal);
+deadAgentsCloseBtn.addEventListener("click", closeDeadAgentsModal);
+agentListEl.addEventListener("click", (event) => {
+  const li = event.target.closest("li.agent-row");
+  if (!li) return;
+  const id = Number(li.dataset.agentId);
+  selectedAgentId = selectedAgentId === id ? null : id;
+  syncAgentListSelection();
+});
+canvasWrapEl.addEventListener("mousemove", (event) => {
+  const { x, y } = clientToWorld(event.clientX, event.clientY);
+  const hit = agentAtWorldPoint(x, y);
+  hoveredAgentId = hit ? hit.id : null;
+});
+canvasWrapEl.addEventListener("mouseleave", () => {
+  hoveredAgentId = null;
+});
+deadAgentsModal.addEventListener("click", (event) => {
+  if (event.target === deadAgentsModal) closeDeadAgentsModal();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && deadAgentsModal.classList.contains("open")) {
+    closeDeadAgentsModal();
+  }
+});
 
 function renderSidebar() {
   const civ = getCiv();
@@ -1165,17 +1469,9 @@ function renderSidebar() {
     } else {
       civPendingRow.style.display = "none";
     }
-
-    // --- Agents list ---
-    agentListEl.innerHTML = getAgents().map((a) => {
-      const vitals = SURVIVAL_ENABLED
-        ? ` <span class="agent-vitals">${a.incapacitated ? "☠ collapsed" : `❤${Math.round(a.health)} 🍗${Math.round(a.hunger)}`}</span>`
-        : "";
-      return `<li><span class="dot" style="background:${a.color}"></span>` +
-        `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}</span>` +
-        `<span class="agent-status">${escapeHtml(humanizeAction(a))}${vitals}</span></span></li>`;
-    }).join("");
   }
+
+  renderAgentPanel();
 
   // --- Activity & Chat panel (change-detected separately, higher churn) ---
   const conversation = world.conversation || [];
@@ -1375,6 +1671,7 @@ async function pollState() {
     world = snapshot;
     applyFlags(snapshot.config && snapshot.config.flags);
     syncPauseButton();
+    if (terrainCanvas) hideWorldLoading();
   } catch (err) {
     // Keep last frame; surface a disconnected status (but not over a real
     // server status we already have — only mark disconnected on fetch failure).

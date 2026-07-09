@@ -112,12 +112,14 @@ const STARTER_ROAD_NODES = {
   village_east_gate: { x: 1850, y: 960 },
   workshop_row_gate: { x: 2300, y: 680 },
   cave_deep_gate: { x: 2300, y: 960 },
+  cemetery_gate: { x: 380, y: 920 },
 };
 const STARTER_ROAD_EDGES = [
   ["farm_north_gate", "village_hub"],
   ["village_hub", "forest_gate"],
   ["village_hub", "cave_east_gate"],
   ["village_hub", "beach_gate"],
+  ["beach_gate", "cemetery_gate"],
   ["village_hub", "market_gate"],
   ["village_hub", "east_hub"],
   ["east_hub", "farm_south_gate"],
@@ -143,6 +145,7 @@ const C = {
   fn: "#d4c4a0", rk: "#888888", rk2: "#666666",
   dk: "#6b4423", wl: "#4488cc",
   wk1: "#a8a89c", wk2: "#98988a", wk3: "#87877a", wk4: "#75756a",
+  cm1: "#7a8a72", cm2: "#6a7a62", cm3: "#5a6a52",
 };
 
 function makePathBlendTile(baseKeys) {
@@ -167,7 +170,8 @@ const PATH_BLEND_GRASS = makePathBlendTile(["g1", "g2", "g3"]);
 const PATH_BLEND_BEACH = makePathBlendTile(["s1", "s2", "s3", "sd"]);
 const PATH_BLEND_FARM = makePathBlendTile(["f1", "f2", "f3", "fd"]);
 const PATH_BLEND_VILLAGE = makePathBlendTile(["v1", "v2", "v3"]);
-const PATH_BLEND_BY_KIND = { farm: PATH_BLEND_FARM, village: PATH_BLEND_VILLAGE, beach: PATH_BLEND_BEACH };
+const PATH_BLEND_CEMETERY = makePathBlendTile(["cm1", "cm2", "cm3"]);
+const PATH_BLEND_BY_KIND = { farm: PATH_BLEND_FARM, village: PATH_BLEND_VILLAGE, beach: PATH_BLEND_BEACH, cemetery: PATH_BLEND_CEMETERY };
 
 // Set by drawTiledWorld() before each pass of tile-fills so pathBlendForZone
 // (called deep inside fillRectWithTiles) can look up "which district kind is
@@ -234,6 +238,7 @@ const TILE_VILLAGE = makeTile(["v1", "v2", "v3"]);
 const TILE_MARKET = makeTile(["m1", "m2", "m3", "ma"]);
 const TILE_CAVE = makeTile(["cv1", "cv2", "cv3"]);
 const TILE_WORKSHOP = makeTile(["wk1", "wk2", "wk3", "wk4"]);
+const TILE_CEMETERY = makeTile(["cm1", "cm2", "cm3"]);
 
 function drawTree(ctx, x, y) {
   const tree = tileFromStrings([
@@ -1094,9 +1099,8 @@ const ACCESSORIES = {
 
 function drawAgentSprite(ctx, agent, frameTick) {
   const scale = 2;
-  if (agent.deceased) {
-    // Permanent death: a tombstone entirely replaces the living body (no
-    // walk/stand distinction -- a corpse doesn't move -- and no accessory).
+  if (agent.deceased && agent.buried) {
+    // Permanent death, laid to rest: tombstone in the cemetery grid only.
     drawPixelSprite(ctx, agent.x, agent.y, tombstoneSprite(agent), scale, false);
     return;
   }
@@ -1135,8 +1139,9 @@ function drawZoneLabel(ctx, text, x, y) {
 const KIND_TILE = {
   farm: TILE_FARM, forest: TILE_FOREST_FLOOR, village: TILE_VILLAGE,
   market: TILE_MARKET, cave: TILE_CAVE, workshop: TILE_WORKSHOP, beach: TILE_BEACH,
+  cemetery: TILE_CEMETERY,
 };
-const KIND_USES_PATH_BLEND = new Set(["farm", "village", "beach"]);
+const KIND_USES_PATH_BLEND = new Set(["farm", "village", "beach", "cemetery"]);
 
 // Starter district list (mirrors sim_engine.py's STARTER_DISTRICTS) used as
 // the initial fallback before index.html's first /districts.js fetch
@@ -1154,6 +1159,7 @@ const STARTER_DISTRICTS_JS = [
   { id: "village_east", kind: "village", label: "EAST VILLAGE", bounds: { x1: 1650, y1: 960, x2: 2050, y2: 2540 } },
   { id: "workshop_row", kind: "workshop", label: "WORKSHOP ROW", bounds: { x1: 2100, y1: 110, x2: 2500, y2: 710 } },
   { id: "cave_deep", kind: "cave", label: "DEEP CAVE", bounds: { x1: 2100, y1: 960, x2: 2500, y2: 1560 } },
+  { id: "cemetery_grounds", kind: "cemetery", label: "CEMETERY", bounds: { x1: 230, y1: 900, x2: 530, y2: 2200 } },
 ];
 
 // Hand-placed decorative props for the starter core ONLY (bespoke, not
@@ -1206,6 +1212,12 @@ function drawStarterProps(ctx) {
   // Deep cave: rock outcrops matching cave_east's look.
   drawRocks(ctx, 2200, 1100);
   drawRocks(ctx, 2380, 1200);
+
+  // Cemetery grounds: a quiet fenced plot west of the village.
+  for (let fx = 230; fx < 530; fx += 16) drawFence(ctx, fx, 900);
+  for (let fx = 230; fx < 530; fx += 16) drawFence(ctx, fx, 2184);
+  for (let fy = 900; fy < 2200; fy += 16) drawFence(ctx, 230, fy);
+  for (let fy = 900; fy < 2200; fy += 16) drawFence(ctx, 514, fy);
 }
 
 function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges) {

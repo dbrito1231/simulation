@@ -152,6 +152,16 @@ STARTER_DISTRICTS = {
         "bounds": {"x1": 2100, "y1": 960, "x2": 2500, "y2": 1560},
         "build_grid": None, "entryNode": "cave_deep_gate",
     },
+    # Dedicated burial grounds west of the village (below the beach). The
+    # cemetery structure sits on build_grid slot 0; graves use grave_grid with
+    # the same spacing as village structures so tombstones never overlap.
+    "cemetery_grounds": {
+        "kind": "cemetery", "tile": "cemetery", "label": "CEMETERY",
+        "bounds": {"x1": 230, "y1": 900, "x2": 530, "y2": 2200},
+        "build_grid": {"x0": 340, "y0": 980, "cols": 1, "dx": 100, "dy": 95, "cap": 1},
+        "grave_grid": {"x0": 245, "y0": 1100, "cols": 3, "dx": 100, "dy": 95, "cap": 48},
+        "entryNode": "cemetery_gate",
+    },
 }
 
 # kind -> template used by _maybe_found_district() to instantiate a brand new
@@ -193,12 +203,14 @@ STARTER_ROAD_NODES = {
     "village_east_gate": {"x": 1850, "y": 960},
     "workshop_row_gate": {"x": 2300, "y": 680},
     "cave_deep_gate": {"x": 2300, "y": 960},
+    "cemetery_gate": {"x": 380, "y": 920},
 }
 STARTER_ROAD_EDGES = [
     ["farm_north_gate", "village_hub"],
     ["village_hub", "forest_gate"],
     ["village_hub", "cave_east_gate"],
     ["village_hub", "beach_gate"],
+    ["beach_gate", "cemetery_gate"],
     ["village_hub", "market_gate"],
     ["village_hub", "east_hub"],
     ["east_hub", "farm_south_gate"],
@@ -219,7 +231,7 @@ CORE_RESERVED_BOUNDS = {"x1": 0, "y1": 0, "x2": 2600, "y2": 2700}
 MAX_TOTAL_DISTRICTS = 26          # generous safety valve; see _maybe_found_district
 DISTRICT_FOUND_STALL_THRESHOLD = 900  # frames of no kind activity before founding
 
-ZONE_NAMES = ["farm", "forest", "village", "market", "beach", "cave", "ocean", "workshop"]
+ZONE_NAMES = ["farm", "forest", "village", "market", "beach", "cave", "ocean", "workshop", "cemetery"]
 
 # --- Cadences / tuning (frame-gated, ported) ---
 FRAME_MS = 1000.0 / 60.0
@@ -607,10 +619,6 @@ PERSONALITY_DRIFT_CAP = 3
 # not-dead agent (deathFrame is None) is never eligible; burial is strictly
 # for LIFECYCLE_ENABLED's permanent death.
 CEMETERY_ENABLED = True
-GRAVE_COLS = 4
-GRAVE_ROWS = 3                        # 12 slots/cemetery; index wraps past that (never a hard cap)
-GRAVE_SLOT_DX = 18
-GRAVE_SLOT_DY = 22
 BURY_CONTACT_DIST = 80                # matches heal_agent's contact radius
 BURIAL_BACKSTOP_FRAMES = STALL_THRESHOLD * 3  # ~1 min grace for organic bury_agent before the backstop buries directly
 if LIFECYCLE_ENABLED:
@@ -846,7 +854,7 @@ if CEMETERY_ENABLED:
         **({"tier": 1} if TECH_TREE_ENABLED else {}),
     }
     PROJECT_ORDER.append("cemetery")
-    PROJECT_KIND["cemetery"] = "village"
+    PROJECT_KIND["cemetery"] = "cemetery"
     SEED_STRUCTURE_FUNCTIONS["cemetery"] = {
         "unlocks": [{"kind": "burial", "station": "cemetery"}],
     }
@@ -1112,6 +1120,7 @@ class SimEngine:
                 # (see CEMETERY_ENABLED above); irrelevant while alive.
                 a["buried"] = False
                 a["restingPlaceId"] = None
+                a["restingDistrictId"] = None
             else:
                 a["age"] = None
             if CULTURE_ENABLED:
@@ -2811,8 +2820,10 @@ class SimEngine:
                     s for s in c["structures"]
                     if s["type"] == type_id
                     and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)
+        living = self._living_agents()
         slots = len(house_structs) * HOUSE_SHELTER_OCCUPANTS
-        if slots >= len(self.agents):
+        # Corpses stay in self.agents for burial; only the living need beds.
+        if slots >= len(living):
             self._push_activity("Night falls -- every villager has a roof tonight")
             return
 
@@ -2820,7 +2831,7 @@ class SimEngine:
         remaining_slots = slots
         if ECONOMY_ENABLED:
             owned_ids = {s["id"] for s in house_structs if s.get("homeOf")}
-            for a in self.agents:
+            for a in living:
                 if a.get("homeStructureId") in owned_ids:
                     sheltered_names.add(a["name"])
             remaining_slots = max(0, slots - len(sheltered_names))
@@ -2830,10 +2841,10 @@ class SimEngine:
                 return float("inf")
             return min(_dist(a["x"], a["y"], s["x"], s["y"]) for s in house_structs)
 
-        others = [a for a in self.agents if a["name"] not in sheltered_names]
+        others = [a for a in living if a["name"] not in sheltered_names]
         sheltered_names.update(a["name"] for a in
                                sorted(others, key=dist_to_house)[:remaining_slots])
-        unsheltered = [a for a in self.agents if a["name"] not in sheltered_names]
+        unsheltered = [a for a in living if a["name"] not in sheltered_names]
         penalized = 0
         for a in unsheltered:
             if a["incapacitated"] or a["hunger"] <= SHELTER_HUNGER_FLOOR:
@@ -2841,7 +2852,7 @@ class SimEngine:
             a["hunger"] = max(SHELTER_HUNGER_FLOOR, a["hunger"] - SHELTER_HUNGER_PENALTY)
             a["lastShelterNote"] = {
                 "reason": (f"you spent the night outside -- {len(house_structs)} working "
-                           f"house(s) shelter only {slots} of {len(self.agents)} villagers"),
+                           f"house(s) shelter only {slots} of {len(living)} villagers"),
                 "frame": self.frameTick,
             }
             if ECONOMY_ENABLED and not a.get("homeStructureId") \
@@ -2852,7 +2863,7 @@ class SimEngine:
         if penalized:
             self._push_activity(
                 f"Night falls -- {penalized} villager(s) had no shelter "
-                f"({len(house_structs)} working houses, {slots} beds for {len(self.agents)})")
+                f"({len(house_structs)} working houses, {slots} beds for {len(living)})")
 
     # --- Phase C: repair_structure (the decay escape hatch) ---
     def _find_repair_target(self, agent, target):
@@ -3706,6 +3717,13 @@ class SimEngine:
         self._maybe_natural_death()
         self._maybe_birth()
 
+    def _living_agents(self):
+        """Agents who are not permanently dead. Corpses stay in self.agents for
+        burial/memorial/inheritance, but must not consume housing headroom or
+        inflate the birth food-surplus threshold — otherwise a village at the
+        population floor can never recover once enough names have died."""
+        return [a for a in self.agents if a.get("deathFrame") is None]
+
     def _eligible_adults(self, exclude=None):
         return [a for a in self.agents
                 if a.get("deathFrame") is None and not a["incapacitated"]
@@ -3844,26 +3862,43 @@ class SimEngine:
 
     # --- Cemetery & burial (CEMETERY_ENABLED): permanent death shouldn't
     # leave a corpse lying wherever it fell. ---
+    def _cemetery_district_id(self):
+        """The dedicated burial-grounds district, if present."""
+        if not CEMETERY_ENABLED:
+            return None
+        for did, d in self.civilization["districts"].items():
+            if d.get("kind") == "cemetery" and d.get("grave_grid"):
+                return did
+        return None
+
     def _working_cemeteries(self):
-        """Cemetery structures still functional under decay (same condition/
-        ruin check _working_structure_count uses, but returns the structures
-        themselves since burial needs their position, not just a count)."""
+        """Standing cemetery plots that can receive burials. Unlike produce/
+        boost stations, a disrepaired cemetery still has graves -- only a ruin
+        (condition 0) is excluded, so corpses are not stranded when decay runs
+        ahead of repair."""
         if not CEMETERY_ENABLED:
             return []
+        did = self._cemetery_district_id()
         return [s for s in self.civilization["structures"]
                 if s.get("type") == "cemetery" and not s.get("isRuin")
-                and (not GOODS_ENABLED or s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)]
+                and s.get("condition", 100) > 0
+                and (not did or s.get("districtId") == did)]
 
-    def _grave_slot_for(self, cemetery, index):
-        """Deterministic grid of resting places around a cemetery's plot.
-        GRAVE_COLS*GRAVE_ROWS slots visually fit a small village; index wraps
-        past that (never a hard cap -- a full cemetery still buries, it just
-        starts reusing slot positions, same "no permanent block" discipline
-        every other capacity in this file follows)."""
-        col = index % GRAVE_COLS
-        row = (index // GRAVE_COLS) % GRAVE_ROWS
-        return (cemetery["x"] + 10 + col * GRAVE_SLOT_DX,
-                cemetery["y"] + 45 + row * GRAVE_SLOT_DY)
+    def _grave_grid_position(self, district_id, index):
+        """Structure-style grid slot for a grave in the cemetery district.
+        Rows extend without wrapping so tombstones never stack on one spot."""
+        d = self.civilization["districts"].get(district_id)
+        grid = d.get("grave_grid") if d else None
+        if not grid:
+            return None
+        col = index % grid["cols"]
+        row = index // grid["cols"]
+        return (grid["x0"] + col * grid["dx"],
+                grid["y0"] + row * grid["dy"])
+
+    def _buried_count_in_district(self, district_id):
+        return sum(1 for a in self.agents
+                   if a.get("buried") and a.get("restingDistrictId") == district_id)
 
     def _nearest_unburied_corpse(self, agent):
         """Auto-target fallback for bury_agent, mirroring _neediest_nearby's
@@ -3878,25 +3913,82 @@ class SimEngine:
         return nearby[0]
 
     def _bury_agent_at(self, cemetery, corpse, buried_by=None):
-        """Move a corpse to its resting place. buried_by is the agent who
-        performed the burial (organic bury_agent), or None when the
-        BURIAL_BACKSTOP_FRAMES grace window expires and the village buries
-        its own dead without a named actor -- both paths funnel through here
-        so the mutation only happens in one place."""
-        existing = sum(1 for a in self.agents if a.get("restingPlaceId") == cemetery["id"])
-        x, y = self._grave_slot_for(cemetery, existing)
+        """Move a corpse to its resting place in the cemetery district grid.
+        buried_by is the agent who performed the burial (organic bury_agent),
+        or None when the BURIAL_BACKSTOP_FRAMES grace window expires."""
+        district_id = cemetery.get("districtId") or self._cemetery_district_id()
+        if not district_id:
+            return
+        index = self._buried_count_in_district(district_id)
+        pos = self._grave_grid_position(district_id, index)
+        if not pos:
+            return
+        x, y = pos
         corpse["x"] = x
         corpse["y"] = y
         corpse["targetX"] = x
         corpse["targetY"] = y
         corpse["buried"] = True
         corpse["restingPlaceId"] = cemetery["id"]
+        corpse["restingDistrictId"] = district_id
         who = f"{buried_by['name']} buried" if buried_by else "The village buried"
         self._push_activity(f"{who} {corpse['name']} in the Cemetery.")
         if CULTURE_ENABLED:
             self._push_chronicle(f"{corpse['name']} was laid to rest in the Cemetery.", kind="burial")
         if buried_by:
             self._push_memory(buried_by, f"Buried {corpse['name']} in the Cemetery")
+
+    def _ensure_cemetery_district(self):
+        """Back-compat: older saves may lack the starter cemetery grounds."""
+        if not CEMETERY_ENABLED:
+            return
+        c = self.civilization
+        starter = STARTER_DISTRICTS["cemetery_grounds"]
+        if "cemetery_grounds" not in c["districts"]:
+            c["districts"]["cemetery_grounds"] = json.loads(json.dumps(starter))
+            c["districtProjects"].setdefault("cemetery_grounds", None)
+            c["districtLastContribution"].setdefault("cemetery_grounds", 0)
+        if "cemetery_gate" not in c["roadNodes"]:
+            c["roadNodes"]["cemetery_gate"] = dict(STARTER_ROAD_NODES["cemetery_gate"])
+        edge = ["beach_gate", "cemetery_gate"]
+        if edge not in c["roadEdges"] and list(reversed(edge)) not in c["roadEdges"]:
+            c["roadEdges"].append(edge)
+            self._recompute_road_paths()
+
+    def _migrate_cemetery_structure(self):
+        """Move the cemetery chapel onto the burial district's build grid."""
+        did = self._cemetery_district_id()
+        if not did:
+            return
+        d = self.civilization["districts"][did]
+        grid = d.get("build_grid")
+        if not grid:
+            return
+        spot_x = grid["x0"]
+        spot_y = grid["y0"]
+        cemeteries = [s for s in self.civilization["structures"] if s.get("type") == "cemetery"]
+        if not cemeteries:
+            return
+        primary = min(cemeteries, key=lambda s: s["id"])
+        primary["x"] = spot_x
+        primary["y"] = spot_y
+        primary["districtId"] = did
+
+    def _relayout_cemetery_graves(self):
+        """Re-seat every buried villager on the cemetery grave grid (load-time
+        fix for the old tight-offset layout that stacked tombstones)."""
+        did = self._cemetery_district_id()
+        if not did:
+            return
+        buried = [a for a in self.agents if a.get("buried") and a.get("deathFrame") is not None]
+        buried.sort(key=lambda a: (a.get("deathFrame", 0), a["id"]))
+        for i, agent in enumerate(buried):
+            pos = self._grave_grid_position(did, i)
+            if not pos:
+                continue
+            agent["x"], agent["y"] = pos
+            agent["targetX"], agent["targetY"] = pos
+            agent["restingDistrictId"] = did
 
     def _maybe_build_cemetery(self):
         """Deterministic backstop (mirrors _maybe_start_approved_custom): once
@@ -4098,12 +4190,24 @@ class SimEngine:
     # --- birth (#2): reuses the newcomer machinery, adds a birth persona ---
     def _birth_food_surplus(self):
         c = self.civilization
-        held = sum(a["resources"].get(rid, 0) for a in self.agents for rid in EDIBLE_RESOURCES)
+        living = self._living_agents()
+        held = sum(a["resources"].get(rid, 0) for a in living for rid in EDIBLE_RESOURCES)
         stocked = sum(c["stockpile"].get(rid, 0) for rid in EDIBLE_RESOURCES)
         return held + stocked
 
+    def _ally_pair_from(self, candidates):
+        """First ally-linked pair (either direction) in a candidate list."""
+        for i, a in enumerate(candidates):
+            for b in candidates[i + 1:]:
+                if a["relationships"].get(b["name"]) == "ally" or b["relationships"].get(a["name"]) == "ally":
+                    return a, b
+        return None
+
     def _find_ally_birth_pair(self):
-        """Two adults, ally-linked (either direction), sharing a district."""
+        """Two adults, ally-linked (either direction). Prefer a shared district;
+        when the living population is at the floor, any village-wide ally pair
+        is enough — otherwise four survivors scattered across districts can
+        never recover even with housing and food to spare."""
         adults = self._eligible_adults()
         by_district = {}
         for a in adults:
@@ -4111,10 +4215,11 @@ class SimEngine:
         for district_agents in by_district.values():
             if len(district_agents) < 2:
                 continue
-            for i, a in enumerate(district_agents):
-                for b in district_agents[i + 1:]:
-                    if a["relationships"].get(b["name"]) == "ally" or b["relationships"].get(a["name"]) == "ally":
-                        return a, b
+            pair = self._ally_pair_from(district_agents)
+            if pair:
+                return pair
+        if len(adults) <= POPULATION_FLOOR:
+            return self._ally_pair_from(adults)
         return None
 
     def _maybe_birth(self):
@@ -4126,9 +4231,10 @@ class SimEngine:
         c = self.civilization
         if self.frameTick - c.get("lastBirthFrame", 0) < BIRTH_MIN_INTERVAL_FRAMES:
             return
-        if len(self.agents) >= self._population_cap():
+        living_n = len(self._living_agents())
+        if living_n >= self._population_cap():
             return  # no housing headroom
-        if self._birth_food_surplus() < BIRTH_FOOD_SURPLUS_PER_AGENT * max(1, len(self.agents)):
+        if self._birth_food_surplus() < BIRTH_FOOD_SURPLUS_PER_AGENT * max(1, living_n):
             return  # no food surplus
         pair = self._find_ally_birth_pair()
         if not pair:
@@ -5053,7 +5159,8 @@ class SimEngine:
         persist via state.json like any other agent."""
         if not STRUCTURE_EFFECTS_ENABLED:
             return
-        if len(self.agents) >= self._population_cap():
+        # Corpses remain in self.agents for burial; only the living occupy beds.
+        if len(self._living_agents()) >= self._population_cap():
             return
         unused = next((d for d in AGENT_DEFS if d["name"] not in self.agent_names), None)
         if not unused:
@@ -7007,6 +7114,7 @@ class SimEngine:
                         a.setdefault("deathFrame", None)
                         a.setdefault("buried", False)
                         a.setdefault("restingPlaceId", None)
+                        a.setdefault("restingDistrictId", None)
                     else:
                         a["age"] = None
                     if CULTURE_ENABLED:
@@ -7041,6 +7149,10 @@ class SimEngine:
                 if rs:
                     self.roster_size = int(rs)
                 self._recompute_road_paths()
+                if CEMETERY_ENABLED:
+                    self._ensure_cemetery_district()
+                    self._migrate_cemetery_structure()
+                    self._relayout_cemetery_graves()
                 _validate_districts(self.civilization["districts"])
                 _validate_road_graph(self.civilization["roadNodes"], self.civilization["roadEdges"])
                 # Rebuild the MemoryStore by re-embedding each entry's text.
