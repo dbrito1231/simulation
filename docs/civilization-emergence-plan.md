@@ -1492,6 +1492,67 @@ started. Next (morning) slot: confirm births resume organically after
 restart+migration; watch structure_condition with a recovering population;
 council comparative verdict still the Phase D open item.
 
+**Audit verdict (2026-07-09, ~01:08 slot -- cycle 9.evening, session
+`2026-07-08T23-14-15`, frame 1.593M→1.719M, ~70min real soak): provisional —
+new interface bug found and hot-fixed; no phase regressions.** Server was
+found UP on port 5001 in a correctly titled `SimServer` window (standing rule
+intact, unlike last slot). This firing landed only ~2h after cycle 8.evening's
+restart (see schedule-drift note in memory), so the audit window is short —
+provisional per the <4h rule, confirmed by the next full slot.
+**New FAIL found and hot-fixed (LM cognition helper, not a phase flag):**
+all 17/17 birth announcements this session were corrupted -- `newborn.persona`,
+the activity-log announcement, and the "birth" conversation broadcast all
+contained a raw echo of the prompt input ("Input: Parents' names and roles
+(Villager1004 (elder) and Villager100...", truncated mid-word) instead of the
+intended one-sentence flavor text. Also found 4 poisoned `longTerm` memory
+summaries in the (currently-inert -- nothing calls `/memory/summarize`
+anymore) legacy `MemoryStore`. Root cause: `qwen/qwen3.5-9b` does not
+reliably honor `"thinking": {"type": "disabled"}` for these short free-text
+`lm_complete` prompts -- live smoke tests (`max_tokens` 100/300/600) showed
+the model still spending 600-2000+ reasoning tokens on a one-sentence task,
+finishing with `finish_reason: "length"` every time, so any economical token
+budget truncates mid-thought; the existing `is_scaffold_text` heuristic only
+caught known chain-of-thought phrases, not a truncated instruction-echo or a
+truncated mid-sentence fragment. Fix (`server.py` `lm_complete` /
+`_SCAFFOLD_MARKER_RE`): (1) added an `^(input|given|context|task|prompt)\s*:`
+marker so echoed-preamble text is rejected (with an `extract_plain_answer`
+second chance in case a real answer follows on a later line); (2) reject any
+`finish_reason == "length"` response that doesn't end in terminal
+punctuation, since that means generation was cut off mid-thought, not
+mid-answer. Verified live against LM Studio: 3/3 birth-prompt calls that
+previously produced garbage now correctly return `None`, so
+`_spawn_newborn`'s existing deterministic fallback
+(`"{name} is born to {parent_a} and {parent_b}."`) is used -- no design
+change needed, this only makes the existing escape hatch actually fire
+instead of being skipped by a too-permissive filter. `py_compile` clean both
+files. No silent-rejection concern: `lm_complete` callers were already
+designed to degrade to a deterministic string on `None`, per its own
+docstring -- this change makes that path fire correctly rather than
+introducing a new one.
+**Phase F (`LIFECYCLE_ENABLED`) — birth-stall fix confirmed holding:** 17
+births this short session (was 0 for the back half of the prior day soak) —
+the `_living_agents()` fix from cycle 8.evening is working. No deaths this
+session (too short a window for aging to matter), so cemetery-layout
+follow-up remains unconfirmed — next slot should watch for it.
+**Phase C (`GOODS_ENABLED`) — condition watch, early positive signal:**
+`structure_condition` avg 21.3→28.3, structures 226→254 (+28 built),
+disrepair count 40→23 (down), but ruins still climbed 115→130. Consistent
+with the hoped-for mechanism (more living agents from the birth fix -> more
+repairers) but the window is far too short (70min) to call a trend reversal;
+still open per cycle 8.evening's note, needs a full soak.
+**Phase D/E — unchanged, still open:** council still 0 comparative
+judgments this window; Market/priced-trade status not re-checked (no
+market-related benchmark anomalies seen). **General health:** 630 decision
+calls, 98.9% HTTP 200, 7 scattered self-recovering "LM Studio offline"
+blips (1.1%, no clustering), 0 `context_overflow`, 0 decision
+`fallback_reason`s (clean JSON extraction all session). Both standing
+invariants held. No design-level FAIL this slot -- the birth-persona bug was
+a precise interface/heuristic gap (hot-fix authority), not a phase mechanic.
+Next slot: confirm the `lm_complete` fix holds (no more "Input:"-prefixed
+birth announcements), continue the Phase C condition watch on a longer soak,
+and check for the first post-cycle-8.evening natural death to confirm the
+cemetery-grounds layout under real play.
+
 This plan is the *first iteration* of the cycle the whole effort follows:
 
 1. **Run** a long session (8h+) with the new phase enabled.

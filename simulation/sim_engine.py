@@ -4302,7 +4302,7 @@ class SimEngine:
                 "no preamble, in the form: NAME is a NAME_'s child, TRAIT.",
                 f"Parents: {parent_a['name']} ({parent_a['role']}) and "
                 f"{parent_b['name']} ({parent_b['role']}).",
-                max_tokens=60, temperature=0.8,
+                max_tokens=100, temperature=0.8,
             )
         except Exception:
             persona = None

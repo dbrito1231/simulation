@@ -213,7 +213,8 @@ def _cosine(a, b):
 # and the engine's longTerm lists -- see _ENGINE_DEPS below).
 _SCAFFOLD_MARKER_RE = re.compile(
     r"(thinking process|\*\*analyze|let'?s think|let me think|"
-    r"chain[- ]of[- ]thought|step[- ]by[- ]step)",
+    r"chain[- ]of[- ]thought|step[- ]by[- ]step|"
+    r"^(input|given|context|task|prompt)\s*:)",
     re.IGNORECASE,
 )
 _SCAFFOLD_LEADING_LIST_RE = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+")
@@ -2128,7 +2129,9 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5):
     try:
         resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
         body = resp.json()
-        message = body["choices"][0]["message"]
+        choice = body["choices"][0]
+        message = choice["message"]
+        finish_reason = choice.get("finish_reason")
     except (requests.exceptions.RequestException, ValueError, KeyError,
             IndexError, TypeError):
         return None
@@ -2137,9 +2140,22 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5):
     content = (message.get("content") or "").strip()
     if content:
         text = content
+        if is_scaffold_text(text):
+            # A reasoning-class model sometimes echoes the instruction as a
+            # preamble ("Input: Parents' names...") even in `content` with
+            # thinking disabled -- if a real answer follows on a later line,
+            # extract_plain_answer's last-line rule recovers it; otherwise
+            # this still rejects and the caller falls back deterministically.
+            text = extract_plain_answer(text)
     else:
         text = extract_plain_answer((message.get("reasoning_content") or "").strip())
     if not text or is_scaffold_text(text):
+        return None
+    if finish_reason == "length" and text.rstrip("'\" ")[-1:] not in ".!?":
+        # max_tokens cut generation off before a full sentence -- this model
+        # keeps "thinking" past the token budget even with thinking
+        # disabled, so what's left is a mid-thought fragment (e.g. "Output"
+        # or "Invent one brief personality trait"), not a real answer.
         return None
     return text
 
