@@ -608,7 +608,7 @@ DECISION_ACTIONS = [
     "heal_agent",
     "craft_item", "propose_recipe", "approve_recipe", "reject_recipe",
     # CMA + Sid enhancement actions (emergent roles + collective rules/voting).
-    "switch_role", "propose_rule", "vote_rule",
+    "switch_role", "propose_rule", "vote_rule", "repeal_rule",
     # Cemetery/burial (permanent-death handling): the engine filters it from
     # available_actions when CEMETERY_ENABLED is off, same pattern as repair_structure.
     "bury_agent",
@@ -786,6 +786,9 @@ COLLECTIVE RULES (voting):
    object). Others use vote_rule with target set to the rule id and "vote" set
    to "yes" or "no". A rule that reaches a majority is enacted and enforced
    mechanically (e.g. a resource tax on contributions funds a shared stockpile).
+   Use repeal_rule with target set to an enacted rule's id to start a repeal
+   vote; the same majority removes it. Kind "priority" (value = a resource id)
+   biases contribute_resources toward that resource while enacted.
 
 COGNITIVE CONTROLLER:
 18. If "Module reports" are present, you are the Cognitive Controller: weigh the
@@ -882,11 +885,12 @@ RULE object schema (only for propose_rule):
 {
   "id": "resource_tax",                  // ^[a-z][a-z0-9_]{1,24}$, not a duplicate
   "name": "Resource Tax",                // 1-32 chars
-  "kind": "resource_tax",                // resource_tax | custom | harvest_quota | rationing
-  "value": 1,                            // tax magnitude (0-3) for resource_tax; 1-20 for harvest_quota; 1+ for rationing
+  "kind": "resource_tax",                // resource_tax | custom | priority | harvest_quota | rationing
+  "value": 1,                            // tax magnitude (0-3) for resource_tax; resource id string for priority; 1-20 for harvest_quota; 1+ for rationing
   "description": "Contributors add 1 to the shared stockpile."
 }
 For vote_rule set "target" to the rule id and "vote" to "yes" or "no".
+For repeal_rule set "target" to an enacted rule's id (starts a repeal ballot).
 Succession ballots (kind "succession") are created automatically by the
 village when the elder dies -- never propose_rule one yourself; just vote_rule
 on the candidate ids a NOTE gives you.
@@ -1646,6 +1650,16 @@ def role_fallback_action(role, agent_data):
     active_project = agent_data.get("active_project")
     has_project = active_project and active_project not in ("none", "null", None, "")
 
+    # Sid-parity Phase 1: when the village needs a gather role this agent can
+    # fill, prefer switch_role over a generic wander/collect fallback.
+    needed_role = agent_data.get("needed_role")
+    if (needed_role and needed_role != role
+            and role not in ("elder", "builder", "healer")
+            and not ROLE_PRIMARY_RESOURCE.get(role)):
+        return {"action": "switch_role", "target": None, "message": None,
+                "new_role": needed_role, "relationship_update": None,
+                "reasoning": f"The village needs a {needed_role}; retraining to fill the gap."}
+
     pending_ids = agent_data.get("pending_blueprint_ids") or []
     if role == "elder" and pending_ids:
         return {"action": "approve_blueprint", "target": pending_ids[0], "message": None,
@@ -2020,25 +2034,93 @@ MODULE_PROMPTS = {
 }
 
 
-@app.route("/agent/module", methods=["POST"])
-def agent_module_endpoint():
-    """Run one PIANO cognitive module (Phase 3). Returns a one-sentence report."""
+def run_piano_module(module, agent_name, context, frame_tick=None):
+    """In-process PIANO module runner (Sid-parity Phase 5).
+
+    Called from SimEngine._think_job inside the same worker-pool slot as the
+    Cognitive Controller decision -- never fans out past MAX_CONCURRENT_LLM.
+    Returns a one-sentence report string, or None on failure.
+    """
+    sysp = MODULE_PROMPTS.get(module)
+    if not sysp:
+        return None
     try:
-        body = request.get_json(force=True, silent=True) or {}
-        module = body.get("module")
-        sysp = MODULE_PROMPTS.get(module)
-        if not sysp:
-            return jsonify({"text": None}), 200
         text = lm_complete(
             sysp,
-            f"Agent {body.get('agent')} context: {body.get('context')}",
+            f"Agent {agent_name} context: {context}",
             max_tokens=60, temperature=0.5,
         )
         if text:
             text = text.strip().strip('"').strip()[:200]
         session_logger.log_benchmark(
-            "module_run", 1, body.get("frame_tick"),
-            {"agent": body.get("agent"), "module": module},
+            "module_run", 1, frame_tick,
+            {"agent": agent_name, "module": module},
+        )
+        return text or None
+    except Exception:
+        return None
+
+
+def run_meta_update(agent_name, report, frame_tick=None):
+    """In-process meta-system runner (Sid-parity Phase 5).
+
+    Returns {"autobiography": str|None, "persona": str|None} or None on failure.
+    """
+    try:
+        mems = memory_store.recent(agent=agent_name, limit=14)
+        joined = "; ".join(e["text"] for e in mems)
+
+        autobiography = None
+        if joined:
+            autobiography = lm_complete(
+                "Write a 1-2 sentence first-person life story for this village "
+                "agent from their memories, capturing their identity and what "
+                "they care about. Output only the story.",
+                f"Agent {agent_name} ({report.get('role')}). Memories: {joined}. "
+                f"Top actions: {report.get('top_actions')}. "
+                f"Beliefs: {report.get('beliefs')}.",
+                max_tokens=100, temperature=0.6,
+            )
+            if autobiography:
+                autobiography = autobiography.strip().strip('"').strip()[:300]
+                if autobiography:
+                    memory_store.store(
+                        agent_name, autobiography, salience=0.95,
+                        kind="autobiography", frame_tick=frame_tick,
+                        tier="longTerm",
+                    )
+
+        persona = lm_complete(
+            "From this agent's self-report, write ONE short imperative directive "
+            "(max 18 words) to guide their future behavior, reflecting who they "
+            "have become. Output only the directive.",
+            f"Agent {agent_name}. Role: {report.get('role')}. "
+            f"Top actions: {report.get('top_actions')}. "
+            f"Resources: {report.get('resources')}. "
+            f"Beliefs: {report.get('beliefs')}. "
+            f"Life story: {autobiography or 'n/a'}.",
+            max_tokens=40, temperature=0.6,
+        )
+        if persona:
+            persona = persona.strip().strip('"').strip()[:160]
+
+        session_logger.log_benchmark(
+            "meta_update", 1, frame_tick,
+            {"agent": agent_name, "persona": persona, "autobiography": autobiography},
+        )
+        return {"autobiography": autobiography, "persona": persona}
+    except Exception:
+        return None
+
+
+@app.route("/agent/module", methods=["POST"])
+def agent_module_endpoint():
+    """Run one PIANO cognitive module (Phase 3). Returns a one-sentence report."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        text = run_piano_module(
+            body.get("module"), body.get("agent"), body.get("context"),
+            frame_tick=body.get("frame_tick"),
         )
         return jsonify({"text": text})
     except Exception:
@@ -2051,51 +2133,17 @@ def meta_update_endpoint():
     persona directive for an agent from its self-report + memories."""
     try:
         body = request.get_json(force=True, silent=True) or {}
-        agent = body.get("agent")
-        report = body.get("report") or {}
-        frame_tick = body.get("frame_tick")
-        mems = memory_store.recent(agent=agent, limit=14)
-        joined = "; ".join(e["text"] for e in mems)
-
-        autobiography = None
-        if joined:
-            autobiography = lm_complete(
-                "Write a 1-2 sentence first-person life story for this village "
-                "agent from their memories, capturing their identity and what "
-                "they care about. Output only the story.",
-                f"Agent {agent} ({report.get('role')}). Memories: {joined}. "
-                f"Top actions: {report.get('top_actions')}. "
-                f"Beliefs: {report.get('beliefs')}.",
-                max_tokens=100, temperature=0.6,
-            )
-            if autobiography:
-                autobiography = autobiography.strip().strip('"').strip()[:300]
-                if autobiography:
-                    memory_store.store(
-                        agent, autobiography, salience=0.95,
-                        kind="autobiography", frame_tick=frame_tick,
-                        tier="longTerm",
-                    )
-
-        persona = lm_complete(
-            "From this agent's self-report, write ONE short imperative directive "
-            "(max 18 words) to guide their future behavior, reflecting who they "
-            "have become. Output only the directive.",
-            f"Agent {agent}. Role: {report.get('role')}. "
-            f"Top actions: {report.get('top_actions')}. "
-            f"Resources: {report.get('resources')}. "
-            f"Beliefs: {report.get('beliefs')}. "
-            f"Life story: {autobiography or 'n/a'}.",
-            max_tokens=40, temperature=0.6,
+        result = run_meta_update(
+            body.get("agent"), body.get("report") or {},
+            frame_tick=body.get("frame_tick"),
         )
-        if persona:
-            persona = persona.strip().strip('"').strip()[:160]
-
-        session_logger.log_benchmark(
-            "meta_update", 1, frame_tick,
-            {"agent": agent, "persona": persona, "autobiography": autobiography},
-        )
-        return jsonify({"ok": True, "autobiography": autobiography, "persona": persona})
+        if not result:
+            return jsonify({"ok": False}), 200
+        return jsonify({
+            "ok": True,
+            "autobiography": result.get("autobiography"),
+            "persona": result.get("persona"),
+        })
     except Exception:
         return jsonify({"ok": False}), 200
 
@@ -2771,6 +2819,8 @@ _ENGINE_DEPS = {
     "log_benchmark": session_logger.log_benchmark,
     "validate_blueprint": validate_blueprint,
     "canonical_effect_vector": canonical_effect_vector,
+    "run_piano_module": run_piano_module,
+    "run_meta_update": run_meta_update,
 }
 
 _roster_env = os.environ.get("SIM_AGENTS")

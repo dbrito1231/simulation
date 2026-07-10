@@ -340,11 +340,24 @@ MAX_ACTIVE_RULES = 8
 ROLE_SWITCH_TICK_FRAMES = 120
 ROLE_SWITCH_COOLDOWN = 600
 AUTOSWITCH_PROTECTED_ROLES = {"elder", "builder", "healer"}
+# Phase 1 Sid-parity: survival need fires when this many living agents are at
+# or below STARVING_HUNGER and no living food/fish gatherer is present.
+ROLE_STARVE_NEED_THRESHOLD = 2
 RULES_TICK_FRAMES = 150
 RULE_PROPOSE_COOLDOWN = 1500
 
 MEME_SEED_ID = "harvest_spirit"
-MEMES = {"harvest_spirit": "The Harvest Spirit rewards those who share food"}
+MEME_RIVAL_ID = "river_spirit"
+MEME_SEED_IDS = (MEME_SEED_ID, MEME_RIVAL_ID)
+MEMES = {
+    "harvest_spirit": "The Harvest Spirit rewards those who share food",
+    "river_spirit": "The River Spirit blesses fishers who keep the waters free",
+}
+# Belief -> rule kinds this believer tends to support (Sid-parity Phase 3).
+MEME_RULE_AFFINITY = {
+    "harvest_spirit": {"rationing", "harvest_quota", "resource_tax"},
+    "river_spirit": {"priority"},  # prefers free waters / fish priority over food rationing
+}
 MEME_SPREAD_PROB = 0.5
 MEME_PROXIMITY_PROB = 0.2
 MEME_TICK_FRAMES = 90
@@ -356,7 +369,7 @@ LONG_MEM_CAP = 8
 
 VALID_GATHER_ZONES = {"farm", "forest", "village", "market", "beach", "cave", "ocean"}
 VALID_VISUAL_STYLES = {"house", "farm_plot", "workshop", "wall", "generic"}
-RULE_KINDS = {"resource_tax", "custom"}
+RULE_KINDS = {"resource_tax", "custom", "priority"}
 
 MAX_CONCURRENT_LLM = 2
 LLM_MIN_GAP_MS = 250
@@ -518,8 +531,8 @@ HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
 # candidacy is NOT needed (candidates are deterministic; villagers vote via the
 # existing propose_rule/vote_rule scaffold, reused verbatim). With the flag
 # off, no agent carries an age, no birth/death/election code runs, and
-# RULE_KINDS stays exactly {resource_tax, custom} -- prompts/behavior are
-# byte-identical to Phase E.
+# RULE_KINDS stays {resource_tax, custom, priority} -- prompts/behavior for
+# lifecycle-only kinds are suppressed.
 LIFECYCLE_ENABLED = True
 # Aging: 1 "year" per LIFECYCLE_TICK_FRAMES (~10s at 30 ticks/s) is far too
 # fast for a multi-day soak to show generational turnover in real time, so
@@ -623,8 +636,9 @@ BURY_CONTACT_DIST = 80                # matches heal_agent's contact radius
 BURIAL_BACKSTOP_FRAMES = STALL_THRESHOLD * 3  # ~1 min grace for organic bury_agent before the backstop buries directly
 if LIFECYCLE_ENABLED:
     # New governable rule kinds (I4) + the deterministic succession-ballot
-    # kind, layered onto the existing set so a flag-off village keeps exactly
-    # {resource_tax, custom} and byte-identical propose_rule validation.
+    # kind, layered onto the existing set so a flag-off village keeps
+    # {resource_tax, custom, priority} and byte-identical propose_rule
+    # validation for those kinds.
     RULE_KINDS = RULE_KINDS | {"harvest_quota", "rationing", "succession"}
 
 # --- Registries (ported from index.html) ---
@@ -1033,6 +1047,10 @@ class SimEngine:
         self._inflight = set()      # agent names with a think job in flight
         self.RECIPES = {}
         self.roster_size = roster_size
+        self._effect_period_fired = 0
+        self._module_period_runs = 0
+        self._last_effect_benchmark_fired = 0
+        self._meta_agent_index = 0
         self.ROAD_PATH_CACHE = {}   # (nodeA, nodeB) -> [node ids]; see _recompute_road_paths
         self._reset_world(roster_size)
 
@@ -1092,7 +1110,7 @@ class SimEngine:
                 "lastCraftRejection": None, "lastRepairRejection": None,
                 "lastRecipeRejection": None, "lastBurialRejection": None,
                 "lastShelterNote": None, "lastSpokeFrame": 0,
-                "persona": "", "idleFrames": 0,
+                "persona": "", "idleFrames": 0, "moduleTick": 0,
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
                 # Phase E: home structure id (None = homeless) + refusal nudges.
                 "homeStructureId": None, "lastTradeRejection": None,
@@ -1185,10 +1203,16 @@ class SimEngine:
             "lastCraftActivityFrame": 0,
             "lastRuleActivityFrame": 0,
             "lastRoleSwitchFrame": 0,
+            # Phase 1 Sid-parity: frame when a role need first appeared; used
+            # for role_rebalance_latency. Cleared when the need resolves or a
+            # switch fires.
+            "roleNeedSinceFrame": None,
+            "lastRoleRebalanceLatency": None,
             "collectAttempts": 0,
             "collectSuccesses": 0,
             "rules": [],
             "pendingRules": [],
+            "ruleKindsEverEnacted": [],
             "stockpile": {},
             "taxDue": 0,
             "taxPaid": 0,
@@ -1227,7 +1251,9 @@ class SimEngine:
             "teachCount": 0,                # benchmark helper for skill_spread
         }
         self._effect_period_fired = 0
+        self._module_period_runs = 0
         self._last_effect_benchmark_fired = 0
+        self._meta_agent_index = 0
         self._spoiled_period = 0     # Phase C: spoilage counter per benchmark period
         self._last_season = None     # Phase C: season-turn activity logging
         if ECOLOGY_ENABLED:
@@ -3543,6 +3569,12 @@ class SimEngine:
                 return False
             if not (0 <= v <= 3):
                 return False
+        if kind == "priority":
+            # Sid-parity Phase 2: a priority rule biases contributions toward
+            # a named resource. Value must be a known resource id.
+            value = rule.get("value")
+            if not isinstance(value, str) or value not in c["resourceRegistry"]:
+                return False
         if LIFECYCLE_ENABLED and kind == "harvest_quota":
             try:
                 v = float(rule.get("value"))
@@ -3559,6 +3591,12 @@ class SimEngine:
                 return False
         return True
 
+    def _record_rule_kind_enacted(self, kind):
+        c = self.civilization
+        kinds = c.setdefault("ruleKindsEverEnacted", [])
+        if kind and kind not in kinds:
+            kinds.append(kind)
+
     def _tally_and_maybe_enact(self, rule):
         c = self.civilization
         votes = list(rule["votes"].values())
@@ -3569,23 +3607,25 @@ class SimEngine:
             rule["enacted"] = True
             c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
             c["lastRuleActivityFrame"] = self.frameTick
+            if rule.get("kind") == "repeal":
+                return self._enact_repeal(rule, yes)
             if LIFECYCLE_ENABLED and rule["kind"] == "succession":
                 # Succession ballots are a leadership record, not an ongoing
                 # governance constraint -- they deliberately do NOT join
-                # c["rules"] (which has no repeal mechanism and a small
-                # MAX_ACTIVE_RULES budget shared with resource_tax/
-                # harvest_quota/rationing). Elder deaths recur naturally over
-                # a long soak; letting every succession permanently consume
-                # that budget would crowd out real governance over time.
-                # activity.jsonl + the "succession" benchmark are the
-                # permanent record instead.
+                # c["rules"] (which has a small MAX_ACTIVE_RULES budget shared
+                # with resource_tax/harvest_quota/rationing/priority). Elder
+                # deaths recur naturally over a long soak; letting every
+                # succession permanently consume that budget would crowd out
+                # real governance over time. activity.jsonl + the "succession"
+                # benchmark are the permanent record instead.
                 self._enact_succession_winner(rule)
             else:
                 c["rules"].append(rule)
+                self._record_rule_kind_enacted(rule.get("kind"))
                 self._push_activity(f'Rule "{rule["name"]}" enacted by vote ({yes} yes)')
-                self._log_benchmark("rule_enacted", len(c["rules"]), {"id": rule["id"], "yes": yes, "no": no})
-                if LIFECYCLE_ENABLED:
-                    self._apply_governance_rule(rule)
+                self._log_benchmark("rule_enacted", len(c["rules"]), {
+                    "id": rule["id"], "yes": yes, "no": no, "kind": rule.get("kind")})
+                self._apply_governance_rule(rule)
             return "enacted"
         if no >= quorum:
             c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
@@ -3595,13 +3635,10 @@ class SimEngine:
         return "pending"
 
     def _apply_governance_rule(self, rule):
-        """Phase F (I4): give harvest_quota/rationing mechanical teeth the
-        moment they're enacted. Both stay in effect as long as the rule is
-        in civilization["rules"]; a rule can be repealed the same way any
-        rule kind would be (out of scope here -- MAX_ACTIVE_RULES/existing
-        scaffold applies), and rationing additionally self-lifts once storage
-        recovers (checked at withdrawal time in _rationing_gate, not here) --
-        the deterministic escape so it never permanently binds."""
+        """Give harvest_quota/rationing/priority mechanical teeth the moment
+        they're enacted. Rules stay in effect while in civilization["rules"];
+        repeal_rule reverses them. Rationing additionally self-lifts once
+        storage recovers (checked at withdrawal time in _rationing_gate)."""
         c = self.civilization
         if rule["kind"] == "harvest_quota":
             try:
@@ -3619,6 +3656,38 @@ class SimEngine:
             c["rationingActive"][rule["id"]] = {"value": max(1, value)}
             self._push_activity(f'Rationing "{rule["name"]}" now caps stockpile withdrawals to '
                                 f'{max(1, value)} while storage is low')
+        elif rule["kind"] == "priority":
+            rid = rule.get("value")
+            self._push_activity(
+                f'Priority rule "{rule["name"]}" now biases contributions toward {rid}')
+
+    def _clear_governance_rule(self, rule):
+        """Reverse _apply_governance_rule side effects on repeal."""
+        c = self.civilization
+        rid = rule.get("id")
+        if not rid:
+            return
+        c.get("harvestQuotas", {}).pop(rid, None)
+        c.get("rationingActive", {}).pop(rid, None)
+
+    def _enact_repeal(self, repeal_ballot, yes_count):
+        """Remove the targeted enacted rule after a successful repeal vote."""
+        c = self.civilization
+        target_id = repeal_ballot.get("targetRuleId") or repeal_ballot.get("value")
+        target = next((r for r in c["rules"] if r["id"] == target_id), None)
+        if not target:
+            self._push_activity(
+                f'Repeal of "{target_id}" passed ({yes_count} yes) but the rule was already gone')
+            self._log_benchmark("rule_repealed", len(c["rules"]),
+                                {"id": target_id, "yes": yes_count, "missing": True})
+            return "enacted"
+        c["rules"] = [r for r in c["rules"] if r["id"] != target_id]
+        self._clear_governance_rule(target)
+        self._push_activity(
+            f'Rule "{target["name"]}" repealed by vote ({yes_count} yes)')
+        self._log_benchmark("rule_repealed", len(c["rules"]),
+                            {"id": target_id, "yes": yes_count, "kind": target.get("kind")})
+        return "enacted"
 
     def _propose_rule(self, agent, decision):
         c = self.civilization
@@ -3628,7 +3697,10 @@ class SimEngine:
         if not self._validate_rule(rule):
             return f"{agent['name']} drafted an invalid rule"
         kind = rule.get("kind") or "custom"
-        value = float(rule["value"]) if kind == "resource_tax" else rule.get("value")
+        if kind == "resource_tax":
+            value = float(rule["value"])
+        else:
+            value = rule.get("value")
         entry = {
             "id": rule["id"], "name": rule["name"], "kind": kind, "value": value,
             "description": rule.get("description", ""), "proposedBy": agent["name"],
@@ -3640,6 +3712,55 @@ class SimEngine:
                                  f"{entry['name']}: {entry['description']}")
         self._tally_and_maybe_enact(entry)
         return f'{agent["name"]} proposed rule "{entry["name"]}"'
+
+    def _propose_repeal(self, agent, decision):
+        """Sid-parity Phase 2: start a repeal ballot for an enacted rule.
+        Reuses the vote_rule / _tally_and_maybe_enact quorum scaffold."""
+        c = self.civilization
+        if not RULES_ENABLED:
+            return f"{agent['name']} cannot repeal rules"
+        target_id = decision.get("target")
+        if not isinstance(target_id, str) or not target_id:
+            return f"{agent['name']} named no rule to repeal"
+        target = next((r for r in c["rules"] if r["id"] == target_id), None)
+        if not target:
+            return f"{agent['name']} found no enacted rule {target_id}"
+        if len(c["pendingRules"]) >= MAX_PENDING_RULES:
+            return f"{agent['name']} cannot propose a repeal — too many pending votes"
+        ballot_id = f"repeal_{target_id}"
+        if any(r["id"] == ballot_id for r in c["pendingRules"]):
+            return f"{agent['name']} found a repeal of {target_id} already pending"
+        if any(r.get("kind") == "repeal" and r.get("targetRuleId") == target_id
+               for r in c["pendingRules"]):
+            return f"{agent['name']} found a repeal of {target_id} already pending"
+        entry = {
+            "id": ballot_id,
+            "name": f'Repeal {target["name"]}',
+            "kind": "repeal",
+            "value": target_id,
+            "targetRuleId": target_id,
+            "description": f'Repeal the enacted rule "{target["name"]}" ({target_id}).',
+            "proposedBy": agent["name"],
+            "enacted": False,
+            "votes": {agent["name"]: "yes"},
+        }
+        c["pendingRules"].append(entry)
+        c["lastRuleActivityFrame"] = self.frameTick
+        self._push_communication("rule_proposal", agent["name"], "everyone",
+                                 f'{entry["name"]}: {entry["description"]}')
+        self._tally_and_maybe_enact(entry)
+        return f'{agent["name"]} proposed repealing "{target["name"]}"'
+
+    def _active_priority_resource(self):
+        """Return the resource id from the newest enacted priority rule, if any."""
+        if not RULES_ENABLED:
+            return None
+        for rule in reversed(self.civilization["rules"]):
+            if rule.get("kind") == "priority" and rule.get("enacted"):
+                rid = rule.get("value")
+                if isinstance(rid, str) and rid in self.civilization["resourceRegistry"]:
+                    return rid
+        return None
 
     def _vote_on_rule(self, agent, decision):
         c = self.civilization
@@ -4452,6 +4573,14 @@ class SimEngine:
         if target and target in self.civilization["resourceRegistry"]:
             if agent["resources"].get(target, 0) > 0 and p["contributed"].get(target, 0) < p["needs"].get(target, 0):
                 return target
+        # Sid-parity Phase 2: an enacted priority rule biases contributions
+        # toward its named resource (mirrors harvest_spirit edible bias).
+        priority_res = self._active_priority_resource()
+        if priority_res:
+            need = p["needs"].get(priority_res, 0)
+            have = p["contributed"].get(priority_res, 0)
+            if need > have and agent["resources"].get(priority_res, 0) > 0:
+                return priority_res
         # Phase G belief-driven bias (deterministic, no new action): a
         # harvest_spirit believer prefers contributing an EDIBLE resource the
         # project still needs, ahead of the generic need-order scan below --
@@ -4484,13 +4613,43 @@ class SimEngine:
         return MEMES.get(bid, bid)
 
     def _seed_beliefs(self):
+        """Seed two competing memes on different living agents (Sid-parity
+        Phase 3). Falls back to a single seed if the roster is too small."""
         if not MEMES_ENABLED or not self.agents:
             return
-        origin = random.choice(self.agents)
-        origin["beliefs"].add(MEME_SEED_ID)
-        self._push_activity(f'{origin["name"]} began spreading a rumor: "{self._belief_text(MEME_SEED_ID)}"')
-        self._push_communication("rumor", origin["name"], "everyone", self._belief_text(MEME_SEED_ID))
-        self._push_memory(origin, f"I believe: {self._belief_text(MEME_SEED_ID)}")
+        living = [a for a in self.agents if a.get("deathFrame") is None] or list(self.agents)
+        random.shuffle(living)
+        origins = living[:2] if len(living) >= 2 else living[:1]
+        for agent, meme_id in zip(origins, MEME_SEED_IDS):
+            agent["beliefs"].add(meme_id)
+            self._push_activity(
+                f'{agent["name"]} began spreading a rumor: "{self._belief_text(meme_id)}"')
+            self._push_communication("rumor", agent["name"], "everyone",
+                                     self._belief_text(meme_id))
+            self._push_memory(agent, f"I believe: {self._belief_text(meme_id)}")
+
+    def _belief_favored_kinds(self, agent):
+        favored = set()
+        for bid in agent.get("beliefs") or ():
+            favored |= MEME_RULE_AFFINITY.get(bid, set())
+        return favored
+
+    def _belief_biased_vote(self, agent, pending):
+        """Return yes/no biased by the voter's beliefs, or None for no bias.
+        harvest_spirit believers favor food-protective rules; river_spirit
+        believers favor priority rules and lean against heavy rationing."""
+        if not MEMES_ENABLED or not pending:
+            return None
+        kind = pending.get("kind")
+        beliefs = agent.get("beliefs") or set()
+        favored = self._belief_favored_kinds(agent)
+        if kind in favored:
+            return "yes"
+        if MEME_RIVAL_ID in beliefs and kind in ("rationing", "harvest_quota"):
+            return "no"
+        if MEME_SEED_ID in beliefs and kind == "priority" and pending.get("value") == "fish":
+            return "no"
+        return None
 
     def _transmit_belief(self, speaker, recipient, prob):
         if not MEMES_ENABLED or not speaker or not speaker["beliefs"]:
@@ -4546,10 +4705,24 @@ class SimEngine:
                 recipient = self._find_agent(name)
                 self._transmit_belief(speaker, recipient, MEME_PROXIMITY_PROB)
 
+    def _meme_adoption_counts(self):
+        """Per-meme living-agent adoption counts (Sid-parity Phase 3)."""
+        if not MEMES_ENABLED:
+            return {}
+        living = [a for a in self.agents if a.get("deathFrame") is None]
+        counts = {mid: 0 for mid in MEMES}
+        for a in living:
+            for bid in a.get("beliefs") or ():
+                if bid in counts:
+                    counts[bid] += 1
+        return counts
+
     def _meme_adoption_count(self):
+        """Backward-compatible total: agents holding any seeded meme."""
         if not MEMES_ENABLED:
             return 0
-        return len([a for a in self.agents if MEME_SEED_ID in a["beliefs"]])
+        living = [a for a in self.agents if a.get("deathFrame") is None]
+        return len([a for a in living if a.get("beliefs") and (a["beliefs"] & set(MEME_SEED_IDS))])
 
     def _maybe_mutate_meme(self, belief_id, speaker, recipient):
         """Event-driven, capped mutation of a belief's text on spread (#3).
@@ -4843,44 +5016,135 @@ class SimEngine:
     def _is_flexible_role(self, role):
         return EMERGENT_ROLES and not self._role_specialty_resource(role) and role != "elder"
 
+    def _role_is_filled(self, roles):
+        """True if any living, able agent currently holds one of the roles."""
+        role_set = set(roles) if not isinstance(roles, str) else {roles}
+        return any(
+            a["role"] in role_set
+            and a.get("deathFrame") is None
+            and not a["incapacitated"]
+            for a in self.agents
+        )
+
     def _village_needed_role(self):
-        if not EMERGENT_ROLES or not self._active_project_districts():
+        """Return a gather role the village needs, or None.
+
+        Checks three need sources in priority order (build gap, survival,
+        ecology). Sid-parity Phase 1: specialization must rebalance to real
+        collective need, not only stalled builds.
+        """
+        if not EMERGENT_ROLES:
             return None
-        unmet = self._first_unmet_resource_anywhere()
-        if not unmet:
-            return None
-        roles = self.d["RESOURCE_GATHER_ROLES"].get(unmet)
-        if not roles:
-            return None
-        filled = any(a["role"] in roles and not a["incapacitated"] for a in self.agents)
-        return None if filled else roles[0]
+
+        # 1) Build-project gather gap (original signal).
+        if self._active_project_districts():
+            unmet = self._first_unmet_resource_anywhere()
+            if unmet:
+                roles = self.d["RESOURCE_GATHER_ROLES"].get(unmet)
+                if roles and not self._role_is_filled(roles):
+                    return roles[0]
+
+        # 2) Survival need: starving agents and no living food/fish gatherer.
+        if SURVIVAL_ENABLED:
+            living = self._living_agents()
+            starving = [
+                a for a in living
+                if not a["incapacitated"] and a["hunger"] <= STARVING_HUNGER
+            ]
+            if len(starving) >= ROLE_STARVE_NEED_THRESHOLD:
+                food_roles = []
+                for rid in EDIBLE_RESOURCES:
+                    food_roles.extend(self.d["RESOURCE_GATHER_ROLES"].get(rid) or ())
+                # Prefer farmer (food) over fisher when both are missing.
+                for role in food_roles:
+                    if not self._role_is_filled(role):
+                        return role
+
+        # 3) Ecology need: a tracked resource is depleted/low village-wide
+        # and its gather role is unfilled.
+        if ECOLOGY_ENABLED:
+            self._ensure_district_stocks()
+            # Aggregate stock ratio per resource across districts; pick the
+            # scarcest unfilled gather role.
+            totals = {}
+            for stocks in self.civilization["districtStocks"].values():
+                for rid, val in stocks.items():
+                    max_s = self._stock_max(rid)
+                    if not max_s:
+                        continue
+                    entry = totals.setdefault(rid, {"sum": 0.0, "max": 0.0})
+                    entry["sum"] += val
+                    entry["max"] += max_s
+            scarce = []
+            for rid, entry in totals.items():
+                if entry["max"] <= 0:
+                    continue
+                ratio = entry["sum"] / entry["max"]
+                if ratio > STOCK_LOW_RATIO:
+                    continue
+                roles = self.d["RESOURCE_GATHER_ROLES"].get(rid)
+                if not roles or self._role_is_filled(roles):
+                    continue
+                scarce.append((ratio, roles[0]))
+            if scarce:
+                scarce.sort(key=lambda t: t[0])
+                return scarce[0][1]
+
+        return None
 
     def _auto_switch_candidate(self, needed_role):
         cands = [a for a in self.agents
-                 if not a["incapacitated"] and a["role"] != needed_role
+                 if a.get("deathFrame") is None
+                 and not a["incapacitated"] and a["role"] != needed_role
                  and self._is_flexible_role(a["role"])
                  and a["role"] not in AUTOSWITCH_PROTECTED_ROLES]
-        cands.sort(key=lambda a: 0 if self._is_idle(a) else 1)
-        return cands[0] if cands else None
+        if not cands:
+            return None
+        # Prefer agents whose flexible role is oversupplied (2+ living holders)
+        # so specialization rebalances rather than randomly pulling any idle.
+        role_counts = {}
+        for a in self._living_agents():
+            role_counts[a["role"]] = role_counts.get(a["role"], 0) + 1
+
+        def sort_key(a):
+            oversupplied = 0 if role_counts.get(a["role"], 0) >= 2 else 1
+            idle = 0 if self._is_idle(a) else 1
+            return (oversupplied, idle)
+
+        cands.sort(key=sort_key)
+        return cands[0]
 
     def _maybe_auto_switch_role(self):
         if not EMERGENT_ROLES:
             return
-        if self.frameTick - self.civilization["lastRoleSwitchFrame"] < ROLE_SWITCH_COOLDOWN:
-            return
+        c = self.civilization
         needed_role = self._village_needed_role()
         if not needed_role:
+            c["roleNeedSinceFrame"] = None
+            return
+        if c.get("roleNeedSinceFrame") is None:
+            c["roleNeedSinceFrame"] = self.frameTick
+        if self.frameTick - c["lastRoleSwitchFrame"] < ROLE_SWITCH_COOLDOWN:
             return
         agent = self._auto_switch_candidate(needed_role)
         if not agent:
             return
-        self.civilization["lastRoleSwitchFrame"] = self.frameTick
+        since = c.get("roleNeedSinceFrame")
+        if since is not None:
+            c["lastRoleRebalanceLatency"] = self.frameTick - since
+        c["lastRoleSwitchFrame"] = self.frameTick
+        c["roleNeedSinceFrame"] = None
         agent["goal"] = None
         unmet = self._first_unmet_resource_anywhere()
+        reason = (
+            f"The village has no one gathering {unmet}; "
+            f"retraining to {needed_role} to fill the gap."
+            if unmet else
+            f"Village need requires a {needed_role}; retraining to fill the gap."
+        )
         self.apply_decision(agent, {
             "action": "switch_role", "new_role": needed_role,
-            "reasoning": f"The village has no one gathering {unmet}; "
-                         f"retraining to {needed_role} to fill the gap."})
+            "reasoning": reason})
 
     # --- stalled-contribution backstop ---
     def _maybe_force_contribution(self):
@@ -5660,17 +5924,52 @@ class SimEngine:
                         and a["name"] not in pending["votes"]]
             voter = next((a for a in eligible if self._is_idle(a)), None) or (eligible[0] if eligible else None)
             if voter:
-                vote = "no" if (pending["kind"] == "resource_tax" and (pending.get("value") or 0) > 2) else "yes"
+                biased = self._belief_biased_vote(voter, pending)
+                if biased is not None:
+                    vote = biased
+                else:
+                    vote = "no" if (pending["kind"] == "resource_tax" and (pending.get("value") or 0) > 2) else "yes"
+                reason = f'Casting my vote on the proposed rule "{pending["name"]}".'
+                if biased is not None:
+                    reason = f'My beliefs lead me to vote {vote} on "{pending["name"]}".'
                 self.apply_decision(voter, {"action": "vote_rule", "target": pending["id"],
                                             "vote": vote,
-                                            "reasoning": f'Casting my vote on the proposed rule "{pending["name"]}".'})
-            return
-        if self._active_resource_tax() > 0:
+                                            "reasoning": reason})
             return
         if self.frameTick - c["lastRuleActivityFrame"] < RULE_PROPOSE_COOLDOWN:
             return
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
         if not elder:
+            return
+        # Sid-parity Phase 2: once a tax exists, propose a priority rule for
+        # the scarcest unmet build resource (or wood) so governance diversifies.
+        if self._active_resource_tax() > 0 and not self._active_priority_resource():
+            unmet = self._first_unmet_resource_anywhere() or "wood"
+            if unmet in c["resourceRegistry"]:
+                self.apply_decision(elder, {
+                    "action": "propose_rule",
+                    "rule": {
+                        "id": f"priority_{unmet}",
+                        "name": f"{unmet.title()} Priority",
+                        "kind": "priority",
+                        "value": unmet,
+                        "description": f"Contributors prioritize delivering {unmet} to active builds.",
+                    },
+                    "reasoning": f"Proposing a priority rule so the village focuses on {unmet}.",
+                })
+                return
+        # If several rules are stacked, propose repealing the oldest non-tax
+        # rule so amendment is exercised (Sid's amendable-rules benchmark).
+        non_tax = [r for r in c["rules"] if r.get("kind") != "resource_tax"]
+        if len(c["rules"]) >= 2 and non_tax:
+            target = non_tax[0]
+            self.apply_decision(elder, {
+                "action": "repeal_rule",
+                "target": target["id"],
+                "reasoning": f'Repealing outdated rule "{target["name"]}" to keep village law lean.',
+            })
+            return
+        if self._active_resource_tax() > 0:
             return
         self.apply_decision(elder, {
             "action": "propose_rule",
@@ -5701,16 +6000,21 @@ class SimEngine:
             return
         entropy = self._role_entropy()
         adherence = self._rule_adherence()
+        adoption_by_meme = self._meme_adoption_counts()
         adoption = self._meme_adoption_count()
-        adoption_rate = adoption / len(self.agents) if self.agents else 0
+        living_n = len([a for a in self.agents if a.get("deathFrame") is None]) or len(self.agents) or 1
+        adoption_rate = adoption / living_n
         self.lastBenchmarks = {
             "entropy": entropy, "adherence": adherence, "adoption": adoption,
-            "adoptionRate": adoption_rate, "moduleTotal": 0,
+            "adoptionRate": adoption_rate, "adoptionByMeme": adoption_by_meme,
+            "moduleTotal": self._module_period_runs,
             "rules": len(self.civilization["rules"]),
             "structures": len(self.civilization["structures"]),
             "level": self.civilization["level"], "memory": self.lastMemorySize,
             "effectThroughput": self._effect_period_fired,
             "ecologyScarcity": self._ecology_scarcity_index(),
+            "roleRebalanceLatency": self.civilization.get("lastRoleRebalanceLatency"),
+            "ruleKindDiversity": len(self.civilization.get("ruleKindsEverEnacted") or []),
         }
         if TECH_TREE_ENABLED:
             self.lastBenchmarks["era"] = self._current_era_name()
@@ -5719,12 +6023,25 @@ class SimEngine:
         for a in self.agents:
             role_counts[a["role"]] = role_counts.get(a["role"], 0) + 1
         self._log_benchmark("specialization_entropy", round(entropy, 2), {"counts": role_counts})
+        latency = self.civilization.get("lastRoleRebalanceLatency")
+        if EMERGENT_ROLES and latency is not None:
+            self._log_benchmark("role_rebalance_latency", latency,
+                                {"frames": latency})
         if adherence is not None:
             self._log_benchmark("rule_adherence", round(adherence, 2),
                                 {"paid": self.civilization["taxPaid"], "due": self.civilization["taxDue"]})
+        if RULES_ENABLED:
+            kinds = list(self.civilization.get("ruleKindsEverEnacted") or [])
+            self._log_benchmark("rule_kind_diversity", len(kinds), {"kinds": kinds})
         if MEMES_ENABLED:
             self._log_benchmark("meme_adoption", adoption,
-                                {"rate": round(adoption_rate, 2), "seed": MEME_SEED_ID, "of": len(self.agents)})
+                                {"rate": round(adoption_rate, 2),
+                                 "by_meme": adoption_by_meme,
+                                 "of": living_n})
+        if PIANO_MODULES or META_SYSTEM:
+            self._log_benchmark("module_total", self._module_period_runs,
+                                {"period_ticks": BENCHMARK_TICK_FRAMES})
+            self._module_period_runs = 0
         self._log_benchmark("memory_store_size", self.lastMemorySize)
         if STRUCTURE_EFFECTS_ENABLED:
             fired = self._effect_period_fired
@@ -6170,6 +6487,9 @@ class SimEngine:
         elif action == "propose_rule":
             summary = self._propose_rule(agent, decision)
 
+        elif action == "repeal_rule":
+            summary = self._propose_repeal(agent, decision)
+
         elif action == "vote_rule":
             summary = self._vote_on_rule(agent, decision)
 
@@ -6493,8 +6813,15 @@ class SimEngine:
         if EMERGENT_ROLES:
             need_role = self._village_needed_role()
             if need_role and need_role != agent["role"] and self._is_flexible_role(agent["role"]):
-                nudges.append(f"NOTE: No one is gathering {self._first_unmet_resource_anywhere()}, "
-                              f"which a build needs. Consider switch_role to {need_role} to fill the gap.")
+                unmet = self._first_unmet_resource_anywhere()
+                if unmet:
+                    nudges.append(
+                        f"NOTE: No one is gathering {unmet}, which a build needs. "
+                        f"Consider switch_role to {need_role} to fill the gap.")
+                else:
+                    nudges.append(
+                        f"NOTE: The village needs a {need_role} (survival or scarce "
+                        f"resources). Consider switch_role to {need_role} to fill the gap.")
         if RULES_ENABLED:
             unvoted = next((r for r in c["pendingRules"] if agent["name"] not in r["votes"]), None)
             if unvoted:
@@ -6668,6 +6995,7 @@ class SimEngine:
             "self_prompt": "",
             "module_reports": "none",
             "behavior_nudge": behavior_nudge,
+            "needed_role": self._village_needed_role() if EMERGENT_ROLES else None,
             # Phase G: compact skills summary (folded into the existing "Your
             # skill:" line server-side, zero new template line) and a short
             # rotating village-history line (server renders it only when set,
@@ -6677,7 +7005,8 @@ class SimEngine:
             "available_actions": [a for a in self.d["AVAILABLE_ACTIONS"]
                                   if (a != "start_terraform" or ECOLOGY_ENABLED)
                                   and (a != "repair_structure" or GOODS_ENABLED)
-                                  and (a != "bury_agent" or CEMETERY_ENABLED)],
+                                  and (a != "bury_agent" or CEMETERY_ENABLED)
+                                  and (a != "repeal_rule" or RULES_ENABLED)],
         }
 
     def _recent_conversations_text(self):
@@ -6685,6 +7014,82 @@ class SimEngine:
             return "none"
         return " | ".join(f"{c['from']} -> {c['to']}: {c['message']}"
                           for c in self.conversationLog[:5])
+
+    def _piano_module_context(self, agent, payload):
+        """Compact context string for PIANO sub-calls (kept small for cost)."""
+        parts = [
+            f"role={agent.get('role')}",
+            f"zone={agent.get('currentZone')}",
+            f"hunger={agent.get('hunger')}",
+            f"health={agent.get('health')}",
+            f"resources={payload.get('resources')}",
+            f"project={payload.get('active_project')}",
+            f"nudge={payload.get('behavior_nudge')}",
+        ]
+        return "; ".join(str(p) for p in parts if p)
+
+    def _run_piano_modules(self, agent_name, modules, module_tick, context):
+        """Sid-parity Phase 5: run staggered PIANO modules in-process inside
+        the same worker-pool slot as the Cognitive Controller decision.
+        Stagger: perception+desire every turn; social every 2nd; reflection
+        every 3rd. Returns (report_string, new_module_tick, runs)."""
+        runner = self.d.get("run_piano_module")
+        if not runner or not PIANO_MODULES:
+            return "none", module_tick, 0
+        tick = (module_tick or 0) + 1
+        modules = modules or {
+            "perception": True, "social": True, "desire": True, "reflection": True,
+        }
+        to_run = []
+        if modules.get("perception", True):
+            to_run.append("perception")
+        if modules.get("desire", True):
+            to_run.append("desire")
+        if modules.get("social", True) and tick % 2 == 0:
+            to_run.append("social")
+        if modules.get("reflection", True) and tick % 3 == 0:
+            to_run.append("reflection")
+        if not to_run:
+            return "none", tick, 0
+        reports = []
+        runs = 0
+        for module in to_run:
+            text = runner(module, agent_name, context, frame_tick=self.frameTick)
+            if text:
+                reports.append(f"{module}: {text}")
+                runs += 1
+        return (" | ".join(reports) if reports else "none"), tick, runs
+
+    def _maybe_meta_update(self):
+        """Sid-parity Phase 5: rotate one living agent through META_SYSTEM
+        persona refresh on META_TICK_FRAMES. Amortized: one agent per gate."""
+        if not META_SYSTEM:
+            return
+        runner = self.d.get("run_meta_update")
+        if not runner:
+            return
+        living = [a for a in self._living_agents() if not a["incapacitated"]]
+        if not living:
+            return
+        idx = self._meta_agent_index % len(living)
+        self._meta_agent_index += 1
+        agent = living[idx]
+        top_actions = sorted(
+            (agent.get("actionCounts") or {}).items(),
+            key=lambda kv: kv[1], reverse=True,
+        )[:3]
+        report = {
+            "role": agent.get("role"),
+            "top_actions": ", ".join(f"{k}:{v}" for k, v in top_actions) or "none",
+            "resources": dict(agent.get("resources") or {}),
+            "beliefs": [self._belief_text(b) for b in (agent.get("beliefs") or ())],
+        }
+        agent_name = agent["name"]
+        # LLM call while holding the tick lock is acceptable here: one agent
+        # every META_TICK_FRAMES (~80s), same discipline as birth-persona.
+        result = runner(agent_name, report, frame_tick=self.frameTick)
+        if result and result.get("persona"):
+            agent["persona"] = result["persona"]
 
     def _think_job(self, agent_name):
         """Runs in the worker pool. Build payload under lock, do the network
@@ -6695,12 +7100,33 @@ class SimEngine:
                 if not agent or agent["incapacitated"]:
                     return
                 payload = self._build_think_payload(agent)
+                self_prompt = (agent.get("persona") or "").strip() if META_SYSTEM else ""
+                payload["self_prompt"] = self_prompt
+                piano_context = None
+                piano_modules = None
+                piano_tick = 0
+                if PIANO_MODULES:
+                    piano_context = self._piano_module_context(agent, payload)
+                    piano_modules = dict(agent.get("modules") or {})
+                    piano_tick = int(agent.get("moduleTick") or 0)
+            if PIANO_MODULES:
+                # Module fan-out stays inside this worker slot (no extra
+                # ThreadPoolExecutor jobs) so MAX_CONCURRENT_LLM still bounds
+                # total LM Studio concurrency.
+                reports, new_tick, runs = self._run_piano_modules(
+                    agent_name, piano_modules, piano_tick, piano_context)
+                payload["module_reports"] = reports
+            else:
+                new_tick, runs = 0, 0
             # Network call outside the lock (never block the tick thread or peers).
             decision = self.d["llm_decide"](payload)
             with self.lock:
                 agent = self._find_agent(agent_name)
                 if not agent:
                     return
+                if PIANO_MODULES:
+                    agent["moduleTick"] = new_tick
+                    self._module_period_runs += runs
                 # In-flight guard (#A): if a Sage emergency began and THIS agent is
                 # a designated responder, discard the decision and rush instead.
                 em = self._sage_emergency()
@@ -6822,6 +7248,8 @@ class SimEngine:
                     self._update_survival(a)
             if MEMORY_ENABLED and ft % MEMORY_TICK_FRAMES == 0:
                 self._run_memory_maintenance()
+            if META_SYSTEM and ft % META_TICK_FRAMES == 0:
+                self._maybe_meta_update()
             if EMERGENT_ROLES and ft % ROLE_SWITCH_TICK_FRAMES == 0:
                 self._maybe_auto_switch_role()
             if RULES_ENABLED and ft % RULES_TICK_FRAMES == 0:
@@ -7054,6 +7482,16 @@ class SimEngine:
                 civ.setdefault("deferredProjectTypes", {})
                 civ.setdefault("rejectedBlueprintFrames", {})
                 civ.setdefault("customResourceAddedFrame", {})
+                civ.setdefault("lastRoleSwitchFrame", 0)
+                civ.setdefault("roleNeedSinceFrame", None)
+                civ.setdefault("lastRoleRebalanceLatency", None)
+                civ.setdefault("ruleKindsEverEnacted", [])
+                # Backfill diversity from currently enacted rules so old saves
+                # don't report 0 forever after a restore.
+                for r in (civ.get("rules") or []):
+                    kind = r.get("kind")
+                    if kind and kind not in civ["ruleKindsEverEnacted"]:
+                        civ["ruleKindsEverEnacted"].append(kind)
                 # Phase C: spoilage nudge state. Structure condition/isRuin
                 # deliberately have NO migration -- every read defaults via
                 # .get(cond, 100), so pre-Phase-C structures start pristine.
@@ -7148,6 +7586,12 @@ class SimEngine:
                     a.setdefault("lastHomelessNudgeFrame", None)
                     a.setdefault("lastBurialRejection", None)
                     a.setdefault("inventionRetryUsed", False)
+                    a.setdefault("persona", "")
+                    a.setdefault("moduleTick", 0)
+                    a.setdefault("modules", {
+                        "perception": True, "social": True,
+                        "desire": True, "reflection": True,
+                    })
                     if LIFECYCLE_ENABLED:
                         # Phase F: every restored agent gets an age (staggered
                         # by roster position, same deterministic spread
@@ -7270,7 +7714,9 @@ class SimEngine:
                 "waypoints": len(a.get("waypoints") or []),
                 "resources": dict(a["resources"]), "hunger": a["hunger"], "health": a["health"],
                 "incapacitated": a["incapacitated"], "message": a["message"],
-                "isThinking": a["isThinking"], "beliefs": [self._belief_text(b) for b in a["beliefs"]],
+                "isThinking": a["isThinking"],
+                "beliefs": [self._belief_text(b) for b in a["beliefs"]],
+                "beliefIds": sorted(a["beliefs"]) if MEMES_ENABLED else [],
                 "lastAction": a["lastAction"], "assignedTask": a["assignedTask"],
                 "age": round(a["age"], 1) if LIFECYCLE_ENABLED and a.get("age") is not None else None,
                 "lifeStage": self._life_stage(a) if LIFECYCLE_ENABLED else None,

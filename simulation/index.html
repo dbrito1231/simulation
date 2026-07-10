@@ -237,6 +237,12 @@
   #agentList .agent-status { display: block; color: #8a8a99; font-size: 11px; }
   #agentList .agent-vitals { color: #c0867e; white-space: nowrap; }
   #agentList .agent-vitals.agent-dead { color: #9e9e9e; }
+  #agentList .agent-beliefs {
+    display: block;
+    color: #9a8fc0;
+    font-size: 10px;
+    margin-top: 1px;
+  }
   .agents-panel-head {
     display: flex;
     align-items: center;
@@ -1157,6 +1163,7 @@ const ACTION_LABELS = {
   switch_role: "retraining",
   propose_rule: "proposing a rule",
   vote_rule: "voting",
+  repeal_rule: "proposing a repeal",
   move_to_agent: "approaching someone",
   heal_agent: "healing",
   craft_item: "crafting",
@@ -1185,13 +1192,24 @@ function renderBenchmarks() {
   const chips = [];
   chips.push(`<span class="res-chip">spec. entropy <span class="civ-value">${r2(b.entropy)}</span></span>`);
   if (MEMES_ENABLED) {
-    chips.push(`<span class="res-chip">meme adopt <span class="civ-value">${b.adoption}/${getAgents().length}</span></span>`);
+    const byMeme = b.adoptionByMeme || {};
+    const memeIds = Object.keys(byMeme);
+    if (memeIds.length) {
+      memeIds.forEach((mid) => {
+        chips.push(`<span class="res-chip">${escapeHtml(mid)} <span class="civ-value">${byMeme[mid]}/${getLivingAgents().length}</span></span>`);
+      });
+    } else {
+      chips.push(`<span class="res-chip">meme adopt <span class="civ-value">${b.adoption}/${getLivingAgents().length}</span></span>`);
+    }
   }
   if (b.adherence !== null && b.adherence !== undefined) {
     chips.push(`<span class="res-chip">tax adherence <span class="civ-value">${Math.round(b.adherence * 100)}%</span></span>`);
   }
   if (RULES_ENABLED) {
     chips.push(`<span class="res-chip">rules <span class="civ-value">${b.rules}</span></span>`);
+    if (b.ruleKindDiversity != null) {
+      chips.push(`<span class="res-chip">rule kinds <span class="civ-value">${b.ruleKindDiversity}</span></span>`);
+    }
   }
   if (MEMORY_ENABLED) {
     chips.push(`<span class="res-chip">memory <span class="civ-value">${b.memory}</span></span>`);
@@ -1286,7 +1304,7 @@ function renderAgentPanel() {
   const living = getLivingAgents();
   const deceased = getDeceasedAgents();
   const panelKey = JSON.stringify({
-    living: living.map((a) => [a.id, a.name, a.role, a.incapacitated, a.health, a.hunger, a.lastAction, a.isThinking]),
+    living: living.map((a) => [a.id, a.name, a.role, a.incapacitated, a.health, a.hunger, a.lastAction, a.isThinking, a.beliefs || []]),
     deceased: deceased.map((a) => [a.id, a.name, a.role, a.buried, a.age]),
   });
   if (panelKey === lastAgentPanelKey) return;
@@ -1305,10 +1323,16 @@ function renderAgentPanel() {
   } else {
     agentListEl.innerHTML = living.map((a) => {
       const selected = selectedAgentId === a.id;
+      const beliefs = (a.beliefIds && a.beliefIds.length ? a.beliefIds : (a.beliefs || [])).slice(0, 2);
+      const beliefHtml = beliefs.length
+        ? `<span class="agent-beliefs">${beliefs.map((b) => escapeHtml(String(b))).join(" · ")}</span>`
+        : "";
       return `<li class="agent-row${selected ? " agent-selected" : ""}" data-agent-id="${a.id}">` +
         `<span class="dot" style="background:${a.color}"></span>` +
         `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}</span>` +
-        `<span class="agent-status">${escapeHtml(humanizeAction(a))}${agentVitalsHtml(a)}</span></span></li>`;
+        `<span class="agent-status">${escapeHtml(humanizeAction(a))}${agentVitalsHtml(a)}</span>` +
+        beliefHtml +
+        `</span></li>`;
     }).join("");
   }
 

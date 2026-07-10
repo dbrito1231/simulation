@@ -19,7 +19,8 @@ uv run python simulation/server.py   # start server, then open http://127.0.0.1:
 - The server (not the browser) serves `index.html` and `sprites.js`, so open `http://127.0.0.1:5001` — do **not** open `index.html` as a file (the spec text predates this; trust the running setup).
 - Port is **5001** on purpose (macOS AirPlay squats on 5000).
 - Roster size override for experiments: `http://127.0.0.1:5001/?agents=12` (default 8; the builder and elder are always included).
-- There is **no test suite, linter, or build step.** `main.py` is an unused stub. Verify changes by running the server and watching the browser + the JSONL logs.
+- **PIANO / META experiments** (`PIANO_MODULES` / `META_SYSTEM` in `simulation/sim_engine.py`, both **off by default**): when enabled, the engine fans out staggered cognitive modules (`perception`/`desire` every think; `social` every 2nd; `reflection` every 3rd) inside the same worker-pool slot before the Cognitive Controller decision, and rotates a cheap persona refresh every `META_TICK_FRAMES`. Expect ~3–5× LLM calls per think turn. Only enable for short experiments with a **reduced roster** (`?agents=4-5` or `SIM_AGENTS=4`) and LM Studio context raised so `context ÷ parallel ≥ ~3400` still holds. Confirm via `moduleTotal` in `benchmarks.jsonl` / the viewer chip.
+- There is **no test suite, linter, or build step.** `main.py` is an unused stub. Verify changes by running the server and watching the browser + the JSONL logs. Sid-parity Phases 1–3 can be smoke-checked with `uv run python scripts/sid_parity_smoke.py` (no LM Studio required).
 
 ## Architecture
 

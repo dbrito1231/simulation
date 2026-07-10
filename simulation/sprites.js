@@ -1119,7 +1119,32 @@ function drawAgentSprite(ctx, agent, frameTick) {
     const oy = Math.round(agent.y - h + scale * 2);
     drawPixelGrid(ctx, ox + scale * 4, oy, acc, scale, flipX);
   }
+
+  // Sid-parity Phase 3: tint living agents by dominant belief id.
+  const beliefIds = agent.beliefIds || [];
+  if (beliefIds.length && !agent.deceased && !agent.incapacitated) {
+    const tint = BELIEF_TINTS[beliefIds[0]];
+    if (tint) {
+      const w = grid[0].length * scale;
+      const h = grid.length * scale;
+      const ox = Math.round(agent.x - w / 2);
+      const oy = Math.round(agent.y - h + scale * 2);
+      ctx.save();
+      ctx.globalAlpha = 0.28;
+      ctx.fillStyle = tint;
+      ctx.beginPath();
+      ctx.arc(agent.x, oy + 4, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
 }
+
+// Belief tint colors for competing memes (Sid-parity Phase 3).
+const BELIEF_TINTS = {
+  harvest_spirit: "#c9a227",
+  river_spirit: "#3a8fd4",
+};
 
 function drawZoneLabel(ctx, text, x, y) {
   ctx.font = "bold 14px monospace";
