@@ -2599,6 +2599,7 @@ def run_agent_decision(data):
                 "agent_name": agent_name,
                 "frame_tick": frame_tick,
                 "latency_ms": latency_ms,
+                "invention_only": bool(data.get("invention_only")),
                 "request": payload,
                 "response": response,
                 "http_status": http_status,
@@ -2841,6 +2842,68 @@ if engine.restore_state():
           f"memory {memory_store.size()})")
 else:
     print("[server] cold start (no valid state.json)")
+
+
+@app.route("/council-llm-log")
+def council_llm_log():
+    """Return slim LM Studio decision records for a council frame window."""
+    try:
+        start_frame = int(request.args.get("start_frame", 0))
+        end_frame = int(request.args.get("end_frame", 0))
+    except (TypeError, ValueError):
+        return jsonify({"entries": [], "error": "invalid frame range"}), 400
+    agents_raw = request.args.get("agents") or ""
+    agent_set = {a.strip() for a in agents_raw.split(",") if a.strip()}
+    path = session_logger.lm_studio_path
+    if not os.path.isfile(path):
+        return jsonify({"entries": []})
+    entries = []
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("type") != "lm_studio":
+                    continue
+                ft = rec.get("frame_tick")
+                if ft is None or ft < start_frame or ft > end_frame:
+                    continue
+                name = rec.get("agent_name")
+                if agent_set and name not in agent_set:
+                    continue
+                decision = rec.get("decision") or {}
+                slim_decision = {
+                    "action": decision.get("action"),
+                    "reasoning": decision.get("reasoning"),
+                    "message": decision.get("message"),
+                    "verdict": decision.get("verdict"),
+                    "blueprint_name": (decision.get("blueprint") or {}).get("name"),
+                }
+                invention_only = bool(rec.get("invention_only"))
+                if not invention_only:
+                    req = rec.get("request") or {}
+                    for msg in req.get("messages") or []:
+                        content = (msg.get("content") or "").lower()
+                        if "invention-only" in content or "propose a new structure blueprint" in content:
+                            invention_only = True
+                            break
+                entries.append({
+                    "agent_name": name,
+                    "frame_tick": ft,
+                    "latency_ms": rec.get("latency_ms"),
+                    "invention_only": invention_only,
+                    "decision": slim_decision,
+                    "error": rec.get("error"),
+                })
+    except OSError:
+        return jsonify({"entries": []})
+    entries.sort(key=lambda e: e.get("frame_tick") or 0)
+    return jsonify({"entries": entries})
 
 
 @app.route("/state")

@@ -1282,6 +1282,7 @@ class SimEngine:
             entry["outcome"] = outcome
         self.conversationLog.insert(0, entry)
         del self.conversationLog[100:]
+        self._maybe_append_council_communication(kind, frm, to, message, outcome)
         try:
             self.d["log_conversation"](frm, to, message, self.frameTick,
                                        kind=kind, outcome=outcome)
@@ -5603,6 +5604,38 @@ class SimEngine:
                 f"its slot is free for new inventions")
 
     # --- Phase D invention council (diegetic LLM-council; TECH_TREE_ENABLED) ---
+    def _council_active(self):
+        if not TECH_TREE_ENABLED:
+            return None
+        return self.civilization.get("councilActive")
+
+    def _council_participants(self, council):
+        names = set(council.get("proposers") or [])
+        elder = next((a for a in self.agents
+                      if a["role"] == "elder" and a.get("deathFrame") is None), None)
+        if elder:
+            names.add(elder["name"])
+        return names
+
+    def _append_council_transcript(self, entry):
+        council = self._council_active()
+        if not council:
+            return
+        council.setdefault("transcript", []).append(entry)
+
+    def _maybe_append_council_communication(self, kind, frm, to, message, outcome=None):
+        council = self._council_active()
+        if not council:
+            return
+        participants = self._council_participants(council)
+        if frm not in participants and to not in participants and to != "everyone":
+            return
+        entry = {"type": kind, "frame": self.frameTick,
+                 "from": frm, "to": to, "message": message}
+        if outcome:
+            entry["outcome"] = outcome
+        self._append_council_transcript(entry)
+
     def _record_council_proposal(self, agent, bp, decision):
         """A propose_blueprint that lands while a council is in session becomes
         part of the debate record, and appears in-world as a speech bubble
@@ -5622,6 +5655,17 @@ class SimEngine:
         self._push_activity(
             f"Council: {agent['name']} lays the {bp['name']} before the elder "
             f"({len(council['proposals'])} proposal(s) on the table)")
+        self._append_council_transcript({
+            "type": "proposal",
+            "frame": self.frameTick,
+            "proposer": agent["name"],
+            "blueprint_id": bp["id"],
+            "blueprint_name": bp["name"],
+            "function_summary": self._function_summary(bp.get("function")),
+            "needs": dict(bp.get("needs") or {}),
+            "message": decision.get("message") or agent.get("message"),
+            "reasoning": str(decision.get("reasoning") or "")[:500],
+        })
 
     def _clear_invention_retry_flags(self, council):
         """Clear the per-agent one-shot invention-retry guard (see
@@ -5694,14 +5738,36 @@ class SimEngine:
             self._push_activity(
                 f"Elder {elder['name']} chose the {approved_bp['name']} over "
                 f"{', '.join(loser_names)}: {first_reason}")
+        end_frame = self.frameTick
+        start_frame = (council or {}).get("frame")
+        transcript = list((council or {}).get("transcript") or [])
+        losers_part = f" over {', '.join(loser_names)}" if loser_names else ""
+        if not decision.get("message"):
+            elder["message"] = (f"The council has spoken: we build the "
+                                f"{approved_bp['name']}{losers_part}!")
+        elder["messageTimer"] = 480
+        transcript.append({
+            "type": "verdict",
+            "frame": end_frame,
+            "elder": elder["name"],
+            "approved_id": approved_bp["id"],
+            "approved_name": approved_bp["name"],
+            "rejections": dict(rejections),
+            "message": decision.get("message") or elder.get("message"),
+            "reasoning": str(decision.get("reasoning") or "")[:500],
+        })
         record = {
-            "frame": self.frameTick,
+            "frame": start_frame or end_frame,
+            "end_frame": end_frame,
+            "start_frame": start_frame,
             "ts": datetime.now(timezone.utc).isoformat(),
             "trigger": (council or {}).get("trigger") or "elder_review",
+            "proposers": list((council or {}).get("proposers") or []),
             "proposals": proposals,
             "verdict": {"approved_id": approved_bp["id"],
                         "reasons_per_candidate": rejections},
             "outcome": outcome,
+            "transcript": transcript,
         }
         log = c.setdefault("councilLog", [])
         log.insert(0, record)
@@ -5709,12 +5775,6 @@ class SimEngine:
         if council:
             self._clear_invention_retry_flags(council)
             c["councilActive"] = None
-        # Staged verdict: a longer-lived elder bubble naming winner and losers.
-        if not decision.get("message"):
-            losers_part = f" over {', '.join(loser_names)}" if loser_names else ""
-            elder["message"] = (f"The council has spoken: we build the "
-                                f"{approved_bp['name']}{losers_part}!")
-        elder["messageTimer"] = 480
 
     def _maybe_dissolve_council(self):
         """A council whose verdict never lands (elder offline, proposals all
@@ -5729,13 +5789,24 @@ class SimEngine:
             return
         if self.frameTick - council.get("frame", 0) < COUNCIL_TTL_FRAMES:
             return
+        end_frame = self.frameTick
+        transcript = list(council.get("transcript") or [])
+        transcript.append({
+            "type": "dissolve",
+            "frame": end_frame,
+            "message": "dissolved without a verdict",
+        })
         record = {
-            "frame": self.frameTick,
+            "frame": council.get("frame", end_frame),
+            "end_frame": end_frame,
+            "start_frame": council.get("frame"),
             "ts": datetime.now(timezone.utc).isoformat(),
             "trigger": council.get("trigger") or "invention_backstop",
+            "proposers": list(council.get("proposers") or []),
             "proposals": list(council.get("proposals") or []),
             "verdict": None,
             "outcome": "dissolved without a verdict",
+            "transcript": transcript,
         }
         log = c.setdefault("councilLog", [])
         log.insert(0, record)
@@ -5800,9 +5871,17 @@ class SimEngine:
                 "trigger": "invention_backstop",
                 "proposers": names,
                 "proposals": [],
+                "transcript": [],
             }
             elder["message"] = f"The council convenes! {', '.join(names)}, bring me your inventions."
             elder["messageTimer"] = 360
+            self._append_council_transcript({
+                "type": "convene",
+                "frame": self.frameTick,
+                "elder": elder["name"],
+                "proposers": names,
+                "message": elder["message"],
+            })
             self._push_communication(
                 "directive", elder["name"], "everyone",
                 f"Invention council: {', '.join(names)} will each draft a blueprint")

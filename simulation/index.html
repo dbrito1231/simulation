@@ -139,6 +139,11 @@
     flex-shrink: 0;
   }
   #lmStatus .hint { display: block; font-size: 10px; color: #999; margin-top: 4px; }
+  #sidebarBody {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+  }
   .panel-section {
     padding: 10px 16px;
     border-bottom: 1px solid #2a2a35;
@@ -170,7 +175,9 @@
   }
   #civPanel .civ-project-info { flex: 1; min-width: 0; }
   #civPanel #civResourceList,
-  #civPanel #civCustomList {
+  #civPanel #civCustomList,
+  #civPanel #civRuleList,
+  #civPanel #civRecipeList {
     margin-top: 3px;
     display: flex;
     flex-wrap: wrap;
@@ -201,13 +208,27 @@
     display: block;
     font-size: 11px;
   }
+  #civBench { margin-top: 3px; }
+  .bench-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 8px;
+    margin-bottom: 4px;
+  }
+  .bench-group:last-child { margin-bottom: 0; }
+  .bench-group-label {
+    flex: 0 0 100%;
+    font-size: 10px;
+    color: #777;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
   #agentList {
     list-style: none;
     margin: 0;
     padding: 0;
     font-size: 12px;
-    max-height: 280px;
-    overflow-y: auto;
   }
   #agentList li {
     display: flex;
@@ -321,6 +342,91 @@
   }
   #deadAgentsList li:last-child { border-bottom: 0; }
   #deadAgentsList .agent-dead-detail { color: #8a8a99; font-size: 11px; display: block; }
+  #councilTranscriptModal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0, 0, 0, 0.55);
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  #councilTranscriptModal.open { display: flex; }
+  #councilTranscriptDialog {
+    width: min(520px, 100%);
+    max-height: min(80vh, 640px);
+    background: #14141c;
+    border: 1px solid #2a2a35;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  }
+  #councilTranscriptDialog header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid #2a2a35;
+    gap: 8px;
+  }
+  #councilTranscriptDialog header h3 {
+    margin: 0;
+    font-size: 14px;
+    color: #fff;
+    flex: 1;
+    min-width: 0;
+  }
+  #councilTranscriptCloseBtn {
+    padding: 4px 10px;
+    font: 12px sans-serif;
+    background: #333;
+    color: #fff;
+    border: 1px solid #666;
+    border-radius: 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  #councilTranscriptBody {
+    padding: 12px 14px 14px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #bbb;
+  }
+  #councilTranscriptBody .ct-section {
+    margin-bottom: 14px;
+  }
+  #councilTranscriptBody .ct-section h4 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    color: #8a8a99;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  #councilTranscriptBody .ct-entry {
+    padding: 6px 0;
+    border-bottom: 1px solid #22222c;
+  }
+  #councilTranscriptBody .ct-entry:last-child { border-bottom: 0; }
+  #councilTranscriptBody .ct-who { color: #7ec8e3; font-weight: 600; }
+  #councilTranscriptBody .ct-action { color: #e3c87e; }
+  #councilTranscriptBody .ct-reasoning {
+    color: #9a9aa8;
+    font-style: italic;
+    margin-top: 2px;
+    display: block;
+  }
+  #councilTranscriptBody .ct-note {
+    color: #8a8a99;
+    font-size: 11px;
+    font-style: italic;
+    margin-bottom: 8px;
+  }
+  #councilTranscriptBody .council-card { cursor: default; margin-bottom: 6px; }
   #worldLoading {
     position: fixed;
     inset: 0;
@@ -400,6 +506,7 @@
     flex: 1 1 45%; min-width: 130px; box-sizing: border-box;
     background: #1b1b26; border: 1px solid #2a2a35; border-radius: 4px;
     padding: 6px 8px; font-size: 11px; line-height: 1.45; color: #bbb;
+    cursor: pointer;
   }
   .council-card .cc-name { color: #e3c87e; font-weight: 600; }
   .council-card .cc-by { color: #7ec8e3; }
@@ -413,7 +520,14 @@
     list-style: none; margin: 0; padding: 0;
     font-size: 11px; color: #8a8a99; max-height: 110px; overflow-y: auto;
   }
-  #councilHistory li { padding: 2px 0; border-bottom: 1px solid #22222c; }
+  #councilHistory li {
+    padding: 2px 0;
+    border-bottom: 1px solid #22222c;
+    cursor: pointer;
+  }
+  #councilHistory li:hover { color: #ccc; }
+  #councilMeta.council-clickable { cursor: pointer; }
+  #councilMeta.council-clickable:hover { color: #aaa; }
   @media (max-width: 900px) {
     #wrap { flex-direction: column; height: auto; padding: 0; }
     #world { height: auto; max-height: 70vh; width: 100%; }
@@ -463,6 +577,7 @@
       <span class="dot" id="statusDot"></span>
       <span id="statusLabel">LM Studio: offline</span>
     </div>
+    <div id="sidebarBody">
     <section class="panel-section" id="civPanel">
       <h2>Civilization</h2>
       <div class="civ-row"><span class="civ-label" id="civLevelLabel">Level:</span> <span class="civ-value" id="civLevel">1</span></div>
@@ -507,6 +622,7 @@
       </div>
       <ul id="agentList"></ul>
     </section>
+    </div>
   </aside>
 </div>
 <div id="deadAgentsModal" role="dialog" aria-labelledby="deadAgentsTitle" aria-modal="true">
@@ -516,6 +632,15 @@
       <button id="deadAgentsCloseBtn" type="button">Close</button>
     </header>
     <ul id="deadAgentsList"></ul>
+  </div>
+</div>
+<div id="councilTranscriptModal" role="dialog" aria-labelledby="councilTranscriptTitle" aria-modal="true">
+  <div id="councilTranscriptDialog">
+    <header>
+      <h3 id="councilTranscriptTitle">Council debate</h3>
+      <button id="councilTranscriptCloseBtn" type="button">Close</button>
+    </header>
+    <div id="councilTranscriptBody"></div>
   </div>
 </div>
 <div id="worldLoading">Loading world map…</div>
@@ -1189,41 +1314,55 @@ function renderBenchmarks() {
     return '<span class="civ-label">sampling…</span>';
   }
   const r2 = (n) => (n == null ? "0" : Math.round(n * 100) / 100);
-  const chips = [];
-  chips.push(`<span class="res-chip">spec. entropy <span class="civ-value">${r2(b.entropy)}</span></span>`);
+  const MEME_SHORT_NAMES = {
+    harvest_spirit: "Harvest",
+    river_spirit: "River",
+  };
+  const renderGroup = (label, chips) => {
+    if (!chips.length) return "";
+    return `<div class="bench-group"><span class="bench-group-label">${label}</span>${chips.join("")}</div>`;
+  };
+  const culture = [];
+  const governance = [];
+  const systems = [];
+  culture.push(`<span class="res-chip">entropy <span class="civ-value">${r2(b.entropy)}</span></span>`);
   if (MEMES_ENABLED) {
     const byMeme = b.adoptionByMeme || {};
     const memeIds = Object.keys(byMeme);
     if (memeIds.length) {
       memeIds.forEach((mid) => {
-        chips.push(`<span class="res-chip">${escapeHtml(mid)} <span class="civ-value">${byMeme[mid]}/${getLivingAgents().length}</span></span>`);
+        const short = MEME_SHORT_NAMES[mid] || mid;
+        culture.push(`<span class="res-chip">${escapeHtml(short)} <span class="civ-value">${byMeme[mid]}/${getLivingAgents().length}</span></span>`);
       });
     } else {
-      chips.push(`<span class="res-chip">meme adopt <span class="civ-value">${b.adoption}/${getLivingAgents().length}</span></span>`);
+      culture.push(`<span class="res-chip">meme adopt <span class="civ-value">${b.adoption}/${getLivingAgents().length}</span></span>`);
     }
   }
   if (b.adherence !== null && b.adherence !== undefined) {
-    chips.push(`<span class="res-chip">tax adherence <span class="civ-value">${Math.round(b.adherence * 100)}%</span></span>`);
+    governance.push(`<span class="res-chip">tax <span class="civ-value">${Math.round(b.adherence * 100)}%</span></span>`);
   }
   if (RULES_ENABLED) {
-    chips.push(`<span class="res-chip">rules <span class="civ-value">${b.rules}</span></span>`);
+    governance.push(`<span class="res-chip">rules <span class="civ-value">${b.rules}</span></span>`);
     if (b.ruleKindDiversity != null) {
-      chips.push(`<span class="res-chip">rule kinds <span class="civ-value">${b.ruleKindDiversity}</span></span>`);
+      governance.push(`<span class="res-chip">rule kinds <span class="civ-value">${b.ruleKindDiversity}</span></span>`);
     }
   }
   if (MEMORY_ENABLED) {
-    chips.push(`<span class="res-chip">memory <span class="civ-value">${b.memory}</span></span>`);
+    systems.push(`<span class="res-chip">memory <span class="civ-value">${b.memory}</span></span>`);
   }
   if (b.effectThroughput != null && b.effectThroughput !== undefined) {
-    chips.push(`<span class="res-chip">effects <span class="civ-value">${b.effectThroughput}</span></span>`);
+    systems.push(`<span class="res-chip">effects <span class="civ-value">${b.effectThroughput}</span></span>`);
   }
   if (b.ecologyScarcity != null && b.ecologyScarcity !== undefined) {
-    chips.push(`<span class="res-chip">ecology <span class="civ-value">${Math.round(b.ecologyScarcity * 100)}%</span></span>`);
+    systems.push(`<span class="res-chip">ecology <span class="civ-value">${Math.round(b.ecologyScarcity * 100)}%</span></span>`);
   }
   if (PIANO_MODULES || META_SYSTEM) {
-    chips.push(`<span class="res-chip">modules <span class="civ-value">${b.moduleTotal}</span></span>`);
+    systems.push(`<span class="res-chip">modules <span class="civ-value">${b.moduleTotal}</span></span>`);
   }
-  return chips.join("");
+  const html = renderGroup("Culture", culture)
+    + renderGroup("Governance", governance)
+    + renderGroup("Systems", systems);
+  return html || '<span class="civ-label">sampling…</span>';
 }
 
 // Draw one active project's structure sprite into the civ-panel mini-canvas
@@ -1289,6 +1428,16 @@ function agentVitalsHtml(a) {
   return ` <span class="agent-vitals">❤${Math.round(a.health)} 🍗${Math.round(a.hunger)}</span>`;
 }
 
+function universalBeliefs(living) {
+  if (!living.length) return new Set();
+  let shared = new Set(living[0].beliefs || []);
+  for (let i = 1; i < living.length; i++) {
+    const theirs = new Set(living[i].beliefs || []);
+    shared = new Set([...shared].filter((b) => theirs.has(b)));
+  }
+  return shared;
+}
+
 function renderDeceasedAgentRow(a) {
   const age = a.age != null ? `, age ${a.age}` : "";
   const burial = a.buried ? "buried in the Cemetery" : "awaiting burial";
@@ -1321,9 +1470,11 @@ function renderAgentPanel() {
   if (living.length === 0) {
     agentListEl.innerHTML = '<li><span class="civ-label">No living villagers</span></li>';
   } else {
+    const universal = universalBeliefs(living);
     agentListEl.innerHTML = living.map((a) => {
       const selected = selectedAgentId === a.id;
-      const beliefs = (a.beliefIds && a.beliefIds.length ? a.beliefIds : (a.beliefs || [])).slice(0, 2);
+      // Human-readable beliefs; hide memes everyone shares (reduces noise once saturated).
+      const beliefs = (a.beliefs || []).filter((b) => !universal.has(b)).slice(0, 2);
       const beliefHtml = beliefs.length
         ? `<span class="agent-beliefs">${beliefs.map((b) => escapeHtml(String(b))).join(" · ")}</span>`
         : "";
@@ -1468,7 +1619,8 @@ function renderSidebar() {
         const votes = r.votes || {};
         const yes = Object.values(votes).filter((v) => v === "yes").length;
         const no = Object.values(votes).filter((v) => v === "no").length;
-        return `<span class="res-chip"><span class="civ-label">vote ${escapeHtml(r.id)} (${yes}/${no})</span></span>`;
+        const label = r.name || r.id;
+        return `<span class="res-chip"><span class="civ-label">vote ${escapeHtml(label)} (${yes}/${no})</span></span>`;
       }).join("");
       civRuleListEl.innerHTML = enacted + pending;
     } else {
@@ -1551,13 +1703,116 @@ function councilCardHtml(p, verdict) {
   const reason = reasons[p.id];
   const needs = Object.entries(p.needs || {}).map(([k, v]) => `${k}×${v}`).join(", ");
   const cls = isWinner ? "council-card winner" : (verdict ? "council-card loser" : "council-card");
-  return `<div class="${cls}">` +
+  return `<div class="${cls}" role="button" tabindex="0">` +
     `<span class="cc-name">${escapeHtml(p.name || p.id)}</span> ` +
     `<span class="cc-by">by ${escapeHtml(p.proposer || "?")}</span>` +
     `<span class="cc-fn">${escapeHtml(p.function_summary || "")}${needs ? " · needs " + escapeHtml(needs) : ""}</span>` +
     (isWinner ? `<span class="cc-verdict">✔ approved</span>` : "") +
     (reason ? `<span class="cc-reason">✘ ${escapeHtml(reason)}</span>` : "") +
     `</div>`;
+}
+
+const councilTranscriptModal = document.getElementById("councilTranscriptModal");
+const councilTranscriptBodyEl = document.getElementById("councilTranscriptBody");
+const councilTranscriptTitleEl = document.getElementById("councilTranscriptTitle");
+const councilTranscriptCloseBtn = document.getElementById("councilTranscriptCloseBtn");
+
+function councilAgentNames(record) {
+  const names = [...(record.proposers || [])];
+  const elder = getAgents().find((a) => a.role === "elder" && !a.deceased);
+  if (elder && !names.includes(elder.name)) names.push(elder.name);
+  return names;
+}
+
+function renderTranscriptEntry(entry) {
+  const t = entry.type || "event";
+  if (t === "convene") {
+    return `<div class="ct-entry"><span class="ct-who">${escapeHtml(entry.elder || "Elder")}</span> convenes the council` +
+      (entry.proposers ? ` (${escapeHtml(entry.proposers.join(", "))})` : "") +
+      (entry.message ? `: <span class="ct-action">${escapeHtml(entry.message)}</span>` : "") +
+      `</div>`;
+  }
+  if (t === "proposal") {
+    const needs = Object.entries(entry.needs || {}).map(([k, v]) => `${k}×${v}`).join(", ");
+    return `<div class="ct-entry"><span class="ct-who">${escapeHtml(entry.proposer || "?")}</span> proposes ` +
+      `<span class="ct-action">${escapeHtml(entry.blueprint_name || entry.blueprint_id || "a blueprint")}</span>` +
+      (entry.function_summary ? ` — ${escapeHtml(entry.function_summary)}` : "") +
+      (needs ? ` · needs ${escapeHtml(needs)}` : "") +
+      (entry.message ? `<br><span class="ct-reasoning">"${escapeHtml(entry.message)}"</span>` : "") +
+      (entry.reasoning ? `<span class="ct-reasoning">${escapeHtml(entry.reasoning)}</span>` : "") +
+      `</div>`;
+  }
+  if (t === "verdict") {
+    const rej = entry.rejections || {};
+    const rejText = Object.entries(rej).map(([id, r]) => `${id}: ${r}`).join("; ");
+    return `<div class="ct-entry"><span class="ct-who">${escapeHtml(entry.elder || "Elder")}</span> verdict: ` +
+      `<span class="ct-action">${escapeHtml(entry.approved_name || entry.approved_id || "approved")}</span>` +
+      (rejText ? `<br><span class="ct-reasoning">Rejected — ${escapeHtml(rejText)}</span>` : "") +
+      (entry.message ? `<br><span class="ct-reasoning">"${escapeHtml(entry.message)}"</span>` : "") +
+      (entry.reasoning ? `<span class="ct-reasoning">${escapeHtml(entry.reasoning)}</span>` : "") +
+      `</div>`;
+  }
+  if (t === "dissolve") {
+    return `<div class="ct-entry"><span class="ct-action">${escapeHtml(entry.message || "Council dissolved")}</span></div>`;
+  }
+  const kind = t !== "speech" ? `[${escapeHtml(t)}] ` : "";
+  return `<div class="ct-entry">${kind}<span class="ct-who">${escapeHtml(entry.from || "?")}</span> → ` +
+    `<span class="ct-who">${escapeHtml(entry.to || "?")}</span>` +
+    (entry.message ? `: ${escapeHtml(entry.message)}` : "") +
+    `</div>`;
+}
+
+function renderLlmTranscriptEntry(entry) {
+  const d = entry.decision || {};
+  const action = d.action || entry.error || "unknown";
+  const bp = d.blueprint_name ? ` (${d.blueprint_name})` : "";
+  const inv = entry.invention_only ? " [invention]" : "";
+  return `<div class="ct-entry"><span class="ct-who">${escapeHtml(entry.agent_name || "?")}</span>` +
+    ` <span class="ct-action">${escapeHtml(action)}${escapeHtml(bp)}</span>${inv}` +
+    (d.reasoning ? `<span class="ct-reasoning">${escapeHtml(d.reasoning)}</span>` : "") +
+    (d.message ? `<span class="ct-reasoning">"${escapeHtml(d.message)}"</span>` : "") +
+    `</div>`;
+}
+
+async function openCouncilTranscript(idx) {
+  const record = (getCiv().councilLog || [])[idx];
+  if (!record) return;
+  councilTranscriptTitleEl.textContent =
+    `Council — ${formatCouncilTime(record.ts, record.frame)}: ${record.outcome || "debate"}`;
+  const proposals = record.proposals || [];
+  let html = "";
+  if (!record.transcript || !record.transcript.length) {
+    html += `<p class="ct-note">Full in-world transcript available for councils after this update. Showing proposals and verdict below.</p>`;
+  } else {
+    html += `<div class="ct-section"><h4>Debate</h4>` +
+      record.transcript.map(renderTranscriptEntry).join("") + `</div>`;
+  }
+  if (proposals.length) {
+    html += `<div class="ct-section"><h4>Proposals</h4>` +
+      proposals.map((p) => councilCardHtml(p, record.verdict)).join("") + `</div>`;
+  }
+  councilTranscriptBodyEl.innerHTML = html + `<div class="ct-section" id="councilLlmSection"><h4>LLM reasoning</h4><span class="civ-label">Loading…</span></div>`;
+  councilTranscriptModal.classList.add("open");
+
+  const start = record.start_frame != null ? record.start_frame : record.frame;
+  const end = record.end_frame != null ? record.end_frame : record.frame;
+  const agents = councilAgentNames(record).join(",");
+  const llmSection = document.getElementById("councilLlmSection");
+  try {
+    const resp = await fetch(`/council-llm-log?start_frame=${start}&end_frame=${end}&agents=${encodeURIComponent(agents)}`);
+    const data = await resp.json();
+    const entries = data.entries || [];
+    llmSection.innerHTML = `<h4>LLM reasoning</h4>` +
+      (entries.length
+        ? entries.map(renderLlmTranscriptEntry).join("")
+        : `<span class="civ-label">No LM Studio records for this debate window.</span>`);
+  } catch (_err) {
+    llmSection.innerHTML = `<h4>LLM reasoning</h4><span class="civ-label">Could not load LM records.</span>`;
+  }
+}
+
+function closeCouncilTranscript() {
+  councilTranscriptModal.classList.remove("open");
 }
 
 function renderCouncil(civ) {
@@ -1571,15 +1826,37 @@ function renderCouncil(civ) {
   councilMetaEl.textContent =
     `Latest debate (${formatCouncilTime(latest.ts, latest.frame)}, ` +
     `${latest.trigger || "?"}): ${latest.outcome || "in progress"}`;
+  councilMetaEl.classList.add("council-clickable");
+  councilMetaEl.dataset.councilIdx = "0";
   const proposals = latest.proposals || [];
   councilCardsEl.innerHTML = proposals.length
     ? proposals.map((p) => councilCardHtml(p, latest.verdict)).join("")
     : '<span class="civ-label">no proposals recorded</span>';
-  councilHistoryEl.innerHTML = log.slice(1, 8).map((r) => {
+  councilHistoryEl.innerHTML = log.slice(1, 8).map((r, i) => {
     const n = (r.proposals || []).length;
-    return `<li>${formatCouncilTime(r.ts, r.frame)} — ${n} proposal(s) — ${escapeHtml(r.outcome || "?")}</li>`;
+    return `<li data-council-idx="${i + 1}">${formatCouncilTime(r.ts, r.frame)} — ${n} proposal(s) — ${escapeHtml(r.outcome || "?")}</li>`;
   }).join("");
 }
+
+councilMetaEl.addEventListener("click", () => {
+  const idx = Number(councilMetaEl.dataset.councilIdx);
+  if (!Number.isNaN(idx)) openCouncilTranscript(idx);
+});
+councilCardsEl.addEventListener("click", () => openCouncilTranscript(0));
+councilHistoryEl.addEventListener("click", (event) => {
+  const li = event.target.closest("li[data-council-idx]");
+  if (!li) return;
+  openCouncilTranscript(Number(li.dataset.councilIdx));
+});
+councilTranscriptCloseBtn.addEventListener("click", closeCouncilTranscript);
+councilTranscriptModal.addEventListener("click", (event) => {
+  if (event.target === councilTranscriptModal) closeCouncilTranscript();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && councilTranscriptModal.classList.contains("open")) {
+    closeCouncilTranscript();
+  }
+});
 
 // =====================================================================
 // Minimap (Phase 6, optional polish) -- a small fixed-position canvas showing
