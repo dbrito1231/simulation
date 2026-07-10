@@ -1086,7 +1086,7 @@ class SimEngine:
                 "lastTaskedFrame": None, "lastContributedFrame": None,
                 "consecutiveIdleMoves": 0, "hunger": 80, "health": 100,
                 "incapacitated": False, "goal": None, "actionCounts": {},
-                "commitment": None, "inventionTurn": False,
+                "commitment": None, "inventionTurn": False, "inventionRetryUsed": False,
                 "lastBlueprintRejection": None, "lastGatherRejection": None,
                 "lastProjectRejection": None, "lastTerraformRejection": None,
                 "lastCraftRejection": None, "lastRepairRejection": None,
@@ -5307,6 +5307,18 @@ class SimEngine:
             f"Council: {agent['name']} lays the {bp['name']} before the elder "
             f"({len(council['proposals'])} proposal(s) on the table)")
 
+    def _clear_invention_retry_flags(self, council):
+        """Clear the per-agent one-shot invention-retry guard (see
+        _think_job's same-window retry) for every proposer once their
+        council session ends -- verdict or TTL dissolve -- so the flag
+        doesn't carry over and silently block a retry in a future council."""
+        if not council:
+            return
+        for name in council.get("proposers") or []:
+            member = self._find_agent(name)
+            if member:
+                member["inventionRetryUsed"] = False
+
     def _council_reject_pending(self, elder, target_id, reason):
         """Reject one pending blueprint as part of a comparative verdict:
         pops it, records the rejection (amnesty clock included), and routes
@@ -5379,6 +5391,7 @@ class SimEngine:
         log.insert(0, record)
         del log[COUNCIL_LOG_CAP:]
         if council:
+            self._clear_invention_retry_flags(council)
             c["councilActive"] = None
         # Staged verdict: a longer-lived elder bubble naming winner and losers.
         if not decision.get("message"):
@@ -5411,6 +5424,7 @@ class SimEngine:
         log = c.setdefault("councilLog", [])
         log.insert(0, record)
         del log[COUNCIL_LOG_CAP:]
+        self._clear_invention_retry_flags(council)
         c["councilActive"] = None
         self._push_activity("The invention council disperses without a verdict")
 
@@ -6712,7 +6726,8 @@ class SimEngine:
                             "reason": decision["terraform_rejection_note"],
                             "frame": self.frameTick,
                         }
-                    elif decision.get("rejection_note"):
+                    retried_invention = False
+                    if decision.get("rejection_note"):
                         # normalize_decision swapped an invalid propose_blueprint
                         # for a fallback; remember why so the next prompt can
                         # tell the model instead of failing silently again.
@@ -6728,8 +6743,30 @@ class SimEngine:
                             self._log_benchmark(
                                 "tier_gate_rejection", self._village_tech_tier(),
                                 {"kind": "blueprint_normalize", "agent": agent["name"]})
-                    self.apply_decision(agent, decision)
-                    agent["goal"] = self._goal_for_decision(decision)
+                        # Same-window retry (2026-07-09 council investigation):
+                        # a rejected propose_blueprint used to get swapped for
+                        # a gather/move fallback whose goal then ran deterministically
+                        # for a while, so a council member who failed validation
+                        # (59/171 on a duplicate taken id alone) never got another
+                        # invention-only turn before COUNCIL_TTL_FRAMES -- the
+                        # council just dissolved empty. If a council is live and
+                        # this agent is one of its proposers, give them ONE
+                        # immediate retry instead: re-flag inventionTurn (so the
+                        # next think is invention-only again, with this rejection
+                        # reason in the prompt's feedback) and rest this beat
+                        # rather than committing to the fallback's lasting goal.
+                        council = self.civilization.get("councilActive")
+                        if (payload.get("invention_only") and council
+                                and agent["name"] in (council.get("proposers") or [])
+                                and not agent.get("inventionRetryUsed")):
+                            agent["inventionRetryUsed"] = True
+                            agent["inventionTurn"] = True
+                            agent["goal"] = None
+                            self.apply_decision(agent, {"action": "rest"})
+                            retried_invention = True
+                    if not retried_invention:
+                        self.apply_decision(agent, decision)
+                        agent["goal"] = self._goal_for_decision(decision)
         except Exception:
             with self.lock:
                 agent = self._find_agent(agent_name)
@@ -7110,6 +7147,7 @@ class SimEngine:
                     a.setdefault("lastTradeRejection", None)
                     a.setdefault("lastHomelessNudgeFrame", None)
                     a.setdefault("lastBurialRejection", None)
+                    a.setdefault("inventionRetryUsed", False)
                     if LIFECYCLE_ENABLED:
                         # Phase F: every restored agent gets an age (staggered
                         # by roster position, same deterministic spread

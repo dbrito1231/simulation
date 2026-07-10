@@ -2278,16 +2278,16 @@ INVENTION_USER_PROMPT = """You are {agent_name}, the village {role}.
 
 THIS TURN YOU HAVE EXACTLY ONE JOB: invent a new structure for the village by responding with a propose_blueprint action. Ignore every other duty this turn (including task assignment if you are the elder). Do NOT pick any other action.
 
-What problem does this structure solve? Your blueprint must include a "function" block (produces/boosts/unlocks/houses) describing its mechanical effect — not just a name.
+What problem does this structure solve? Author these REQUIRED fields FIRST, in order: id, name, needs, and a "function" block (produces/boosts/unlocks/houses) describing its mechanical effect — not just a name. A blueprint without a function block is always rejected.
 
 Structure ids already taken (your blueprint id must NOT be any of these): {taken_ids}
 Blueprint ids previously rejected (do NOT reuse): {rejected_ids}
 Resources you may reference in "needs" and "function": {resource_ids}
-You may also introduce up to 3 brand-new resources via "new_resources", each with a gather_zone of farm, forest, village, market, beach, cave, or ocean (or null for crafted-only goods).
+{new_resources_line}
 {feedback}
-{tech_line}Design how it LOOKS too: include a "sprite" — 2-5 hex colors in "palette" plus a "grid" of 4-14 rows (4-14 chars each) using . for empty and a-e for palette colors. Make it recognizable at a glance.
+{tech_line}Only AFTER id/name/needs/function are complete, and only if you still have room, add an OPTIONAL "sprite" for how it looks: 2-5 hex colors in "palette" plus a "grid" of 4-14 rows (4-14 chars each) using . for empty and a-e for palette colors. If you are unsure you have room left, skip the sprite — a missing sprite is never rejected.
 {sprite_example}
-Respond with ONLY the JSON decision object: action "propose_blueprint" plus a complete "blueprint" (id, name, needs, required function block, optional new_resources, visual_style, sprite). Invent something with a NEW effect, not a renamed duplicate."""
+Respond with ONLY the JSON decision object: action "propose_blueprint" plus a "blueprint" with id, name, needs, and function REQUIRED; new_resources and sprite are OPTIONAL. Invent something with a NEW effect, not a renamed duplicate."""
 
 # Few-shot sprite references derived from Kenney's CC0 "Tiny Town" pack (see
 # simulation/sprite_examples/LICENSE.md). One example is shown per invention
@@ -2324,9 +2324,27 @@ def build_invention_prompt(data):
                        + [b.get("id") for b in data.get("pending_blueprints") or []
                           if isinstance(b, dict) and b.get("id")]))
     rejected = [str(r) for r in data.get("rejected_blueprints") or []]
-    resources = [r.get("id") for r in data.get("known_resources") or []
+    known_resources = data.get("known_resources") or []
+    resources = [r.get("id") for r in known_resources
                  if isinstance(r, dict) and r.get("id")]
     feedback = data.get("behavior_nudge") or ""
+    # 19 of 171 invention-turn rejections in the 2026-07-09 investigation were
+    # "too many custom resources" -- the model kept bundling new_resources
+    # into a blueprint even though the cap (MAX_CUSTOM_RESOURCES) was already
+    # hard, wasting the whole turn. known_resources already flags each entry
+    # "custom" (see sim_engine._build_think_payload), so tell the model up
+    # front instead of letting validate_blueprint reject it after the fact.
+    custom_resource_count = sum(1 for r in known_resources
+                                if isinstance(r, dict) and r.get("custom"))
+    if custom_resource_count >= MAX_CUSTOM_RESOURCES:
+        new_resources_line = (
+            "Every custom resource slot is full and all are still in use -- do NOT add "
+            '"new_resources" to your blueprint; invent using only the resources listed above.')
+    else:
+        new_resources_line = (
+            'You may also introduce up to 3 brand-new resources via "new_resources", each '
+            'with a gather_zone of farm, forest, village, market, beach, cave, or ocean '
+            '(or null for crafted-only goods).')
     # Phase D (TECH_TREE_ENABLED): one short tier line -- what the current
     # tech tier allows and how the next tier is reached. Empty (and therefore
     # byte-identical to the Phase C prompt) when the engine sends no tier.
@@ -2345,6 +2363,7 @@ def build_invention_prompt(data):
         taken_ids=", ".join(taken) or "none",
         rejected_ids=", ".join(rejected) or "none",
         resource_ids=", ".join(resources) or "none",
+        new_resources_line=new_resources_line,
         feedback=feedback,
         tech_line=tech_line,
         sprite_example=format_sprite_example(data.get("frame_tick")),
