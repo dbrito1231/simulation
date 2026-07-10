@@ -6325,9 +6325,11 @@ class SimEngine:
             agent["inventionTurn"] = False
         nudges = []
         rejection = agent.get("lastBlueprintRejection")
+        rejection_nudge = None
         if rejection and self.frameTick - rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-            nudges.append(f"NOTE: Your last blueprint proposal was rejected: {rejection['reason']}. "
-                          f"Propose a different blueprint that avoids that problem.")
+            rejection_nudge = (f"NOTE: Your last blueprint proposal was rejected: {rejection['reason']}. "
+                               f"Propose a different blueprint that avoids that problem.")
+            nudges.append(rejection_nudge)
         gather_rejection = agent.get("lastGatherRejection")
         if gather_rejection and self.frameTick - gather_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last gather failed: {gather_rejection['reason']}. "
@@ -6571,6 +6573,17 @@ class SimEngine:
                 and self.frameTick - agent.get("lastSpokeFrame", 0) > SOCIAL_SILENCE_FRAMES:
             nudges.append("NOTE: You haven't spoken with anyone in a while and someone is nearby. "
                           "Consider talk_to_nearby to coordinate plans, ask for help, or share what you know.")
+        if invention_turn:
+            # Invention turns get the dedicated INVENTION_SYSTEM_PROMPT/
+            # INVENTION_USER_PROMPT (build_invention_prompt in server.py),
+            # which already covers taken ids, resources, and tier rules --
+            # every other nudge here (talk/craft/heal/capacity/social/etc.)
+            # is a distraction from the one job this turn has. The 2026-07-09
+            # investigation found competing nudges in 100% of 171 invention
+            # turns, correlating with duplicate/off-target proposals. Keep
+            # only the blueprint-rejection reason (if any) so a retried
+            # invention turn still learns why its last attempt failed.
+            nudges = [rejection_nudge] if rejection_nudge else []
         behavior_nudge = " ".join(nudges)
 
         return {

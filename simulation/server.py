@@ -48,13 +48,17 @@ MODEL_SMART = "qwen/qwen3.5-9b"
 MODEL_FAST = "qwen/qwen3.5-9b"
 
 # Phase D model-experiment hook (plan Part 6 / copilot-audit C4): invention-only
-# calls may override the decision defaults (temperature 0.4 / max_tokens 512).
-# None = inherit the defaults, i.e. current behavior. The Part 6 replay
-# experiment flips these (e.g. temperature 0.8, max_tokens 768) -- adopt only
-# if the replay wins on blueprint validity + effect-vector novelty. The council
-# fan-out relies on this hook for proposal diversity once flipped.
-INVENTION_TEMPERATURE = None
-INVENTION_MAX_TOKENS = None
+# calls override the decision defaults (temperature 0.4 / max_tokens 512).
+# The 2026-07-09 council investigation found 32/171 invention completions
+# hitting the 512-token ceiling (finish_reason "length") mid-JSON -- the
+# dominant cause of "blueprint must be an object" and missing-function
+# rejections, since the model runs out of budget before closing the object.
+# 1024 gives room for needs + function + an optional sprite without changing
+# routine (non-invention) turns. Temperature 0.6 (up from the routine 0.4)
+# gives the council fan-out proposal diversity instead of 3 members
+# converging on the same idea.
+INVENTION_TEMPERATURE = 0.6
+INVENTION_MAX_TOKENS = 1024
 
 # Request timeout (seconds). Routine decisions measured median ~18s / p90 ~22s
 # in the 2026-07-07 session, well under the old flat 30s -- but invention-only
@@ -912,6 +916,58 @@ SYSTEM_PROMPT_SLIM = (
     SYSTEM_PROMPT[:_SYSTEM_PROMPT_EXAMPLES_IDX]
     if _SYSTEM_PROMPT_EXAMPLES_IDX != -1 else SYSTEM_PROMPT
 )
+
+# Dedicated, minimal system prompt for invention-only turns (see
+# build_invention_prompt / _maybe_invention_backstop). SYSTEM_PROMPT/SLIM carry
+# ~20 rules (talk, ecology, survival, crafting, sage priority, roles, voting,
+# market, population, knowledge) that are irrelevant to authoring a blueprint
+# and cost ~3k prompt tokens on every council member's turn for nothing --
+# the 2026-07-09 investigation found invention turns still shipped the full
+# rulebook while only ever emitting propose_blueprint. This keeps just the
+# output-format contract and the blueprint schema/example, cutting prompt
+# size by roughly 85% so the context-overflow retry actually has headroom to
+# matter and so INVENTION_MAX_TOKENS goes toward the blueprint, not rules the
+# model never needed to see.
+INVENTION_SYSTEM_PROMPT = """You are an autonomous agent in a pixel-art village simulation.
+This turn your ONLY job is to invent a new structure by responding with propose_blueprint. Do not use any other action.
+
+Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
+Do not use chain-of-thought or reasoning — output the JSON object immediately.
+The JSON must match this structure exactly:
+{
+  "action": "propose_blueprint",
+  "target": null,
+  "target_district": null,
+  "message": null,
+  "new_role": null,
+  "relationship_update": null,
+  "reasoning": "<one short sentence>",
+  "blueprint": <blueprint object, see schema below>
+}
+
+BLUEPRINT object schema:
+{
+  "id": "library",                       // ^[a-z][a-z0-9_]{1,24}$ -- must NOT match any id already taken (see below)
+  "name": "Library",                     // 1-32 chars
+  "needs": {"wood": 4, "paper": 2},      // 1-8 entries, each amount 1-5
+  "new_resources": [                      // 0-3 items; omit entirely if you aren't adding a resource
+    {"id": "paper", "name": "Paper", "gather_zone": "forest", "color": "#E8D5B7"}
+  ],
+  "visual_style": "house",               // house | farm_plot | workshop | wall | generic
+  "function": {                          // REQUIRED: at least one effect -- author this BEFORE sprite
+    "produces": [{"resource":"herbs","amount":2,"every_ticks":600,"scope":"district"}],
+    "boosts": [{"kind":"gather","resources":["food"],"every_n":4,"bonus":1,"max_bonus":2,"scope":"district"}],
+    "unlocks": [{"kind":"craft","station":"workshop"}],
+    "houses": {"every_n": 3}
+  },
+  "sprite": {                            // OPTIONAL pixel art -- only include once id/needs/function are done
+    "palette": ["#8B5A2B", "#D9C08C", "#4A6B3A"],   // 2-5 hex colors; a=1st, b=2nd, c=3rd...
+    "grid": ["...aaa...", "..aaaaa..", ".bbbbbbb.", ".bcbbbcb.", ".bbbbbbb."]
+  }                                       // 4-14 rows, each 4-14 chars of . (empty) or a-e
+}
+
+EXAMPLE (gatherer proposing a library + paper):
+{"action":"propose_blueprint","target":null,"target_district":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"The village needs knowledge storage.","blueprint":{"id":"library","name":"Library","needs":{"wood":4,"paper":2},"new_resources":[{"id":"paper","name":"Paper","gather_zone":"forest","color":"#E8D5B7"}],"visual_style":"house","function":{"produces":[{"resource":"paper","amount":1,"every_ticks":900,"scope":"village"}]}}}"""
 
 USER_PROMPT_TEMPLATE = """Your name: {agent_name}
 Your role: {role}
@@ -2405,14 +2461,20 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     slim=True builds the reduced-context retry payload (see
     run_agent_decision): SYSTEM_PROMPT_SLIM instead of SYSTEM_PROMPT (drops
     the worked EXAMPLE blocks) plus the slim user prompt. The rules and JSON
-    schema are kept either way so response_format still shapes the output."""
-    system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
+    schema are kept either way so response_format still shapes the output.
+    invention_only turns always use INVENTION_SYSTEM_PROMPT instead (the
+    ~20-rule village rulebook is irrelevant to authoring a blueprint and
+    slim/full made almost no size difference for these calls -- see its
+    docstring), regardless of the slim flag."""
+    if data.get("invention_only"):
+        system_content = INVENTION_SYSTEM_PROMPT
+    else:
+        system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
     if self_prompt:
         system_content += f"\n\nYOUR PERSONA (act in character): {self_prompt}"
     max_tokens, temperature = 512, 0.4
     if data.get("invention_only"):
-        # Phase D experiment hook: per-call overrides for invention-only turns
-        # (None = keep the defaults; the Part 6 replay flips them).
+        # Phase D experiment hook: per-call overrides for invention-only turns.
         if INVENTION_MAX_TOKENS is not None:
             max_tokens = INVENTION_MAX_TOKENS
         if INVENTION_TEMPERATURE is not None:
