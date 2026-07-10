@@ -1,5 +1,5 @@
 {
-  "lastReviewedCommit": "PENDING",
+  "lastReviewedCommit": "75c2843",
   "iteration": 13,
   "phase": "G",
   "note": "2026-07-10 morning (cycle 12.morning): Server UP at start (standing rule held). AUDIT of overnight soak 2026-07-10T00-25-10 (~13h40m real, frames 1.139M->2.064M) -- full non-provisional. Phase C soft-FAIL: ruins 11->154, avg cond 47.1->27.4, structs 185->313; all 15 houses non-working locked pop cap; births stuck at 16; living 16->5. HOT-FIXED: STRUCTURE_DECAY_PER_GOODS_TICK 0.1->0.05 + _maybe_repair_housing backstop (smoke 0->1 working house). Phase D PASS: FIRST organic comparative council verdict (Fish Market over stone_cutter); Wagon Era. Phase E soft regress: markets fell non-working, market_active false, gini 0.65->0.82, 1 barter trade. Phase F succession PASS (6 clean elections to Villager1011) but birth-stall cascade from housing; invent-leak 0; heal_agent ~50% of 3881 decisions. Cemetery PASS 23/23. Phase G PASS same watches (teach 0, meme 0, practice 7843, libraryKnowledge 10). 0 context_overflow; 105 intermittent LM-offline blips. Reviewed 2b98e4a (sid-parity; PIANO/META off). No next-prompt. Branch: feat/sid-parity-deepening. DIPLOMACY deferred. Evening: confirm housing recovery + birth reopen; market working; teach/meme/priced trade.",
