@@ -424,14 +424,16 @@ SHELTER_HUNGER_FLOOR = 20
 # at build and decays STRUCTURE_DECAY_PER_GOODS_TICK per goods tick (30s).
 # 2026-07-07 audit retune: 0.5/tick ruined a 416-structure town in one night
 # (~100 min per structure, needing ~4 successful repairs per 30s village-wide
-# to hold -- unpayable by 12 agents; 409/416 became ruins, throughput 0). Now
-# 0.1/tick: ~5.8h of neglect to disrepair (<30: stops producing/boosting/
-# housing), ~8.3h to ruin -- a structure survives an unattended overnight soak,
-# sprawl still decays across days, upkeep stays a real competing use of
-# gathering time. A ruin is rebuilt via repair_structure for half the original
-# needs (min 1 each) -- cheaper than new, the deterministic escape for total
-# collapse.
-STRUCTURE_DECAY_PER_GOODS_TICK = 0.1
+# to hold -- unpayable by 12 agents; 409/416 became ruins, throughput 0).
+# Mid retune 0.1/tick (~5.8h to disrepair, ~8.3h to ruin) still failed the
+# 2026-07-10 morning soak on a reset world: ruins 11→154 over ~13.5h real /
+# ~8.6h sim while agents were heal-spamming, all 15 houses non-working, births
+# stalled (pop 16→5). Now 0.05/tick: ~11.7h of neglect to disrepair, ~16.7h to
+# ruin -- survives one unattended overnight; sprawl still decays across days.
+# Paired with _maybe_repair_housing so zero working houses can't permanently
+# lock the population cap. A ruin is rebuilt via repair_structure for half the
+# original needs (min 1 each) -- cheaper than new, the deterministic escape.
+STRUCTURE_DECAY_PER_GOODS_TICK = 0.05
 STRUCTURE_DISREPAIR_THRESHOLD = 30
 REPAIR_CONDITION_RESTORE = 50
 # Disaster: rare random damage so decay isn't perfectly predictable. 0.005 per
@@ -4189,6 +4191,56 @@ class SimEngine:
                 continue
             self._bury_agent_at(cemetery, corpse, buried_by=None)
 
+    def _maybe_repair_housing(self):
+        """Deterministic escape when decay has zeroed working houses.
+        2026-07-10 morning soak: all 15 houses non-working → population cap
+        collapsed → 0 births overnight → living pop 16→5 while heal_agent ate
+        half of all LLM turns. repair_structure already funds from stockpile
+        and is reachable by the model, but under survival pressure it loses
+        the priority contest. One house rebuild per RULES_TICK gate is enough
+        to reopen housing headroom; the LLM still owns routine upkeep."""
+        if not GOODS_ENABLED:
+            return
+        if self._working_structure_count("house") > 0:
+            return
+        houses = [s for s in self.civilization["structures"] if s.get("type") == "house"]
+        if not houses:
+            return
+        em = self._sage_emergency() if SURVIVAL_ENABLED else None
+        responders = self._sage_responders(em) if em else set()
+        candidates = [
+            a for a in self.agents
+            if a.get("deathFrame") is None
+            and not a.get("incapacitated")
+            and a["name"] not in responders
+        ]
+        if not candidates:
+            return
+
+        def _can_fund(agent):
+            cost = self._repair_cost(min(houses, key=lambda s: s.get("condition", 100)))
+            stock = self.civilization["stockpile"]
+            for res, amt in cost.items():
+                held = agent["resources"].get(res, 0) + int(stock.get(res, 0))
+                if held < amt:
+                    return False
+            return True
+
+        funded = [a for a in candidates if _can_fund(a)]
+        pool = funded or candidates
+        house_did = houses[0].get("districtId")
+        if house_did and house_did in self.civilization["districts"]:
+            agent = min(pool, key=lambda a: self._distance_to_district(a, house_did))
+        else:
+            agent = pool[0]
+        agent["goal"] = None
+        summary = self._repair_structure(agent, "house")
+        if summary and "lacks" not in summary and "nothing" not in summary:
+            self._push_activity(
+                f"Housing emergency -- {summary} (no working houses left; "
+                f"population cap was locked)"
+            )
+
     # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
     def _start_succession_election(self):
         """One pending 'succession' rule per eligible candidate (adults,
@@ -7263,6 +7315,7 @@ class SimEngine:
                 self._tick_lifecycle()
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_feed_starving()
+                self._maybe_repair_housing()
                 self._maybe_abandon_stalled_projects()
                 self._maybe_relocate_stuck_project()
                 self._maybe_force_contribution()

@@ -1,15 +1,15 @@
 {
-  "lastReviewedCommit": "6afd5c9",
-  "iteration": 12,
+  "lastReviewedCommit": "PENDING",
+  "iteration": 13,
   "phase": "G",
-  "note": "2026-07-09 evening (cycle 11.evening): STANDING RULE VIOLATED at slot start -- SimServer already down (port 5001 free, no titled window); LM Studio was up. AUDIT of day soak 2026-07-09T07-41-19 (~12h36m real, frames 0->957k) plus tails 20-26-13 (~15m context_overflow storm) and 22-13-55 (~1h7m to frame 1.065M) -- full non-provisional on primary. World reset after cycle 10.morning (old 2.1M-frame/160-ruin world gone). Invent-leak CONFIRMED fixed: 15 births across day+evening, 0 scaffold/Input leaks. Phase F PASS: 12 old-age deaths, 3 clean successions (Aria/Colt/Villager1000), living 16. Cemetery PASS: 12/12 buried. Phase C soft-FAIL cleared on reset: day ruins 0 (avg cond 98.8->50.8, 145 structs, 40 repairs); evening ruins crept 0->9 (avg 51.3, 176 structs) -- watch, no retune. Market/Forge/Cemetery working; Libraries ruined after knowledge stored. Phase D partial: 0 comparative multi-proposal verdicts (55 convene/49 disperse day); post-ecd15f2/6963849 evening got 8 single-proposal approvals (lone path works); id-collision notes ~5% vs prior ~57%. Phase E PASS revived: market_active true, wealth_gini 0->0.713->0.687, homeowners 4; priced buy/sell still thin. Phase G PASS same watches (teach 0, meme 0, libraryKnowledge 10, practice 4248). Mid-tail context_overflow 107/107 then recovered. Soak-only (no next-prompt); reviewed ecd15f2+6963849. DIPLOMACY still deferred. Morning: ruins climb, first comparative council verdict, priced trade, teach/meme.",
+  "note": "2026-07-10 morning (cycle 12.morning): Server UP at start (standing rule held). AUDIT of overnight soak 2026-07-10T00-25-10 (~13h40m real, frames 1.139M->2.064M) -- full non-provisional. Phase C soft-FAIL: ruins 11->154, avg cond 47.1->27.4, structs 185->313; all 15 houses non-working locked pop cap; births stuck at 16; living 16->5. HOT-FIXED: STRUCTURE_DECAY_PER_GOODS_TICK 0.1->0.05 + _maybe_repair_housing backstop (smoke 0->1 working house). Phase D PASS: FIRST organic comparative council verdict (Fish Market over stone_cutter); Wagon Era. Phase E soft regress: markets fell non-working, market_active false, gini 0.65->0.82, 1 barter trade. Phase F succession PASS (6 clean elections to Villager1011) but birth-stall cascade from housing; invent-leak 0; heal_agent ~50% of 3881 decisions. Cemetery PASS 23/23. Phase G PASS same watches (teach 0, meme 0, practice 7843, libraryKnowledge 10). 0 context_overflow; 105 intermittent LM-offline blips. Reviewed 2b98e4a (sid-parity; PIANO/META off). No next-prompt. Branch: feat/sid-parity-deepening. DIPLOMACY deferred. Evening: confirm housing recovery + birth reopen; market working; teach/meme/priced trade.",
   "still_open": [
-    "Phase C: ruins reappeared 0->9 in evening tail on the reset world -- watch whether climb re-accelerates toward the old-world soft FAIL; Libraries currently ruined",
-    "Phase D: still 0 comparative multi-proposal elder judgments (chose X over Y); single-proposal approvals now work after ecd15f2/6963849",
-    "Phase E: market working again but organic priced buy/sell still thin -- watch volume",
+    "Phase C: confirm 0.05 decay + housing backstop stop ruin re-acceleration and restore working houses/births on next soak",
+    "Phase E: markets non-working at slot end -- watch return to market_active; priced buy/sell still thin",
     "Phase G: teaching (teach_count 0) and meme mutation (0) still organically unexercised",
-    "Mid-soak context_overflow storm in session 2026-07-09T20-26-13 (107/107) -- confirm LM Studio context/parallel sizing stays at 13000/2",
+    "Population cohort all ~70yo with only 5 living -- watch floor / recovery after housing hot-fix",
+    "Intermittent LM Studio offline blips (~3%/hour, 105 total) -- not a storm, but watch",
     "DIPLOMACY_ENABLED (second settlement + inter-village trade/treaties) -- still not started; last unscheduled batch item",
-    "Standing rule: server was found DOWN at evening slot start -- morning must leave SimServer running"
+    "Branch drift: cycle running on feat/sid-parity-deepening (skill text still names feat/server-authoritative-engine)"
   ]
 }

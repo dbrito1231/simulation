@@ -1637,6 +1637,44 @@ path). `DIPLOMACY_ENABLED` still not started. Morning: confirm ruins
 don't re-accelerate; watch for first comparative multi-proposal council
 verdict; priced trade volume; teach/meme still open.
 
+**Audit verdict (2026-07-10, morning slot -- cycle 12.morning, session
+`2026-07-10T00-25-10`, ~13h40m real / frames 1.139M→2.064M): Phase C
+soft-FAIL re-confirmed (ruins climb + housing lock); Phase D comparative
+council PASS (first organic "chose X over Y"); Phase F succession PASS but
+birth-stall cascade; cemetery PASS; hot-fixed decay + housing backstop.**
+Server was UP at slot start (standing rule held). Full non-provisional.
+**Phase C — soft FAIL (hot-fixed):** avg condition 47.1→27.4, ruins 11→154,
+structures 185→313; 77 repair successes could not keep up. All 15 houses
+non-working by slot end → population cap locked. Retuned
+`STRUCTURE_DECAY_PER_GOODS_TICK` 0.1→0.05 (~16.7h to ruin) and added
+`_maybe_repair_housing` (deterministic one-house rebuild when working
+houses == 0). Forced smoke: 0→1 working house on live save copy.
+**Phase D — PASS (comparative exercised):** first organic multi-proposal
+verdict at f=1.424M — Elder Villager1000 chose Fish Market over
+stone_cutter with a reason; Wagon Era reached; many single-proposal
+approvals continued.
+**Phase E — soft regress (decay cascade):** `market_active` true→false as
+both markets fell below working threshold; wealth_gini 0.65→0.82;
+homeowners 4→1; only 1 barter trade visible; priced buy/sell still thin.
+**Phase F — succession PASS / birth-stall FAIL (addressed by housing
+hot-fix):** 6 clean successions (Villager1001→…→Villager1011); 11
+old-age deaths this session / 23 total, all buried; births stuck at 16
+all soak (0 new) while living pop 16→5 (all ~70yo). Root cause = zero
+working houses, not succession. heal_agent was ~50% of 3,881 decisions
+(survival pressure). Invent-leak still 0.
+**Cemetery — PASS:** 23/23 buried; cemetery working.
+**Phase G — PASS, same watches:** practice 4664→7843, libraryKnowledge 10,
+teach 0, memeMutations 0, chronicle 20.
+**General:** 0 context_overflow (evening storm did not repeat); 105
+intermittent LM-offline blips (~3%/hour, not a full outage); 4
+bad_response. Reviewed `2b98e4a` (sid-parity deepening; PIANO/META still
+off). Soak-only otherwise (no `.cursor/next-prompt.md`). Branch note:
+work continues on `feat/sid-parity-deepening` (not
+`feat/server-authoritative-engine`). `DIPLOMACY_ENABLED` still deferred.
+Evening: confirm housing backstop + slower decay reopen births and stop
+ruin re-acceleration; watch market return to working; teach/meme/priced
+trade still open.
+
 This plan is the *first iteration* of the cycle the whole effort follows:
 
 1. **Run** a long session (8h+) with the new phase enabled.
