@@ -1593,6 +1593,50 @@ scaffold hot-fix; `DIPLOMACY_ENABLED` still not started. Evening: confirm
 0 invent-leak birth lines; watch whether ruins climb slows; council /
 market rebuild still open.
 
+**Audit verdict (2026-07-09, evening slot -- cycle 11.evening, primary
+session `2026-07-09T07-41-19` ~12h36m real / frames 0→957k, plus tails
+`20-26-13` ~15m and `22-13-55` ~1h7m to frame 1.065M): PASS on lifecycle
+invent-leak fix + cemetery + market revival; Phase C soft-FAIL cleared on
+the post-morning reset world; council still lacks comparative multi-proposal
+verdicts but single-proposal approvals now land.** **STANDING RULE
+VIOLATED at slot start:** port 5001 free, no titled `SimServer` window —
+server was already down (not stopped by this slot). LM Studio was up.
+World context: the ruin-heavy ~2.1M-frame world audited at cycle 10.morning
+is gone; day soak is a fresh run from frame 0 (same calendar day after
+morning restart / reset). Full non-provisional on the primary session.
+**Invent-leak hot-fix (cycle 10) — CONFIRMED:** 10 day births + 5 evening
+births, **0** instruction-echo / `Input:` leaks (clean "VillagerN is born
+to X and Y" lines only).
+**Phase F — PASS:** 12 old-age deaths, 3 clean successions (Aria → Colt →
+Villager1000), living 16 at slot end; births continuing in evening tail.
+**Cemetery — PASS:** 12/12 dead buried in Cemetery (`buried: true` on all).
+**Phase C — soft FAIL from old world cleared on reset; watch re-climb:**
+day soak avg condition 98.8→50.8 with **ruins 0** across 3→145 structures
+(40 repairs); evening tail avg 50.2→51.3 but ruins 0→9 as structures
+150→176 (9 repairs). Market/Forge/Cemetery working at slot end (conds
+~41–49); both Libraries ruined (cond 0) after knowledge already stored.
+Not retuning decay.
+**Phase D — partial:** Craftsman→Forge era transitions organic; council
+55 convene / 49 disperse on day soak, **0** "chose X over Y" comparative
+verdicts. Post-`ecd15f2`/`6963849` evening tail: 8 single-proposal
+approvals (Tool Shed, Healing Cottage, …) with `nprop=1` — lone-proposal
+path works; multi-proposal comparative judgment still unexercised.
+Id-collision rejection share down sharply (day ~17/308 notes vs cycle-10
+~57%).
+**Phase E — PASS (revived):** `market_active` true by mid-day; wealth_gini
+0→0.713→0.687; multiple markets built; homeowners 1→4. Organic priced
+buy/sell still thin — watch.
+**Phase G — PASS, same watches:** libraryKnowledge 10, practice 4248,
+teach 0, memeMutations 0; study-at-library fired after deaths.
+**General:** day 4,124 LM calls (~99% ok, 37 offline blips, 0 overflow);
+mid-tail `20-26-13` was a **context_overflow storm** (107/107 errors,
+~15m) — brief LM/context misconfig, recovered in `22-13-55` (614/614 ok).
+Soak-only (no `.cursor/next-prompt.md`); reviewed unreviewed commits
+`ecd15f2` + `6963849` (invention token budget + lone-proposal council
+path). `DIPLOMACY_ENABLED` still not started. Morning: confirm ruins
+don't re-accelerate; watch for first comparative multi-proposal council
+verdict; priced trade volume; teach/meme still open.
+
 This plan is the *first iteration* of the cycle the whole effort follows:
 
 1. **Run** a long session (8h+) with the new phase enabled.

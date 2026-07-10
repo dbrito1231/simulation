@@ -1,15 +1,15 @@
 ﻿{
-    "lastReviewedCommit":  "5271c1c",
-    "iteration":  11,
-    "phase":  "G",
-    "note":  "2026-07-09 morning (cycle 10.morning): Server found UP in titled SimServer window (standing rule intact). AUDIT of night soak 2026-07-09T01-20-28 (~5h46m real, frames 1.720M-\u003e2.104M) -- full non-provisional. Phase F PASS: living 22-\u003e54, births +36 (27-\u003e63), 4 old-age deaths, 3 clean successions, floor cleared -- cycle 8 birth-stall fix holding under load. Cemetery PASS under real play: 4 new deaths buried on cemetery_grounds grave_grid, 21/21 unique positions, ruined chapel still accepted burials. lm_complete: 0 Input:-prefixed garbage (cycle 9 fix held); 34/36 births used clean deterministic fallback; 2/36 still leaked \u0027Invent one brief personality trait...\u0027 (instruction echo ending in \u0027.\u0027 slipped past finish_reason==length). HOT-FIXED: expand _SCAFFOLD_MARKER_RE + belt-and-suspenders is_scaffold_text in _spawn_newborn. Phase C soft FAIL continues: avg cond 28.3-\u003e31.9 (up) but ruins 130-\u003e160 as structures 254-\u003e323; 71 repairs not enough; Market/Cemetery/Forge still ruined (tech_tier reads 1 while era label stays Wagon -- sticky-era watch). Phase D: council 29/28 disperse, 0 comparative verdicts; id-collision ~57% of rej notes. Phase E dormant (market ruined). Phase G PASS same watches (teach 0, meme 0, library 12, practice 9427). General: 1933 LM calls, 99.7% HTTP 200, 0 context_overflow. Soak-only aside from scaffold hot-fix; DIPLOMACY still deferred. Evening: confirm 0 invent-leak births; watch ruins climb; council/market still open.",
-    "still_open":  [
-                       "Phase C: ruins still climbing (130-\u003e160) despite avg condition edging up (28.3-\u003e31.9) and more repairers -- watch whether climb slows before another decay retune; Market/Cemetery/Forge remain ruined",
-                       "Phase D: invention council still 0 comparative elder judgments; id-collision still ~57% of rejection notes",
-                       "Phase E: sole market still ruined -- watch for rebuild + organic priced trade",
-                       "Phase G: teaching (teach_count 0) and meme mutation (0) still organically unexercised",
-                       "Sticky era label: era stays \u0027Wagon Era\u0027 while working tech_tier drops to 1 when Forge is ruined -- confirm whether intentional; not hot-fixed this slot",
-                       "lm_complete invent-leak hot-fix: confirm next slot that 0 birth announcements are instruction echoes",
-                       "DIPLOMACY_ENABLED (second settlement + inter-village trade/treaties) -- still not started; last unscheduled batch item"
-                   ]
+  "lastReviewedCommit": "6963849",
+  "iteration": 12,
+  "phase": "G",
+  "note": "2026-07-09 evening (cycle 11.evening): STANDING RULE VIOLATED at slot start — SimServer already down (port 5001 free, no titled window); LM Studio was up. AUDIT of day soak 2026-07-09T07-41-19 (~12h36m real, frames 0->957k) plus tails 20-26-13 (~15m context_overflow storm) and 22-13-55 (~1h7m to frame 1.065M) — full non-provisional on primary. World reset after cycle 10.morning (old 2.1M-frame/160-ruin world gone). Invent-leak CONFIRMED fixed: 15 births across day+evening, 0 scaffold/Input leaks. Phase F PASS: 12 old-age deaths, 3 clean successions (Aria/Colt/Villager1000), living 16. Cemetery PASS: 12/12 buried. Phase C soft-FAIL cleared on reset: day ruins 0 (avg cond 98.8->50.8, 145 structs, 40 repairs); evening ruins crept 0->9 (avg 51.3, 176 structs) — watch, no retune. Market/Forge/Cemetery working; Libraries ruined after knowledge stored. Phase D partial: 0 comparative multi-proposal verdicts (55 convene/49 disperse day); post-ecd15f2/6963849 evening got 8 single-proposal approvals (lone path works); id-collision notes ~5% vs prior ~57%. Phase E PASS revived: market_active true, wealth_gini 0->0.713->0.687, homeowners 4; priced buy/sell still thin. Phase G PASS same watches (teach 0, meme 0, libraryKnowledge 10, practice 4248). Mid-tail context_overflow 107/107 then recovered. Soak-only (no next-prompt); reviewed ecd15f2+6963849. DIPLOMACY still deferred. Morning: ruins climb, first comparative council verdict, priced trade, teach/meme.",
+  "still_open": [
+    "Phase C: ruins reappeared 0->9 in evening tail on the reset world — watch whether climb re-accelerates toward the old-world soft FAIL; Libraries currently ruined",
+    "Phase D: still 0 comparative multi-proposal elder judgments (chose X over Y); single-proposal approvals now work after ecd15f2/6963849",
+    "Phase E: market working again but organic priced buy/sell still thin — watch volume",
+    "Phase G: teaching (teach_count 0) and meme mutation (0) still organically unexercised",
+    "Mid-soak context_overflow storm in session 2026-07-09T20-26-13 (107/107) — confirm LM Studio context/parallel sizing stays at 13000/2",
+    "DIPLOMACY_ENABLED (second settlement + inter-village trade/treaties) -- still not started; last unscheduled batch item",
+    "Standing rule: server was found DOWN at evening slot start — morning must leave SimServer running"
+  ]
 }
