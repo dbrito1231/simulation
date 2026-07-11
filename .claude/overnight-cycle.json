@@ -1,5 +1,5 @@
 {
-  "lastReviewedCommit": "PENDING_CYCLE_COMMIT",
+  "lastReviewedCommit": "77caf70",
   "iteration": 14,
   "phase": "G",
   "note": "2026-07-10 evening (cycle 12.evening): Server UP at start (standing rule held). AUDIT of day soaks 14-10-01+17-18-46+19-57-48 (~frames 2.065M->2.549M). Phase C soft-PASS: avg cond 27.7->40.9, ruins 153->167 (not re-accelerating), housing backstop fired, 2/15 houses working. Phase D PASS: second comparative council (Fish Harbor over plank_workshop). Phase E soft-FAIL: market_active false all day, both seed markets ruined -- HOT-FIXED _maybe_repair_market (smoke 0->1). Phase F: births still 16 despite housing -- root cause ally-orphaning (survivors only ally dead agents) -- HOT-FIXED floor fallback to any two adults (smoke pair ok). Living 4 at floor ages ~102. Cemetery PASS 24/24 (chapel ruined). Phase G PASS same watches (teach 0, meme 0, practice 9248). 0 overflow. Reviewed e739424 + council transcript UX polish. No next-prompt. Branch: feat/sid-parity-deepening. Morning: confirm births + market_active overnight.",
