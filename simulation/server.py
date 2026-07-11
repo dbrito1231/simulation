@@ -72,6 +72,10 @@ INVENTION_MAX_TOKENS = 1024
 DEFAULT_TIMEOUT_S = 30
 INVENTION_TIMEOUT_S = 75
 
+COUNCIL_LLM_ACTIONS = frozenset({
+    "propose_blueprint", "approve_blueprint", "reject_blueprint",
+})
+
 
 def model_for_decision(data):
     if data.get("invention_only"):
@@ -2846,7 +2850,10 @@ else:
 
 @app.route("/council-llm-log")
 def council_llm_log():
-    """Return slim LM Studio decision records for a council frame window."""
+    """Return slim LM Studio decision records for a council frame window.
+
+    Only blueprint-pitch and verdict turns are included — routine gather/talk
+    decisions from the same agents during the council window are omitted."""
     try:
         start_frame = int(request.args.get("start_frame", 0))
         end_frame = int(request.args.get("end_frame", 0))
@@ -2877,13 +2884,7 @@ def council_llm_log():
                 if agent_set and name not in agent_set:
                     continue
                 decision = rec.get("decision") or {}
-                slim_decision = {
-                    "action": decision.get("action"),
-                    "reasoning": decision.get("reasoning"),
-                    "message": decision.get("message"),
-                    "verdict": decision.get("verdict"),
-                    "blueprint_name": (decision.get("blueprint") or {}).get("name"),
-                }
+                action = decision.get("action")
                 invention_only = bool(rec.get("invention_only"))
                 if not invention_only:
                     req = rec.get("request") or {}
@@ -2892,9 +2893,22 @@ def council_llm_log():
                         if "invention-only" in content or "propose a new structure blueprint" in content:
                             invention_only = True
                             break
+                is_verdict = isinstance(decision.get("verdict"), dict)
+                if (action not in COUNCIL_LLM_ACTIONS
+                        and not invention_only
+                        and not is_verdict):
+                    continue
+                slim_decision = {
+                    "action": action,
+                    "reasoning": decision.get("reasoning"),
+                    "message": decision.get("message"),
+                    "verdict": decision.get("verdict"),
+                    "blueprint_name": (decision.get("blueprint") or {}).get("name"),
+                }
                 entries.append({
                     "agent_name": name,
                     "frame_tick": ft,
+                    "ts": rec.get("ts"),
                     "latency_ms": rec.get("latency_ms"),
                     "invention_only": invention_only,
                     "decision": slim_decision,

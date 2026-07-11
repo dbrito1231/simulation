@@ -1,14 +1,14 @@
 {
-  "lastReviewedCommit": "75c2843",
-  "iteration": 13,
+  "lastReviewedCommit": "PENDING_CYCLE_COMMIT",
+  "iteration": 14,
   "phase": "G",
-  "note": "2026-07-10 morning (cycle 12.morning): Server UP at start (standing rule held). AUDIT of overnight soak 2026-07-10T00-25-10 (~13h40m real, frames 1.139M->2.064M) -- full non-provisional. Phase C soft-FAIL: ruins 11->154, avg cond 47.1->27.4, structs 185->313; all 15 houses non-working locked pop cap; births stuck at 16; living 16->5. HOT-FIXED: STRUCTURE_DECAY_PER_GOODS_TICK 0.1->0.05 + _maybe_repair_housing backstop (smoke 0->1 working house). Phase D PASS: FIRST organic comparative council verdict (Fish Market over stone_cutter); Wagon Era. Phase E soft regress: markets fell non-working, market_active false, gini 0.65->0.82, 1 barter trade. Phase F succession PASS (6 clean elections to Villager1011) but birth-stall cascade from housing; invent-leak 0; heal_agent ~50% of 3881 decisions. Cemetery PASS 23/23. Phase G PASS same watches (teach 0, meme 0, practice 7843, libraryKnowledge 10). 0 context_overflow; 105 intermittent LM-offline blips. Reviewed 2b98e4a (sid-parity; PIANO/META off). No next-prompt. Branch: feat/sid-parity-deepening. DIPLOMACY deferred. Evening: confirm housing recovery + birth reopen; market working; teach/meme/priced trade.",
+  "note": "2026-07-10 evening (cycle 12.evening): Server UP at start (standing rule held). AUDIT of day soaks 14-10-01+17-18-46+19-57-48 (~frames 2.065M->2.549M). Phase C soft-PASS: avg cond 27.7->40.9, ruins 153->167 (not re-accelerating), housing backstop fired, 2/15 houses working. Phase D PASS: second comparative council (Fish Harbor over plank_workshop). Phase E soft-FAIL: market_active false all day, both seed markets ruined -- HOT-FIXED _maybe_repair_market (smoke 0->1). Phase F: births still 16 despite housing -- root cause ally-orphaning (survivors only ally dead agents) -- HOT-FIXED floor fallback to any two adults (smoke pair ok). Living 4 at floor ages ~102. Cemetery PASS 24/24 (chapel ruined). Phase G PASS same watches (teach 0, meme 0, practice 9248). 0 overflow. Reviewed e739424 + council transcript UX polish. No next-prompt. Branch: feat/sid-parity-deepening. Morning: confirm births + market_active overnight.",
   "still_open": [
-    "Phase C: confirm 0.05 decay + housing backstop stop ruin re-acceleration and restore working houses/births on next soak",
-    "Phase E: markets non-working at slot end -- watch return to market_active; priced buy/sell still thin",
+    "Phase F/C: confirm floor birth-pair escape reopens births overnight; living pop climbs off POPULATION_FLOOR",
+    "Phase E: confirm market backstop keeps market_active; watch for organic priced buy/sell",
     "Phase G: teaching (teach_count 0) and meme mutation (0) still organically unexercised",
-    "Population cohort all ~70yo with only 5 living -- watch floor / recovery after housing hot-fix",
-    "Intermittent LM Studio offline blips (~3%/hour, 105 total) -- not a storm, but watch",
+    "Cemetery chapel at condition 0 -- burial still works; consider station backstop if burial ever gates on working",
+    "heal_agent still ~50% of decisions under 4-elder cohort -- should ease if births reopen",
     "DIPLOMACY_ENABLED (second settlement + inter-village trade/treaties) -- still not started; last unscheduled batch item",
     "Branch drift: cycle running on feat/sid-parity-deepening (skill text still names feat/server-authoritative-engine)"
   ]

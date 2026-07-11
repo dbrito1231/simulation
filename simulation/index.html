@@ -412,6 +412,13 @@
     border-bottom: 1px solid #22222c;
   }
   #councilTranscriptBody .ct-entry:last-child { border-bottom: 0; }
+  #councilTranscriptBody .ct-time {
+    display: block;
+    font-size: 10px;
+    color: #6e6e7a;
+    margin-bottom: 2px;
+    font-variant-numeric: tabular-nums;
+  }
   #councilTranscriptBody .ct-who { color: #7ec8e3; font-weight: 600; }
   #councilTranscriptBody .ct-action { color: #e3c87e; }
   #councilTranscriptBody .ct-reasoning {
@@ -1724,17 +1731,52 @@ function councilAgentNames(record) {
   return names;
 }
 
+const COUNCIL_TRANSCRIPT_TYPES = new Set(["convene", "proposal", "verdict", "dissolve"]);
+const SIM_FPS = 30;
+let councilModalRecord = null;
+
+function councilTranscriptEntries(record) {
+  return (record.transcript || []).filter((e) => COUNCIL_TRANSCRIPT_TYPES.has(e.type));
+}
+
+function councilEntryTimeLabel(entry, record) {
+  const frame = entry.frame != null ? entry.frame : entry.frame_tick;
+  if (entry.ts) {
+    const wall = formatCouncilTime(entry.ts, frame);
+    return frame != null ? `${wall} · frame ${frame}` : wall;
+  }
+  if (frame != null && record) {
+    const anchorTs = record.started_ts || record.ts;
+    const anchorFrame = record.start_frame != null ? record.start_frame : record.frame;
+    if (anchorTs && anchorFrame != null) {
+      const d0 = new Date(anchorTs).getTime();
+      if (!isNaN(d0)) {
+        const est = new Date(d0 + ((frame - anchorFrame) / SIM_FPS) * 1000);
+        return `${formatCouncilTime(est.toISOString(), frame)} · frame ${frame} (est.)`;
+      }
+    }
+    return `frame ${frame}`;
+  }
+  return "";
+}
+
+function councilTimePrefix(entry, record) {
+  const label = councilEntryTimeLabel(entry, record);
+  return label ? `<span class="ct-time">${escapeHtml(label)}</span>` : "";
+}
+
 function renderTranscriptEntry(entry) {
+  const time = councilTimePrefix(entry, councilModalRecord);
   const t = entry.type || "event";
   if (t === "convene") {
-    return `<div class="ct-entry"><span class="ct-who">${escapeHtml(entry.elder || "Elder")}</span> convenes the council` +
+    return `<div class="ct-entry">${time}<span class="ct-who">${escapeHtml(entry.elder || "Elder")}</span> convenes the council` +
       (entry.proposers ? ` (${escapeHtml(entry.proposers.join(", "))})` : "") +
       (entry.message ? `: <span class="ct-action">${escapeHtml(entry.message)}</span>` : "") +
       `</div>`;
   }
   if (t === "proposal") {
     const needs = Object.entries(entry.needs || {}).map(([k, v]) => `${k}×${v}`).join(", ");
-    return `<div class="ct-entry"><span class="ct-who">${escapeHtml(entry.proposer || "?")}</span> proposes ` +
+    return `<div class="ct-entry">${time}<span class="ct-who">${escapeHtml(entry.proposer || "?")}</span> proposes ` +
       `<span class="ct-action">${escapeHtml(entry.blueprint_name || entry.blueprint_id || "a blueprint")}</span>` +
       (entry.function_summary ? ` — ${escapeHtml(entry.function_summary)}` : "") +
       (needs ? ` · needs ${escapeHtml(needs)}` : "") +
@@ -1745,7 +1787,7 @@ function renderTranscriptEntry(entry) {
   if (t === "verdict") {
     const rej = entry.rejections || {};
     const rejText = Object.entries(rej).map(([id, r]) => `${id}: ${r}`).join("; ");
-    return `<div class="ct-entry"><span class="ct-who">${escapeHtml(entry.elder || "Elder")}</span> verdict: ` +
+    return `<div class="ct-entry">${time}<span class="ct-who">${escapeHtml(entry.elder || "Elder")}</span> verdict: ` +
       `<span class="ct-action">${escapeHtml(entry.approved_name || entry.approved_id || "approved")}</span>` +
       (rejText ? `<br><span class="ct-reasoning">Rejected — ${escapeHtml(rejText)}</span>` : "") +
       (entry.message ? `<br><span class="ct-reasoning">"${escapeHtml(entry.message)}"</span>` : "") +
@@ -1753,21 +1795,21 @@ function renderTranscriptEntry(entry) {
       `</div>`;
   }
   if (t === "dissolve") {
-    return `<div class="ct-entry"><span class="ct-action">${escapeHtml(entry.message || "Council dissolved")}</span></div>`;
+    return `<div class="ct-entry">${time}<span class="ct-action">${escapeHtml(entry.message || "Council dissolved")}</span></div>`;
   }
-  const kind = t !== "speech" ? `[${escapeHtml(t)}] ` : "";
-  return `<div class="ct-entry">${kind}<span class="ct-who">${escapeHtml(entry.from || "?")}</span> → ` +
-    `<span class="ct-who">${escapeHtml(entry.to || "?")}</span>` +
-    (entry.message ? `: ${escapeHtml(entry.message)}` : "") +
-    `</div>`;
+  return "";
 }
 
 function renderLlmTranscriptEntry(entry) {
+  const time = councilTimePrefix(
+    { ts: entry.ts, frame: entry.frame_tick },
+    councilModalRecord,
+  );
   const d = entry.decision || {};
   const action = d.action || entry.error || "unknown";
   const bp = d.blueprint_name ? ` (${d.blueprint_name})` : "";
   const inv = entry.invention_only ? " [invention]" : "";
-  return `<div class="ct-entry"><span class="ct-who">${escapeHtml(entry.agent_name || "?")}</span>` +
+  return `<div class="ct-entry">${time}<span class="ct-who">${escapeHtml(entry.agent_name || "?")}</span>` +
     ` <span class="ct-action">${escapeHtml(action)}${escapeHtml(bp)}</span>${inv}` +
     (d.reasoning ? `<span class="ct-reasoning">${escapeHtml(d.reasoning)}</span>` : "") +
     (d.message ? `<span class="ct-reasoning">"${escapeHtml(d.message)}"</span>` : "") +
@@ -1777,21 +1819,26 @@ function renderLlmTranscriptEntry(entry) {
 async function openCouncilTranscript(idx) {
   const record = (getCiv().councilLog || [])[idx];
   if (!record) return;
+  councilModalRecord = record;
   councilTranscriptTitleEl.textContent =
     `Council — ${formatCouncilTime(record.ts, record.frame)}: ${record.outcome || "debate"}`;
   const proposals = record.proposals || [];
-  let html = "";
-  if (!record.transcript || !record.transcript.length) {
-    html += `<p class="ct-note">Full in-world transcript available for councils after this update. Showing proposals and verdict below.</p>`;
-  } else {
-    html += `<div class="ct-section"><h4>Debate</h4>` +
-      record.transcript.map(renderTranscriptEntry).join("") + `</div>`;
+  const sequence = councilTranscriptEntries(record);
+  let html = `<p class="ct-note">Invention councils are blueprint pitches, not live debate chat. ` +
+    `Villagers each propose a structure design; the elder compares them and picks a winner.</p>`;
+  if (!sequence.length && (!record.transcript || !record.transcript.length)) {
+    html += `<p class="ct-note">Full timeline available for councils held after the transcript update.</p>`;
+  } else if (sequence.length) {
+    html += `<div class="ct-section"><h4>Council timeline</h4>` +
+      sequence.map(renderTranscriptEntry).join("") + `</div>`;
+  } else if (record.transcript && record.transcript.length) {
+    html += `<p class="ct-note">Older record — only structured events are shown (random village chat omitted).</p>`;
   }
   if (proposals.length) {
-    html += `<div class="ct-section"><h4>Proposals</h4>` +
+    html += `<div class="ct-section"><h4>Proposals compared</h4>` +
       proposals.map((p) => councilCardHtml(p, record.verdict)).join("") + `</div>`;
   }
-  councilTranscriptBodyEl.innerHTML = html + `<div class="ct-section" id="councilLlmSection"><h4>LLM reasoning</h4><span class="civ-label">Loading…</span></div>`;
+  councilTranscriptBodyEl.innerHTML = html + `<div class="ct-section" id="councilLlmSection"><h4>Blueprint pitches &amp; verdict (LLM)</h4><span class="civ-label">Loading…</span></div>`;
   councilTranscriptModal.classList.add("open");
 
   const start = record.start_frame != null ? record.start_frame : record.frame;
@@ -1802,17 +1849,18 @@ async function openCouncilTranscript(idx) {
     const resp = await fetch(`/council-llm-log?start_frame=${start}&end_frame=${end}&agents=${encodeURIComponent(agents)}`);
     const data = await resp.json();
     const entries = data.entries || [];
-    llmSection.innerHTML = `<h4>LLM reasoning</h4>` +
+    llmSection.innerHTML = `<h4>Blueprint pitches &amp; verdict (LLM)</h4>` +
       (entries.length
         ? entries.map(renderLlmTranscriptEntry).join("")
-        : `<span class="civ-label">No LM Studio records for this debate window.</span>`);
+        : `<span class="civ-label">No blueprint or verdict LLM turns logged for this council window.</span>`);
   } catch (_err) {
-    llmSection.innerHTML = `<h4>LLM reasoning</h4><span class="civ-label">Could not load LM records.</span>`;
+    llmSection.innerHTML = `<h4>Blueprint pitches &amp; verdict (LLM)</h4><span class="civ-label">Could not load LM records.</span>`;
   }
 }
 
 function closeCouncilTranscript() {
   councilTranscriptModal.classList.remove("open");
+  councilModalRecord = null;
 }
 
 function renderCouncil(civ) {

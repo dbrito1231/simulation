@@ -1675,6 +1675,45 @@ Evening: confirm housing backstop + slower decay reopen births and stop
 ruin re-acceleration; watch market return to working; teach/meme/priced
 trade still open.
 
+**Audit verdict (2026-07-10, evening slot -- cycle 12.evening, day soaks
+`2026-07-10T14-10-01` + `17-18-46` + `19-57-48` + brief `20-38-45`,
+~frames 2.065M→2.549M / ~4.5h sim after morning restart): Phase C decay
+stabilizing; housing backstop confirmed; births still stalled by ally
+orphaning (hot-fixed); market still dead (hot-fixed); Phase D comparative
+PASS again; cemetery burial PASS with ruined chapel.**
+Server was UP at slot start (standing rule held). Full non-provisional on
+combined day soaks.
+**Phase C — soft PASS (decay retune holding):** avg condition 27.7→40.9,
+ruins 153→167 (slow climb, not the overnight 11→154 re-acceleration),
+structures 313→447. Housing emergency fired once (`Villager1012` rebuilt
+a house from ruins); end state **2/15 working houses**. Sprawl continues
+but condition trend is recovering.
+**Phase D — PASS:** second organic comparative council — Elder Villager1011
+chose Fish Harbor over plank_workshop; Wagon Era held; single-proposal
+approvals continued (Ice House, Smokehouse, …).
+**Phase E — soft FAIL (hot-fixed):** `market_active` false the entire day;
+both seed markets at condition 0; Fish Markets (gold producers, no pricing
+unlock) thrived. Added `_maybe_repair_market` (mirrors housing backstop).
+Forced smoke: 0→1 working market, `market_active` true on state copy.
+**Phase F — birth-stall root cause shifted (hot-fixed):** living 5→4 at
+`POPULATION_FLOOR`, ages ~102–104, births still 16 (0 new). Housing + food
+were sufficient; all four survivors' ally links pointed only at the dead,
+so `_find_ally_birth_pair` returned None forever. Floor escape now falls
+back to any two living adults. Invent-leak still 0. heal_agent still
+~42–57% of decisions under tiny elderly roster.
+**Cemetery — PASS (chapel ruined):** 24/24 buried; cemetery structure
+itself at condition 0 (burial path does not require working condition).
+**Phase G — PASS, same watches:** practice 7843→9248, libraryKnowledge 10,
+teach 0, memeMutations 0, chronicle 20.
+**General:** 0 context_overflow; LM mostly healthy (14 bad_response across
+day, offline blips not storming). Reviewed `e739424` (sidebar/council UX)
++ uncommitted council-transcript filter/timestamps (viewer-only). No
+`.cursor/next-prompt.md` — soak-only aside from the two hot-fixes.
+`DIPLOMACY_ENABLED` still deferred. Morning: confirm births reopen and
+`market_active` stays true overnight; watch teach/meme/priced trade;
+cemetery chapel may need a station backstop later if burial ever gates on
+working condition.
+
 This plan is the *first iteration* of the cycle the whole effort follows:
 
 1. **Run** a long session (8h+) with the new phase enabled.

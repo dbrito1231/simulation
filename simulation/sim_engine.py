@@ -1282,7 +1282,6 @@ class SimEngine:
             entry["outcome"] = outcome
         self.conversationLog.insert(0, entry)
         del self.conversationLog[100:]
-        self._maybe_append_council_communication(kind, frm, to, message, outcome)
         try:
             self.d["log_conversation"](frm, to, message, self.frameTick,
                                        kind=kind, outcome=outcome)
@@ -4192,6 +4191,40 @@ class SimEngine:
                 continue
             self._bury_agent_at(cemetery, corpse, buried_by=None)
 
+    def _repair_backstop_agent(self, structures):
+        """Pick a living non-responder nearest the worst-condition target who
+        can fund the repair (stockpile + held). Shared by housing/market
+        emergency rebuilds."""
+        if not structures:
+            return None
+        em = self._sage_emergency() if SURVIVAL_ENABLED else None
+        responders = self._sage_responders(em) if em else set()
+        candidates = [
+            a for a in self.agents
+            if a.get("deathFrame") is None
+            and not a.get("incapacitated")
+            and a["name"] not in responders
+        ]
+        if not candidates:
+            return None
+        target = min(structures, key=lambda s: s.get("condition", 100))
+
+        def _can_fund(agent):
+            cost = self._repair_cost(target)
+            stock = self.civilization["stockpile"]
+            for res, amt in cost.items():
+                held = agent["resources"].get(res, 0) + int(stock.get(res, 0))
+                if held < amt:
+                    return False
+            return True
+
+        funded = [a for a in candidates if _can_fund(a)]
+        pool = funded or candidates
+        did = target.get("districtId")
+        if did and did in self.civilization["districts"]:
+            return min(pool, key=lambda a: self._distance_to_district(a, did))
+        return pool[0]
+
     def _maybe_repair_housing(self):
         """Deterministic escape when decay has zeroed working houses.
         2026-07-10 morning soak: all 15 houses non-working → population cap
@@ -4205,41 +4238,40 @@ class SimEngine:
         if self._working_structure_count("house") > 0:
             return
         houses = [s for s in self.civilization["structures"] if s.get("type") == "house"]
-        if not houses:
+        agent = self._repair_backstop_agent(houses)
+        if not agent:
             return
-        em = self._sage_emergency() if SURVIVAL_ENABLED else None
-        responders = self._sage_responders(em) if em else set()
-        candidates = [
-            a for a in self.agents
-            if a.get("deathFrame") is None
-            and not a.get("incapacitated")
-            and a["name"] not in responders
-        ]
-        if not candidates:
-            return
-
-        def _can_fund(agent):
-            cost = self._repair_cost(min(houses, key=lambda s: s.get("condition", 100)))
-            stock = self.civilization["stockpile"]
-            for res, amt in cost.items():
-                held = agent["resources"].get(res, 0) + int(stock.get(res, 0))
-                if held < amt:
-                    return False
-            return True
-
-        funded = [a for a in candidates if _can_fund(a)]
-        pool = funded or candidates
-        house_did = houses[0].get("districtId")
-        if house_did and house_did in self.civilization["districts"]:
-            agent = min(pool, key=lambda a: self._distance_to_district(a, house_did))
-        else:
-            agent = pool[0]
         agent["goal"] = None
         summary = self._repair_structure(agent, "house")
         if summary and "lacks" not in summary and "nothing" not in summary:
             self._push_activity(
                 f"Housing emergency -- {summary} (no working houses left; "
                 f"population cap was locked)"
+            )
+
+    def _maybe_repair_market(self):
+        """Deterministic escape when every pricing-unlock market is
+        non-working. 2026-07-10 day soak: both seed markets stayed at
+        condition 0 all afternoon (`market_active` false the whole session)
+        while Fish Markets (gold producers, no pricing unlock) thrived —
+        Phase E priced trade never reopened. One market rebuild per
+        RULES_TICK gate restores the gate; the LLM still owns routine upkeep."""
+        if not GOODS_ENABLED or not ECONOMY_ENABLED:
+            return
+        if self._market_active():
+            return
+        markets = [s for s in self.civilization["structures"] if s.get("type") == "market"]
+        if not markets:
+            return
+        agent = self._repair_backstop_agent(markets)
+        if not agent:
+            return
+        agent["goal"] = None
+        summary = self._repair_structure(agent, "market")
+        if summary and "lacks" not in summary and "nothing" not in summary:
+            self._push_activity(
+                f"Market emergency -- {summary} (no working market left; "
+                f"priced trade was locked)"
             )
 
     # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
@@ -4380,7 +4412,12 @@ class SimEngine:
         """Two adults, ally-linked (either direction). Prefer a shared district;
         when the living population is at the floor, any village-wide ally pair
         is enough — otherwise four survivors scattered across districts can
-        never recover even with housing and food to spare."""
+        never recover even with housing and food to spare.
+
+        Floor escape (2026-07-10 evening): if survivors' only ally links point
+        at the dead, `_ally_pair_from` stays empty forever and births never
+        reopen even with working houses + food. At the floor, any two living
+        adults are enough — the ally preference still wins when it can."""
         adults = self._eligible_adults()
         by_district = {}
         for a in adults:
@@ -4392,7 +4429,11 @@ class SimEngine:
             if pair:
                 return pair
         if len(adults) <= POPULATION_FLOOR:
-            return self._ally_pair_from(adults)
+            pair = self._ally_pair_from(adults)
+            if pair:
+                return pair
+            if len(adults) >= 2:
+                return adults[0], adults[1]
         return None
 
     def _maybe_birth(self):
@@ -5609,32 +5650,18 @@ class SimEngine:
             return None
         return self.civilization.get("councilActive")
 
-    def _council_participants(self, council):
-        names = set(council.get("proposers") or [])
-        elder = next((a for a in self.agents
-                      if a["role"] == "elder" and a.get("deathFrame") is None), None)
-        if elder:
-            names.add(elder["name"])
-        return names
+    def _stamp_council_event(self, entry):
+        """Attach frame + wall-clock time to a council transcript line."""
+        out = dict(entry)
+        out.setdefault("frame", self.frameTick)
+        out.setdefault("ts", datetime.now(timezone.utc).isoformat())
+        return out
 
     def _append_council_transcript(self, entry):
         council = self._council_active()
         if not council:
             return
-        council.setdefault("transcript", []).append(entry)
-
-    def _maybe_append_council_communication(self, kind, frm, to, message, outcome=None):
-        council = self._council_active()
-        if not council:
-            return
-        participants = self._council_participants(council)
-        if frm not in participants and to not in participants and to != "everyone":
-            return
-        entry = {"type": kind, "frame": self.frameTick,
-                 "from": frm, "to": to, "message": message}
-        if outcome:
-            entry["outcome"] = outcome
-        self._append_council_transcript(entry)
+        council.setdefault("transcript", []).append(self._stamp_council_event(entry))
 
     def _record_council_proposal(self, agent, bp, decision):
         """A propose_blueprint that lands while a council is in session becomes
@@ -5746,21 +5773,21 @@ class SimEngine:
             elder["message"] = (f"The council has spoken: we build the "
                                 f"{approved_bp['name']}{losers_part}!")
         elder["messageTimer"] = 480
-        transcript.append({
+        transcript.append(self._stamp_council_event({
             "type": "verdict",
-            "frame": end_frame,
             "elder": elder["name"],
             "approved_id": approved_bp["id"],
             "approved_name": approved_bp["name"],
             "rejections": dict(rejections),
             "message": decision.get("message") or elder.get("message"),
             "reasoning": str(decision.get("reasoning") or "")[:500],
-        })
+        }))
         record = {
             "frame": start_frame or end_frame,
             "end_frame": end_frame,
             "start_frame": start_frame,
             "ts": datetime.now(timezone.utc).isoformat(),
+            "started_ts": (council or {}).get("ts"),
             "trigger": (council or {}).get("trigger") or "elder_review",
             "proposers": list((council or {}).get("proposers") or []),
             "proposals": proposals,
@@ -5791,16 +5818,16 @@ class SimEngine:
             return
         end_frame = self.frameTick
         transcript = list(council.get("transcript") or [])
-        transcript.append({
+        transcript.append(self._stamp_council_event({
             "type": "dissolve",
-            "frame": end_frame,
             "message": "dissolved without a verdict",
-        })
+        }))
         record = {
             "frame": council.get("frame", end_frame),
             "end_frame": end_frame,
             "start_frame": council.get("frame"),
             "ts": datetime.now(timezone.utc).isoformat(),
+            "started_ts": council.get("ts"),
             "trigger": council.get("trigger") or "invention_backstop",
             "proposers": list(council.get("proposers") or []),
             "proposals": list(council.get("proposals") or []),
@@ -7395,6 +7422,7 @@ class SimEngine:
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_feed_starving()
                 self._maybe_repair_housing()
+                self._maybe_repair_market()
                 self._maybe_abandon_stalled_projects()
                 self._maybe_relocate_stuck_project()
                 self._maybe_force_contribution()
