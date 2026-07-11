@@ -479,7 +479,76 @@ function proceduralGridForStructure(structure) {
   return grid;
 }
 
+function structureRenderScale(structure) {
+  const s = Number(structure && structure.renderScale);
+  return Number.isFinite(s) && s > 0 ? s : 1;
+}
+
+function spriteSpecIsDegenerate(spec) {
+  if (!spec || !Array.isArray(spec.grid)) return true;
+  const counts = {};
+  let total = 0;
+  const colorsUsed = new Set();
+  for (const row of spec.grid) {
+    for (const ch of String(row)) {
+      if (ch === ".") continue;
+      counts[ch] = (counts[ch] || 0) + 1;
+      total++;
+      const idx = ch.charCodeAt(0) - 97;
+      if (spec.palette && spec.palette[idx]) colorsUsed.add(spec.palette[idx]);
+    }
+  }
+  if (total < 4) return true;
+  if (colorsUsed.size < 2) return true;
+  const maxCount = Math.max(...Object.values(counts));
+  return maxCount / total > 0.82;
+}
+
+function upscaleColorGrid(grid, factor) {
+  if (!grid || factor <= 1) return grid;
+  const out = [];
+  for (let y = 0; y < grid.length; y++) {
+    for (let sy = 0; sy < factor; sy++) {
+      const row = [];
+      for (let x = 0; x < grid[y].length; x++) {
+        const c = grid[y][x];
+        for (let sx = 0; sx < factor; sx++) row.push(c);
+      }
+      out.push(row);
+    }
+  }
+  return out;
+}
+
+function upgradedSeedGrid(structure) {
+  const base = STRUCTURE_GRIDS[structure.type];
+  if (!base) return null;
+  const tier = Math.max(1, Number(structure.visualTier) || 1);
+  const factor = Math.min(tier, 3);
+  return factor > 1 ? upscaleColorGrid(base, factor) : base;
+}
+
+function structureIsUpgraded(structure) {
+  const lvl = Number(structure && structure.level);
+  const vt = Number(structure && structure.visualTier);
+  return (Number.isFinite(lvl) && lvl > 1) || (Number.isFinite(vt) && vt > 1);
+}
+
 function getStructureGrid(structure) {
+  const upgraded = structureIsUpgraded(structure);
+  // Upgraded seed types store a bigger sprite on the instance — prefer it
+  // when it has real detail; flat gray LLM blobs fall back to upscaled seeds.
+  if (upgraded && structure.sprite && !spriteSpecIsDegenerate(structure.sprite)) {
+    const cacheId = structure.id != null
+      ? `${structure.type}:${structure.id}`
+      : structure.type;
+    const upgradedGrid = spriteGridFromSpec(cacheId, structure.sprite);
+    if (upgradedGrid) return upgradedGrid;
+  }
+  if (upgraded) {
+    const seedGrid = upgradedSeedGrid(structure);
+    if (seedGrid) return seedGrid;
+  }
   let grid = STRUCTURE_GRIDS[structure.type];
   if (grid) return grid;
   if (structure.sprite) {
@@ -497,9 +566,10 @@ function getStructureGrid(structure) {
 // shadow and name label regardless of grid size or fallback type.
 function getStructureRenderSize(structure) {
   const grid = getStructureGrid(structure);
-  if (!grid) return { width: 8 * STRUCTURE_SCALE, height: 8 * STRUCTURE_SCALE };
-  const width = grid.reduce((max, row) => Math.max(max, row.length), 0) * STRUCTURE_SCALE;
-  return { width, height: grid.length * STRUCTURE_SCALE };
+  const scale = STRUCTURE_SCALE * structureRenderScale(structure);
+  if (!grid) return { width: 8 * scale, height: 8 * scale };
+  const width = grid.reduce((max, row) => Math.max(max, row.length), 0) * scale;
+  return { width, height: grid.length * scale };
 }
 
 // Fallback for custom blueprints with no built-in sprite: a simple block
@@ -525,8 +595,9 @@ function drawGenericStructure(ctx, x, y, label, accentColor) {
 
 function drawStructure(ctx, structure) {
   const grid = getStructureGrid(structure);
+  const scale = STRUCTURE_SCALE * structureRenderScale(structure);
   if (grid) {
-    drawPixelGrid(ctx, structure.x, structure.y, grid, STRUCTURE_SCALE, false);
+    drawPixelGrid(ctx, structure.x, structure.y, grid, scale, false);
     return;
   }
   drawGenericStructure(
@@ -1245,6 +1316,51 @@ function drawStarterProps(ctx) {
   for (let fy = 900; fy < 2200; fy += 16) drawFence(ctx, 514, fy);
 }
 
+const TILE_CELL_PX = 40;
+const TERRAIN_COLORS = { soil: "#6D4C41", rock: "#757575", grove: "#2E7D32", water: "#1565C0" };
+const BLOCK_COLORS = { wall: "#5D4037", floor: "#8D6E63", door: "#A1887F", fence: "#795548" };
+
+function drawDistrictTerrain(ctx, district) {
+  const terrain = district.terrain;
+  if (!terrain || !Object.keys(terrain).length) return;
+  const b = district.bounds;
+  const cols = 8;
+  const rows = 8;
+  const cellW = Math.max(8, (b.x2 - b.x1) / cols);
+  const cellH = Math.max(8, (b.y2 - b.y1) / rows);
+  for (const [key, kind] of Object.entries(terrain)) {
+    const [gx, gy] = key.split(",").map(Number);
+    if (Number.isNaN(gx) || Number.isNaN(gy)) continue;
+    const color = TERRAIN_COLORS[kind] || TERRAIN_COLORS.soil;
+    ctx.fillStyle = color;
+    ctx.globalAlpha = 0.35;
+    ctx.fillRect(b.x1 + gx * cellW, b.y1 + gy * cellH, cellW, cellH);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawDistrictTiles(ctx, district) {
+  const tiles = district.tiles;
+  if (!tiles || !Object.keys(tiles).length) return;
+  const b = district.bounds;
+  const cols = 8;
+  const rows = 8;
+  const cellW = Math.max(8, (b.x2 - b.x1) / cols);
+  const cellH = Math.max(8, (b.y2 - b.y1) / rows);
+  for (const [key, block] of Object.entries(tiles)) {
+    const [gx, gy] = key.split(",").map(Number);
+    if (Number.isNaN(gx) || Number.isNaN(gy)) continue;
+    const x = b.x1 + gx * cellW;
+    const y = b.y1 + gy * cellH;
+    ctx.fillStyle = BLOCK_COLORS[block] || "#9E9E9E";
+    ctx.fillRect(x + 2, y + 2, cellW - 4, cellH - 4);
+    if (block === "door") {
+      ctx.fillStyle = "#3E2723";
+      ctx.fillRect(x + cellW * 0.35, y + cellH * 0.2, cellW * 0.3, cellH * 0.6);
+    }
+  }
+}
+
 function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges) {
   const foamOffset = Math.floor(frameTick / 8) % 16;
   const activeDistricts = (districts && districts.length) ? districts : STARTER_DISTRICTS_JS;
@@ -1271,6 +1387,8 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
     } else {
       fillRectWithTile(ctx, b.x1, b.y1, w, h, tile);
     }
+    drawDistrictTerrain(ctx, d);
+    drawDistrictTiles(ctx, d);
   }
 
   drawStarterProps(ctx);

@@ -559,6 +559,13 @@
       <h2>Activity</h2>
       <ul id="actList"></ul>
     </section>
+    <section class="panel-section" id="settlementsSection" style="display:none">
+      <details id="settlementsPanel" open>
+        <summary>Settlements</summary>
+        <div id="settlementsMeta"></div>
+        <ul id="settlementsList"></ul>
+      </details>
+    </section>
     <section class="panel-section" id="councilSection" style="display:none">
       <details id="councilPanel" open>
         <summary>Council</summary>
@@ -589,6 +596,7 @@
       <h2>Civilization</h2>
       <div class="civ-row"><span class="civ-label" id="civLevelLabel">Level:</span> <span class="civ-value" id="civLevel">1</span></div>
       <div class="civ-row"><span class="civ-label">Structures:</span> <span class="civ-value" id="civStructures">0</span></div>
+      <div class="civ-row" id="civUpgradesRow" style="display:none"><span class="civ-label">Upgradable:</span> <span class="civ-value" id="civUpgrades">0</span></div>
       <div class="civ-project-row">
         <canvas id="civProjectSprite" width="80" height="80"></canvas>
         <div class="civ-project-info">
@@ -796,6 +804,7 @@ let BENCHMARKS_ENABLED = true;
 let ECOLOGY_ENABLED = true;
 let PIANO_MODULES = false;
 let META_SYSTEM = false;
+let PATH1_ENABLED = false;
 
 // =====================================================================
 // World snapshot. Everything the renderer reads comes from here. Seeded with a
@@ -1138,7 +1147,9 @@ function drawStructureWithShadow(structure) {
 }
 
 function drawStructureLabel(ctx, structure, size) {
-  const label = structure.name || structure.type;
+  const base = structure.name || structure.type;
+  const lvl = structure.level != null ? structure.level : null;
+  const label = lvl != null && lvl > 0 ? `${base} Lv.${lvl}` : base;
   ctx.font = "9px monospace";
   ctx.textAlign = "center";
   const labelW = Math.ceil(ctx.measureText(label).width + 8);
@@ -1205,6 +1216,8 @@ const convListEl = document.getElementById("convList");
 const actListEl = document.getElementById("actList");
 const civLevelEl = document.getElementById("civLevel");
 const civStructuresEl = document.getElementById("civStructures");
+const civUpgradesRowEl = document.getElementById("civUpgradesRow");
+const civUpgradesEl = document.getElementById("civUpgrades");
 const civProjectCountEl = document.getElementById("civProjectCount");
 const civProjectsListEl = document.getElementById("civProjectsList");
 const civResourcesEl = document.getElementById("civResources");
@@ -1285,6 +1298,8 @@ const ACTION_LABELS = {
   build_structure: "building",
   start_project: "starting a project",
   repair_structure: "repairing",
+  upgrade_structure: "upgrading",
+  submit_structure_sprite: "designing sprite",
   talk_to_nearby: "talking",
   trade_resource: "trading",
   propose_blueprint: "proposing a blueprint",
@@ -1303,6 +1318,12 @@ const ACTION_LABELS = {
   approve_recipe: "reviewing a recipe",
   reject_recipe: "reviewing a recipe",
   bury_agent: "burying the dead",
+  place_block: "placing a block",
+  remove_block: "removing a block",
+  dig_terrain: "digging terrain",
+  plant_terrain: "planting terrain",
+  propose_treaty: "proposing a treaty",
+  vote_treaty: "voting on a treaty",
   rest: "resting"
 };
 function humanizeAction(agent) {
@@ -1424,6 +1445,11 @@ let lastSidebarKey = "";
 let lastAgentPanelKey = "";
 let lastLogKey = "";
 
+function agentAgeLabel(a) {
+  if (a.age == null || Number.isNaN(Number(a.age))) return "";
+  return ` · age ${Math.round(Number(a.age))}`;
+}
+
 function agentVitalsHtml(a) {
   if (!SURVIVAL_ENABLED) return "";
   if (a.deceased) {
@@ -1446,11 +1472,10 @@ function universalBeliefs(living) {
 }
 
 function renderDeceasedAgentRow(a) {
-  const age = a.age != null ? `, age ${a.age}` : "";
   const burial = a.buried ? "buried in the Cemetery" : "awaiting burial";
   return `<li><span class="dot" style="background:${a.color}"></span>` +
-    `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}</span>` +
-    `<span class="agent-dead-detail">dead · ${burial}${age}</span></span></li>`;
+    `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}${escapeHtml(agentAgeLabel(a))}</span>` +
+    `<span class="agent-dead-detail">dead · ${burial}</span></span></li>`;
 }
 
 function renderAgentPanel() {
@@ -1460,7 +1485,7 @@ function renderAgentPanel() {
   const living = getLivingAgents();
   const deceased = getDeceasedAgents();
   const panelKey = JSON.stringify({
-    living: living.map((a) => [a.id, a.name, a.role, a.incapacitated, a.health, a.hunger, a.lastAction, a.isThinking, a.beliefs || []]),
+    living: living.map((a) => [a.id, a.name, a.role, a.age, a.incapacitated, a.health, a.hunger, a.lastAction, a.isThinking, a.beliefs || []]),
     deceased: deceased.map((a) => [a.id, a.name, a.role, a.buried, a.age]),
   });
   if (panelKey === lastAgentPanelKey) return;
@@ -1487,7 +1512,7 @@ function renderAgentPanel() {
         : "";
       return `<li class="agent-row${selected ? " agent-selected" : ""}" data-agent-id="${a.id}">` +
         `<span class="dot" style="background:${a.color}"></span>` +
-        `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}</span>` +
+        `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}${escapeHtml(agentAgeLabel(a))}</span>` +
         `<span class="agent-status">${escapeHtml(humanizeAction(a))}${agentVitalsHtml(a)}</span>` +
         beliefHtml +
         `</span></li>`;
@@ -1562,6 +1587,14 @@ function renderSidebar() {
     civLevelEl.textContent = civ.level != null ? civ.level : 1;
   }
   civStructuresEl.textContent = (civ.structures || []).length;
+  const upgradable = (civ.structures || []).filter((s) => !s.isRuin && (s.level == null || s.level < 100));
+  if (STRUCTURE_UPGRADES_ENABLED && upgradable.length) {
+    civUpgradesRowEl.style.display = "";
+    const top = upgradable.slice().sort((a, b) => (b.level || 1) - (a.level || 1)).slice(0, 3);
+    civUpgradesEl.textContent = `${upgradable.length} (${top.map((s) => `${s.name || s.type} Lv.${s.level || 1}`).join(", ")})`;
+  } else {
+    civUpgradesRowEl.style.display = "none";
+  }
   renderProjectsList();
 
   // Phase D: "Council in session" banner, driven by civ.councilActive.
@@ -1642,6 +1675,7 @@ function renderSidebar() {
     }
 
     renderCouncil(civ);
+    renderSettlements(civ);
 
     const pendingBp = civ.pendingBlueprints || [];
     if (pendingBp.length > 0) {
@@ -1863,6 +1897,30 @@ function closeCouncilTranscript() {
   councilModalRecord = null;
 }
 
+const settlementsSectionEl = document.getElementById("settlementsSection");
+const settlementsMetaEl = document.getElementById("settlementsMeta");
+const settlementsListEl = document.getElementById("settlementsList");
+
+function renderSettlements(civ) {
+  if (!PATH1_ENABLED) {
+    settlementsSectionEl.style.display = "none";
+    return;
+  }
+  const settlements = civ.settlements || [];
+  if (!settlements.length) {
+    settlementsSectionEl.style.display = "none";
+    return;
+  }
+  settlementsSectionEl.style.display = "block";
+  const nightNote = civ.isNight ? " · night" : "";
+  settlementsMetaEl.textContent = `${settlements.length} settlement(s)${nightNote}`;
+  settlementsListEl.innerHTML = settlements.map((s) => {
+    const districts = (s.districts || []).length;
+    return `<li><span class="civ-value">${escapeHtml(s.name || s.id)}</span> ` +
+      `<span class="civ-label">(${districts} district${districts === 1 ? "" : "s"})</span></li>`;
+  }).join("");
+}
+
 function renderCouncil(civ) {
   const log = civ.councilLog || [];
   if (!log.length) {
@@ -1997,9 +2055,12 @@ window.addEventListener("mouseup", () => { minimapDragging = false; });
 const STATE_POLL_MS = 100;
 let polling = false;
 
+let STRUCTURE_UPGRADES_ENABLED = true;
+
 function applyFlags(flags) {
   if (!flags) return;
   if ("SURVIVAL_ENABLED" in flags) SURVIVAL_ENABLED = !!flags.SURVIVAL_ENABLED;
+  if ("STRUCTURE_UPGRADES_ENABLED" in flags) STRUCTURE_UPGRADES_ENABLED = !!flags.STRUCTURE_UPGRADES_ENABLED;
   if ("CRAFTING_ENABLED" in flags) CRAFTING_ENABLED = !!flags.CRAFTING_ENABLED;
   if ("MEMES_ENABLED" in flags) MEMES_ENABLED = !!flags.MEMES_ENABLED;
   if ("RULES_ENABLED" in flags) RULES_ENABLED = !!flags.RULES_ENABLED;
@@ -2008,6 +2069,7 @@ function applyFlags(flags) {
   if ("ECOLOGY_ENABLED" in flags) ECOLOGY_ENABLED = !!flags.ECOLOGY_ENABLED;
   if ("PIANO_MODULES" in flags) PIANO_MODULES = !!flags.PIANO_MODULES;
   if ("META_SYSTEM" in flags) META_SYSTEM = !!flags.META_SYSTEM;
+  if ("PATH1_ENABLED" in flags) PATH1_ENABLED = !!flags.PATH1_ENABLED;
 }
 
 async function pollState() {

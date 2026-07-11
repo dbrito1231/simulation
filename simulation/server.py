@@ -78,6 +78,8 @@ COUNCIL_LLM_ACTIONS = frozenset({
 
 
 def model_for_decision(data):
+    if data.get("sprite_design_only"):
+        return MODEL_SMART
     if data.get("invention_only"):
         return MODEL_SMART
     if (data.get("role") or "").lower() == "elder":
@@ -605,6 +607,8 @@ DECISION_ACTIONS = [
     # available_actions when the flag is off; normalize passes it through and
     # the engine surfaces reasons (lastRepairRejection).
     "repair_structure",
+    "upgrade_structure",
+    "submit_structure_sprite",
     "propose_blueprint", "approve_blueprint", "reject_blueprint",
     "assign_task", "change_role", "rest",
     # Survival (#2) and crafting (#4) actions. The client gates these by flag,
@@ -616,6 +620,9 @@ DECISION_ACTIONS = [
     # Cemetery/burial (permanent-death handling): the engine filters it from
     # available_actions when CEMETERY_ENABLED is off, same pattern as repair_structure.
     "bury_agent",
+    # Path 1: composable tiles, terrain mutation, diplomacy treaties.
+    "place_block", "remove_block", "dig_terrain", "plant_terrain",
+    "propose_treaty", "vote_treaty",
 ]
 
 # Loose shape only; validate_blueprint() stays the authority on blueprint detail.
@@ -665,6 +672,13 @@ DECISION_SCHEMA = {
             },
         },
         "vote": {"type": ["string", "null"]},
+        "sprite": {
+            "type": ["object", "null"],
+            "properties": {
+                "palette": {"type": "array"},
+                "grid": {"type": "array"},
+            },
+        },
     },
 }
 
@@ -721,7 +735,8 @@ MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to 
 1. NEVER use talk_to_nearby if Agents near you is "none".
 2. If talk_to_nearby, message and target MUST both be set to a nearby agent name.
 3. Prefer collect_resource, contribute_resources, start_project, build_structure,
-   or move_to_district over idle talk.
+   upgrade_structure (when an existing facility is below max level), or move_to_district
+   over idle talk.
 4. Talk is for coordination (request resources, announce builds)—not small talk.
 5. The village has SEVERAL buildable districts at once (see Known districts) and can have up to a few concurrent
    builds in progress. Any agent may start_project in a district that has no active build; set target_district to
@@ -747,6 +762,10 @@ BLUEPRINTS (inventing new structures):
 8b. If Invention status is REQUIRED, every seed structure type is already built —
    start_project on a seed type will be refused. Use propose_blueprint (or build/
    contribute to an Approved custom build) instead.
+8c. STRUCTURE UPGRADES: if a structure type already exists below level 100, you MUST
+   use upgrade_structure on that structure (target = its id) instead of start_project
+   for the same type. Only build a second instance once every existing one is level 100.
+   Upgraded structures grow bigger visually and work better.
 9. Only propose resources that have a gather_zone (one of: farm, forest, village,
    market, beach, cave, ocean) so villagers can collect them, or set gather_zone to
    null for trade-only resources (these cannot be collected).
@@ -777,6 +796,11 @@ SAGE PRIORITY (absolute):
    (if the healer has also collapsed, revive her first — she is the key to saving
    Sage — then heal Sage). Other agents continue their own work; only those
    responders abandon their task for the elder.
+
+PATH 1 (when enabled):
+P1. Some resources need tools: stone needs wooden_pick, copper_ore needs stone_pick, iron_ore needs iron_pick (craft picks at workshop; smelt ores at kiln via craft_item after building kiln).
+P2. place_block/remove_block build 2D tiles in your district (wall/floor/door/fence). dig_terrain/plant_terrain mutate local terrain (dig yields stone; plant costs wood).
+P3. propose_treaty/vote_treaty govern inter-settlement trade pacts (reuse rule object with kind treaty).
 
 EMERGENT ROLES:
 16. Your role is not fixed. If "Incoming messages" or a NOTE says the village
@@ -992,7 +1016,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-{season_line}{prices_line}{chronicle_line}{level_line}Structures built: {structures_built}
+{season_line}{prices_line}{chronicle_line}{path1_lines}{level_line}Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
@@ -1416,11 +1440,42 @@ HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 SPRITE_CELL_RE = re.compile(r"^[.a-e]+$")
 
 
-def validate_sprite_block(sprite):
+def sprite_spec_is_degenerate(sprite):
+    """Reject flat single-color blobs (common LLM failure on upgrade turns)."""
+    if not isinstance(sprite, dict):
+        return True
+    grid = sprite.get("grid")
+    palette = sprite.get("palette") or []
+    if not isinstance(grid, list):
+        return True
+    counts = {}
+    total = 0
+    colors_used = set()
+    for row in grid:
+        for ch in str(row):
+            if ch == ".":
+                continue
+            counts[ch] = counts.get(ch, 0) + 1
+            total += 1
+            idx = ord(ch) - ord("a")
+            if 0 <= idx < len(palette):
+                colors_used.add(palette[idx].lower())
+    if total < 4:
+        return True
+    if len(colors_used) < 2:
+        return True
+    if max(counts.values()) / total > 0.82:
+        return True
+    return False
+
+
+def validate_sprite_block(sprite, min_rows=0, min_cols=0):
     """Validate an optional LLM-authored pixel sprite. Returns (ok, reason).
     Kept deliberately permissive on artistry, strict on shape: the viewer
     renders whatever passes, and a missing sprite falls back to a
-    deterministic procedural one (never a blocker for invention)."""
+    deterministic procedural one (never a blocker for invention).
+    When min_rows/min_cols are set (sprite upgrade turns), the grid must be
+    strictly larger in BOTH dimensions than the procedural fallback."""
     if not isinstance(sprite, dict):
         return False, "sprite must be an object with palette and grid"
     palette = sprite.get("palette")
@@ -1432,14 +1487,24 @@ def validate_sprite_block(sprite):
     grid = sprite.get("grid")
     if not isinstance(grid, list) or not (4 <= len(grid) <= 14):
         return False, "sprite grid must be 4-14 rows"
+    max_col = 0
     for row in grid:
         if not isinstance(row, str) or not (4 <= len(row) <= 14):
             return False, "each sprite row must be a string of 4-14 cells"
         if not SPRITE_CELL_RE.match(row):
             return False, "sprite rows may only contain . (empty) and letters a-e"
+        max_col = max(max_col, len(row))
         for ch in row:
             if ch != "." and (ord(ch) - ord("a")) >= len(palette):
                 return False, f"sprite cell '{ch}' has no palette entry"
+    if min_rows and len(grid) <= min_rows:
+        return False, (f"sprite must be taller than the current tier "
+                       f"(need >{min_rows} rows, got {len(grid)})")
+    if min_cols and max_col <= min_cols:
+        return False, (f"sprite must be wider than the current tier "
+                       f"(need >{min_cols} columns, got {max_col})")
+    if sprite_spec_is_degenerate(sprite):
+        return False, "sprite is too flat (use varied colors/pattern, not one solid fill)"
     return True, None
 
 
@@ -1684,6 +1749,12 @@ def role_fallback_action(role, agent_data):
                     "reasoning": "Assigning work to an idle villager."}
 
     invention_required = str(agent_data.get("invention_status") or "").startswith("REQUIRED")
+    upgradeable = agent_data.get("upgradeable_structures") or []
+    if upgradeable and not has_project:
+        target_u = upgradeable[0]
+        return {"action": "upgrade_structure", "target": str(target_u.get("id")), "message": None,
+                "new_role": None, "relationship_update": None,
+                "reasoning": f"Upgrading {target_u.get('name')} before building duplicates."}
     if not has_project:
         if invention_required:
             # Mirrors sim_engine._invention_required's gate on _start_project_for:
@@ -1787,6 +1858,46 @@ def normalize_decision(decision, agent_data):
         fallback["reasoning"] = (fallback.get("reasoning", "") + f" (invalid terraform: {reason})").strip()
         fallback["terraform_rejection_note"] = reason
         return fallback
+
+    if action == "upgrade_structure":
+        upgradeable = agent_data.get("upgradeable_structures") or []
+        if not upgradeable:
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (fallback.get("reasoning", "") + " (no upgradeable structure)").strip()
+            return fallback
+        target = decision.get("target")
+        if target:
+            t = str(target).strip().lower()
+            ids = {str(u.get("id")) for u in upgradeable}
+            types = {(u.get("type") or "").lower() for u in upgradeable}
+            names = {(u.get("name") or "").lower() for u in upgradeable}
+            if t not in ids and t not in types and t not in names:
+                fallback = role_fallback_action(agent_data.get("role"), agent_data)
+                fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid upgrade target)").strip()
+                fallback["upgrade_rejection_note"] = "target is not an upgradeable structure"
+                return fallback
+        decision.pop("blueprint", None)
+        return decision
+
+    if action == "submit_structure_sprite":
+        if not agent_data.get("sprite_design_only"):
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (fallback.get("reasoning", "") + " (not a sprite design turn)").strip()
+            return fallback
+        ctx = agent_data.get("sprite_design_context") or {}
+        sprite = decision.get("sprite")
+        ok, reason = validate_sprite_block(
+            sprite,
+            min_rows=int(ctx.get("minRows") or 0),
+            min_cols=int(ctx.get("minCols") or 0),
+        )
+        if not ok:
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (fallback.get("reasoning", "") + f" (invalid sprite: {reason})").strip()
+            fallback["sprite_rejection_note"] = reason
+            return fallback
+        decision.pop("blueprint", None)
+        return decision
 
     if action == "propose_blueprint":
         known_ids = agent_data.get("known_resource_ids") or []
@@ -2191,6 +2302,9 @@ def build_agent_data(data, nearby_formatted, known_resources, pending_blueprints
         a for a in data.get("idle_agents") or [] if isinstance(a, dict) and a.get("name")
     ]
     agent_data["known_effect_vectors"] = list(data.get("known_effect_vectors") or [])
+    agent_data["upgradeable_structures"] = list(data.get("upgradeable_structures") or [])
+    agent_data["sprite_design_only"] = bool(data.get("sprite_design_only"))
+    agent_data["sprite_design_context"] = data.get("sprite_design_context")
     return agent_data
 
 
@@ -2341,6 +2455,31 @@ Resources you may reference in "needs" and "function": {resource_ids}
 {sprite_example}
 Respond with ONLY the JSON decision object: action "propose_blueprint" plus a "blueprint" with id, name, needs, and function REQUIRED; new_resources and sprite are OPTIONAL. Invent something with a NEW effect, not a renamed duplicate."""
 
+SPRITE_UPGRADE_SYSTEM_PROMPT = """You are an autonomous agent in a pixel-art village simulation.
+
+THIS TURN YOU HAVE EXACTLY ONE JOB: design a LARGER pixel-art sprite for a structure that was just upgraded.
+
+Respond with ONLY a JSON decision:
+{"action":"submit_structure_sprite","target":null,"sprite":{"palette":["#RRGGBB",...],"grid":[".aab...",...]},"reasoning":"..."}
+
+RULES:
+1. action MUST be submit_structure_sprite.
+2. sprite.palette: 2-5 hex colors (#RRGGBB).
+3. sprite.grid: 4-14 rows, each row 4-14 characters, only . (empty) and letters a-e for palette indices.
+4. The new grid MUST be STRICTLY BIGGER than the minimum dimensions given (more rows AND more columns).
+5. Keep the same building identity (roof, walls, door) but expand detail — it is a grown-up version of the same structure.
+6. Do NOT invent random unrelated shapes; evolve the existing building bigger."""
+
+SPRITE_UPGRADE_USER_PROMPT = """You are {agent_name}, the village {role}.
+
+Structure to redraw: {structure_name} (type {structure_type}, visual tier {tier})
+Minimum size to beat: strictly more than {min_rows} rows AND strictly more than {min_cols} columns.
+
+{feedback}
+{sprite_example}
+
+Submit submit_structure_sprite with a bigger sprite grid that clearly shows a larger version of this facility."""
+
 # Few-shot sprite references derived from Kenney's CC0 "Tiny Town" pack (see
 # simulation/sprite_examples/LICENSE.md). One example is shown per invention
 # turn — enough to teach the grid format and pixel-art idioms (outline, roof
@@ -2364,6 +2503,22 @@ def format_sprite_example(frame_tick):
                       separators=(",", ":"))
     return (f'Example of a good sprite (a {ex["name"].replace("_", " ")} — '
             f'{ex["note"]}): {body}')
+
+
+def build_sprite_upgrade_prompt(data):
+    ctx = data.get("sprite_design_context") or {}
+    feedback = data.get("behavior_nudge") or ""
+    return SPRITE_UPGRADE_USER_PROMPT.format(
+        agent_name=data.get("agent_name"),
+        role=data.get("role"),
+        structure_name=ctx.get("structureName") or ctx.get("structureType") or "structure",
+        structure_type=ctx.get("structureType") or "unknown",
+        tier=(ctx.get("tier") or 0) + 1,
+        min_rows=int(ctx.get("minRows") or 4),
+        min_cols=int(ctx.get("minCols") or 4),
+        feedback=feedback,
+        sprite_example=format_sprite_example(data.get("frame_tick")),
+    )
 
 
 def build_invention_prompt(data):
@@ -2428,6 +2583,8 @@ def build_user_prompt(data, slim=False):
     memory line and recent conversations -- the two most compressible,
     highest-variance-size fields -- to shrink the prompt. invention_only
     turns get the dedicated proposal-only prompt instead."""
+    if data.get("sprite_design_only"):
+        return build_sprite_upgrade_prompt(data)
     if data.get("invention_only"):
         return build_invention_prompt(data)
     nearby_formatted = format_nearby_agents(data.get("nearby_agents"))
@@ -2481,6 +2638,14 @@ def build_user_prompt(data, slim=False):
     # entry) so flag-off / empty-chronicle prompts stay byte-identical.
     chronicle_line_raw = data.get("chronicle_line")
     chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
+    path1_parts = []
+    if data.get("path1_tool_line"):
+        path1_parts.append(data["path1_tool_line"])
+    if data.get("path1_industry_line"):
+        path1_parts.append(data["path1_industry_line"])
+    if data.get("path1_neighbor_line"):
+        path1_parts.append(data["path1_neighbor_line"])
+    path1_lines = ("\n".join(path1_parts) + "\n") if path1_parts else ""
 
     return USER_PROMPT_TEMPLATE.format(
         agent_name=data.get("agent_name"),
@@ -2519,6 +2684,7 @@ def build_user_prompt(data, slim=False):
         season_line=season_line,
         prices_line=prices_line,
         chronicle_line=chronicle_line,
+        path1_lines=path1_lines,
         recent_conversations="none" if slim else data.get("recent_conversations", "none"),
         inbox=data.get("inbox", "none"),
         module_reports=data.get("module_reports", "none"),
@@ -2537,13 +2703,18 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     ~20-rule village rulebook is irrelevant to authoring a blueprint and
     slim/full made almost no size difference for these calls -- see its
     docstring), regardless of the slim flag."""
-    if data.get("invention_only"):
+    if data.get("sprite_design_only"):
+        system_content = SPRITE_UPGRADE_SYSTEM_PROMPT
+    elif data.get("invention_only"):
         system_content = INVENTION_SYSTEM_PROMPT
     else:
         system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
     if self_prompt:
         system_content += f"\n\nYOUR PERSONA (act in character): {self_prompt}"
     max_tokens, temperature = 512, 0.4
+    if data.get("sprite_design_only"):
+        max_tokens = 768
+        temperature = 0.3
     if data.get("invention_only"):
         # Phase D experiment hook: per-call overrides for invention-only turns.
         if INVENTION_MAX_TOKENS is not None:
@@ -2583,7 +2754,8 @@ def run_agent_decision(data):
         self_prompt = (data.get("self_prompt") or "").strip()
         response_format = build_response_format()
         payload = build_decision_payload(data, self_prompt, response_format)
-        request_timeout = INVENTION_TIMEOUT_S if data.get("invention_only") else DEFAULT_TIMEOUT_S
+        request_timeout = INVENTION_TIMEOUT_S if (data.get("invention_only")
+                                                  or data.get("sprite_design_only")) else DEFAULT_TIMEOUT_S
 
         known_resources = data.get("known_resources") or []
         pending_blueprints = data.get("pending_blueprints") or []
@@ -2604,6 +2776,7 @@ def run_agent_decision(data):
                 "frame_tick": frame_tick,
                 "latency_ms": latency_ms,
                 "invention_only": bool(data.get("invention_only")),
+                "sprite_design_only": bool(data.get("sprite_design_only")),
                 "request": payload,
                 "response": response,
                 "http_status": http_status,
@@ -2823,6 +2996,8 @@ _ENGINE_DEPS = {
     "log_conversation": session_logger.log_conversation,
     "log_benchmark": session_logger.log_benchmark,
     "validate_blueprint": validate_blueprint,
+    "validate_sprite_block": validate_sprite_block,
+    "sprite_spec_is_degenerate": sprite_spec_is_degenerate,
     "canonical_effect_vector": canonical_effect_vector,
     "run_piano_module": run_piano_module,
     "run_meta_update": run_meta_update,
@@ -2940,7 +3115,10 @@ def districts_js():
         districts = [
             {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
              "bounds": dict(d["bounds"]),
-             "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None}
+             "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
+             "tiles": dict(d.get("tiles") or {}),
+             "terrain": dict(d.get("terrain") or {}),
+             "settlementId": d.get("settlementId")}
             for did, d in c["districts"].items()
         ]
         road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}

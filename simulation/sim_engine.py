@@ -271,6 +271,22 @@ WORKSHOPS_PER_CRAFT_BONUS = 3  # workshops village-wide per +1 crafted output (m
 WALL_SOFT_CAP = 10
 WORKSHOP_DISTRICT_CAP = 3   # per buildable village/workshop-kind district
 CUSTOM_SOFT_CAP = 5         # per custom/blueprint type (and the granary)
+# Structure upgrades: level 1-100 per instance; duplicate builds blocked until
+# every existing instance of that type is maxed (forward-only for legacy saves).
+STRUCTURE_UPGRADES_ENABLED = True
+MAX_STRUCTURE_LEVEL = 100
+LEVEL_STEP = 1              # levels gained per upgrade_structure action (1 → 2 → 3 …)
+UPGRADE_STAT_STEP = 10        # cost + produce/boost weight tier every N levels
+UPGRADE_TIERS = (1, 25, 50, 75, 100)
+UPGRADE_COST_BASE = 1       # primary material units; scales with level tier
+# Type-aware palettes for procedural upgrade sprites (seed types have no stored sprite).
+SEED_UPGRADE_PALETTES = {
+    "farm_plot": ["#6D4C41", "#8BC34A", "#C5E1A5", "#33691E", "#FFF9C4"],
+    "house": ["#8B5A2B", "#C62828", "#F5E6C8", "#5D4037", "#FFEB3B"],
+    "workshop": ["#78909C", "#37474F", "#FFD54F", "#5D4037", "#B0BEC5"],
+    "wall": ["#9E9E9E", "#616161", "#BDBDBD", "#424242", "#EEEEEE"],
+    "cemetery": ["#455A64", "#263238", "#B0BEC5", "#37474F", "#ECEFF1"],
+}
 EFFECT_TICK_FRAMES = 150     # deterministic structure-effect tick (produces, etc.)
 # Ecology regrowth: +1 per ECOLOGY_REGROW_FRAMES (~20s at 30 ticks/s). At ~3
 # gathers/min/agent depleting 2× yield, one district needs regrowth slower than
@@ -538,12 +554,13 @@ HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
 LIFECYCLE_ENABLED = True
 # Aging: 1 "year" per LIFECYCLE_TICK_FRAMES (~10s at 30 ticks/s) is far too
 # fast for a multi-day soak to show generational turnover in real time, so
-# ages advance in small fractional steps -- tuned so a village soaking for
-# hours plausibly sees a birth or death, not so fast a single overnight run
-# blows through several generations. Smoke-testing forces this by temporarily
-# shrinking the gate/increment, never by waiting.
+# ages advance in small fractional steps. 2026-07-10: 0.02 (~1y/8.3min) wiped
+# cohorts overnight; 0.005 (~1y/33min) still felt too fast -- retuned to
+# 0.001 (~1y/2.8h, 0→90 in ~10.4 days) so multi-day 24/7 soaks see gradual
+# turnover, not near-extinction every night. Smoke-testing forces this by
+# temporarily shrinking the gate/increment, never by waiting.
 LIFECYCLE_TICK_FRAMES = 300
-AGE_YEARS_PER_TICK = 0.02          # ~1 year per 15,000 frames (~8.3 min) at the gate cadence
+AGE_YEARS_PER_TICK = 0.001         # ~1 year per 300,000 frames (~2.8 h) at the gate cadence
 ADULT_AGE = 18                      # below this, an agent cannot be a birth parent or election candidate
 ELDER_AGE = 55                      # life-stage label switches to "elder" (age word only, not the elder ROLE)
 MAX_LIFE_EXPECTANCY = 90            # death chance saturates approaching this age
@@ -636,12 +653,35 @@ PERSONALITY_DRIFT_CAP = 3
 CEMETERY_ENABLED = True
 BURY_CONTACT_DIST = 80                # matches heal_agent's contact radius
 BURIAL_BACKSTOP_FRAMES = STALL_THRESHOLD * 3  # ~1 min grace for organic bury_agent before the backstop buries directly
+
+# --- Path 1: Minecraft-like world depth (PATH1_ENABLED) ---
+PATH1_ENABLED = True
+INDUSTRY_ENABLED = True
+TOOL_TIERS_ENABLED = True
+COMPOSABLE_BUILD_ENABLED = True
+TERRAIN_TILES_ENABLED = True
+PATH1_DIPLOMACY_ENABLED = True
+TIER3_CONTENT_ENABLED = True
+PRESSURE_LOOP_ENABLED = True
+
+
+def path1_on(subflag=None):
+    """True when a Path 1 sub-flag is active. PATH1_ENABLED bundles all on."""
+    if PATH1_ENABLED:
+        return True
+    if subflag:
+        return globals().get(subflag, False)
+    return False
+
+
 if LIFECYCLE_ENABLED:
     # New governable rule kinds (I4) + the deterministic succession-ballot
     # kind, layered onto the existing set so a flag-off village keeps
     # {resource_tax, custom, priority} and byte-identical propose_rule
     # validation for those kinds.
     RULE_KINDS = RULE_KINDS | {"harvest_quota", "rationing", "succession"}
+if path1_on("PATH1_DIPLOMACY_ENABLED"):
+    RULE_KINDS = RULE_KINDS | {"treaty"}
 
 # --- Registries (ported from index.html) ---
 PROJECT_TEMPLATES = {
@@ -875,6 +915,111 @@ if CEMETERY_ENABLED:
         "unlocks": [{"kind": "burial", "station": "cemetery"}],
     }
 
+# Path 1 constants + registry extensions (flags defined above).
+TILE_CELL = 40
+TILE_CAP_PER_DISTRICT = 200
+BLOCK_REFUND_RATIO = 0.5
+TOOL_TIER_ORDER = ("wooden_pick", "stone_pick", "iron_pick")
+TOOL_TIER_LEVEL = {"wooden_pick": 1, "stone_pick": 2, "iron_pick": 3}
+RESOURCE_MIN_TOOL = {
+    "stone": "wooden_pick",
+    "copper_ore": "stone_pick",
+    "iron_ore": "iron_pick",
+}
+TOOL_YIELD_BONUS = 1
+TERRAIN_TYPES = ("soil", "rock", "grove", "water")
+BLOCK_TYPES = {
+    "wall": {"cost": {"wood": 1}, "shelter": True},
+    "floor": {"cost": {"wood": 1}, "shelter": False},
+    "door": {"cost": {"wood": 2}, "shelter": False},
+    "fence": {"cost": {"wood": 1}, "shelter": True},
+}
+NIGHT_FRACTION = 0.25
+NIGHT_EXPOSURE_DAMAGE = 2
+WILDLIFE_EVENT_PROB = 0.02
+WILDLIFE_GUARD_RADIUS = 120
+SETTLEMENT_STRUCT_THRESHOLD = 5
+SETTLEMENT_POP_THRESHOLD = 6
+CARAVAN_CARRY_MIN = 3
+PATH1_GRID_COLS = 8
+PATH1_GRID_ROWS = 8
+
+if path1_on("INDUSTRY_ENABLED"):
+    _P1_BASE = {
+        "clay": {"name": "Clay", "gatherZone": "beach", "color": "#BCAAA4"},
+        "sand": {"name": "Sand", "gatherZone": "beach", "color": "#FFE082"},
+        "copper_ore": {"name": "Copper Ore", "gatherZone": "cave", "color": "#D84315"},
+        "iron_ore": {"name": "Iron Ore", "gatherZone": "cave", "color": "#5D4037"},
+    }
+    BASE_RESOURCES.update(_P1_BASE)
+    _P1_CRAFTED = {
+        "charcoal": {"name": "Charcoal", "gatherZone": None, "color": "#424242", "crafted": True},
+        "copper_ingot": {"name": "Copper Ingot", "gatherZone": None, "color": "#FF7043", "crafted": True},
+        "iron_ingot": {"name": "Iron Ingot", "gatherZone": None, "color": "#78909C", "crafted": True},
+        "rope": {"name": "Rope", "gatherZone": None, "color": "#A1887F", "crafted": True},
+        "cloth": {"name": "Cloth", "gatherZone": None, "color": "#F48FB1", "crafted": True},
+        "wooden_pick": {"name": "Wooden Pick", "gatherZone": None, "color": "#8D6E63", "crafted": True},
+        "stone_pick": {"name": "Stone Pick", "gatherZone": None, "color": "#9E9E9E", "crafted": True},
+        "iron_pick": {"name": "Iron Pick", "gatherZone": None, "color": "#607D8B", "crafted": True},
+    }
+    CRAFTED_RESOURCES.update(_P1_CRAFTED)
+    SEED_RECIPES.update({
+        "charcoal": {"name": "Charcoal", "inputs": {"wood": 2}, "station": "workshop"},
+        "copper_ingot": {"name": "Copper Ingot", "inputs": {"copper_ore": 1, "charcoal": 1},
+                         "station": "workshop"},
+        "iron_ingot": {"name": "Iron Ingot", "inputs": {"iron_ore": 1, "charcoal": 1},
+                       "station": "workshop"},
+        "rope": {"name": "Rope", "inputs": {"wood": 1}, "station": "workshop"},
+        "cloth": {"name": "Cloth", "inputs": {"herbs": 2}, "station": "workshop"},
+        "wooden_pick": {"name": "Wooden Pick", "inputs": {"wood": 3}, "station": "workshop"},
+        "stone_pick": {"name": "Stone Pick", "inputs": {"stone": 2, "wood": 1}, "station": "workshop"},
+        "iron_pick": {"name": "Iron Pick", "inputs": {"iron_ingot": 1, "wood": 1}, "station": "workshop"},
+    })
+    PROJECT_TEMPLATES["kiln"] = {
+        "name": "Kiln", "needs": {"stone": 3, "wood": 2},
+        "visualStyle": "workshop", **({"tier": 1} if TECH_TREE_ENABLED else {}),
+    }
+    PROJECT_ORDER.append("kiln")
+    PROJECT_KIND["kiln"] = "workshop"
+    SEED_STRUCTURE_FUNCTIONS["kiln"] = {
+        "unlocks": [{"kind": "craft", "station": "kiln"}],
+        "produces": [{"resource": "charcoal", "amount": 1, "every_ticks": 1800, "scope": "district"}],
+    }
+    if path1_on("TIER3_CONTENT_ENABLED"):
+        PROJECT_TEMPLATES["harbor"] = {
+            "name": "Harbor", "needs": {"planks": 3, "stone": 2, "rope": 1},
+            "visualStyle": "dock", **({"tier": 2} if TECH_TREE_ENABLED else {}),
+        }
+        PROJECT_TEMPLATES["mill"] = {
+            "name": "Mill", "needs": {"planks": 2, "stone": 2, "wood": 2},
+            "visualStyle": "farm_plot", **({"tier": 2} if TECH_TREE_ENABLED else {}),
+        }
+        PROJECT_TEMPLATES["foundry"] = {
+            "name": "Foundry", "needs": {"iron_ingot": 2, "stone": 3, "bricks": 2},
+            "visualStyle": "workshop", **({"tier": 3} if TECH_TREE_ENABLED else {}),
+        }
+        for tid in ("harbor", "mill", "foundry"):
+            PROJECT_ORDER.append(tid)
+            PROJECT_KIND[tid] = "village" if tid != "harbor" else "beach"
+        SEED_STRUCTURE_FUNCTIONS["harbor"] = {
+            "produces": [{"resource": "fish", "amount": 1, "every_ticks": 1500, "scope": "district"}],
+            "boosts": [{"kind": "gather", "resources": ["fish"], "every_n": 1, "bonus": 1,
+                        "max_bonus": 2, "scope": "district"}],
+        }
+        SEED_STRUCTURE_FUNCTIONS["mill"] = {
+            "boosts": [{"kind": "gather", "resources": list(EDIBLE_RESOURCES), "every_n": 1,
+                        "bonus": 1, "max_bonus": 2, "scope": "district"}],
+        }
+        SEED_STRUCTURE_FUNCTIONS["foundry"] = {
+            "unlocks": [{"kind": "craft", "station": "foundry", "tier": 3}],
+            "produces": [{"resource": "iron_ingot", "amount": 1, "every_ticks": 2400, "scope": "village"}],
+        }
+        if TECH_TREE_ENABLED:
+            ERA_LADDER.extend([
+                ("Harbor Era", "harbor"),
+                ("Mill Era", "mill"),
+            ])
+
 AGENT_DEFS = [
     {"id": 1, "name": "Aria", "role": "farmer", "personality": "hardworking and cautious", "color": "#4CAF50", "zone": "farm_north"},
     {"id": 2, "name": "Marco", "role": "trader", "personality": "sociable and opportunistic", "color": "#FF9800", "zone": "market"},
@@ -1107,7 +1252,9 @@ class SimEngine:
                 "consecutiveIdleMoves": 0, "hunger": 80, "health": 100,
                 "incapacitated": False, "goal": None, "actionCounts": {},
                 "commitment": None, "inventionTurn": False, "inventionRetryUsed": False,
+                "spriteDesignTurn": None,
                 "lastBlueprintRejection": None, "lastGatherRejection": None,
+                "lastUpgradeRejection": None, "lastSpriteRejection": None,
                 "lastProjectRejection": None, "lastTerraformRejection": None,
                 "lastCraftRejection": None, "lastRepairRejection": None,
                 "lastRecipeRejection": None, "lastBurialRejection": None,
@@ -1251,6 +1398,12 @@ class SimEngine:
             "memeMutations": 0,             # session-lifetime count, enforces MEME_MUTATION_SESSION_CAP
             "skillPracticeCount": 0,        # benchmark helper for skill_spread
             "teachCount": 0,                # benchmark helper for skill_spread
+            # Path 1: settlements, treaties, composable/terrain counters.
+            "settlements": [],
+            "treaties": [],
+            "caravanLog": [],
+            "path1Placements": 0,
+            "path1TerrainMutations": 0,
         }
         self._effect_period_fired = 0
         self._module_period_runs = 0
@@ -1260,6 +1413,11 @@ class SimEngine:
         self._last_season = None     # Phase C: season-turn activity logging
         if ECOLOGY_ENABLED:
             self.civilization["districtStocks"] = self._init_district_stocks(self.civilization["districts"])
+        if path1_on():
+            for d in self.civilization["districts"].values():
+                d.setdefault("tiles", {})
+                self._ensure_district_terrain(d)
+            self._init_settlements()
         self._recompute_road_paths()
         active_defs = self._select_active_defs(roster_size)
         self.agent_names = set(d["name"] for d in active_defs)
@@ -2364,6 +2522,13 @@ class SimEngine:
                 break
         if self._village_tech_tier() >= 2:
             caps.add("metallurgy")
+        if path1_on("TIER3_CONTENT_ENABLED"):
+            if any(s.get("type") == "harbor" and self._working_structure_count("harbor") > 0
+                   for s in c["structures"]):
+                caps.add("harbor")
+            if any(s.get("type") == "mill" and self._working_structure_count("mill") > 0
+                   for s in c["structures"]):
+                caps.add("mill")
         vehicles = ("cart", "wagon")
         if any(a["resources"].get(v, 0) > 0 for a in self.agents for v in vehicles) \
                 or any(c["stockpile"].get(v, 0) > 0 for v in vehicles):
@@ -2441,7 +2606,11 @@ class SimEngine:
                 if resource not in resources:
                     continue
                 scope = boost.get("scope", "district")
-                count = self._working_structure_count(type_id, district if scope == "district" else None)
+                if STRUCTURE_UPGRADES_ENABLED:
+                    count = int(self._weighted_working_count(
+                        type_id, district if scope == "district" else None))
+                else:
+                    count = self._working_structure_count(type_id, district if scope == "district" else None)
                 every_n = boost.get("every_n", 1)
                 max_bonus = boost.get("max_bonus", 1)
                 bonus += min(max_bonus, (count // every_n) * boost.get("bonus", 1))
@@ -2471,7 +2640,11 @@ class SimEngine:
                 if boost.get("kind") != "craft" or boost.get("station") != station:
                     continue
                 scope = boost.get("scope", "village")
-                count = self._working_structure_count(type_id, district_id if scope == "district" else None)
+                if STRUCTURE_UPGRADES_ENABLED:
+                    count = int(self._weighted_working_count(
+                        type_id, district_id if scope == "district" else None))
+                else:
+                    count = self._working_structure_count(type_id, district_id if scope == "district" else None)
                 every_n = boost.get("every_n", 1)
                 max_bonus = boost.get("max_bonus", 1)
                 bonus += min(max_bonus, (count // every_n) * boost.get("bonus", 1))
@@ -2705,17 +2878,27 @@ class SimEngine:
                 # (_working_structure_count == _structure_count with GOODS off).
                 if scope == "district":
                     for did in {s.get("districtId") for s in c["structures"] if s["type"] == type_id}:
-                        count = self._working_structure_count(type_id, did)
+                        if STRUCTURE_UPGRADES_ENABLED:
+                            count = self._weighted_working_count(type_id, did)
+                        else:
+                            count = self._working_structure_count(type_id, did)
                         if count <= 0:
                             continue
-                        total = amount_each * count
+                        total = int(amount_each * count)
+                        if total < 1:
+                            continue
                         self._deposit_produced(resource, total, type_id, did)
                         self._effect_period_fired += 1
                 else:
-                    count = self._working_structure_count(type_id)
+                    if STRUCTURE_UPGRADES_ENABLED:
+                        count = self._weighted_working_count(type_id)
+                    else:
+                        count = self._working_structure_count(type_id)
                     if count <= 0:
                         continue
-                    total = amount_each * count
+                    total = int(amount_each * count)
+                    if total < 1:
+                        continue
                     self._deposit_produced(resource, total, type_id)
                     self._effect_period_fired += 1
                 last_fire[fire_key] = self.frameTick
@@ -2993,6 +3176,280 @@ class SimEngine:
                             {"structure": s.get("type"), "ruin_rebuild": was_ruin})
         return summary
 
+    # --- Structure upgrades (STRUCTURE_UPGRADES_ENABLED) ---
+    def _structure_level(self, structure):
+        if not STRUCTURE_UPGRADES_ENABLED:
+            return MAX_STRUCTURE_LEVEL
+        return int(structure.get("level") or 1)
+
+    def _visual_tier_index(self, level):
+        idx = 0
+        for i, thresh in enumerate(UPGRADE_TIERS):
+            if level >= thresh:
+                idx = i
+        return idx
+
+    def _type_has_unmaxed_instance(self, type_):
+        if not STRUCTURE_UPGRADES_ENABLED:
+            return False
+        return any(
+            s.get("type") == type_
+            and not s.get("isRuin")
+            and self._structure_level(s) < MAX_STRUCTURE_LEVEL
+            for s in self.civilization["structures"]
+        )
+
+    def _upgradeable_structures_brief(self):
+        if not STRUCTURE_UPGRADES_ENABLED:
+            return []
+        out = []
+        for s in self.civilization["structures"]:
+            if s.get("isRuin"):
+                continue
+            lvl = self._structure_level(s)
+            if lvl < MAX_STRUCTURE_LEVEL:
+                out.append({
+                    "id": s.get("id"),
+                    "type": s.get("type"),
+                    "name": s.get("name") or s.get("type"),
+                    "level": lvl,
+                    "district": s.get("districtId"),
+                })
+        return out
+
+    def _find_upgrade_target(self, agent, target):
+        pool = [s for s in self.civilization["structures"]
+                if not s.get("isRuin")
+                and self._structure_level(s) < MAX_STRUCTURE_LEVEL
+                and (not GOODS_ENABLED or s.get("condition", 100) > 0)]
+        if not pool:
+            return None
+        if target:
+            t = str(target).strip().lower()
+            matches = [s for s in pool
+                       if str(s.get("id")) == t
+                       or (s.get("type") or "").lower() == t
+                       or (s.get("name") or "").lower() == t]
+            if matches:
+                return min(matches, key=lambda s: self._structure_level(s))
+        local = [s for s in pool if s.get("districtId") == agent.get("currentDistrict")]
+        pool2 = local or pool
+        return min(pool2, key=lambda s: self._structure_level(s))
+
+    def _upgrade_cost(self, structure):
+        level = self._structure_level(structure)
+        tmpl = (self.civilization["projectRegistry"].get(structure.get("type"))
+                or PROJECT_TEMPLATES.get(structure.get("type")) or {})
+        needs = tmpl.get("needs") or {"wood": 2}
+        primary = next(iter(needs), "wood")
+        amt = max(1, UPGRADE_COST_BASE * max(1, level // UPGRADE_STAT_STEP))
+        return {primary: amt}
+
+    def _sprite_dimensions(self, sprite):
+        if not sprite or not isinstance(sprite.get("grid"), list) or not sprite["grid"]:
+            return 0, 0
+        grid = sprite["grid"]
+        return len(grid), max(len(str(r)) for r in grid)
+
+    def _farm_plot_tier_sprite(self, structure, tier_idx, palette):
+        rows = min(14, 6 + tier_idx * 2)
+        cols = min(14, 8 + tier_idx * 2)
+        key = f"{structure.get('id')}|{tier_idx}"
+        h = sum(ord(c) * (i + 1) for i, c in enumerate(key)) & 0xFFFFFFFF
+        grid = []
+        for y in range(rows):
+            chars = []
+            for x in range(cols):
+                if x in (0, cols - 1) or y in (0, rows - 1):
+                    chars.append(".")
+                elif (y // 2) % 2 == 0:
+                    chars.append("a" if (x + y + h) % 4 else "b")
+                else:
+                    chars.append("c" if (x + y) % 3 == 0 else "b")
+            grid.append("".join(chars))
+        return {"palette": palette[:5], "grid": grid}
+
+    def _procedural_tier_sprite(self, structure, tier_idx):
+        """Deterministic bigger pixel grid for a visual tier (no LLM required)."""
+        type_id = structure.get("type") or ""
+        seed_palette = SEED_UPGRADE_PALETTES.get(type_id)
+        if type_id == "farm_plot" and seed_palette:
+            return self._farm_plot_tier_sprite(structure, tier_idx, seed_palette)
+        palettes = [
+            ["#8B5A2B", "#C62828", "#F5E6C8"], ["#78909C", "#37474F", "#FFD54F"],
+            ["#A1887F", "#4E342E", "#AED581"], ["#90A4AE", "#B71C1C", "#E3F2FD"],
+        ]
+        key = f"{structure.get('type')}|{structure.get('id')}|{tier_idx}"
+        h = sum(ord(c) * (i + 1) for i, c in enumerate(key)) & 0xFFFFFFFF
+        palette = seed_palette if seed_palette else palettes[h % len(palettes)]
+        rows = min(14, 6 + tier_idx * 2)
+        cols = min(14, 6 + tier_idx * 2)
+        grid = []
+        for y in range(rows):
+            chars = []
+            for x in range(cols):
+                if y < max(1, rows // 3):
+                    ch = "b" if (x + y + h) % 3 else "a"
+                elif y > rows * 2 // 3 and cols // 3 <= x <= cols * 2 // 3:
+                    ch = "c"
+                elif (x + y + h) % 5 == 0:
+                    ch = "c"
+                else:
+                    ch = "a"
+                chars.append(ch)
+            grid.append("".join(chars))
+        return {"palette": palette, "grid": grid}
+
+    def _expand_sprite_to_tier(self, structure, tier_idx):
+        current = structure.get("sprite")
+        if current and current.get("grid"):
+            rows, cols = self._sprite_dimensions(current)
+            target_rows = min(14, max(rows + 2, rows + tier_idx * 2))
+            target_cols = min(14, max(cols + 2, cols + tier_idx * 2))
+            palette = list(current.get("palette") or ["#8B5A2B", "#C62828", "#F5E6C8"])[:5]
+            old_grid = [str(r) for r in current["grid"]]
+            new_grid = []
+            for y in range(target_rows):
+                if y < len(old_grid):
+                    row = old_grid[y]
+                    row = row + "a" * max(0, target_cols - len(row))
+                    row = row[:target_cols]
+                else:
+                    row = "a" * target_cols
+                new_grid.append(row)
+            return {"palette": palette, "grid": new_grid}
+        return self._procedural_tier_sprite(structure, tier_idx)
+
+    def _apply_visual_tier(self, structure, new_tier_idx):
+        structure["visualTier"] = new_tier_idx + 1
+        structure["renderScale"] = round(1.0 + new_tier_idx * 0.25, 2)
+        structure["sprite"] = self._expand_sprite_to_tier(structure, new_tier_idx)
+        if new_tier_idx >= len(UPGRADE_TIERS) - 1:
+            base_name = structure.get("name") or structure.get("type")
+            if "Mega" not in str(base_name):
+                structure["name"] = f"Mega {base_name}"
+
+    def _structure_upgrade_weight(self, structure):
+        """Effective contribution of a structure to produces/boosts (1-10)."""
+        if not STRUCTURE_UPGRADES_ENABLED:
+            return 1
+        return max(1, self._structure_level(structure) // UPGRADE_STAT_STEP)
+
+    def _weighted_working_count(self, type_id, district_id=None):
+        total = 0.0
+        for s in self.civilization["structures"]:
+            if s.get("type") != type_id:
+                continue
+            if district_id and s.get("districtId") != district_id:
+                continue
+            if GOODS_ENABLED and s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD:
+                continue
+            if s.get("isRuin"):
+                continue
+            total += self._structure_upgrade_weight(s)
+        return total
+
+    def _pay_upgrade_cost(self, agent, cost, name):
+        c = self.civilization
+        plan = {}
+        missing = []
+        for res, amt in cost.items():
+            held = agent["resources"].get(res, 0)
+            from_agent = min(held, amt)
+            from_stock = amt - from_agent
+            if from_stock > int(c["stockpile"].get(res, 0)):
+                missing.append(res)
+            else:
+                plan[res] = (from_agent, from_stock)
+        if missing:
+            cost_str = ", ".join(f"{amt} {res}" for res, amt in cost.items())
+            agent["lastUpgradeRejection"] = {
+                "reason": (f"upgrading {name} needs {cost_str} -- you and the stockpile "
+                           f"together lack {', '.join(missing)}"),
+                "frame": self.frameTick,
+            }
+            return False
+        stock_parts = []
+        for res, (from_agent, from_stock) in plan.items():
+            if from_agent:
+                agent["resources"][res] -= from_agent
+            if from_stock:
+                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
+                stock_parts.append(f"{from_stock} {res}")
+        if stock_parts:
+            self._push_activity(
+                f"The village stockpile supplied {', '.join(stock_parts)} for "
+                f"{agent['name']}'s upgrade of the {name}")
+        return True
+
+    def _upgrade_structure(self, agent, target):
+        s = self._find_upgrade_target(agent, target)
+        if not s:
+            agent["lastUpgradeRejection"] = {
+                "reason": "no upgradeable structure found", "frame": self.frameTick}
+            return f"{agent['name']} found no structure to upgrade"
+        level = self._structure_level(s)
+        if level >= MAX_STRUCTURE_LEVEL:
+            agent["lastUpgradeRejection"] = {
+                "reason": f"{s.get('name')} is already at max level",
+                "frame": self.frameTick,
+            }
+            return f"{agent['name']} cannot upgrade {s.get('name')} further"
+        cost = self._upgrade_cost(s)
+        name = s.get("name") or s.get("type")
+        if not self._pay_upgrade_cost(agent, cost, name):
+            return f"{agent['name']} lacks resources to upgrade the {name}"
+        old_tier = self._visual_tier_index(level)
+        new_level = min(MAX_STRUCTURE_LEVEL, level + LEVEL_STEP)
+        s["level"] = new_level
+        new_tier = self._visual_tier_index(new_level)
+        if new_tier > old_tier:
+            self._apply_visual_tier(s, new_tier)
+            rows, cols = self._sprite_dimensions(s.get("sprite"))
+            agent["spriteDesignTurn"] = {
+                "structureId": s["id"],
+                "tier": new_tier,
+                "minRows": rows,
+                "minCols": cols,
+                "structureName": name,
+                "structureType": s.get("type"),
+            }
+        agent["lastUpgradeRejection"] = None
+        self._push_activity(f"{agent['name']} upgraded the {name} to level {new_level}")
+        self._log_benchmark("structure_upgraded", new_level,
+                            {"structure": s.get("type"), "id": s["id"]})
+        return f"{agent['name']} upgraded {name} to level {new_level}"
+
+    def _apply_structure_sprite(self, agent, sprite):
+        turn = agent.get("spriteDesignTurn") or {}
+        sid = turn.get("structureId")
+        s = next((x for x in self.civilization["structures"] if x.get("id") == sid), None)
+        if not s:
+            agent["spriteDesignTurn"] = None
+            return f"{agent['name']} had no pending sprite design"
+        validate = self.d.get("validate_sprite_block")
+        min_rows = int(turn.get("minRows") or 0)
+        min_cols = int(turn.get("minCols") or 0)
+        if validate:
+            ok, reason = validate(sprite, min_rows=min_rows, min_cols=min_cols)
+        else:
+            ok, reason = True, None
+        if not ok:
+            agent["lastSpriteRejection"] = {"reason": reason, "frame": self.frameTick}
+            return f"{agent['name']}'s sprite design was rejected ({reason})"
+        if self.d.get("sprite_spec_is_degenerate", lambda sp: False)(sprite):
+            agent["lastSpriteRejection"] = {
+                "reason": "sprite is too flat (use varied colors/pattern, not one solid fill)",
+                "frame": self.frameTick,
+            }
+            return f"{agent['name']}'s sprite design was rejected (too flat)"
+        s["sprite"] = sprite
+        agent["spriteDesignTurn"] = None
+        agent["lastSpriteRejection"] = None
+        name = s.get("name") or s.get("type")
+        self._push_activity(f"{agent['name']} refined the sprite for the {name}")
+        return f"{agent['name']} applied a new larger sprite to the {name}"
+
     def _population_cap(self):
         c = self.civilization
         base = c.get("basePopulation") or len(self.agents)
@@ -3102,6 +3559,7 @@ class SimEngine:
             "condition": 100.0, "isRuin": False,
             # Phase E property: None until claimed (see _maybe_auto_claim_home).
             "homeOf": None,
+            "level": 1, "visualTier": 1, "renderScale": 1.0,
         }
         c["structures"].append(new_structure)
         c["nextStructureId"] += 1
@@ -3135,6 +3593,11 @@ class SimEngine:
                 agent["lastQuotaRejection"] = {"reason": quota_reason, "frame": self.frameTick}
                 return f"{agent['name']} found nothing — {quota_reason}"
             agent["lastQuotaRejection"] = None
+        tool_ok, tool_reason = self._can_gather_resource(agent, resource)
+        if not tool_ok:
+            agent["lastGatherRejection"] = {"reason": tool_reason, "frame": self.frameTick}
+            self._path1_tool_benchmark(resource, False)
+            return f"{agent['name']} found nothing — {tool_reason}"
         allowed, reason, scale = self._ecology_gather_gate(agent, resource)
         if not allowed:
             agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
@@ -3143,13 +3606,22 @@ class SimEngine:
         amount = 1
         if STRUCTURE_EFFECTS_ENABLED:
             amount += self._gather_yield_bonus(agent, resource)
+        if path1_on("TOOL_TIERS_ENABLED") and RESOURCE_MIN_TOOL.get(resource):
+            if self._gather_tool_tier(agent) >= TOOL_TIER_LEVEL[RESOURCE_MIN_TOOL[resource]]:
+                amount += TOOL_YIELD_BONUS
         if CULTURE_ENABLED:
             amount += self._skill_bonus(agent, "gather")
         if ECOLOGY_ENABLED and scale < 1.0:
             amount = max(1, int(amount * scale))
+        if ECOLOGY_ENABLED and path1_on("TERRAIN_TILES_ENABLED"):
+            did = agent.get("currentDistrict")
+            if did:
+                grove_mult = 0.5 + self._terrain_grove_ratio(did)
+                amount = max(1, int(amount * grove_mult))
         amount = max(1, min(amount, self._carry_cap(agent) - agent["resources"].get(resource, 0)))
         agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
         c["collectSuccesses"] += 1
+        self._path1_tool_benchmark(resource, True)
         if ECOLOGY_ENABLED:
             did = agent.get("currentDistrict")
             if did:
@@ -3165,6 +3637,432 @@ class SimEngine:
             bonus_note = " (structure effects boosted the harvest)"
         return f"{agent['name']} collected {resource}" + (f" x{amount}{bonus_note}" if amount > 1 else "")
 
+    # --- Path 1: tool tiers ---
+    def _gather_tool_tier(self, agent):
+        if not path1_on("TOOL_TIERS_ENABLED"):
+            return 0
+        best = 0
+        for tool in TOOL_TIER_ORDER:
+            if agent["resources"].get(tool, 0) > 0:
+                best = max(best, TOOL_TIER_LEVEL[tool])
+        return best
+
+    def _can_gather_resource(self, agent, resource):
+        if not path1_on("TOOL_TIERS_ENABLED"):
+            return True, None
+        needed = RESOURCE_MIN_TOOL.get(resource)
+        if not needed:
+            return True, None
+        have = self._gather_tool_tier(agent)
+        need_lvl = TOOL_TIER_LEVEL[needed]
+        if have < need_lvl:
+            return False, f"{resource} needs a {needed} (you have tier {have} tools)"
+        return True, None
+
+    # --- Path 1: composable tiles ---
+    def _district_at_pos(self, agent):
+        did = agent.get("currentDistrict")
+        if did and did in self.civilization["districts"]:
+            return did, self.civilization["districts"][did]
+        return None, None
+
+    def _pos_to_grid(self, agent):
+        did, d = self._district_at_pos(agent)
+        if not d:
+            return None, None, None, None
+        b = d["bounds"]
+        gx = int((agent["x"] - b["x1"]) // TILE_CELL)
+        gy = int((agent["y"] - b["y1"]) // TILE_CELL)
+        gx = max(0, min(PATH1_GRID_COLS - 1, gx))
+        gy = max(0, min(PATH1_GRID_ROWS - 1, gy))
+        return did, d, gx, gy
+
+    def _tile_key(self, gx, gy):
+        return f"{gx},{gy}"
+
+    def _ensure_district_tiles(self, district):
+        district.setdefault("tiles", {})
+
+    def _ensure_district_terrain(self, district):
+        if "terrain" not in district:
+            kind = district.get("kind", "village")
+            default = {"forest": "grove", "farm": "soil", "beach": "sand",
+                       "cave": "rock", "ocean": "water"}.get(kind, "soil")
+            district["terrain"] = {}
+            for gx in range(PATH1_GRID_COLS):
+                for gy in range(PATH1_GRID_ROWS):
+                    district["terrain"][self._tile_key(gx, gy)] = default
+
+    def _place_block(self, agent, block_type, gx=None, gy=None):
+        if not path1_on("COMPOSABLE_BUILD_ENABLED"):
+            return f"{agent['name']} cannot place blocks — composable build is disabled"
+        bt = BLOCK_TYPES.get(block_type or "")
+        if not bt:
+            agent["lastBlockRejection"] = {"reason": f"unknown block type {block_type}",
+                                           "frame": self.frameTick}
+            return f"{agent['name']} cannot place unknown block {block_type}"
+        did, d, agx, agy = self._pos_to_grid(agent)
+        if not did:
+            agent["lastBlockRejection"] = {"reason": "not in a district", "frame": self.frameTick}
+            return f"{agent['name']} cannot place blocks outside a district"
+        gx = int(gx) if gx is not None else agx
+        gy = int(gy) if gy is not None else agy
+        self._ensure_district_tiles(d)
+        tiles = d["tiles"]
+        if len(tiles) >= TILE_CAP_PER_DISTRICT:
+            agent["lastBlockRejection"] = {"reason": "district tile cap reached", "frame": self.frameTick}
+            return f"{agent['name']} cannot place — district is at tile cap"
+        key = self._tile_key(gx, gy)
+        if key in tiles:
+            agent["lastBlockRejection"] = {"reason": "tile already occupied", "frame": self.frameTick}
+            return f"{agent['name']} cannot place — tile already has {tiles[key]}"
+        for res, n in bt["cost"].items():
+            if agent["resources"].get(res, 0) < n:
+                agent["lastBlockRejection"] = {"reason": f"need {n} {res}", "frame": self.frameTick}
+                return f"{agent['name']} lacks {res} to place {block_type}"
+        for res, n in bt["cost"].items():
+            agent["resources"][res] -= n
+        tiles[key] = block_type
+        agent["lastBlockRejection"] = None
+        c = self.civilization
+        c["path1Placements"] = c.get("path1Placements", 0) + 1
+        self._log_benchmark("composable_placements", c["path1Placements"],
+                            {"block": block_type, "district": did})
+        self._push_activity(f"{agent['name']} placed {block_type} at {did} ({gx},{gy})")
+        return f"{agent['name']} placed {block_type}"
+
+    def _remove_block(self, agent, gx=None, gy=None):
+        if not path1_on("COMPOSABLE_BUILD_ENABLED"):
+            return f"{agent['name']} cannot remove blocks"
+        did, d, agx, agy = self._pos_to_grid(agent)
+        if not did:
+            return f"{agent['name']} cannot remove blocks outside a district"
+        gx = int(gx) if gx is not None else agx
+        gy = int(gy) if gy is not None else agy
+        self._ensure_district_tiles(d)
+        key = self._tile_key(gx, gy)
+        block_type = d["tiles"].pop(key, None)
+        if not block_type:
+            agent["lastBlockRejection"] = {"reason": "no block here", "frame": self.frameTick}
+            return f"{agent['name']} found no block to remove"
+        bt = BLOCK_TYPES.get(block_type, {})
+        for res, n in bt.get("cost", {}).items():
+            refund = max(0, int(n * BLOCK_REFUND_RATIO)) or 1
+            agent["resources"][res] = agent["resources"].get(res, 0) + refund
+        return f"{agent['name']} removed {block_type}"
+
+    def _composable_shelter_count(self):
+        if not path1_on("COMPOSABLE_BUILD_ENABLED"):
+            return 0
+        count = 0
+        for d in self.civilization["districts"].values():
+            tiles = d.get("tiles") or {}
+            walls = sum(1 for t in tiles.values() if t in ("wall", "fence"))
+            has_door = any(t == "door" for t in tiles.values())
+            if walls >= 8 and has_door:
+                count += 1
+        return count
+
+    # --- Path 1: terrain mutation ---
+    def _dig_terrain(self, agent):
+        if not path1_on("TERRAIN_TILES_ENABLED"):
+            return f"{agent['name']} cannot dig — terrain tiles disabled"
+        did, d, gx, gy = self._pos_to_grid(agent)
+        if not did:
+            agent["lastTerrainRejection"] = {"reason": "not in a district", "frame": self.frameTick}
+            return f"{agent['name']} cannot dig outside a district"
+        tool_ok, tool_reason = self._can_gather_resource(agent, "stone")
+        if not tool_ok:
+            agent["lastTerrainRejection"] = {"reason": tool_reason, "frame": self.frameTick}
+            return f"{agent['name']} cannot dig — {tool_reason}"
+        self._ensure_district_terrain(d)
+        key = self._tile_key(gx, gy)
+        current = d["terrain"].get(key, "soil")
+        gained = None
+        if current == "grove":
+            d["terrain"][key] = "soil"
+        elif current == "soil":
+            d["terrain"][key] = "rock"
+            gained = "stone"
+        else:
+            agent["lastTerrainRejection"] = {"reason": f"cannot dig {current}", "frame": self.frameTick}
+            return f"{agent['name']} cannot dig {current} here"
+        if gained:
+            cap = self._carry_cap(agent)
+            if agent["resources"].get(gained, 0) < cap:
+                agent["resources"][gained] = agent["resources"].get(gained, 0) + 1
+        c = self.civilization
+        c["path1TerrainMutations"] = c.get("path1TerrainMutations", 0) + 1
+        self._log_benchmark("terrain_mutations", c["path1TerrainMutations"], {"action": "dig", "district": did})
+        agent["lastTerrainRejection"] = None
+        self._push_activity(f"{agent['name']} dug terrain at {did} ({gx},{gy})")
+        return f"{agent['name']} dug terrain" + (f" and found {gained}" if gained else "")
+
+    def _plant_terrain(self, agent):
+        if not path1_on("TERRAIN_TILES_ENABLED"):
+            return f"{agent['name']} cannot plant — terrain tiles disabled"
+        did, d, gx, gy = self._pos_to_grid(agent)
+        if not did:
+            agent["lastTerrainRejection"] = {"reason": "not in a district", "frame": self.frameTick}
+            return f"{agent['name']} cannot plant outside a district"
+        if agent["resources"].get("wood", 0) < 1:
+            agent["lastTerrainRejection"] = {"reason": "need 1 wood", "frame": self.frameTick}
+            return f"{agent['name']} needs wood to plant"
+        self._ensure_district_terrain(d)
+        key = self._tile_key(gx, gy)
+        current = d["terrain"].get(key, "soil")
+        if current not in ("soil", "rock"):
+            agent["lastTerrainRejection"] = {"reason": f"cannot plant on {current}", "frame": self.frameTick}
+            return f"{agent['name']} cannot plant on {current}"
+        agent["resources"]["wood"] -= 1
+        d["terrain"][key] = "grove"
+        c = self.civilization
+        c["path1TerrainMutations"] = c.get("path1TerrainMutations", 0) + 1
+        self._log_benchmark("terrain_mutations", c["path1TerrainMutations"], {"action": "plant", "district": did})
+        agent["lastTerrainRejection"] = None
+        return f"{agent['name']} planted a grove"
+
+    def _terrain_grove_ratio(self, district_id):
+        d = self.civilization["districts"].get(district_id) or {}
+        terrain = d.get("terrain") or {}
+        if not terrain:
+            return 0.5
+        groves = sum(1 for t in terrain.values() if t == "grove")
+        return groves / max(1, len(terrain))
+
+    def _maybe_expand_field(self, agent):
+        if not path1_on("TERRAIN_TILES_ENABLED"):
+            return
+        did = agent.get("currentDistrict")
+        if not did:
+            return
+        d = self.civilization["districts"].get(did)
+        if not d or d.get("kind") != "farm":
+            return
+        if self._terrain_grove_ratio(did) > 0.3:
+            return
+        if agent.get("goal"):
+            return
+        agent["goal"] = {"kind": "plant_terrain", "ttl": STALL_THRESHOLD * 2}
+
+    # --- Path 1: diplomacy ---
+    def _init_settlements(self):
+        c = self.civilization
+        if c.get("settlements"):
+            return
+        home_districts = list(c["districts"].keys())
+        c["settlements"] = [{"id": "home", "name": "Home Village", "districts": home_districts}]
+        for did in home_districts:
+            c["districts"][did].setdefault("settlementId", "home")
+        c.setdefault("treaties", [])
+        c.setdefault("caravanLog", [])
+
+    def _maybe_found_settlement(self):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return
+        c = self.civilization
+        self._init_settlements()
+        if len(c["settlements"]) >= 2:
+            return
+        living = len(self._living_agents())
+        structures = len([s for s in c["structures"] if not s.get("isRuin")])
+        if structures < SETTLEMENT_STRUCT_THRESHOLD or living < SETTLEMENT_POP_THRESHOLD:
+            return
+        plot = self._claim_frontier_plot()
+        if not plot:
+            return
+        self._found_district("village", DISTRICT_KIND_TEMPLATES["village"], plot)
+        new_did = plot.get("claimedBy")
+        if not new_did:
+            return
+        sid = "outpost"
+        c["settlements"].append({"id": sid, "name": "Frontier Outpost", "districts": [new_did]})
+        c["districts"][new_did]["settlementId"] = sid
+        self._push_activity("A second settlement is founded — the Frontier Outpost!")
+        self._log_benchmark("settlement_founded", len(c["settlements"]), {"id": sid})
+
+    def _settlement_for_agent(self, agent):
+        did = agent.get("currentDistrict")
+        if did:
+            return self.civilization["districts"].get(did, {}).get("settlementId", "home")
+        return "home"
+
+    def _border_settlement_agent(self, agent):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return False
+        self._init_settlements()
+        settlements = {s["id"] for s in self.civilization["settlements"]}
+        if len(settlements) < 2:
+            return False
+        sid = self._settlement_for_agent(agent)
+        for other in self.agents:
+            if other["name"] == agent["name"] or other.get("deathFrame"):
+                continue
+            if self._distance_to(agent, other) > 150:
+                continue
+            if self._settlement_for_agent(other) != sid:
+                return True
+        return False
+
+    def _maybe_caravan_goal(self, agent):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return
+        carry = self._carry_cap(agent)
+        has_vehicle = any(agent["resources"].get(v, 0) > 0 for v in ("cart", "wagon"))
+        if not has_vehicle or sum(agent["resources"].values()) < CARAVAN_CARRY_MIN:
+            return
+        c = self.civilization
+        self._init_settlements()
+        if len(c["settlements"]) < 2:
+            return
+        my_sid = self._settlement_for_agent(agent)
+        other = next((s for s in c["settlements"] if s["id"] != my_sid), None)
+        if not other or not other["districts"]:
+            return
+        dest = other["districts"][0]
+        if agent.get("currentDistrict") == dest:
+            c["caravanLog"].append({"agent": agent["name"], "settlement": other["id"],
+                                    "frame": self.frameTick})
+            self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
+                                {"agent": agent["name"], "dest": dest})
+            self._push_activity(f"{agent['name']} arrives at {other['name']} with trade goods")
+            return
+        if not agent.get("goal"):
+            agent["goal"] = {"kind": "caravan", "target_district": dest, "ttl": STALL_THRESHOLD * 4}
+
+    def _propose_treaty(self, agent, decision):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return f"{agent['name']} cannot propose treaties"
+        rule = decision.get("rule") or {}
+        if not isinstance(rule, dict) or not rule.get("id") or not rule.get("name"):
+            agent["lastTreatyRejection"] = {"reason": "invalid treaty proposal", "frame": self.frameTick}
+            return f"{agent['name']} drafted an invalid treaty"
+        entry = {
+            "id": rule["id"], "name": rule["name"], "kind": "treaty",
+            "value": rule.get("value") or "trade",
+            "description": rule.get("description", "Inter-settlement treaty"),
+            "proposedBy": agent["name"], "enacted": False,
+            "votes": {agent["name"]: "yes"},
+        }
+        self.civilization["pendingRules"].append(entry)
+        self._tally_and_maybe_enact(entry)
+        agent["lastTreatyRejection"] = None
+        return f'{agent["name"]} proposed treaty "{entry["name"]}"'
+
+    def _vote_treaty(self, agent, decision):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return f"{agent['name']} cannot vote on treaties"
+        target = decision.get("target")
+        vote = (decision.get("vote") or "yes").lower()
+        pending = next((r for r in self.civilization["pendingRules"]
+                        if r["id"] == target and r.get("kind") == "treaty"), None)
+        if not pending:
+            agent["lastTreatyRejection"] = {"reason": "no such treaty pending", "frame": self.frameTick}
+            return f"{agent['name']} found no treaty {target} to vote on"
+        pending["votes"][agent["name"]] = vote
+        self._tally_and_maybe_enact(pending)
+        if pending.get("enacted"):
+            self.civilization.setdefault("treaties", []).append({
+                "id": pending["id"], "name": pending["name"], "value": pending["value"],
+                "frame": self.frameTick,
+            })
+        return f'{agent["name"]} voted {vote} on treaty "{pending["name"]}"'
+
+    # --- Path 1: pressure loop ---
+    def _is_night(self):
+        if not path1_on("PRESSURE_LOOP_ENABLED"):
+            return False
+        phase = self.frameTick % DAY_FRAMES
+        return phase >= int(DAY_FRAMES * (1 - NIGHT_FRACTION))
+
+    def _tick_night_pressure(self):
+        if not path1_on("PRESSURE_LOOP_ENABLED") or not SURVIVAL_ENABLED:
+            return
+        if not self._is_night():
+            return
+        c = self.civilization
+        house_slots = len([s for s in c["structures"]
+                           if (self._get_structure_function(s.get("type")) or {}).get("houses")
+                           and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD])
+        house_slots *= HOUSE_SHELTER_OCCUPANTS
+        house_slots += self._composable_shelter_count() * HOUSE_SHELTER_OCCUPANTS
+        living = self._living_agents()
+        sheltered = set()
+        if house_slots >= len(living):
+            c["nightSheltered"] = len(living)
+            c["nightTotal"] = len(living)
+            return
+        for a in living:
+            if a.get("homeStructureId"):
+                sheltered.add(a["name"])
+        others = [a for a in living if a["name"] not in sheltered]
+        sheltered.update(a["name"] for a in others[:max(0, house_slots - len(sheltered))])
+        exposed = 0
+        for a in living:
+            if a["name"] in sheltered or a["incapacitated"]:
+                continue
+            if a["health"] > 10:
+                a["health"] = max(10, a["health"] - NIGHT_EXPOSURE_DAMAGE)
+                a["lastNightNote"] = {"reason": "exposed to the night cold", "frame": self.frameTick}
+                exposed += 1
+        c["nightSheltered"] = len(sheltered)
+        c["nightTotal"] = len(living)
+        rate = len(sheltered) / max(1, len(living))
+        self._log_benchmark("night_shelter_rate", round(rate, 2),
+                            {"sheltered": len(sheltered), "total": len(living)})
+        if exposed:
+            self._push_activity(f"Night exposure — {exposed} villager(s) took cold damage")
+
+    def _tick_wildlife(self):
+        if not path1_on("PRESSURE_LOOP_ENABLED") or not SURVIVAL_ENABLED:
+            return
+        if random.random() > WILDLIFE_EVENT_PROB:
+            return
+        forest_agents = [a for a in self._living_agents()
+                         if not a["incapacitated"]
+                         and self.civilization["districts"].get(a.get("currentDistrict"), {}).get("kind") == "forest"]
+        if not forest_agents:
+            return
+        victim = random.choice(forest_agents)
+        guarded = any(self._distance_to(victim, g) <= WILDLIFE_GUARD_RADIUS
+                      for g in self._living_agents()
+                      if g["name"] != victim["name"] and g.get("role") == "guard"
+                      and not g["incapacitated"])
+        if guarded:
+            self._push_activity(f"Wildlife stirs near {victim['name']} but guards keep it at bay")
+            return
+        victim["health"] = max(5, victim["health"] - 5)
+        victim["lastNightNote"] = {"reason": "startled by wildlife", "frame": self.frameTick}
+        self._push_activity(f"Wildlife attacks {victim['name']} in the forest!")
+
+    def _maybe_seek_shelter(self, agent):
+        if not path1_on("PRESSURE_LOOP_ENABLED") or not self._is_night():
+            return
+        if agent.get("homeStructureId") or agent.get("goal"):
+            return
+        village_district = next((did for did, d in self.civilization["districts"].items()
+                                 if d.get("kind") == "village"), None)
+        if village_district and agent.get("currentDistrict") != village_district:
+            agent["goal"] = {"kind": "seek_shelter", "target_district": village_district,
+                             "ttl": STALL_THRESHOLD}
+
+    def _path1_industry_benchmark(self):
+        if not path1_on("INDUSTRY_ENABLED"):
+            return
+        depth = len([r for r in self.RECIPES if r not in ("planks", "bricks", "tools", "cart", "wagon")])
+        self._log_benchmark("industry_recipe_depth", depth, {"recipes": depth})
+
+    def _path1_tool_benchmark(self, resource, success):
+        if not path1_on("TOOL_TIERS_ENABLED"):
+            return
+        c = self.civilization
+        key = "tool_gather_ok" if success else "tool_gather_fail"
+        c[key] = c.get(key, 0) + 1
+        total = c.get("tool_gather_ok", 0) + c.get("tool_gather_fail", 0)
+        if total > 0:
+            self._log_benchmark("tool_tier_gather_ratio",
+                                round(c.get("tool_gather_ok", 0) / total, 2))
+
     def _project_resource_list(self, project):
         return " and ".join(project["needs"].keys())
 
@@ -3174,7 +4072,8 @@ class SimEngine:
         prefs = prefs or ["house"]
         open_prefs = [p for p in prefs if not self._type_saturated(p)
                       and not self._is_project_type_deferred(p)[0]
-                      and not self._type_tier_locked(p)[0]]
+                      and not self._type_tier_locked(p)[0]
+                      and not self._type_has_unmaxed_instance(p)]
         if open_prefs:
             return random.choice(open_prefs)
         # Every preferred type is saturated: fall back to any unsaturated
@@ -3183,7 +4082,8 @@ class SimEngine:
         fallback = [tid for tid in self.civilization["projectRegistry"]
                     if not self._type_saturated(tid)
                     and not self._is_project_type_deferred(tid)[0]
-                    and not self._type_tier_locked(tid)[0]]
+                    and not self._type_tier_locked(tid)[0]
+                    and not self._type_has_unmaxed_instance(tid)]
         if fallback:
             return random.choice(fallback)
         return prefs[0]
@@ -3280,6 +4180,22 @@ class SimEngine:
         if self._invention_required() and not tmpl.get("custom"):
             return (f"{agent['name']} wants to build, but the village needs a NEW invention "
                     f"(propose_blueprint)")
+        if STRUCTURE_UPGRADES_ENABLED and self._type_has_unmaxed_instance(type_):
+            unmaxed = [s for s in c["structures"]
+                       if s.get("type") == type_
+                       and not s.get("isRuin")
+                       and self._structure_level(s) < MAX_STRUCTURE_LEVEL]
+            target_s = min(unmaxed, key=lambda s: self._structure_level(s))
+            name = tmpl.get("name", type_)
+            agent["lastProjectRejection"] = {
+                "reason": (f"a {name} already exists at level {self._structure_level(target_s)} "
+                           f"(max {MAX_STRUCTURE_LEVEL}) -- upgrade_structure id {target_s['id']} "
+                           f"instead of building another"),
+                "frame": self.frameTick,
+            }
+            return (f"{agent['name']} cannot build another {name} -- upgrade the existing one "
+                    f"(id {target_s['id']}, level {self._structure_level(target_s)}) with "
+                    f"upgrade_structure first")
         if self._type_saturated(type_):
             # Only suggest an alternative the agent can actually start:
             # deferred types and types with an active duplicate both get
@@ -3403,6 +4319,19 @@ class SimEngine:
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop" \
                 and not self._craft_station_unlocked("workshop"):
             return f"{agent['name']} cannot craft {recipe_id} -- the village has no Workshop built yet"
+        if path1_on("INDUSTRY_ENABLED") and recipe_id in ("charcoal", "copper_ingot", "iron_ingot") \
+                and not self._craft_station_unlocked("kiln"):
+            return f"{agent['name']} cannot craft {recipe_id} -- the village has no Kiln built yet"
+        if path1_on("INDUSTRY_ENABLED") and recipe_id == "iron_pick" \
+                and not self._craft_station_unlocked("foundry"):
+            agent["lastCraftRejection"] = {"reason": "requires a working Foundry", "frame": self.frameTick}
+            return f"{agent['name']} cannot craft {recipe_id} -- the village has no Foundry built yet"
+        if path1_on("INDUSTRY_ENABLED") and recipe.get("station") == "kiln" \
+                and not self._craft_station_unlocked("kiln"):
+            return f"{agent['name']} cannot craft {recipe_id} -- the village has no Kiln built yet"
+        if path1_on("TIER3_CONTENT_ENABLED") and recipe.get("station") == "foundry" \
+                and not self._craft_station_unlocked("foundry"):
+            return f"{agent['name']} cannot craft {recipe_id} -- the village has no Foundry built yet"
         if TECH_TREE_ENABLED:
             tier = recipe.get("tier", 1)
             village_tier = self._village_tech_tier()
@@ -6487,6 +7416,18 @@ class SimEngine:
             else:
                 summary = f"{agent['name']} cannot repair — structure decay is disabled"
 
+        elif action == "upgrade_structure":
+            if STRUCTURE_UPGRADES_ENABLED:
+                summary = self._upgrade_structure(agent, decision.get("target"))
+            else:
+                summary = f"{agent['name']} cannot upgrade — structure upgrades are disabled"
+
+        elif action == "submit_structure_sprite":
+            if STRUCTURE_UPGRADES_ENABLED:
+                summary = self._apply_structure_sprite(agent, decision.get("sprite"))
+            else:
+                summary = f"{agent['name']} cannot submit a sprite — upgrades are disabled"
+
         elif action == "contribute_resources":
             district_id = self._resolve_contribution_district(agent, decision.get("target_district"))
             if not district_id:
@@ -6706,6 +7647,43 @@ class SimEngine:
                     self._bury_agent_at(cemetery, corpse, buried_by=agent)
                     summary = f"{agent['name']} buried {corpse['name']} in the Cemetery"
 
+        elif action == "place_block":
+            gx = gy = None
+            target = decision.get("target") or ""
+            if "," in str(target):
+                parts = str(target).split(",")
+                try:
+                    gx, gy = int(parts[0]), int(parts[1])
+                except ValueError:
+                    pass
+            block_type = decision.get("message") or decision.get("new_role") or "wall"
+            if target and "," not in str(target):
+                block_type = target
+            summary = self._place_block(agent, block_type, gx, gy)
+
+        elif action == "remove_block":
+            gx = gy = None
+            target = decision.get("target") or ""
+            if "," in str(target):
+                parts = str(target).split(",")
+                try:
+                    gx, gy = int(parts[0]), int(parts[1])
+                except ValueError:
+                    pass
+            summary = self._remove_block(agent, gx, gy)
+
+        elif action == "dig_terrain":
+            summary = self._dig_terrain(agent)
+
+        elif action == "plant_terrain":
+            summary = self._plant_terrain(agent)
+
+        elif action == "propose_treaty":
+            summary = self._propose_treaty(agent, decision)
+
+        elif action == "vote_treaty":
+            summary = self._vote_treaty(agent, decision)
+
         # rest / default: summary already set
 
         agent["lastAction"] = action
@@ -6766,6 +7744,25 @@ class SimEngine:
             return False
         if g["kind"] == "craft_gather":
             return self._step_craft_gather_goal(agent, g)
+        if g["kind"] == "plant_terrain":
+            self.apply_decision(agent, {"action": "plant_terrain", "reasoning": "goal:plant"})
+            agent["goal"] = None
+            return True
+        if g["kind"] == "seek_shelter":
+            dest = g.get("target_district")
+            if dest and agent.get("currentDistrict") != dest:
+                self._set_agent_target(agent, dest)
+                return True
+            agent["goal"] = None
+            return False
+        if g["kind"] == "caravan":
+            dest = g.get("target_district")
+            if dest and agent.get("currentDistrict") != dest:
+                self._set_agent_target(agent, dest)
+                return True
+            self._maybe_caravan_goal(agent)
+            agent["goal"] = None
+            return False
         district_id = g.get("district") or self._resolve_contribution_district(agent)
         if g["kind"] in ("gather", "deliver", "build") and not district_id:
             agent["goal"] = None
@@ -6815,6 +7812,7 @@ class SimEngine:
         invention_turn = bool(agent.get("inventionTurn"))
         if invention_turn:
             agent["inventionTurn"] = False
+        sprite_design_turn = bool(agent.get("spriteDesignTurn"))
         nudges = []
         rejection = agent.get("lastBlueprintRejection")
         rejection_nudge = None
@@ -6841,6 +7839,21 @@ class SimEngine:
         project_rejection = agent.get("lastProjectRejection")
         if project_rejection and self.frameTick - project_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             nudges.append(f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
+        if STRUCTURE_UPGRADES_ENABLED:
+            upgrade_rejection = agent.get("lastUpgradeRejection")
+            if upgrade_rejection and self.frameTick - upgrade_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: Your last upgrade failed: {upgrade_rejection['reason']}.")
+            sprite_rejection = agent.get("lastSpriteRejection")
+            if sprite_rejection and self.frameTick - sprite_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                nudges.append(f"NOTE: Your last sprite design was rejected: {sprite_rejection['reason']}.")
+            upgradeable = self._upgradeable_structures_brief()
+            if upgradeable and not sprite_design_turn:
+                sample = upgradeable[:3]
+                parts = ", ".join(
+                    f"{u['name']} id {u['id']} Lv.{u['level']}" for u in sample)
+                nudges.append(
+                    f"NOTE: Upgrade existing facilities before building duplicates. "
+                    f"Use upgrade_structure (target = structure id): {parts}.")
         if GOODS_ENABLED:
             repair_rejection = agent.get("lastRepairRejection")
             if repair_rejection and self.frameTick - repair_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
@@ -7072,6 +8085,25 @@ class SimEngine:
                 and self.frameTick - agent.get("lastSpokeFrame", 0) > SOCIAL_SILENCE_FRAMES:
             nudges.append("NOTE: You haven't spoken with anyone in a while and someone is nearby. "
                           "Consider talk_to_nearby to coordinate plans, ask for help, or share what you know.")
+        tool_line = None
+        industry_line = None
+        neighbor_line = None
+        if path1_on():
+            tools = [t for t in TOOL_TIER_ORDER if agent["resources"].get(t, 0) > 0]
+            tool_line = f"wooden/stone/iron picks held: {', '.join(tools) or 'none'}"
+            industry_line = f"Industry recipes: {len(self.RECIPES)} (smelt ores at kiln via craft_item)"
+            if self._is_night():
+                nudges.append("NOTE: It is night — seek shelter in a house or composable shelter.")
+            if self._border_settlement_agent(agent):
+                neighbor_line = "Neighbor settlement nearby — trade or propose_treaty"
+                nudges.append(f"NOTE: {neighbor_line}.")
+            for rej_key, label in (("lastBlockRejection", "block"), ("lastTerrainRejection", "terrain")):
+                rej = agent.get(rej_key)
+                if rej and self.frameTick - rej.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                    nudges.append(f"NOTE: Your last {label} action failed: {rej['reason']}.")
+            self._maybe_seek_shelter(agent)
+            self._maybe_expand_field(agent)
+            self._maybe_caravan_goal(agent)
         if invention_turn:
             # Invention turns get the dedicated INVENTION_SYSTEM_PROMPT/
             # INVENTION_USER_PROMPT (build_invention_prompt in server.py),
@@ -7083,6 +8115,13 @@ class SimEngine:
             # only the blueprint-rejection reason (if any) so a retried
             # invention turn still learns why its last attempt failed.
             nudges = [rejection_nudge] if rejection_nudge else []
+        if sprite_design_turn:
+            sprite_rej = agent.get("lastSpriteRejection")
+            sprite_note = None
+            if sprite_rej and self.frameTick - sprite_rej.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+                sprite_note = (f"NOTE: Your last sprite was rejected: {sprite_rej['reason']}. "
+                               f"Submit a strictly BIGGER grid.")
+            nudges = [sprite_note] if sprite_note else []
         behavior_nudge = " ".join(nudges)
 
         return {
@@ -7111,6 +8150,9 @@ class SimEngine:
                                 if d.get("build_grid")],
             "directive": self._current_directive() or "none",
             "invention_only": invention_turn,
+            "sprite_design_only": sprite_design_turn,
+            "sprite_design_context": dict(agent["spriteDesignTurn"]) if sprite_design_turn else None,
+            "upgradeable_structures": self._upgradeable_structures_brief() if STRUCTURE_UPGRADES_ENABLED else [],
             "invention_status": ("REQUIRED: every known structure is built or at capacity. Use "
                                  "propose_blueprint to invent a new structure.") if invention_required else "not needed",
             "commitment": agent.get("commitment"),
@@ -7160,11 +8202,20 @@ class SimEngine:
             # so flag-off prompts stay byte-identical to Phase F).
             "skills": {k: round(v, 1) for k, v in agent["skills"].items()} if CULTURE_ENABLED else None,
             "chronicle_line": self._chronicle_prompt_line() if CULTURE_ENABLED else None,
+            "path1_tool_line": tool_line,
+            "path1_industry_line": industry_line,
+            "path1_neighbor_line": neighbor_line,
+            "settlements": list(c.get("settlements") or []) if path1_on("PATH1_DIPLOMACY_ENABLED") else None,
             "available_actions": [a for a in self.d["AVAILABLE_ACTIONS"]
                                   if (a != "start_terraform" or ECOLOGY_ENABLED)
                                   and (a != "repair_structure" or GOODS_ENABLED)
                                   and (a != "bury_agent" or CEMETERY_ENABLED)
-                                  and (a != "repeal_rule" or RULES_ENABLED)],
+                                  and (a != "repeal_rule" or RULES_ENABLED)
+                                  and (a != "upgrade_structure" or STRUCTURE_UPGRADES_ENABLED)
+                                  and (a != "submit_structure_sprite" or sprite_design_turn)
+                                  and (a not in ("place_block", "remove_block") or path1_on("COMPOSABLE_BUILD_ENABLED"))
+                                  and (a not in ("dig_terrain", "plant_terrain") or path1_on("TERRAIN_TILES_ENABLED"))
+                                  and (a not in ("propose_treaty", "vote_treaty") or path1_on("PATH1_DIPLOMACY_ENABLED"))],
         }
 
     def _recent_conversations_text(self):
@@ -7310,6 +8361,16 @@ class SimEngine:
                             "reason": decision["terraform_rejection_note"],
                             "frame": self.frameTick,
                         }
+                    if decision.get("sprite_rejection_note"):
+                        agent["lastSpriteRejection"] = {
+                            "reason": decision["sprite_rejection_note"],
+                            "frame": self.frameTick,
+                        }
+                    if decision.get("upgrade_rejection_note"):
+                        agent["lastUpgradeRejection"] = {
+                            "reason": decision["upgrade_rejection_note"],
+                            "frame": self.frameTick,
+                        }
                     retried_invention = False
                     if decision.get("rejection_note"):
                         # normalize_decision swapped an invalid propose_blueprint
@@ -7442,6 +8503,13 @@ class SimEngine:
                     self._maybe_study_at_library()
                 if CEMETERY_ENABLED:
                     self._maybe_handle_burials()
+                if path1_on():
+                    self._maybe_found_settlement()
+                    self._path1_industry_benchmark()
+            if path1_on("PRESSURE_LOOP_ENABLED") and ft % GOODS_TICK_FRAMES == 0:
+                self._tick_wildlife()
+            if path1_on("PRESSURE_LOOP_ENABLED") and self._is_night() and ft % 30 == 0:
+                self._tick_night_pressure()
             if STRUCTURE_EFFECTS_ENABLED and ft % EFFECT_TICK_FRAMES == 0:
                 self._tick_structure_effects()
             if ECOLOGY_ENABLED and ft % ECOLOGY_REGROW_FRAMES == 0:
@@ -7684,6 +8752,11 @@ class SimEngine:
                         civ["projectRegistry"].setdefault("market", dict(PROJECT_TEMPLATES["market"]))
                     for s in (civ.get("structures") or []):
                         s.setdefault("homeOf", None)
+                if STRUCTURE_UPGRADES_ENABLED:
+                    for s in (civ.get("structures") or []):
+                        s.setdefault("level", 1)
+                        s.setdefault("visualTier", 1)
+                        s.setdefault("renderScale", 1.0)
                 if LIFECYCLE_ENABLED:
                     # Phase F: population lifecycle + governance state. A save
                     # from before this phase has none of this -- setdefault is
@@ -7725,6 +8798,23 @@ class SimEngine:
                     civ.setdefault("cemeteryBackoffUntil", 0)
                     civ.setdefault("cemeteryBackstopFailures", 0)
                     civ.setdefault("cemeteryEscalationLogged", False)
+                if path1_on():
+                    for tid, tmpl in PROJECT_TEMPLATES.items():
+                        if isinstance(civ.get("projectRegistry"), dict):
+                            civ["projectRegistry"].setdefault(tid, dict(tmpl))
+                    for rid, rdef in {**BASE_RESOURCES, **CRAFTED_RESOURCES}.items():
+                        if isinstance(civ.get("resourceRegistry"), dict):
+                            civ["resourceRegistry"].setdefault(rid, dict(rdef))
+                    civ.setdefault("settlements", [])
+                    civ.setdefault("treaties", [])
+                    civ.setdefault("caravanLog", [])
+                    civ.setdefault("path1Placements", 0)
+                    civ.setdefault("path1TerrainMutations", 0)
+                    for d in (civ.get("districts") or {}).values():
+                        d.setdefault("tiles", {})
+                        d.setdefault("settlementId", "home")
+                        if "terrain" not in d:
+                            d["terrain"] = {}
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
@@ -7746,6 +8836,13 @@ class SimEngine:
                     a.setdefault("lastHomelessNudgeFrame", None)
                     a.setdefault("lastBurialRejection", None)
                     a.setdefault("inventionRetryUsed", False)
+                    a.setdefault("spriteDesignTurn", None)
+                    a.setdefault("lastUpgradeRejection", None)
+                    a.setdefault("lastSpriteRejection", None)
+                    a.setdefault("lastBlockRejection", None)
+                    a.setdefault("lastTerrainRejection", None)
+                    a.setdefault("lastTreatyRejection", None)
+                    a.setdefault("lastNightNote", None)
                     a.setdefault("persona", "")
                     a.setdefault("moduleTick", 0)
                     a.setdefault("modules", {
@@ -7897,7 +8994,10 @@ class SimEngine:
                                 "districtId": s.get("districtId"),
                                 "condition": s.get("condition", 100),
                                 "isRuin": bool(s.get("isRuin")),
-                                "homeOf": s.get("homeOf")}
+                                "homeOf": s.get("homeOf"),
+                                "level": s.get("level", 1),
+                                "visualTier": s.get("visualTier", 1),
+                                "renderScale": s.get("renderScale", 1.0)}
                                for s in c["structures"]],
                 "districtProjects": district_projects,
                 "completedProjects": c["completedProjects"],
@@ -7946,6 +9046,10 @@ class SimEngine:
                 civ["prices"] = ({rid: self._resource_price(rid)
                                   for rid in c["resourceRegistry"] if rid != "gold"}
                                  if civ["marketActive"] else {})
+            if path1_on():
+                civ["settlements"] = list(c.get("settlements") or [])
+                civ["treaties"] = list(c.get("treaties") or [])
+                civ["isNight"] = self._is_night()
             benchmarks = dict(self.lastBenchmarks)
             activity = list(self.activityLog)
             conversation = list(self.conversationLog[:30])
@@ -7973,6 +9077,15 @@ class SimEngine:
                         "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
                         "CULTURE_ENABLED": CULTURE_ENABLED,
                         "CEMETERY_ENABLED": CEMETERY_ENABLED,
+                        "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
+                        "PATH1_ENABLED": PATH1_ENABLED,
+                        "INDUSTRY_ENABLED": path1_on("INDUSTRY_ENABLED"),
+                        "TOOL_TIERS_ENABLED": path1_on("TOOL_TIERS_ENABLED"),
+                        "COMPOSABLE_BUILD_ENABLED": path1_on("COMPOSABLE_BUILD_ENABLED"),
+                        "TERRAIN_TILES_ENABLED": path1_on("TERRAIN_TILES_ENABLED"),
+                        "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
+                        "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
+                        "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
                     },
                 },
             }

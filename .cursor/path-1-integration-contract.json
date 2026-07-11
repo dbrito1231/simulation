@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "frozen_at": "2026-07-11T05:00:00Z",
+  "note": "SA-0 Lead fills frozen_at UTC and must not rename keys after Wave 1 starts.",
+  "flags": {
+    "PATH1_ENABLED": true,
+    "INDUSTRY_ENABLED": true,
+    "TOOL_TIERS_ENABLED": true,
+    "COMPOSABLE_BUILD_ENABLED": true,
+    "TERRAIN_TILES_ENABLED": true,
+    "DIPLOMACY_ENABLED": true,
+    "TIER3_CONTENT_ENABLED": true,
+    "PRESSURE_LOOP_ENABLED": true
+  },
+  "resources": [
+    "clay",
+    "sand",
+    "copper_ore",
+    "iron_ore",
+    "charcoal",
+    "copper_ingot",
+    "iron_ingot",
+    "rope",
+    "cloth",
+    "wooden_pick",
+    "stone_pick",
+    "iron_pick"
+  ],
+  "structures": ["kiln", "harbor", "mill", "foundry"],
+  "block_types": ["wall", "floor", "door", "fence"],
+  "terrain_types": ["soil", "rock", "grove", "water"],
+  "actions": [
+    "place_block",
+    "remove_block",
+    "dig_terrain",
+    "plant_terrain",
+    "propose_treaty",
+    "vote_treaty"
+  ],
+  "eras": ["Harbor Era", "Mill Era"],
+  "district_fields": ["tiles", "terrain"],
+  "ownership": {
+    "SA-1": ["sim_engine.py registry blocks", "restore_state registry merge"],
+    "SA-2": ["sim_engine.py gather/tool helpers", "server.py gather normalize"],
+    "SA-3": ["sim_engine.py BLOCK_TYPES", "place_block", "remove_block", "tiles"],
+    "SA-4": ["sim_engine.py terrain", "dig_terrain", "plant_terrain"],
+    "SA-5": ["sim_engine.py settlements", "caravan", "treaties"],
+    "SA-6": ["sim_engine.py pressure/night/wildlife"],
+    "SA-7": ["sprites.js", "index.html"],
+    "SA-8": ["server.py DECISION_*", "SYSTEM_PROMPT", "CLAUDE.md"],
+    "SA-9": ["scripts/path1_smoke.py", "audit log in path-1 plan"]
+  }
+}
