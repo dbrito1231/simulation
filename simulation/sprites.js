@@ -414,6 +414,61 @@ function colorFromId(id) {
 // at scale 2 = 32x32px) so a house reads as a building, not a doll-sized prop.
 const STRUCTURE_SCALE = 5;
 
+// Canonical silhouette for the high-level seed house. Level 30 houses may
+// carry an LLM-authored sprite in persisted state, but those sprites can be
+// attractive blobs without the visual landmarks that make a house readable.
+// Keep the built-in house recognizable: pitched roof, chimney, two windows,
+// walls, and a centered door.
+function makeLevel30HouseGrid() {
+  const width = 17;
+  const height = 14;
+  const grid = Array.from({ length: height }, () => Array(width).fill(null));
+  const roof = C.br;
+  const roofLight = C.m1;
+  const wall = C.s1;
+  const outline = C.brd;
+  const window = C.o1;
+  const windowLight = C.ow;
+  const door = C.dk;
+
+  // Pitched roof with a chimney on the right.
+  for (let y = 0; y <= 6; y++) {
+    const left = 8 - y;
+    const right = 8 + y;
+    for (let x = left; x <= right; x++) grid[y][x] = roof;
+  }
+  grid[0][11] = outline;
+  grid[1][11] = outline;
+  grid[2][11] = outline;
+  for (let x = 1; x < width - 1; x++) grid[6][x] = roofLight;
+
+  // Façade, with a dark outline and warm wall fill.
+  for (let y = 7; y < height; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      grid[y][x] = (x === 1 || x === width - 2 || y === height - 1)
+        ? outline : wall;
+    }
+  }
+
+  // Window frames and panes.
+  for (const start of [3, 11]) {
+    for (let y = 9; y <= 10; y++) {
+      for (let x = start; x < start + 3; x++) grid[y][x] = window;
+    }
+    grid[9][start + 1] = windowLight;
+    grid[10][start + 1] = windowLight;
+  }
+
+  // Centered door and a small brass handle.
+  for (let y = 11; y < height; y++) {
+    for (let x = 7; x <= 9; x++) grid[y][x] = door;
+  }
+  grid[12][8] = C.ma;
+  return grid;
+}
+
+const LEVEL30_HOUSE_GRID = makeLevel30HouseGrid();
+
 // LLM-authored sprites: blueprints may carry {palette: ["#RRGGBB",...],
 // grid: [".aab.", ...]} (validated server-side). Convert to the color-row
 // format drawPixelGrid consumes; cache per structure type.
@@ -536,6 +591,12 @@ function structureIsUpgraded(structure) {
 
 function getStructureGrid(structure) {
   const upgraded = structureIsUpgraded(structure);
+  // Seed houses need a stable architectural silhouette at the milestone
+  // level. Do not let a persisted LLM sprite replace the pitched roof and
+  // façade that identify this built-in structure as a house.
+  if (structure.type === "house" && Number(structure.level) >= 30) {
+    return LEVEL30_HOUSE_GRID;
+  }
   // Upgraded seed types store a bigger sprite on the instance — prefer it
   // when it has real detail; flat gray LLM blobs fall back to upscaled seeds.
   if (upgraded && structure.sprite && !spriteSpecIsDegenerate(structure.sprite)) {

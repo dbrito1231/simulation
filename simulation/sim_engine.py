@@ -279,6 +279,22 @@ LEVEL_STEP = 1              # levels gained per upgrade_structure action (1 → 
 UPGRADE_STAT_STEP = 10        # cost + produce/boost weight tier every N levels
 UPGRADE_TIERS = (1, 25, 50, 75, 100)
 UPGRADE_COST_BASE = 1       # primary material units; scales with level tier
+# Structure footprint model (size-aware placement/overlap): mirrors the
+# client's drawn size so the engine can prevent/detect visual overlap after
+# upgrades grow a structure's renderScale.
+STRUCTURE_PX_SCALE = 5          # mirrors sprites.js STRUCTURE_SCALE
+SEED_SPRITE_DIMS = {             # (rows, cols) of sprites.js STRUCTURE_GRIDS
+    "house": (8, 8), "workshop": (8, 8), "farm_plot": (6, 8),
+    "wall": (6, 6), "cemetery": (6, 6),
+}
+PROC_SPRITE_DIMS = (9, 10)      # sprites.js proceduralGridForStructure fallback
+STRUCTURE_GAP_X = 12             # min clear px between structure footprints
+STRUCTURE_GAP_Y = 18             # taller: covers the label drawn at y+height+2
+# Agent-driven reorganization: periodic backstop cadence (~10s at 30/s) for
+# _maybe_reorganize_structures, and the throttle window for the "no room to
+# relocate" activity nudge so a stuck relocation doesn't spam the feed.
+REORG_CHECK_FRAMES = 300
+REORG_NO_ROOM_NUDGE_FRAMES = 1000
 # Type-aware palettes for procedural upgrade sprites (seed types have no stored sprite).
 SEED_UPGRADE_PALETTES = {
     "farm_plot": ["#6D4C41", "#8BC34A", "#C5E1A5", "#33691E", "#FFF9C4"],
@@ -314,6 +330,22 @@ BLUEPRINT_STALL_THRESHOLD = 1800
 # it"; without an expiry it dominates decisions forever (and persists across
 # sessions via state.json). ~3 minutes at 30 ticks/s = several think cycles.
 DIRECTIVE_TTL_FRAMES = 5400
+# Cap on how many behavior_nudge strings get concatenated into one prompt.
+# P0 (emergency/survival) nudges always pass through uncapped since they are
+# rare; P1-P3 nudges fill the remaining slots in priority order.
+MAX_BEHAVIOR_NUDGES = 3
+# C3: caps on unbounded/monotonically-growing think-payload lists. Each trims
+# only what reaches the PROMPT -- validation (server.py's validate_blueprint)
+# either keeps reading a separate, always-full list, or is unaffected because
+# the underlying value is already bounded elsewhere (noted per constant).
+MAX_REJECTED_BLUEPRINTS_PROMPT = 15  # rest: engine keeps full rejected_blueprints for validation
+MAX_APPROVED_PROJECTS_PROMPT = 15  # already <= MAX_APPROVED_CUSTOM in practice; safeguard only
+MAX_KNOWN_RESOURCES_PROMPT = 40  # validation gets a separate, always-full known_resource_ids list
+MAX_KNOWN_RECIPES_PROMPT = 30  # not read by validate_blueprint; prompt-only
+MAX_ACTIVE_RULES_PROMPT = 12  # already <= MAX_ACTIVE_RULES (8) in practice; safeguard only
+MAX_NEARBY_AGENTS_PROMPT = 10  # village is 8-12 agents; safeguard only
+MAX_IDLE_AGENTS_PROMPT = 8  # elder-only list; safeguard only
+MAX_BLUEPRINT_BRIEFS = 4  # per-bucket cap on elder blueprint-council nudge briefs
 GOAL_STEP_FRAMES = 45
 SAGE_CRITICAL_HEALTH = 30
 CRAFT_STALL_THRESHOLD = 1500
@@ -350,6 +382,11 @@ MAX_CUSTOM_RECIPES = 12
 # elder's verdict means something across many think cycles, short enough that
 # a 9h soak sees several amnesty waves).
 BLUEPRINT_AMNESTY_FRAMES = STALL_THRESHOLD * 60
+# A pending blueprint whose sage review never lands (elder offline/incapacitated
+# the whole window) auto-skips the review after this many frames rather than
+# blocking approval forever -- same deadlock-avoidance shape as the amnesty
+# clock above, just for the review stage instead of the rejection stage.
+SAGE_REVIEW_TIMEOUT_FRAMES = STALL_THRESHOLD * 20
 MAX_PENDING_RULES = 4
 MAX_ACTIVE_RULES = 8
 
@@ -361,6 +398,13 @@ AUTOSWITCH_PROTECTED_ROLES = {"elder", "builder", "healer"}
 ROLE_STARVE_NEED_THRESHOLD = 2
 RULES_TICK_FRAMES = 150
 RULE_PROPOSE_COOLDOWN = 1500
+# _maybe_advance_rules's "keep village law lean" repeal backstop must not be
+# able to repeal a rule it (or the propose branch) only just enacted -- without
+# a minimum age, tax+priority (the normal 2-rule steady state) triggers an
+# immediate propose/repeal oscillation every cooldown window. A few cooldown
+# cycles' worth of frames lets a freshly-enacted rule actually do something
+# before it's eligible for the amendment-exercise repeal.
+RULE_REPEAL_MIN_AGE_FRAMES = RULE_PROPOSE_COOLDOWN * 4
 
 MEME_SEED_ID = "harvest_spirit"
 MEME_RIVAL_ID = "river_spirit"
@@ -387,7 +431,11 @@ VALID_GATHER_ZONES = {"farm", "forest", "village", "market", "beach", "cave", "o
 VALID_VISUAL_STYLES = {"house", "farm_plot", "workshop", "wall", "generic"}
 RULE_KINDS = {"resource_tax", "custom", "priority"}
 
-MAX_CONCURRENT_LLM = 2
+# Must match LM Studio's loaded parallel slots (scripts/lms_load.py loads
+# context 20000 / parallel 3 -- per-slot budget ~6600 tokens, above the
+# ~5.8k max prompt seen with all Path 1 flags on). Raised 2->3 on 2026-07-11
+# alongside that reload for +50% think throughput.
+MAX_CONCURRENT_LLM = 3
 LLM_MIN_GAP_MS = 250
 # When _schedule_think can't dispatch (worker pool full, cooldown, min-gap),
 # the agent retries this soon instead of waiting a full thinkInterval (up to
@@ -432,6 +480,14 @@ CART_CARRY_BONUS = 20
 # SHELTER_HUNGER_FLOOR (20), i.e. a night outside can never push anyone into
 # the starvation-reflex band (STARVING_HUNGER 10).
 DAY_FRAMES = 13500
+# In-world clock for the GUI's Time panel: a continuously advancing accelerated
+# date/time, derived purely from frameTick (so it persists correctly across
+# restarts and stays in sync with the day/night cycle above, including
+# freezing together while paused). SIM_CLOCK_EPOCH_MS is an arbitrary in-world
+# start instant for frameTick 0; SIM_MS_PER_TICK follows from DAY_FRAMES so one
+# sim-day always equals one real day/night cycle (~192x real time).
+SIM_CLOCK_EPOCH_MS = datetime(2026, 1, 1, 6, 0, tzinfo=timezone.utc).timestamp() * 1000
+SIM_MS_PER_TICK = 86400_000.0 / DAY_FRAMES
 HOUSE_SHELTER_OCCUPANTS = 2
 SHELTER_HUNGER_PENALTY = 6
 SHELTER_HUNGER_FLOOR = 20
@@ -478,6 +534,11 @@ SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}
 # are byte-identical to Phase C.
 TECH_TREE_ENABLED = True
 MAX_TECH_TIER = 3
+# Two-stage blueprint approval: the elder must sage_review_blueprint (a
+# geography/resource sanity pass) before approve_blueprint/reject_blueprint is
+# accepted on that id. Flag-gated so it can be killed instantly if it ever
+# deadlocks approval; with it off, approve_blueprint behaves exactly as before.
+SAGE_REVIEW_ENABLED = True
 # The wagon (tier-2 vehicle, crafted at the Forge, consumes the Phase C cart):
 # query-time effects on its holder, same pattern as the cart.
 WAGON_CARRY_BONUS = 40
@@ -489,7 +550,7 @@ WAGON_SPEED_MULT = 1.4
 INVENTION_COUNCIL_SIZE = 3
 COUNCIL_LOG_CAP = 12                      # persisted debate records (viewer panel)
 # A council with no verdict dissolves after this many frames (STALL_THRESHOLD=600
-# frames = 20s at 30fps, so x20 = ~6.7 min). Sized for INVENTION_TIMEOUT_S=75s
+# frames = 20s at 30fps, so x20 = ~6.7 min). Sized for THINKING_TIMEOUT_S=75s
 # per member (server.py) queued behind MAX_CONCURRENT_LLM=2 workers, plus the
 # elder's own verdict turn -- was x10 (~3.3 min), too tight once the 2026-07-07
 # timeout fix let invention calls actually run to completion instead of
@@ -919,6 +980,9 @@ if CEMETERY_ENABLED:
 TILE_CELL = 40
 TILE_CAP_PER_DISTRICT = 200
 BLOCK_REFUND_RATIO = 0.5
+# District kinds whose terrain grid defaults to something other than "soil"
+# (see _ensure_district_terrain) -- these can never be dug for stone.
+NON_DIGGABLE_DISTRICT_KINDS = {"forest", "beach", "cave", "ocean"}
 TOOL_TIER_ORDER = ("wooden_pick", "stone_pick", "iron_pick")
 TOOL_TIER_LEVEL = {"wooden_pick": 1, "stone_pick": 2, "iron_pick": 3}
 RESOURCE_MIN_TOOL = {
@@ -1180,6 +1244,10 @@ class SimEngine:
         self.SLUG_RE = deps["SLUG_RE"]
         self.lock = threading.RLock()
         self.frameTick = 0
+        # Real wall-clock seconds at process start, for the GUI's "uptime"
+        # display. Deliberately not persisted/restored -- it reflects time
+        # since the server process last started, not since the world began.
+        self.processStartTime = time.time()
         self.paused = False
         self.lmStatus = "offline"
         self.llm_cooldown_until = 0.0
@@ -1252,6 +1320,7 @@ class SimEngine:
                 "consecutiveIdleMoves": 0, "hunger": 80, "health": 100,
                 "incapacitated": False, "goal": None, "actionCounts": {},
                 "commitment": None, "inventionTurn": False, "inventionRetryUsed": False,
+                "inventionBuildContext": None,
                 "spriteDesignTurn": None,
                 "lastBlueprintRejection": None, "lastGatherRejection": None,
                 "lastUpgradeRejection": None, "lastSpriteRejection": None,
@@ -1264,6 +1333,8 @@ class SimEngine:
                 # Phase E: home structure id (None = homeless) + refusal nudges.
                 "homeStructureId": None, "lastTradeRejection": None,
                 "lastHomelessNudgeFrame": None,
+                # Agent-driven reorg: structureId this agent is relocating, or None.
+                "reorgTask": None,
             }
             if LIFECYCLE_ENABLED:
                 # Phase F: staggered starting ages so the roster isn't a single
@@ -1404,6 +1475,12 @@ class SimEngine:
             "caravanLog": [],
             "path1Placements": 0,
             "path1TerrainMutations": 0,
+            # Agent-driven structure reorganization (footprint-overlap fixup):
+            # at most one task in flight; see _maybe_reorganize_structures.
+            "reorgTasks": [],
+            "lastReorgFrame": 0,
+            "lastReorgCheckFrame": 0,
+            "lastReorgNoRoomFrame": 0,
         }
         self._effect_period_fired = 0
         self._module_period_runs = 0
@@ -1513,12 +1590,17 @@ class SimEngine:
         for o in self.agents:
             if o is agent:
                 continue
-            if _dist(agent["x"], agent["y"], o["x"], o["y"]) <= 80:
-                near.append({"name": o["name"], "role": o["role"],
+            d = _dist(agent["x"], agent["y"], o["x"], o["y"])
+            if d <= 80:
+                near.append((d, {"name": o["name"], "role": o["role"],
                              "food": o["resources"].get("food", 0),
                              "wood": o["resources"].get("wood", 0),
-                             "gold": o["resources"].get("gold", 0)})
-        return near
+                             "gold": o["resources"].get("gold", 0)}))
+        # C3: sort nearest-first before the MAX_NEARBY_AGENTS_PROMPT cap below
+        # so a crowded radius always keeps the closest agents, not an
+        # arbitrary iteration-order slice.
+        near.sort(key=lambda pair: pair[0])
+        return [item for _, item in near[:MAX_NEARBY_AGENTS_PROMPT]]
 
     def _find_nearest_agent(self, agent):
         best, best_d = None, float("inf")
@@ -1651,6 +1733,32 @@ class SimEngine:
         agent["targetX"] = target["x"] + (random.random() - 0.5) * 60
         agent["targetY"] = target["y"] + (random.random() - 0.5) * 60
         agent["waypoints"] = []
+
+    def _en_route_to(self, agent, district_id):
+        """True while the agent's final travel destination already lies in
+        the given district and they haven't arrived yet. Guards the callers
+        that re-issue routing every goal step: without it each call re-rolls
+        a new random destination point and replans the road path, which reads
+        as agents jittering/circling around road hubs instead of walking."""
+        d = self.civilization["districts"].get(district_id)
+        if not d:
+            return False
+        wps = agent.get("waypoints") or []
+        fx = wps[-1]["x"] if wps else agent.get("targetX")
+        fy = wps[-1]["y"] if wps else agent.get("targetY")
+        if fx is None or fy is None:
+            return False
+        b = d["bounds"]
+        if not (b["x1"] <= fx <= b["x2"] and b["y1"] <= fy <= b["y2"]):
+            return False
+        return abs(agent["x"] - fx) + abs(agent["y"] - fy) > 1.0
+
+    def _set_agent_target_once(self, agent, target):
+        """_set_agent_target, but a no-op while already traveling there."""
+        district_id = self._resolve_target_district(target, agent)
+        if district_id and self._en_route_to(agent, district_id):
+            return
+        self._set_agent_target(agent, target)
 
     def _auto_move_toward_target(self, agent, target_name):
         if not target_name or target_name not in self.agent_names:
@@ -1850,6 +1958,12 @@ class SimEngine:
 
         def usable(did):
             d = c["districts"].get(did)
+            # Note: this count-vs-cap check is an optimistic pre-filter -- it
+            # can overestimate room now that footprint-aware placement lets
+            # large (upgraded) structures shadow multiple grid slots.
+            # _find_structure_spot returning None is the authoritative gate;
+            # _maybe_relocate_stuck_project handles the case where a project
+            # starts here anyway and then can't actually complete.
             return bool(d and d.get("build_grid") and d["kind"] == kind
                         and not c["districtProjects"].get(did)
                         and self._district_structure_count(did) < d["build_grid"]["cap"])
@@ -1885,7 +1999,11 @@ class SimEngine:
         if not actives:
             return "none"
         c = self.civilization
-        return "; ".join(f"{c['districtProjects'][did]['name']} in {did}" for did in actives)
+        def _brief(did):
+            p = c["districtProjects"][did]
+            lead = p.get("lead")
+            return f"{p['name']} in {did}" + (f" (lead: {lead})" if lead else "")
+        return "; ".join(_brief(did) for did in actives)
 
     def _active_projects_progress_text(self):
         actives = self._active_project_districts()
@@ -2013,6 +2131,37 @@ class SimEngine:
             else:
                 parts.append(f"{rid}:ok")
         return ", ".join(parts)
+
+    def _structure_distribution_by_district(self):
+        """Per-district structure type counts, computed fresh from
+        civilization["structures"] -- no caching needed at this scale. Used to
+        give the sage review a sense of what's already built where."""
+        counts = {}
+        for s in self.civilization["structures"]:
+            did = s.get("districtId")
+            if not did or s.get("isRuin"):
+                continue
+            counts.setdefault(did, {}).setdefault(s.get("type"), 0)
+            counts[did][s.get("type")] += 1
+        return counts
+
+    def _sage_review_geo_context(self):
+        """Compact village-wide geography/resource summary for the sage
+        review nudge: per buildable district, stock levels and what's already
+        standing there."""
+        c = self.civilization
+        distribution = self._structure_distribution_by_district()
+        parts = []
+        for did, d in c["districts"].items():
+            if not d.get("build_grid"):
+                continue
+            stocks = c.get("districtStocks", {}).get(did) or {} if ECOLOGY_ENABLED else {}
+            low = [rid for rid, val in stocks.items() if val <= 0 or val < self._stock_max(rid) * STOCK_LOW_RATIO]
+            built = distribution.get(did) or {}
+            built_str = ", ".join(f"{t}x{n}" for t, n in sorted(built.items())) or "nothing built"
+            shortage_str = f"short on {', '.join(sorted(low))}" if low else "stocks fine"
+            parts.append(f"{did} ({d.get('kind')}): {built_str}; {shortage_str}")
+        return "; ".join(parts) if parts else "no district data"
 
     def _tick_ecology_regrow(self):
         if not ECOLOGY_ENABLED:
@@ -2373,6 +2522,15 @@ class SimEngine:
                    if s.get("type") == type_
                    and (district_id is None or s.get("districtId") == district_id))
 
+    def _structure_type_built(self, type_):
+        """True once at least one non-ruin structure of this type is actually
+        standing. duplicateOf can name a seed/custom type that's registered
+        (or even just another pendingBlueprints id) but has no built instance
+        yet -- approve_blueprint's upgrade routing checks this first so it
+        never pops a proposal into a doomed "no structure to upgrade" call."""
+        return any(s.get("type") == type_ and not s.get("isRuin")
+                   for s in self.civilization["structures"])
+
     # --- structure function registry (Phase A consequence engine) ---
     def _get_structure_function(self, type_):
         if not STRUCTURE_EFFECTS_ENABLED:
@@ -2391,26 +2549,32 @@ class SimEngine:
     def _canonical_effect_vector(self, function):
         return self.d["canonical_effect_vector"](function)
 
-    def _known_effect_vectors(self):
+    def _effect_vector_owner_map(self):
+        """Map canonical effect vector -> owning id (seed/custom structure type
+        or pending blueprint id), so a new proposal can be tagged duplicateOf
+        the thing it duplicates instead of just being rejected outright."""
         c = self.civilization
-        vectors = set()
+        owners = {}
         for tid, fn in SEED_STRUCTURE_FUNCTIONS.items():
             vec = self._canonical_effect_vector(fn)
             if vec:
-                vectors.add(vec)
+                owners.setdefault(vec, tid)
         for pid in c["projectRegistry"]:
             fn = self._get_structure_function(pid)
             if fn:
                 vec = self._canonical_effect_vector(fn)
                 if vec:
-                    vectors.add(vec)
+                    owners.setdefault(vec, pid)
         for bp in c["pendingBlueprints"]:
             fn = bp.get("function")
             if fn:
                 vec = self._canonical_effect_vector(fn)
                 if vec:
-                    vectors.add(vec)
-        return vectors
+                    owners.setdefault(vec, bp["id"])
+        return owners
+
+    def _known_effect_vectors(self):
+        return set(self._effect_vector_owner_map())
 
     def _structure_display_name(self, type_id):
         c = self.civilization
@@ -3251,6 +3415,49 @@ class SimEngine:
         grid = sprite["grid"]
         return len(grid), max(len(str(r)) for r in grid)
 
+    def _structure_footprint(self, s):
+        """Drawn footprint in world px, mirroring the client (sprites.js
+        getStructureRenderSize/getStructureGrid/upgradedSeedGrid): take the
+        max rows/cols across every candidate source (conservative -- the
+        client's exact path can vary by sprite/degenerate-check state), then
+        scale by STRUCTURE_PX_SCALE and renderScale."""
+        candidates = []
+        sprite = s.get("sprite")
+        is_degenerate = self.d.get("sprite_spec_is_degenerate", lambda sp: False)
+        if sprite and not is_degenerate(sprite):
+            rows, cols = self._sprite_dimensions(sprite)
+            if rows and cols:
+                candidates.append((rows, cols))
+        type_id = s.get("type")
+        if type_id in SEED_SPRITE_DIMS:
+            seed_rows, seed_cols = SEED_SPRITE_DIMS[type_id]
+            factor = min(max(1, int(s.get("visualTier") or 1)), 3)
+            candidates.append((seed_rows * factor, seed_cols * factor))
+        if not candidates:
+            candidates.append(PROC_SPRITE_DIMS)
+        rows = max(c[0] for c in candidates)
+        cols = max(c[1] for c in candidates)
+        render_scale = float(s.get("renderScale") or 1.0)
+        w = cols * STRUCTURE_PX_SCALE * render_scale
+        h = rows * STRUCTURE_PX_SCALE * render_scale
+        return w, h
+
+    def _structure_rect(self, s):
+        w, h = self._structure_footprint(s)
+        return s.get("x", 0), s.get("y", 0), w, h
+
+    def _footprint_rects_collide(self, a, b):
+        """AABB overlap test for two (x, y, w, h) rects, inflated by the
+        structure gap constants. Distinct from the module-level
+        `_rects_overlap` (x1/y1/x2/y2 dict form used for district bounds)."""
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        return (ax < bx + bw + STRUCTURE_GAP_X and bx < ax + aw + STRUCTURE_GAP_X
+                and ay < by + bh + STRUCTURE_GAP_Y and by < ay + ah + STRUCTURE_GAP_Y)
+
+    def _structures_overlapping(self, a, b):
+        return self._footprint_rects_collide(self._structure_rect(a), self._structure_rect(b))
+
     def _farm_plot_tier_sprite(self, structure, tier_idx, palette):
         rows = min(14, 6 + tier_idx * 2)
         cols = min(14, 8 + tier_idx * 2)
@@ -3414,6 +3621,9 @@ class SimEngine:
                 "structureName": name,
                 "structureType": s.get("type"),
             }
+            # The upgrade may have grown this structure's footprint enough to
+            # overlap a neighbor; the upgrader becomes the relocator.
+            self._enqueue_reorg_for_overlaps(s, preferred_agent=agent)
         agent["lastUpgradeRejection"] = None
         self._push_activity(f"{agent['name']} upgraded the {name} to level {new_level}")
         self._log_benchmark("structure_upgraded", new_level,
@@ -3448,6 +3658,9 @@ class SimEngine:
         agent["lastSpriteRejection"] = None
         name = s.get("name") or s.get("type")
         self._push_activity(f"{agent['name']} refined the sprite for the {name}")
+        # An agent-refined sprite can also grow the drawn footprint enough to
+        # overlap a neighbor -- same reorg trigger as a tier upgrade.
+        self._enqueue_reorg_for_overlaps(s, preferred_agent=agent)
         return f"{agent['name']} applied a new larger sprite to the {name}"
 
     def _population_cap(self):
@@ -3514,20 +3727,30 @@ class SimEngine:
             return count >= WALL_SOFT_CAP
         return count >= CUSTOM_SOFT_CAP
 
-    def _find_structure_spot(self, district_id):
+    def _find_structure_spot(self, district_id, footprint=None, ignore_id=None):
         d = self.civilization["districts"].get(district_id)
         grid = d.get("build_grid") if d else None
         if not grid:
             b = d["bounds"] if d else {"x1": 0, "y1": 0}
             return {"x": b["x1"], "y": b["y1"]}
-        existing = [s for s in self.civilization["structures"] if s.get("districtId") == district_id]
+        bounds = d["bounds"]
+        fw, fh = footprint if footprint else (8 * STRUCTURE_PX_SCALE, 8 * STRUCTURE_PX_SCALE)
+        # Big footprints can shadow slots across district edges, so check
+        # every existing structure civilization-wide, not just this district.
+        existing = [s for s in self.civilization["structures"] if s.get("id") != ignore_id]
+        existing_rects = [self._structure_rect(s) for s in existing]
         cap = grid.get("cap", 30)
         for i in range(cap):
             x = grid["x0"] + (i % grid["cols"]) * grid["dx"]
             y = grid["y0"] + (i // grid["cols"]) * grid["dy"]
-            taken = any(abs(s["x"] - x) < 70 and abs(s["y"] - y) < 80 for s in existing)
-            if not taken:
-                return {"x": x, "y": y}
+            if x < bounds["x1"] or y < bounds["y1"]:
+                continue
+            if x + fw > bounds["x2"] or y + fh + 14 > bounds["y2"]:
+                continue
+            candidate = (x, y, fw, fh)
+            if any(self._footprint_rects_collide(candidate, r) for r in existing_rects):
+                continue
+            return {"x": x, "y": y}
         return None  # district's build grid is at capacity
 
     def _check_civilization_level(self):
@@ -3544,10 +3767,14 @@ class SimEngine:
             return f"{agent['name']} has nothing to build"
         if project.get("isTerraform"):
             return self._complete_terraform(agent, district_id)
-        spot = self._find_structure_spot(district_id)
+        struct_type = project["type"]
+        footprint = self._structure_footprint({
+            "type": struct_type, "sprite": project.get("sprite"),
+            "visualTier": 1, "renderScale": 1.0,
+        })
+        spot = self._find_structure_spot(district_id, footprint=footprint)
         if not spot:
             return f"{agent['name']} finds {district_id} has no room left to build"
-        struct_type = project["type"]
         new_structure = {
             "id": c["nextStructureId"], "type": struct_type,
             "x": spot["x"], "y": spot["y"],
@@ -3595,6 +3822,10 @@ class SimEngine:
             agent["lastQuotaRejection"] = None
         tool_ok, tool_reason = self._can_gather_resource(agent, resource)
         if not tool_ok:
+            if RESOURCE_MIN_TOOL.get(resource) == "wooden_pick" and path1_on("TERRAIN_TILES_ENABLED"):
+                # Bootstrap: a pickless stone gather becomes a dig instead of
+                # failing, so a fresh world can reach its first Workshop/pick.
+                return self._dig_terrain(agent)
             agent["lastGatherRejection"] = {"reason": tool_reason, "frame": self.frameTick}
             self._path1_tool_benchmark(resource, False)
             return f"{agent['name']} found nothing — {tool_reason}"
@@ -3679,6 +3910,73 @@ class SimEngine:
 
     def _tile_key(self, gx, gy):
         return f"{gx},{gy}"
+
+    def _find_nearby_terrain(self, district, kind, from_gx, from_gy):
+        """Nearest cell of `kind` in district['terrain'] to (from_gx, from_gy),
+        by grid distance. Grid is fixed-size (PATH1_GRID_COLS x ROWS), so a
+        full scan is cheap. Returns (gx, gy) or None if no match exists."""
+        best = None
+        best_dist = None
+        for key, value in district.get("terrain", {}).items():
+            if value != kind:
+                continue
+            gx_s, gy_s = key.split(",")
+            gx, gy = int(gx_s), int(gy_s)
+            if gx == from_gx and gy == from_gy:
+                continue
+            dist = (gx - from_gx) ** 2 + (gy - from_gy) ** 2
+            if best_dist is None or dist < best_dist:
+                best, best_dist = (gx, gy), dist
+        return best
+
+    def _nearest_diggable_district(self, exclude_district_id, agent=None):
+        """The district, other than the given one, that actually has a soil
+        tile to dig right now — nearest to the agent by district-center
+        distance when an agent is given (so eight stone-seekers don't all
+        funnel down the same road to the same field), else the first match."""
+        best = None
+        best_dist = None
+        for did, d in self.civilization["districts"].items():
+            if did == exclude_district_id or d.get("kind") in NON_DIGGABLE_DISTRICT_KINDS:
+                continue
+            self._ensure_district_terrain(d)
+            if "soil" not in d["terrain"].values():
+                continue
+            if agent is None:
+                return did
+            b = d["bounds"]
+            cx, cy = (b["x1"] + b["x2"]) / 2, (b["y1"] + b["y2"]) / 2
+            dist = (cx - agent["x"]) ** 2 + (cy - agent["y"]) ** 2
+            if best_dist is None or dist < best_dist:
+                best, best_dist = did, dist
+        return best
+
+    def _pickless_stone_route(self, agent, resource):
+        """Feasibility-aware routing for a pickless stone-seeker: dig right
+        here if the ground allows, else head to the nearest diggable
+        district. Returns a summary string, or None when normal zone routing
+        (to the cave) is correct — i.e. the agent has the pick, or the
+        resource isn't gated on one. Without this, agents get routed to the
+        cave (stone's nominal gather zone), find no soil there, get bounced
+        to a farm by the dig-relocate backstop, and commute forever."""
+        if not (path1_on("TOOL_TIERS_ENABLED") and path1_on("TERRAIN_TILES_ENABLED")):
+            return None
+        if RESOURCE_MIN_TOOL.get(resource) != "wooden_pick":
+            return None
+        tool_ok, _ = self._can_gather_resource(agent, resource)
+        if tool_ok:
+            return None
+        did, d = self._district_at_pos(agent)
+        if did and d.get("kind") not in NON_DIGGABLE_DISTRICT_KINDS:
+            return self._dig_terrain(agent)
+        dest = self._nearest_diggable_district(did, agent)
+        if not dest:
+            return None
+        self._set_agent_target_once(agent, dest)
+        if USE_GOALS:
+            agent["goal"] = {"kind": "dig_relocate", "target_district": dest,
+                             "ttl": STALL_THRESHOLD * 2}
+        return f"{agent['name']} heads to {dest} to find diggable ground"
 
     def _ensure_district_tiles(self, district):
         district.setdefault("tiles", {})
@@ -3771,10 +4069,9 @@ class SimEngine:
         if not did:
             agent["lastTerrainRejection"] = {"reason": "not in a district", "frame": self.frameTick}
             return f"{agent['name']} cannot dig outside a district"
-        tool_ok, tool_reason = self._can_gather_resource(agent, "stone")
-        if not tool_ok:
-            agent["lastTerrainRejection"] = {"reason": tool_reason, "frame": self.frameTick}
-            return f"{agent['name']} cannot dig — {tool_reason}"
+        # Digging is deliberately tool-free: it is the bootstrap stone source
+        # for a fresh world (stone gathers are pick-gated, the pick needs a
+        # Workshop, and the Workshop needs stone).
         self._ensure_district_terrain(d)
         key = self._tile_key(gx, gy)
         current = d["terrain"].get(key, "soil")
@@ -3785,7 +4082,42 @@ class SimEngine:
             d["terrain"][key] = "rock"
             gained = "stone"
         else:
-            agent["lastTerrainRejection"] = {"reason": f"cannot dig {current}", "frame": self.frameTick}
+            # This tile is exhausted (rock/sand/water) -- relocate to the
+            # nearest fresh soil tile instead of failing forever on the same
+            # spot. The walk is the action this turn; the next dig call
+            # (LLM or goal-driven) lands on diggable ground.
+            nearby = self._find_nearby_terrain(d, "soil", gx, gy)
+            if nearby:
+                ngx, ngy = nearby
+                b = d["bounds"]
+                agent["targetX"] = b["x1"] + (ngx + 0.5) * TILE_CELL
+                agent["targetY"] = b["y1"] + (ngy + 0.5) * TILE_CELL
+                agent["waypoints"] = []
+                agent["lastTerrainRejection"] = None
+                return f"{agent['name']} moves to fresh ground to keep digging"
+            # No soil anywhere in this district -- some district kinds never
+            # have any (cave defaults its whole grid to "rock", beach to
+            # "sand", ocean to "water"; see _ensure_district_terrain). A
+            # same-district relocate can't help there, so route to a
+            # different district of a soil-bearing kind instead of leaving
+            # the agent (e.g. a miner in a cave) stuck forever.
+            dest = self._nearest_diggable_district(did, agent)
+            if dest:
+                self._set_agent_target_once(agent, dest)
+                if USE_GOALS:
+                    # Persistent goal: while it's set, the think tick steps
+                    # this deterministically instead of dispatching an LLM
+                    # think, so the agent's role reflexes can't reverse the
+                    # trip mid-transit (a miner would otherwise bounce back
+                    # to the cave every think cycle and never arrive).
+                    agent["goal"] = {"kind": "dig_relocate", "target_district": dest,
+                                     "ttl": STALL_THRESHOLD * 2}
+                agent["lastTerrainRejection"] = None
+                return f"{agent['name']} heads to {dest} to find diggable ground"
+            agent["lastTerrainRejection"] = {
+                "reason": f"no diggable ground left in {did} — try another district",
+                "frame": self.frameTick,
+            }
             return f"{agent['name']} cannot dig {current} here"
         if gained:
             cap = self._carry_cap(agent)
@@ -4178,8 +4510,15 @@ class SimEngine:
                                  "village_tier": self._village_tech_tier()})
             return f"{agent['name']} cannot start {name} — {lock_reason}"
         if self._invention_required() and not tmpl.get("custom"):
-            return (f"{agent['name']} wants to build, but the village needs a NEW invention "
-                    f"(propose_blueprint)")
+            name = tmpl.get("name", type_)
+            agent["lastProjectRejection"] = {
+                "reason": f"blocked by invention gate — the village needs a NEW invention for {name}",
+                "frame": self.frameTick,
+            }
+            agent["inventionTurn"] = True
+            agent["inventionBuildContext"] = {"type": type_, "typeName": name, "district": target_district}
+            return (f"{agent['name']} wants to build {name}, but the village needs a NEW invention "
+                    f"(propose_blueprint) — {agent['name']} will draft one")
         if STRUCTURE_UPGRADES_ENABLED and self._type_has_unmaxed_instance(type_):
             unmaxed = [s for s in c["structures"]
                        if s.get("type") == type_
@@ -4235,6 +4574,7 @@ class SimEngine:
             "contributed": contributed, "visualStyle": tmpl.get("visualStyle") or "generic",
             "sprite": tmpl.get("sprite"),
             "districtId": district_id,
+            "lead": agent["name"], "leadReassigned": None,
         }
         self._seed_project_from_stockpile(district_id, c["districtProjects"][district_id], agent=agent)
         c["districtLastContribution"][district_id] = self.frameTick
@@ -4310,9 +4650,9 @@ class SimEngine:
             if not affordable:
                 return f"{agent['name']} has nothing to craft"
             return self._craft_item(agent, affordable)
-        if recipe.get("station") and agent["currentZone"] != recipe["station"]:
-            self._set_agent_target(agent, recipe["station"])
-            return f"{agent['name']} heads to the {recipe['station']} to craft {recipe_id}"
+        # Feasibility gates run BEFORE any travel: routing an agent to a
+        # station district that can't serve them (no Workshop/Kiln built,
+        # tier-gated recipe, missing inputs) just produces a useless commute.
         # Workshop-station recipes need a physical Workshop somewhere in the
         # village (structures of type "workshop" are placed in village-kind
         # districts, so this is a village-wide check, not a per-district one).
@@ -4347,6 +4687,9 @@ class SimEngine:
             self._craft_input_reflex(agent, recipe_id, recipe)
             missing = self._largest_missing_input(agent, recipe["inputs"])
             return f"{agent['name']} lacks {missing} to craft {recipe_id}"
+        if recipe.get("station") and agent["currentZone"] != recipe["station"]:
+            self._set_agent_target_once(agent, recipe["station"])
+            return f"{agent['name']} heads to the {recipe['station']} to craft {recipe_id}"
         for r, n in recipe["inputs"].items():
             agent["resources"][r] -= n
         output = 1
@@ -4551,6 +4894,7 @@ class SimEngine:
                 # benchmark are the permanent record instead.
                 self._enact_succession_winner(rule)
             else:
+                rule["enactedFrame"] = self.frameTick
                 c["rules"].append(rule)
                 self._record_rule_kind_enacted(rule.get("kind"))
                 self._push_activity(f'Rule "{rule["name"]}" enacted by vote ({yes} yes)')
@@ -4825,6 +5169,7 @@ class SimEngine:
         agent["incapacitated"] = True
         agent["goal"] = None
         agent["assignedTask"] = None
+        agent["reorgTask"] = None
         c["deaths"] = c.get("deaths", 0) + 1
         c["lastDeathActivityFrame"] = self.frameTick
         age_txt = f" at age {int(agent.get('age') or 0)}" if agent.get("age") is not None else ""
@@ -6509,6 +6854,80 @@ class SimEngine:
                     f"The old rejection of the '{bid}' blueprint has been forgotten -- "
                     f"it may be proposed again")
 
+    # --- sage review (two-stage blueprint approval: SAGE_REVIEW_ENABLED) ---
+    def _is_sage_reviewer(self, agent):
+        """Who may perform the geography/resource review stage. No separate
+        Sage role exists -- the current elder does both the review and the
+        final approve/reject turn (two decisions, one agent); this predicate
+        is the single swap point if that ever changes."""
+        return agent["role"] == "elder"
+
+    def _maybe_skip_sage_review(self):
+        """A pending review that never lands (elder offline/incapacitated the
+        whole window) auto-skips after SAGE_REVIEW_TIMEOUT_FRAMES instead of
+        blocking approval forever -- same deadlock-avoidance shape as
+        _maybe_amnesty_rejected_blueprints, for the review stage."""
+        c = self.civilization
+        elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
+        if elder:
+            return
+        for bp in c["pendingBlueprints"]:
+            if bp.get("sageReview") != "pending":
+                continue
+            proposed_at = bp.get("proposedFrame")
+            if proposed_at is None or self.frameTick - proposed_at < SAGE_REVIEW_TIMEOUT_FRAMES:
+                continue
+            bp["sageReview"] = "skipped"
+            bp["sageReviewReason"] = "sage unavailable; timeout auto-skip"
+            bp["sageReviewFrame"] = self.frameTick
+            self._push_activity(
+                f"No elder was available to review {bp['name']} -- the review was skipped")
+
+    def _maybe_amnesty_denied_sage_reviews(self):
+        """A denied review just blocks approve_blueprint; give it the same
+        amnesty clock as an outright reject_blueprint so it doesn't sit
+        pending forever -- once BLUEPRINT_AMNESTY_FRAMES pass, it's popped and
+        blacklisted the normal way (subject to the normal rejection amnesty)."""
+        c = self.civilization
+        for bp in list(c["pendingBlueprints"]):
+            if bp.get("sageReview") != "denied":
+                continue
+            denied_at = bp.get("sageReviewFrame")
+            if denied_at is None or self.frameTick - denied_at < BLUEPRINT_AMNESTY_FRAMES:
+                continue
+            c["pendingBlueprints"].remove(bp)
+            c["rejectedBlueprintIds"].add(bp["id"])
+            c.setdefault("rejectedBlueprintFrames", {})[bp["id"]] = self.frameTick
+            self._push_activity(
+                f"The sage's denial of {bp['name']} stands -- the proposal has been withdrawn")
+
+    def _resolve_project_lead(self, proposed_by_name):
+        """The proposer leads their own approved project unless they're dead
+        or incapacitated, in which case the most-idle available agent (same
+        ordering _idle_agents_for_elder already uses for task assignment)
+        takes over."""
+        proposer = self._find_agent(proposed_by_name)
+        if proposer and not proposer.get("incapacitated") and proposer in self._living_agents():
+            return proposer["name"]
+        able = [a for a in self._living_agents() if not a.get("incapacitated")]
+        idle_able = [a for a in self._idle_agents_for_elder() if not a.get("incapacitated")]
+        candidates = idle_able or able
+        if not candidates:
+            return None
+        return candidates[0]["name"]
+
+    def _district_matches_blueprint_geo(self, district_id, bp):
+        """Lightweight siting check for approve_blueprint's optional
+        target_district: the district must exist, be buildable, and not
+        already host another active project."""
+        c = self.civilization
+        d = c["districts"].get(district_id)
+        if not d or not d.get("build_grid"):
+            return False, f"{district_id} is not a buildable district"
+        if c["districtProjects"].get(district_id):
+            return False, f"a project is already active in {district_id}"
+        return True, None
+
     # --- custom-resource retirement (C3: the resource cap gets an expiry too) ---
     def _custom_resource_referenced(self, rid):
         """True while anything still uses the custom resource: a structure
@@ -6546,32 +6965,12 @@ class SimEngine:
         return False
 
     def _maybe_retire_custom_resource(self):
-        """Once MAX_CUSTOM_RESOURCES is hit, validate_blueprint rejects every
-        proposal bundling a new resource ("too many custom resources" x137 in
-        the 2026-07-05 9h soak) with no expiry analogue -- same shape as the
-        MAX_APPROVED_CUSTOM deadlock. Retire the oldest custom resource that
-        nothing references anymore (no producer, recipe, project need, or
-        remaining stock); if every one is still in use the cap is legitimately
-        hard and the rejection reason (server.py validate_blueprint) says so."""
-        c = self.civilization
-        while self._custom_resource_count() >= MAX_CUSTOM_RESOURCES:
-            added = c.setdefault("customResourceAddedFrame", {})
-            custom = [rid for rid in c["resourceRegistry"]
-                      if rid not in BASE_RESOURCES and rid not in CRAFTED_RESOURCES]
-            unreferenced = [rid for rid in custom if not self._custom_resource_referenced(rid)]
-            if not unreferenced:
-                return  # all referenced: the cap holds until something falls out of use
-            retired = min(unreferenced, key=lambda rid: added.get(rid, 0))
-            name = c["resourceRegistry"][retired].get("name", retired)
-            del c["resourceRegistry"][retired]
-            added.pop(retired, None)
-            # Scrub dead stock entries so district stocks don't track a
-            # resource that can no longer be gathered or referenced.
-            for stocks in (c.get("districtStocks") or {}).values():
-                stocks.pop(retired, None)
-            self._push_activity(
-                f"The unused resource {name} ({retired}) has faded from village life -- "
-                f"its slot is free for new inventions")
+        """Retain all invented resources; invention is intentionally unlimited.
+
+        This hook remains as a compatibility no-op because older saves and the
+        tick loop still reference it.
+        """
+        return
 
     # --- Phase D invention council (diegetic LLM-council; TECH_TREE_ENABLED) ---
     def _council_active(self):
@@ -6799,7 +7198,8 @@ class SimEngine:
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
         if not elder:
             return
-        idle = [a for a in self._idle_agents_for_elder() if a["name"] != elder["name"]]
+        idle = [a for a in self._idle_agents_for_elder()
+                if a["name"] != elder["name"] and not a.get("inventionTurn")]
         if c.get("inventionBackstopFires", 0) >= INVENTION_ELDER_TAKEOVER or not idle:
             c["inventionRequiredStreak"] = 0
             c["inventionBackstopFires"] = 0
@@ -6886,6 +7286,211 @@ class SimEngine:
             self._touch_kind_activity(kind)
             self._push_activity(
                 f"The {project['name']} build moves to {dest} — {district_id} has no land left")
+
+    # --- agent-driven structure reorganization (fixes footprint overlaps) ---
+    def _find_relocation_spot(self, structure):
+        """Size-aware relocation destination for `structure`: prefer a free
+        spot in its own district (excluding itself from the collision check,
+        since it's the thing being moved), else another buildable district of
+        the same kind with no active project (mirrors
+        _maybe_relocate_stuck_project's same-kind-district fallback).
+        Returns (district_id, x, y) or None."""
+        footprint = self._structure_footprint(structure)
+        own_district = structure.get("districtId")
+        if own_district:
+            spot = self._find_structure_spot(own_district, footprint=footprint,
+                                             ignore_id=structure.get("id"))
+            if spot:
+                return own_district, spot["x"], spot["y"]
+        c = self.civilization
+        kind = c["districts"].get(own_district, {}).get("kind") if own_district else None
+        if not kind:
+            return None
+        for did in self._buildable_district_ids():
+            if did == own_district:
+                continue
+            if c["districts"][did]["kind"] != kind:
+                continue
+            if c["districtProjects"].get(did):
+                continue
+            spot = self._find_structure_spot(did, footprint=footprint, ignore_id=structure.get("id"))
+            if spot:
+                return did, spot["x"], spot["y"]
+        return None
+
+    def _enqueue_reorg_for_overlaps(self, structure, preferred_agent=None):
+        """Enqueue (at most) one relocation task for the smaller of `structure`
+        and any structure it overlaps. Ruins are kept in the collision check
+        (still occupy their footprint visually) so they can still be the
+        mover or the displacer. If a destination can't be found, emit a
+        single throttled activity nudge and leave the overlap for the next
+        gate/founding cycle to resolve."""
+        c = self.civilization
+        tasked_ids = {t["structureId"] for t in c["reorgTasks"]}
+        if structure.get("id") in tasked_ids:
+            return
+        for other in c["structures"]:
+            if other.get("id") == structure.get("id") or other.get("id") in tasked_ids:
+                continue
+            if not self._structures_overlapping(structure, other):
+                continue
+            w1, h1 = self._structure_footprint(structure)
+            w2, h2 = self._structure_footprint(other)
+            area1, area2 = w1 * h1, w2 * h2
+            if area1 < area2:
+                mover, displacer = structure, other
+            elif area2 < area1:
+                mover, displacer = other, structure
+            else:
+                # Tie: relocate the higher id (the newer/duplicate one).
+                mover, displacer = (structure, other) if structure["id"] > other["id"] \
+                    else (other, structure)
+            mover_name = mover.get("name") or mover.get("type")
+            dest = self._find_relocation_spot(mover)
+            if not dest:
+                if self.frameTick - c.get("lastReorgNoRoomFrame", 0) >= REORG_NO_ROOM_NUDGE_FRAMES:
+                    c["lastReorgNoRoomFrame"] = self.frameTick
+                    self._push_activity(
+                        f"No room to relocate the {mover_name} -- it stays crowded for now")
+                continue
+            to_district, to_x, to_y = dest
+            task = {
+                "structureId": mover["id"], "toDistrict": to_district,
+                "toX": to_x, "toY": to_y,
+                "displacedBy": displacer.get("name") or displacer.get("type"),
+                "assignedTo": None, "workLeft": 3, "createdFrame": self.frameTick,
+            }
+            c["reorgTasks"].append(task)
+            if (preferred_agent is not None and preferred_agent.get("role") != "elder"
+                    and not preferred_agent.get("incapacitated")
+                    and not preferred_agent.get("reorgTask")
+                    and preferred_agent.get("deathFrame") is None):
+                task["assignedTo"] = preferred_agent["name"]
+                preferred_agent["reorgTask"] = mover["id"]
+                self._push_activity(
+                    f"{preferred_agent['name']} sets out to relocate the {mover_name} — "
+                    f"the {task['displacedBy']} has outgrown its plot")
+            return  # one task enqueued per call
+
+    def _maybe_reorganize_structures(self):
+        """Periodic backstop (~every REORG_CHECK_FRAMES): keeps at most one
+        reorg task in flight -- reassigns a task whose agent died/collapsed,
+        assigns an unassigned task (preferring the builder, else the nearest
+        able agent), and, when no task is pending, scans all structure pairs
+        for a footprint overlap to enqueue. The elder and any current
+        sage-emergency responder are never assigned -- Sage priority stays
+        absolute."""
+        c = self.civilization
+        if self.frameTick - c.get("lastReorgCheckFrame", 0) < REORG_CHECK_FRAMES:
+            return
+        c["lastReorgCheckFrame"] = self.frameTick
+        em_target = self._sage_emergency()
+        protected = self._sage_responders(em_target) if em_target else set()
+
+        def unavailable(a):
+            return (a["role"] == "elder" or a["incapacitated"]
+                    or a.get("deathFrame") is not None or a["name"] in protected)
+
+        tasks = c["reorgTasks"]
+        if tasks:
+            task = tasks[0]
+            assignee = self._find_agent(task["assignedTo"]) if task.get("assignedTo") else None
+            if task.get("assignedTo") and (not assignee or assignee["incapacitated"]
+                                            or assignee.get("deathFrame") is not None):
+                if assignee:
+                    assignee["reorgTask"] = None
+                task["assignedTo"] = None
+            if not task.get("assignedTo"):
+                structure = next((s for s in c["structures"]
+                                  if s.get("id") == task["structureId"]), None)
+                if not structure:
+                    tasks.remove(task)
+                    return
+                candidate = next((a for a in self.agents if a["role"] == "builder"
+                                  and not unavailable(a) and not a.get("reorgTask")), None)
+                if not candidate:
+                    nearest, nearest_d = None, float("inf")
+                    for a in self.agents:
+                        if unavailable(a) or a.get("reorgTask"):
+                            continue
+                        dd = _dist(a["x"], a["y"], structure.get("x", 0), structure.get("y", 0))
+                        if dd < nearest_d:
+                            nearest_d, nearest = dd, a
+                    candidate = nearest
+                if candidate:
+                    task["assignedTo"] = candidate["name"]
+                    candidate["reorgTask"] = structure["id"]
+                    name = structure.get("name") or structure.get("type")
+                    self._push_activity(
+                        f"{candidate['name']} sets out to relocate the {name} — "
+                        f"the {task['displacedBy']} has outgrown its plot")
+            return
+        # No task in flight: scan for the first overlapping pair and enqueue.
+        structures = c["structures"]
+        for i, s1 in enumerate(structures):
+            for s2 in structures[i + 1:]:
+                if self._structures_overlapping(s1, s2):
+                    self._enqueue_reorg_for_overlaps(s1)
+                    return
+
+    def _step_reorg(self, agent):
+        """Deterministic reorg stepping, modeled on _rush_to_heal: walk to the
+        tasked structure, work a fixed timer, then rewrite its position once
+        a destination is (re-)confirmed still free. Never lets a reorg-tasked
+        agent fall through to LLM thinking -- the per-agent tick loop calls
+        this instead of dispatching a think job while agent['reorgTask'] is set."""
+        c = self.civilization
+        structure_id = agent.get("reorgTask")
+        task = next((t for t in c["reorgTasks"] if t["structureId"] == structure_id), None)
+        structure = next((s for s in c["structures"] if s.get("id") == structure_id), None)
+        if not task or not structure:
+            if task:
+                c["reorgTasks"].remove(task)
+            agent["reorgTask"] = None
+            return
+        if agent["incapacitated"]:
+            task["assignedTo"] = None
+            agent["reorgTask"] = None
+            return
+        fw, fh = self._structure_footprint(structure)
+        sx = structure.get("x", 0) + fw / 2
+        sy = structure.get("y", 0) + fh / 2
+        if _dist(agent["x"], agent["y"], sx, sy) > 80:
+            agent["targetX"] = sx
+            agent["targetY"] = sy
+            agent["waypoints"] = []
+            return
+        task["workLeft"] = task.get("workLeft", 3) - 1
+        if task["workLeft"] > 0:
+            return
+        # Work complete -- re-validate the destination (something else may
+        # have claimed the slot since the task was enqueued).
+        to_district = task["toDistrict"]
+        spot = self._find_structure_spot(to_district, footprint=(fw, fh),
+                                         ignore_id=structure.get("id"))
+        if spot:
+            tx, ty = spot["x"], spot["y"]
+        else:
+            dest = self._find_relocation_spot(structure)
+            if not dest:
+                name = structure.get("name") or structure.get("type")
+                self._push_activity(
+                    f"{agent['name']} finds no room to relocate the {name} -- giving up for now")
+                c["reorgTasks"].remove(task)
+                agent["reorgTask"] = None
+                return
+            to_district, tx, ty = dest
+        structure["x"] = tx
+        structure["y"] = ty
+        structure["districtId"] = to_district
+        name = structure.get("name") or structure.get("type")
+        self._push_activity(
+            f"{agent['name']} relocated the {name} to make room for the {task['displacedBy']}")
+        self._log_benchmark("structure_relocated", structure["id"],
+                            {"structure": structure.get("type"), "district": to_district})
+        c["reorgTasks"].remove(task)
+        agent["reorgTask"] = None
+        c["lastReorgFrame"] = self.frameTick
 
     # --- district founding (the open-world mechanism) ---
     def _district_counts_as_full(self, district_id):
@@ -7047,9 +7652,15 @@ class SimEngine:
                 return
         # If several rules are stacked, propose repealing the oldest non-tax
         # rule so amendment is exercised (Sid's amendable-rules benchmark).
+        # Age-gated (RULE_REPEAL_MIN_AGE_FRAMES): without this, tax+priority --
+        # the normal 2-rule steady state -- meant this branch fired the very
+        # next cooldown window after the propose branch ever enacted a
+        # priority rule, undoing it immediately and oscillating forever.
         non_tax = [r for r in c["rules"] if r.get("kind") != "resource_tax"]
-        if len(c["rules"]) >= 2 and non_tax:
-            target = non_tax[0]
+        repeal_eligible = [r for r in non_tax
+                          if self.frameTick - r.get("enactedFrame", 0) >= RULE_REPEAL_MIN_AGE_FRAMES]
+        if len(c["rules"]) >= 2 and repeal_eligible:
+            target = repeal_eligible[0]
             self.apply_decision(elder, {
                 "action": "repeal_rule",
                 "target": target["id"],
@@ -7332,8 +7943,11 @@ class SimEngine:
                         resource_acted = contrib_res
                     elif unmet and self._gather_zone_for_resource(unmet):
                         gz = self._gather_zone_for_resource(unmet)
-                        if agent["currentZone"] != gz:
-                            self._set_agent_target(agent, gz)
+                        redirect = self._pickless_stone_route(agent, unmet)
+                        if redirect:
+                            summary = redirect
+                        elif agent["currentZone"] != gz:
+                            self._set_agent_target_once(agent, gz)
                             summary = f"{agent['name']} heads to gather {unmet}"
                         else:
                             summary = f"{agent['name']} found nothing to collect"
@@ -7444,8 +8058,11 @@ class SimEngine:
                 else:
                     unmet = self._first_unmet_project_resource(district_id)
                     gz = self._gather_zone_for_resource(unmet) if unmet else None
-                    if unmet and gz and agent["currentZone"] != gz:
-                        self._set_agent_target(agent, gz)
+                    redirect = self._pickless_stone_route(agent, unmet) if unmet else None
+                    if redirect:
+                        summary = redirect
+                    elif unmet and gz and agent["currentZone"] != gz:
+                        self._set_agent_target_once(agent, gz)
                         summary = f"{agent['name']} heads to gather {unmet}"
                     elif unmet and gz and agent["currentZone"] == gz \
                             and agent["resources"].get(unmet, 0) < self._carry_cap(agent):
@@ -7477,6 +8094,10 @@ class SimEngine:
                 ok, reason = self._validate_blueprint(bp)
                 if ok:
                     needs_str = ", ".join(f"{k}x{v}" for k, v in bp["needs"].items())
+                    build_ctx = agent.get("inventionBuildContext") or {}
+                    agent["inventionBuildContext"] = None
+                    dup_owner = self._effect_vector_owner_map().get(
+                        self._canonical_effect_vector(bp.get("function")))
                     c["pendingBlueprints"].append({
                         "id": bp["id"], "name": bp["name"], "needs": dict(bp["needs"]),
                         "function": dict(bp["function"]),
@@ -7487,6 +8108,11 @@ class SimEngine:
                         "visualStyle": bp.get("visual_style") or "generic",
                         "sprite": bp.get("sprite"),
                         "proposedBy": agent["name"],
+                        "sageReview": "pending", "sageReviewReason": None, "sageReviewFrame": None,
+                        "duplicateOf": dup_owner,
+                        "proposedFrame": self.frameTick,
+                        "requestedDistrict": build_ctx.get("district"),
+                        "buildIntent": build_ctx.get("type"),
                         **({"tier": bp.get("tier") or 1} if TECH_TREE_ENABLED else {}),
                     })
                     if decision.get("message"):
@@ -7508,35 +8134,106 @@ class SimEngine:
                             {"kind": "blueprint", "target": (bp or {}).get("id"),
                              "village_tier": self._village_tech_tier()})
 
-        elif action == "approve_blueprint":
+        elif action == "sage_review_blueprint":
             idx = next((i for i, p in enumerate(c["pendingBlueprints"]) if p["id"] == decision.get("target")), -1)
-            if agent["role"] == "elder" and idx != -1:
+            sage_decision = decision.get("sage_decision")
+            if self._is_sage_reviewer(agent) and idx != -1 and sage_decision in ("approve", "deny") \
+                    and c["pendingBlueprints"][idx]["sageReview"] == "pending":
                 bp = c["pendingBlueprints"][idx]
-                for r in bp["newResources"]:
-                    if r["id"] not in c["resourceRegistry"]:
-                        c["resourceRegistry"][r["id"]] = {"name": r["name"],
-                                                          "gatherZone": r["gatherZone"], "color": r["color"]}
-                        # Age record for the custom-resource retirement gate
-                        # (_maybe_retire_custom_resource picks the oldest).
-                        c.setdefault("customResourceAddedFrame", {})[r["id"]] = self.frameTick
-                c["projectRegistry"][bp["id"]] = {
-                    "name": bp["name"], "needs": dict(bp["needs"]),
-                    "visualStyle": bp["visualStyle"], "custom": True,
-                    "sprite": bp.get("sprite"),
-                    "function": dict(bp.get("function") or {}),
-                    **({"tier": bp.get("tier") or 1} if TECH_TREE_ENABLED else {}),
-                }
-                c.setdefault("approvedCustomApprovedFrame", {})[bp["id"]] = self.frameTick
-                c["pendingBlueprints"].pop(idx)
-                c["lastBlueprintActivityFrame"] = self.frameTick
+                bp["sageReview"] = "approved" if sage_decision == "approve" else "denied"
+                bp["sageReviewReason"] = decision.get("message") or decision.get("reasoning") or None
+                bp["sageReviewFrame"] = self.frameTick
                 if decision.get("message"):
                     agent["message"] = decision["message"]
                     agent["messageTimer"] = 180
-                summary = f"{agent['name']} approved {bp['name']} blueprint"
-                if TECH_TREE_ENABLED:
+                verb = "approved" if sage_decision == "approve" else "denied"
+                summary = f"{agent['name']} {verb} the sage review of {bp['name']}"
+            else:
+                summary = f"{agent['name']} could not sage-review that blueprint"
+
+        elif action == "approve_blueprint":
+            idx = next((i for i, p in enumerate(c["pendingBlueprints"]) if p["id"] == decision.get("target")), -1)
+            bp = c["pendingBlueprints"][idx] if idx != -1 else None
+            review_ok = not SAGE_REVIEW_ENABLED or (bp and bp.get("sageReview") in ("approved", "skipped"))
+            resolved = False
+            if agent["role"] == "elder" and idx != -1 and review_ok:
+                if bp.get("duplicateOf") and not self._structure_type_built(bp["duplicateOf"]):
+                    # duplicateOf can name a seed/custom type that's registered
+                    # but not yet standing (still under construction, or --
+                    # since _effect_vector_owner_map also scans pendingBlueprints
+                    # -- another proposal that hasn't even been approved yet).
+                    # There is nothing to upgrade yet: leave the blueprint
+                    # pending rather than popping it into a failed upgrade
+                    # attempt, so the elder can retry once the original is
+                    # built, or reject_blueprint it explicitly.
+                    summary = (f"{agent['name']} cannot approve {bp['name']} as an upgrade yet -- "
+                               f"{bp['duplicateOf']} is not built yet. Wait for it to be built, "
+                               f"or reject_blueprint if it's unnecessary.")
+                elif bp.get("duplicateOf"):
+                    lead_agent = self._find_agent(bp.get("proposedBy")) or agent
+                    upgrade_summary = self._upgrade_structure(lead_agent, bp["duplicateOf"])
+                    c["pendingBlueprints"].pop(idx)
+                    c["lastBlueprintActivityFrame"] = self.frameTick
+                    if decision.get("message"):
+                        agent["message"] = decision["message"]
+                        agent["messageTimer"] = 180
+                    summary = (f"{agent['name']} approved {bp['name']} as an upgrade to "
+                               f"{bp['duplicateOf']} -- {upgrade_summary}")
+                    resolved = True
+                else:
+                    for r in bp["newResources"]:
+                        if r["id"] not in c["resourceRegistry"]:
+                            c["resourceRegistry"][r["id"]] = {"name": r["name"],
+                                                              "gatherZone": r["gatherZone"], "color": r["color"]}
+                            # Age record for the custom-resource retirement gate
+                            # (_maybe_retire_custom_resource picks the oldest).
+                            c.setdefault("customResourceAddedFrame", {})[r["id"]] = self.frameTick
+                    c["projectRegistry"][bp["id"]] = {
+                        "name": bp["name"], "needs": dict(bp["needs"]),
+                        "visualStyle": bp["visualStyle"], "custom": True,
+                        "sprite": bp.get("sprite"),
+                        "function": dict(bp.get("function") or {}),
+                        **({"tier": bp.get("tier") or 1} if TECH_TREE_ENABLED else {}),
+                    }
+                    c.setdefault("approvedCustomApprovedFrame", {})[bp["id"]] = self.frameTick
+                    c["pendingBlueprints"].pop(idx)
+                    c["lastBlueprintActivityFrame"] = self.frameTick
+                    if decision.get("message"):
+                        agent["message"] = decision["message"]
+                        agent["messageTimer"] = 180
+                    summary = f"{agent['name']} approved {bp['name']} blueprint"
+                    lead_name = self._resolve_project_lead(bp.get("proposedBy"))
+                    target_district = decision.get("target_district") or bp.get("requestedDistrict")
+                    geo_ok, geo_reason = self._district_matches_blueprint_geo(target_district, bp) \
+                        if target_district else (False, None)
+                    if target_district and not geo_ok:
+                        summary += f" (ignored target_district {target_district}: {geo_reason})"
+                    district_id = target_district if geo_ok else self._resolve_build_district(
+                        agent, bp["id"], None)
+                    if district_id and lead_name:
+                        contributed = {res: 0 for res in bp["needs"]}
+                        c["districtProjects"][district_id] = {
+                            "type": bp["id"], "name": bp["name"], "needs": dict(bp["needs"]),
+                            "contributed": contributed, "visualStyle": bp["visualStyle"],
+                            "sprite": bp.get("sprite"), "districtId": district_id,
+                            "lead": lead_name, "leadReassigned": None,
+                        }
+                        c["districtLastContribution"][district_id] = self.frameTick
+                        if lead_name != bp.get("proposedBy"):
+                            c["districtProjects"][district_id]["leadReassigned"] = {
+                                "from": bp.get("proposedBy"), "to": lead_name, "frame": self.frameTick}
+                            self._push_activity(
+                                f"{bp.get('proposedBy')} unavailable to lead the {bp['name']} project -- "
+                                f"{lead_name} takes over")
+                        summary += f", started in {district_id} with {lead_name} as lead"
+                    resolved = True
+                if resolved and TECH_TREE_ENABLED:
                     self._record_council_verdict(agent, bp, decision)
             else:
-                summary = f"{agent['name']} could not approve that blueprint"
+                if bp and not review_ok:
+                    summary = f"{agent['name']} cannot approve {bp['name']} -- sage review still pending"
+                else:
+                    summary = f"{agent['name']} could not approve that blueprint"
 
         elif action == "reject_blueprint":
             idx = next((i for i, p in enumerate(c["pendingBlueprints"]) if p["id"] == decision.get("target")), -1)
@@ -7594,12 +8291,14 @@ class SimEngine:
 
         elif action == "heal_agent":
             patient = self._find_agent(decision.get("target")) if decision.get("target") else None
-            if patient is not None and patient.get("deathFrame") is not None:
+            dead_target = patient["name"] if patient is not None and patient.get("deathFrame") is not None else None
+            if dead_target:
                 patient = None
             if not patient or (patient["health"] >= 100 and not patient["incapacitated"]):
                 patient = self._neediest_nearby(agent)
             if not patient:
-                summary = f"{agent['name']} found no one to heal"
+                summary = (f"{agent['name']} cannot revive {dead_target} — they have passed away"
+                           if dead_target else f"{agent['name']} found no one to heal")
             elif self._distance_to(agent, patient) > 80:
                 self._auto_move_toward_target(agent, patient["name"])
                 summary = f"{agent['name']} moves to help {patient['name']}"
@@ -7751,14 +8450,29 @@ class SimEngine:
         if g["kind"] == "seek_shelter":
             dest = g.get("target_district")
             if dest and agent.get("currentDistrict") != dest:
-                self._set_agent_target(agent, dest)
+                self._set_agent_target_once(agent, dest)
                 return True
             agent["goal"] = None
             return False
+        if g["kind"] == "dig_relocate":
+            dest = g.get("target_district")
+            if dest and agent.get("currentDistrict") != dest:
+                self._set_agent_target_once(agent, dest)
+                return True
+            summary = self._dig_terrain(agent) or ""
+            if "cannot dig" in summary:
+                agent["goal"] = None
+                return False
+            if agent["resources"].get("stone", 0) >= self._carry_cap(agent):
+                # Full load: release the goal so the LLM/fallback can route
+                # the stone to a project via contribute_resources.
+                agent["goal"] = None
+                return False
+            return True
         if g["kind"] == "caravan":
             dest = g.get("target_district")
             if dest and agent.get("currentDistrict") != dest:
-                self._set_agent_target(agent, dest)
+                self._set_agent_target_once(agent, dest)
                 return True
             self._maybe_caravan_goal(agent)
             agent["goal"] = None
@@ -7781,7 +8495,7 @@ class SimEngine:
                                               "message": None, "reasoning": f"goal:{g['kind']}"})
         s = summary or ""
         if any(t in s for t in ("has nothing to contribute", "found nothing", "nothing to craft",
-                                "lacks ", "built ", "could not")):
+                                "lacks ", "built ", "could not", "cannot dig")):
             agent["goal"] = None
             return False
         return True
@@ -7799,7 +8513,10 @@ class SimEngine:
         nearby_detailed = self._get_nearby_detailed(agent)
         idle_agents = []
         if agent["role"] == "elder":
-            for i, a in enumerate(self._idle_agents_for_elder()):
+            # C3: cap at MAX_IDLE_AGENTS_PROMPT -- _idle_agents_for_elder is
+            # already ordered least-recently-tasked first, so the slice keeps
+            # the agents most in need of a task.
+            for i, a in enumerate(self._idle_agents_for_elder()[:MAX_IDLE_AGENTS_PROMPT]):
                 idle_agents.append({
                     "name": a["name"], "role": a["role"], "longest_idle": i == 0,
                     "contribution_debt": self.frameTick - (a["lastContributedFrame"] or 0),
@@ -7810,94 +8527,129 @@ class SimEngine:
         # One-shot invention-only turn (set by _maybe_invention_backstop):
         # the server swaps in a slim, proposal-only prompt for this call.
         invention_turn = bool(agent.get("inventionTurn"))
+        # inventionBuildContext deliberately survives past this point (unlike
+        # inventionTurn) -- it's read later in apply_decision's propose_blueprint
+        # branch, which runs after the async LLM round-trip, and clearing it
+        # here would erase it before that branch ever sees it.
+        invention_build_context = dict(agent["inventionBuildContext"]) \
+            if invention_turn and agent.get("inventionBuildContext") else None
         if invention_turn:
             agent["inventionTurn"] = False
         sprite_design_turn = bool(agent.get("spriteDesignTurn"))
         nudges = []
+
+        def note(prio, text):
+            """Collect a (priority, text) nudge. Lower prio = more important.
+            P0=emergency/survival, P1=governance/commitment,
+            P2=rejection-recovery/stall, P3=opportunity/idle. Selection into
+            the final behavior_nudge happens once, below, via MAX_BEHAVIOR_NUDGES."""
+            nudges.append((prio, text))
+
+        # Phase A1 (shadow-log only): tracked alongside the nudges below and
+        # folded into high_stakes_reason near the end of this function. Purely
+        # additive -- none of these locals feed a nudge or a decision.
+        fresh_rejection_kinds = set()
+        emergency_active = False
+        elder_blueprint_review_active = False
         rejection = agent.get("lastBlueprintRejection")
         rejection_nudge = None
         if rejection and self.frameTick - rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+            fresh_rejection_kinds.add("blueprint")
             rejection_nudge = (f"NOTE: Your last blueprint proposal was rejected: {rejection['reason']}. "
                                f"Propose a different blueprint that avoids that problem.")
-            nudges.append(rejection_nudge)
+            rejection_nudge += " Use a fresh non-seed id; never reuse a seed, approved, pending, or rejected id."
+            note(2, rejection_nudge)
         gather_rejection = agent.get("lastGatherRejection")
         if gather_rejection and self.frameTick - gather_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-            nudges.append(f"NOTE: Your last gather failed: {gather_rejection['reason']}. "
-                          f"Contribute to an active terraform or start_terraform here before moving elsewhere.")
+            fresh_rejection_kinds.add("gather")
+            reason_text = gather_rejection.get("reason") or ""
+            if "pick" in reason_text:
+                note(2, f"NOTE: Your last gather failed: {reason_text}. "
+                        f"Craft the required pick at the workshop (craft_item), or dig_terrain for stone.")
+            else:
+                note(2, f"NOTE: Your last gather failed: {reason_text}. "
+                        f"Contribute to an active terraform or start_terraform here before moving elsewhere.")
         terraform_rejection = agent.get("lastTerraformRejection")
         if terraform_rejection and self.frameTick - terraform_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-            nudges.append(f"NOTE: Your last start_terraform failed: {terraform_rejection['reason']}. "
-                          f"Use a template id (plant_grove/clear_field/extend_beach) or name the district.")
+            fresh_rejection_kinds.add("terraform")
+            note(2, f"NOTE: Your last start_terraform failed: {terraform_rejection['reason']}. "
+                    f"Use a template id (plant_grove/clear_field/extend_beach) or name the district.")
         craft_rejection = agent.get("lastCraftRejection")
         if craft_rejection and self.frameTick - craft_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-            nudges.append(f"NOTE: Your last craft failed: {craft_rejection['reason']}. "
-                          f"Gather the missing input first.")
+            fresh_rejection_kinds.add("craft")
+            note(2, f"NOTE: Your last craft failed: {craft_rejection['reason']}. "
+                    f"Gather the missing input first.")
         if TECH_TREE_ENABLED:
             recipe_rejection = agent.get("lastRecipeRejection")
             if recipe_rejection and self.frameTick - recipe_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: Your last recipe proposal was refused: {recipe_rejection['reason']}.")
+                fresh_rejection_kinds.add("recipe")
+                note(2, f"NOTE: Your last recipe proposal was refused: {recipe_rejection['reason']}.")
         project_rejection = agent.get("lastProjectRejection")
         if project_rejection and self.frameTick - project_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-            nudges.append(f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
+            fresh_rejection_kinds.add("project")
+            note(2, f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
         if STRUCTURE_UPGRADES_ENABLED:
             upgrade_rejection = agent.get("lastUpgradeRejection")
             if upgrade_rejection and self.frameTick - upgrade_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: Your last upgrade failed: {upgrade_rejection['reason']}.")
+                fresh_rejection_kinds.add("upgrade")
+                note(2, f"NOTE: Your last upgrade failed: {upgrade_rejection['reason']}.")
             sprite_rejection = agent.get("lastSpriteRejection")
             if sprite_rejection and self.frameTick - sprite_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: Your last sprite design was rejected: {sprite_rejection['reason']}.")
+                fresh_rejection_kinds.add("sprite")
+                note(2, f"NOTE: Your last sprite design was rejected: {sprite_rejection['reason']}.")
             upgradeable = self._upgradeable_structures_brief()
             if upgradeable and not sprite_design_turn:
                 sample = upgradeable[:3]
                 parts = ", ".join(
                     f"{u['name']} id {u['id']} Lv.{u['level']}" for u in sample)
-                nudges.append(
+                note(3,
                     f"NOTE: Upgrade existing facilities before building duplicates. "
                     f"Use upgrade_structure (target = structure id): {parts}.")
         if GOODS_ENABLED:
             repair_rejection = agent.get("lastRepairRejection")
             if repair_rejection and self.frameTick - repair_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: Your last repair failed: {repair_rejection['reason']}.")
+                fresh_rejection_kinds.add("repair")
+                note(2, f"NOTE: Your last repair failed: {repair_rejection['reason']}.")
             spoilage = c.get("lastSpoilage")
             if spoilage and self.frameTick - spoilage.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: {spoilage['reason']}.")
+                note(3, f"NOTE: {spoilage['reason']}.")
             shelter = agent.get("lastShelterNote")
             if shelter and self.frameTick - shelter.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: {shelter['reason']}. More houses would fix this.")
+                note(3, f"NOTE: {shelter['reason']}. More houses would fix this.")
             worst_local = min((s for s in c["structures"]
                                if s.get("districtId") == agent.get("currentDistrict")
                                and (s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD)),
                               key=lambda s: s.get("condition", 100), default=None)
             if worst_local:
                 state_word = "in ruins" if worst_local.get("isRuin") else "in disrepair and not working"
-                nudges.append(f"NOTE: The {worst_local.get('name') or worst_local.get('type')} here is "
-                              f"{state_word} (condition {int(worst_local.get('condition', 0))}). "
-                              f"Use repair_structure to restore it.")
+                note(3, f"NOTE: The {worst_local.get('name') or worst_local.get('type')} here is "
+                        f"{state_word} (condition {int(worst_local.get('condition', 0))}). "
+                        f"Use repair_structure to restore it.")
         if ECONOMY_ENABLED:
             trade_rejection = agent.get("lastTradeRejection")
             if trade_rejection and self.frameTick - trade_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: Your last trade was refused: {trade_rejection['reason']}.")
+                note(2, f"NOTE: Your last trade was refused: {trade_rejection['reason']}.")
             if not agent.get("homeStructureId") \
                     and (self.frameTick - (agent.get("lastHomelessNudgeFrame") or -HOMELESS_NUDGE_FRAMES)) \
                     >= HOMELESS_NUDGE_FRAMES:
                 claimable = self._find_house_to_claim(agent)
                 agent["lastHomelessNudgeFrame"] = self.frameTick
                 if claimable:
-                    nudges.append("NOTE: You have no home, but an unclaimed house exists. "
-                                  "Be the one to repair_structure it (if damaged) or help build the "
-                                  "next house to claim it as your own.")
+                    note(3, "NOTE: You have no home, but an unclaimed house exists. "
+                            "Be the one to repair_structure it (if damaged) or help build the "
+                            "next house to claim it as your own.")
                 else:
-                    nudges.append("NOTE: You have no home and no house is unclaimed. "
-                                  "Consider start_project to build a house -- the builder claims it.")
+                    note(3, "NOTE: You have no home and no house is unclaimed. "
+                            "Consider start_project to build a house -- the builder claims it.")
         if LIFECYCLE_ENABLED:
             quota_rejection = agent.get("lastQuotaRejection")
             if quota_rejection and self.frameTick - quota_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: {quota_rejection['reason']}. "
-                              f"Try a different resource or district, or wait for the quota to reset.")
+                note(2, f"NOTE: {quota_rejection['reason']}. "
+                        f"Try a different resource or district, or wait for the quota to reset.")
             ration_rejection = agent.get("lastRationingRejection")
             if ration_rejection and self.frameTick - ration_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: {ration_rejection['reason']}. "
-                              f"Gather more or wait for storage to recover.")
+                note(2, f"NOTE: {ration_rejection['reason']}. "
+                        f"Gather more or wait for storage to recover.")
             pending_succession = c.get("pendingSuccession")
             if pending_succession and agent["name"] not in \
                     next((r["votes"] for r in c["pendingRules"]
@@ -7911,96 +8663,96 @@ class SimEngine:
                 candidate_ids = ", ".join(
                     f"{r['candidateName']} (id {r['id']})" for r in c["pendingRules"]
                     if r["kind"] == "succession" and r.get("electionId") == pending_succession["electionId"])
-                nudges.append(f"NOTE: The village elder has died. Vote for the next elder with vote_rule: "
-                              f"{candidate_ids}. Set target to your preferred candidate's id and vote yes.")
+                note(1, f"NOTE: The village elder has died. Vote for the next elder with vote_rule: "
+                        f"{candidate_ids}. Set target to your preferred candidate's id and vote yes.")
         if CEMETERY_ENABLED:
             burial_rejection = agent.get("lastBurialRejection")
             if burial_rejection and self.frameTick - burial_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                nudges.append(f"NOTE: {burial_rejection['reason']}. "
-                              f"Use start_project with target cemetery to build one.")
+                note(2, f"NOTE: {burial_rejection['reason']}. "
+                        f"Use start_project with target cemetery to build one.")
             unburied = next((a for a in self.agents
                              if a.get("deathFrame") is not None and not a.get("buried")), None)
             if unburied:
                 if self._working_cemeteries():
-                    nudges.append(f"NOTE: {unburied['name']} awaits burial. "
-                                  f"Use bury_agent (target {unburied['name']}) to lay them to rest in the Cemetery.")
+                    note(3, f"NOTE: {unburied['name']} awaits burial. "
+                            f"Use bury_agent (target {unburied['name']}) to lay them to rest in the Cemetery.")
                 else:
-                    nudges.append(f"NOTE: {unburied['name']} awaits burial but the village has no Cemetery yet. "
-                                  f"Use start_project with target cemetery.")
+                    note(3, f"NOTE: {unburied['name']} awaits burial but the village has no Cemetery yet. "
+                            f"Use start_project with target cemetery.")
         abandonment = c.get("lastProjectAbandonment")
         if abandonment and self.frameTick - abandonment.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-            nudges.append(f"NOTE: {abandonment['reason']}.")
+            note(2, f"NOTE: {abandonment['reason']}.")
         stalled_customs = self._stalled_approved_customs()
         if stalled_customs:
             pid, name, _ = stalled_customs[0]
-            nudges.append(f"NOTE: The village approved {name} but never built it. "
-                          f"Use start_project with target {pid}.")
+            note(2, f"NOTE: The village approved {name} but never built it. "
+                    f"Use start_project with target {pid}.")
         if ECOLOGY_ENABLED:
             stocks_line = self._format_district_stocks_for_prompt(agent)
             if ":depleted" in stocks_line or ":low" in stocks_line:
-                nudges.append(f"NOTE: Local stocks are strained ({stocks_line}). "
-                              f"Consider start_terraform (plant_grove/clear_field/extend_beach) or move_to_district.")
+                note(3, f"NOTE: Local stocks are strained ({stocks_line}). "
+                        f"Consider start_terraform (plant_grove/clear_field/extend_beach) or move_to_district.")
         if agent["assignedTask"] and \
                 self.frameTick - (agent.get("lastTaskedFrame") or 0) > DIRECTIVE_TTL_FRAMES:
             # Same staleness problem as the directive: an old task (possibly
             # restored from state.json) shouldn't bias decisions forever.
             agent["assignedTask"] = None
         if agent["assignedTask"]:
-            nudges.append(f"Your leader assigned you: {agent['assignedTask']}. Do it now.")
+            note(1, f"Your leader assigned you: {agent['assignedTask']}. Do it now.")
         if invention_required:
-            nudges.append("NOTE: All known structures are already built. The village needs a NEW "
-                          "invention -- use propose_blueprint now.")
+            note(1, "NOTE: All known structures are already built. The village needs a NEW "
+                    "invention -- use propose_blueprint now.")
         ready = next((did for did in actives if self._is_project_complete(did)), None)
         if ready:
-            nudges.append(f"PROJECT READY: the build in {ready} is fully funded. "
-                          f"Use build_structure with target_district {ready} now.")
+            note(3, f"PROJECT READY: the build in {ready} is fully funded. "
+                    f"Use build_structure with target_district {ready} now.")
         if agent.get("commitment"):
             commitment = agent["commitment"]
-            nudges.append(f'NOTE: You agreed to help {commitment["to"]}: "{commitment["text"]}". '
-                          f'Honor it soon with collect_resource, contribute_resources, or '
-                          f'trade_resource for {commitment["resource"]}.')
+            note(1, f'NOTE: You agreed to help {commitment["to"]}: "{commitment["text"]}". '
+                    f'Honor it soon with collect_resource, contribute_resources, or '
+                    f'trade_resource for {commitment["resource"]}.')
         if not actives:
             # Suppressed while invention is required: start_project would be
             # refused anyway, and the nudge pulls the model away from
             # propose_blueprint (the only action that unblocks progress).
             if not invention_required:
-                nudges.append("NOTE: No active project exists anywhere. Use start_project now to begin a build "
-                              "(optionally set target_district to one of the known_districts ids).")
+                note(3, "NOTE: No active project exists anywhere. Use start_project now to begin a build "
+                        "(optionally set target_district to one of the known_districts ids).")
         elif agent["consecutiveTalks"] >= 2:
-            nudges.append("NOTE: You have chatted twice. Prioritize collect_resource, contribute_resources, or move_to_agent.")
+            note(3, "NOTE: You have chatted twice. Prioritize collect_resource, contribute_resources, or move_to_agent.")
         directive = self._current_directive()
         if agent["role"] != "elder" and directive:
-            nudges.append(f"Your leader directs: {directive}. Prioritize it.")
+            note(1, f"Your leader directs: {directive}. Prioritize it.")
         if agent.get("consecutiveIdleMoves", 0) >= 3:
-            nudges.append("NOTE: You have been moving without acting. Prioritize collect_resource or contribute_resources.")
+            note(3, "NOTE: You have been moving without acting. Prioritize collect_resource or contribute_resources.")
         carry_cap = self._carry_cap(agent)
         capped = next(((k, v) for k, v in agent["resources"].items() if v >= carry_cap), None)
         if capped:
-            nudges.append(f"NOTE: You are at capacity for {capped[0]} ({capped[1]}/{carry_cap}). "
-                          f"Use contribute_resources or trade_resource instead of collecting more.")
+            note(3, f"NOTE: You are at capacity for {capped[0]} ({capped[1]}/{carry_cap}). "
+                    f"Use contribute_resources or trade_resource instead of collecting more.")
         spec = self._role_specialty_resource(agent["role"])
         if spec and spec == self._first_unmet_resource_anywhere():
-            nudges.append(f"NOTE: Your role specializes in {spec}, which an active project still needs. Prioritize collect_resource.")
+            note(3, f"NOTE: Your role specializes in {spec}, which an active project still needs. Prioritize collect_resource.")
         if EMERGENT_ROLES:
             need_role = self._village_needed_role()
             if need_role and need_role != agent["role"] and self._is_flexible_role(agent["role"]):
                 unmet = self._first_unmet_resource_anywhere()
                 if unmet:
-                    nudges.append(
+                    note(3,
                         f"NOTE: No one is gathering {unmet}, which a build needs. "
                         f"Consider switch_role to {need_role} to fill the gap.")
                 else:
-                    nudges.append(
+                    note(3,
                         f"NOTE: The village needs a {need_role} (survival or scarce "
                         f"resources). Consider switch_role to {need_role} to fill the gap.")
         if RULES_ENABLED:
             unvoted = next((r for r in c["pendingRules"] if agent["name"] not in r["votes"]), None)
             if unvoted:
-                nudges.append(f'NOTE: Pending rule "{unvoted["name"]}" (id {unvoted["id"]}) needs your vote. '
-                              f"Use vote_rule with target {unvoted['id']} and vote yes or no.")
+                note(1, f'NOTE: Pending rule "{unvoted["name"]}" (id {unvoted["id"]}) needs your vote. '
+                        f"Use vote_rule with target {unvoted['id']} and vote yes or no.")
             elif (not c["rules"] and not c["pendingRules"]
                   and self.frameTick - c["lastRuleActivityFrame"] > BLUEPRINT_STALL_THRESHOLD):
-                nudges.append("NOTE: The village has no shared rules yet. Consider propose_rule (a small resource_tax builds a shared stockpile).")
+                note(3, "NOTE: The village has no shared rules yet. Consider propose_rule (a small resource_tax builds a shared stockpile).")
         if agent["role"] == "elder" and c["pendingBlueprints"]:
             # Was gated at >=2 (the comparative council judgment): a LONE
             # valid proposal got no nudge at all and could sit unreviewed
@@ -8010,22 +8762,68 @@ class SimEngine:
             # "Storage House" validated on his own invention-only turn but
             # was never surfaced back to him because it was the only one
             # pending. Now covers n=1 too, with matching singular wording.
-            briefs = "; ".join(
-                f"{b['id']} by {b['proposedBy']} (needs "
-                + ", ".join(f"{k} {v}" for k, v in (b.get('needs') or {}).items())
-                + f"; {self._function_summary(b.get('function'))})"
-                for b in c["pendingBlueprints"])
-            if len(c["pendingBlueprints"]) == 1:
-                nudges.append(
-                    f"BLUEPRINT AWAITS YOUR VERDICT: {briefs}. Use approve_blueprint "
-                    f"(target = its id) if it serves the village, or reject_blueprint "
-                    f"with a one-line reason if not.")
-            else:
-                nudges.append(
-                    f"COUNCIL VERDICT NEEDED: {len(c['pendingBlueprints'])} blueprint proposals "
-                    f"compete: {briefs}. Compare them and approve the BEST with approve_blueprint "
-                    f'(target = its id), rejecting the rest IN THE SAME decision by adding '
-                    f'"verdict": {{"rejections": {{"<id>": "<one-line reason it lost>"}}}}.')
+            #
+            # SAGE_REVIEW_ENABLED splits the queue into three buckets: still
+            # needs a geography/resource review pass, cleared and awaiting a
+            # verdict, or denied at review (no action offered -- it expires on
+            # its own via _maybe_amnesty_denied_sage_reviews).
+            needs_review = [b for b in c["pendingBlueprints"]
+                            if SAGE_REVIEW_ENABLED and b.get("sageReview", "pending") == "pending"]
+            ready = [b for b in c["pendingBlueprints"]
+                     if not SAGE_REVIEW_ENABLED or b.get("sageReview") in ("approved", "skipped")]
+            denied = [b for b in c["pendingBlueprints"] if b.get("sageReview") == "denied"]
+            elder_blueprint_review_active = bool(needs_review or ready)
+            if needs_review:
+                # C3: cap rendered briefs per bucket -- MAX_PENDING_BLUEPRINTS
+                # already loosely bounds the queue, so this is mostly a
+                # safeguard against a bucket absorbing the whole queue.
+                shown = needs_review[:MAX_BLUEPRINT_BRIEFS]
+                overflow = len(needs_review) - len(shown)
+                briefs = "; ".join(
+                    f"{b['id']} by {b['proposedBy']} (needs "
+                    + ", ".join(f"{k} {v}" for k, v in (b.get('needs') or {}).items())
+                    + f"; {self._function_summary(b.get('function'))}"
+                    + (f"; duplicates {b['duplicateOf']}" if b.get("duplicateOf") else "")
+                    + ")"
+                    for b in shown)
+                if overflow > 0:
+                    briefs += f"; (+{overflow} more)"
+                note(1,
+                    f"BLUEPRINT NEEDS SAGE REVIEW: {briefs}. Check district stock shortages, "
+                    f"gather-zone availability, existing producers, and structure distribution "
+                    f"({self._sage_review_geo_context()}), then use sage_review_blueprint "
+                    f"(target = its id, sage_decision = approve or deny).")
+            if ready:
+                shown = ready[:MAX_BLUEPRINT_BRIEFS]
+                overflow = len(ready) - len(shown)
+                briefs = "; ".join(
+                    f"{b['id']} by {b['proposedBy']}"
+                    + (f" [sage: {b['sageReviewReason']}]" if b.get("sageReviewReason") else "")
+                    + (f" [duplicates {b['duplicateOf']} -- approving upgrades it instead of "
+                       f"building new]" if b.get("duplicateOf") else "")
+                    for b in shown)
+                if overflow > 0:
+                    briefs += f"; (+{overflow} more)"
+                if len(ready) == 1:
+                    note(1,
+                        f"BLUEPRINT AWAITS YOUR VERDICT: {briefs}. Use approve_blueprint "
+                        f"(target = its id, optionally target_district) if it serves the village, "
+                        f"or reject_blueprint with a one-line reason if not.")
+                else:
+                    note(1,
+                        f"COUNCIL VERDICT NEEDED: {len(ready)} blueprint proposals "
+                        f"compete: {briefs}. Compare them and approve the BEST with approve_blueprint "
+                        f'(target = its id), rejecting the rest IN THE SAME decision by adding '
+                        f'"verdict": {{"rejections": {{"<id>": "<one-line reason it lost>"}}}}.')
+            if denied and not needs_review and not ready:
+                shown = denied[:MAX_BLUEPRINT_BRIEFS]
+                overflow = len(denied) - len(shown)
+                briefs = "; ".join(f"{b['id']} ({b.get('sageReviewReason') or 'no reason given'})"
+                                   for b in shown)
+                if overflow > 0:
+                    briefs += f"; (+{overflow} more)"
+                note(1, f"NOTE: Sage denied {briefs} -- it cannot be approved as-is; "
+                        f"it will expire on its own.")
         if agent["role"] == "elder" and actives:
             stalled_district = next((did for did in actives
                                      if self.frameTick - c["districtLastContribution"].get(did, 0) > STALL_THRESHOLD), None)
@@ -8035,56 +8833,61 @@ class SimEngine:
                     holders = sorted((a for a in self.agents if a["resources"].get(stalled, 0) > 0),
                                      key=lambda a: a["resources"].get(stalled, 0), reverse=True)
                     holder = holders[0]["name"] if holders else "no one"
-                    nudges.append(f"NOTE: No progress on {stalled_district} in a while. {stalled} is still short; "
-                                  f"{holder} is holding the most of it. Consider assign_task or contribute_resources.")
+                    note(2, f"NOTE: No progress on {stalled_district} in a while. {stalled} is still short; "
+                            f"{holder} is holding the most of it. Consider assign_task or contribute_resources.")
         if len(actives) < MAX_CONCURRENT_PROJECTS:
             idle_buildable = next((did for did in self._buildable_district_ids()
                                    if not c["districtProjects"].get(did)
                                    and self._district_structure_count(did) < c["districts"][did]["build_grid"]["cap"]),
                                   None)
             if idle_buildable and idle_buildable != agent.get("currentDistrict"):
-                nudges.append(f"NOTE: {idle_buildable} has no build underway and there's room for another "
-                              f"concurrent project (up to {MAX_CONCURRENT_PROJECTS} at once). Consider start_project "
-                              f"with target_district {idle_buildable} if you're nearby.")
+                note(3, f"NOTE: {idle_buildable} has no build underway and there's room for another "
+                        f"concurrent project (up to {MAX_CONCURRENT_PROJECTS} at once). Consider start_project "
+                        f"with target_district {idle_buildable} if you're nearby.")
         if len(c["pendingBlueprints"]) < MAX_PENDING_BLUEPRINTS \
                 and self.frameTick - c["lastBlueprintActivityFrame"] > BLUEPRINT_STALL_THRESHOLD:
-            nudges.append("NOTE: No new blueprint activity in a while. Consider propose_blueprint if you have an idea.")
+            note(3, "NOTE: No new blueprint activity in a while. Consider propose_blueprint if you have an idea.")
         if STRUCTURE_EFFECTS_ENABLED and not invention_required:
             pref = self.d["ROLE_PROJECT"].get(agent["role"].lower(), "house")
             prefs = pref if isinstance(pref, list) else [pref]
             if prefs and all(self._type_saturated(p) for p in prefs):
-                nudges.append(f"NOTE: The village has enough {', '.join(prefs)} structures -- "
-                              f"more add nothing. Build a different type or propose_blueprint.")
+                note(3, f"NOTE: The village has enough {', '.join(prefs)} structures -- "
+                        f"more add nothing. Build a different type or propose_blueprint.")
         if CRAFTING_ENABLED and self.frameTick - c["lastCraftActivityFrame"] > CRAFT_STALL_THRESHOLD:
             has_workshop = any(s["type"] == "workshop" for s in c["structures"])
             if agent["role"] == "elder" and not has_workshop:
-                nudges.append("NOTE: No workshop exists yet. Direct an agent to build a Workshop so the village can craft planks, bricks, and tools for advanced builds.")
+                note(2, "NOTE: No workshop exists yet. Direct an agent to build a Workshop so the village can craft planks, bricks, and tools for advanced builds.")
             elif has_workshop:
                 granary = c["projectRegistry"].get("granary")
                 if granary and "granary" not in c["builtTypes"]:
                     crafted_needs = ", ".join(f"{n} {r}" for r, n in granary["needs"].items()
                                               if r in self.RECIPES)
-                    nudges.append(f"NOTE: No crafting in a while and the Granary is still unbuilt -- "
-                                  f"it needs {crafted_needs}. At the workshop, craft_item those now.")
+                    note(2, f"NOTE: No crafting in a while and the Granary is still unbuilt -- "
+                            f"it needs {crafted_needs}. At the workshop, craft_item those now.")
                 else:
-                    nudges.append("NOTE: No crafting in a while. At the workshop, craft_item (planks/bricks/tools) — advanced builds like the Granary need crafted goods.")
+                    note(2, "NOTE: No crafting in a while. At the workshop, craft_item (planks/bricks/tools) — advanced builds like the Granary need crafted goods.")
             else:
-                nudges.append("NOTE: The village should build a Workshop, then craft goods for advanced builds like the Granary.")
+                note(2, "NOTE: The village should build a Workshop, then craft goods for advanced builds like the Granary.")
         if SURVIVAL_ENABLED:
             if agent["hunger"] < EAT_THRESHOLD and agent["resources"].get("food", 0) == 0:
-                nudges.append("NOTE: You are hungry and have no food. Gather food from the farm (or fish at the beach) before you starve.")
-            collapsed = next((a for a in self.agents if a["incapacitated"]), None)
+                note(0, "NOTE: You are hungry and have no food. Gather food from the farm (or fish at the beach) before you starve.")
+            # Dead agents stay incapacitated forever (no post-mortem revive
+            # path), so without the deathFrame guard a deceased agent reads
+            # as a standing "collapsed" emergency in every prompt.
+            collapsed = next((a for a in self.agents
+                              if a["incapacitated"] and a.get("deathFrame") is None), None)
             if collapsed and collapsed["name"] != agent["name"]:
                 verb = "Go heal_agent" if agent["role"] == "healer" else "Bring food or heal_agent"
-                nudges.append(f"NOTE: {collapsed['name']} has collapsed. {verb} to revive them.")
+                note(0, f"NOTE: {collapsed['name']} has collapsed. {verb} to revive them.")
             em = self._sage_emergency()
             if em and em["name"] != agent["name"] and agent["name"] in self._sage_responders(em):
-                nudges.append(f"EMERGENCY: Elder Sage's life is the top priority — abandon your task and "
-                              f"heal_agent {em['name']}. Nothing matters more than the elder's survival.")
+                emergency_active = True
+                note(0, f"EMERGENCY: Elder Sage's life is the top priority — abandon your task and "
+                        f"heal_agent {em['name']}. Nothing matters more than the elder's survival.")
         if nearby_detailed and agent["consecutiveTalks"] == 0 \
                 and self.frameTick - agent.get("lastSpokeFrame", 0) > SOCIAL_SILENCE_FRAMES:
-            nudges.append("NOTE: You haven't spoken with anyone in a while and someone is nearby. "
-                          "Consider talk_to_nearby to coordinate plans, ask for help, or share what you know.")
+            note(3, "NOTE: You haven't spoken with anyone in a while and someone is nearby. "
+                    "Consider talk_to_nearby to coordinate plans, ask for help, or share what you know.")
         tool_line = None
         industry_line = None
         neighbor_line = None
@@ -8093,14 +8896,14 @@ class SimEngine:
             tool_line = f"wooden/stone/iron picks held: {', '.join(tools) or 'none'}"
             industry_line = f"Industry recipes: {len(self.RECIPES)} (smelt ores at kiln via craft_item)"
             if self._is_night():
-                nudges.append("NOTE: It is night — seek shelter in a house or composable shelter.")
+                note(3, "NOTE: It is night — seek shelter in a house or composable shelter.")
             if self._border_settlement_agent(agent):
                 neighbor_line = "Neighbor settlement nearby — trade or propose_treaty"
-                nudges.append(f"NOTE: {neighbor_line}.")
+                note(3, f"NOTE: {neighbor_line}.")
             for rej_key, label in (("lastBlockRejection", "block"), ("lastTerrainRejection", "terrain")):
                 rej = agent.get(rej_key)
                 if rej and self.frameTick - rej.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                    nudges.append(f"NOTE: Your last {label} action failed: {rej['reason']}.")
+                    note(2, f"NOTE: Your last {label} action failed: {rej['reason']}.")
             self._maybe_seek_shelter(agent)
             self._maybe_expand_field(agent)
             self._maybe_caravan_goal(agent)
@@ -8114,15 +8917,121 @@ class SimEngine:
             # turns, correlating with duplicate/off-target proposals. Keep
             # only the blueprint-rejection reason (if any) so a retried
             # invention turn still learns why its last attempt failed.
-            nudges = [rejection_nudge] if rejection_nudge else []
-        if sprite_design_turn:
+            # These overrides bypass the priority-cap selection below --
+            # they already reduce to <=1 nudge, so there's nothing to cap.
+            final_nudges = [rejection_nudge] if rejection_nudge else []
+        elif sprite_design_turn:
             sprite_rej = agent.get("lastSpriteRejection")
-            sprite_note = None
+            sprite_note_text = None
             if sprite_rej and self.frameTick - sprite_rej.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                sprite_note = (f"NOTE: Your last sprite was rejected: {sprite_rej['reason']}. "
-                               f"Submit a strictly BIGGER grid.")
-            nudges = [sprite_note] if sprite_note else []
-        behavior_nudge = " ".join(nudges)
+                sprite_note_text = (f"NOTE: Your last sprite was rejected: {sprite_rej['reason']}. "
+                                    f"Submit a strictly BIGGER grid.")
+            final_nudges = [sprite_note_text] if sprite_note_text else []
+        else:
+            # Priority selection: keep ALL P0 (rare) nudges, then fill
+            # remaining slots up to MAX_BEHAVIOR_NUDGES with P1/P2/P3 nudges
+            # in priority order, preserving relative order within each class
+            # (Python's sort is stable).
+            p0_nudges = [text for prio, text in nudges if prio == 0]
+            rest_nudges = sorted(
+                ((prio, text) for prio, text in nudges if prio != 0),
+                key=lambda pt: pt[0])
+            remaining_slots = max(0, MAX_BEHAVIOR_NUDGES - len(p0_nudges))
+            final_nudges = p0_nudges + [text for _, text in rest_nudges[:remaining_slots]]
+        # Observability: total collected vs. how many survived selection.
+        # For invention/sprite turns the override already IS the total (no
+        # separate pool was capped), so nothing reads as "dropped".
+        if invention_turn or sprite_design_turn:
+            nudges_total = len(final_nudges)
+            nudges_dropped = 0
+        else:
+            nudges_total = len(nudges)
+            nudges_dropped = nudges_total - len(final_nudges)
+        behavior_nudge = " ".join(final_nudges)
+
+        # Phase A1 (shadow-log only, no behavior change): name the first
+        # matching high-stakes trigger for this turn, priority order below.
+        # Not read by is_high_stakes_turn/model_for_decision -- logging only.
+        election_active = bool(c.get("pendingSuccession"))
+        treaty_unvoted = any(r.get("kind") == "treaty" and agent["name"] not in r["votes"]
+                             for r in c["pendingRules"])
+        if emergency_active:
+            high_stakes_reason = "emergency"
+        elif election_active:
+            high_stakes_reason = "election"
+        elif treaty_unvoted:
+            high_stakes_reason = "treaty_vote"
+        elif elder_blueprint_review_active:
+            high_stakes_reason = "elder_blueprint_review"
+        elif len(fresh_rejection_kinds) >= 2:
+            high_stakes_reason = "repeated_rejections"
+        else:
+            high_stakes_reason = None
+
+        # C3: trim the payload lists below that otherwise grow monotonically
+        # across a long session. Each trim is prompt-facing only -- anything
+        # server.py's validate_blueprint reads for id-collision/membership
+        # checks keeps a separate, always-full list (noted per field).
+        resource_items = [{"id": rid, "gather_zone": d.get("gatherZone"),
+                           # Crafted goods are built-in resources, not
+                           # invention slots (match _custom_resource_count).
+                           "custom": (rid not in BASE_RESOURCES
+                                       and rid not in CRAFTED_RESOURCES)}
+                          for rid, d in c["resourceRegistry"].items()]
+        # known_resource_ids: always-full, cheap id-only list. server.py's
+        # validate_blueprint uses this (via build_agent_data) for the
+        # duplicate-resource-id and needs-reference checks, so it must never
+        # be trimmed -- only the rich known_resources list below (used for
+        # the prompt) is capped.
+        known_resource_ids_full = [r["id"] for r in resource_items]
+        seed_resources = [r for r in resource_items if not r["custom"]]
+        custom_resources = [r for r in resource_items if r["custom"]]
+        if len(seed_resources) + len(custom_resources) > MAX_KNOWN_RESOURCES_PROMPT:
+            custom_slots = max(0, MAX_KNOWN_RESOURCES_PROMPT - len(seed_resources))
+            known_resources_prompt = seed_resources + (custom_resources[-custom_slots:] if custom_slots else [])
+        else:
+            known_resources_prompt = seed_resources + custom_resources
+
+        recipe_items = list(self.RECIPES.items()) if CRAFTING_ENABLED else []
+        if len(recipe_items) > MAX_KNOWN_RECIPES_PROMPT:
+            recipe_items = recipe_items[-MAX_KNOWN_RECIPES_PROMPT:]
+
+        # rejected_blueprints: server.py's validate_blueprint reads the
+        # full, untrimmed "rejected_blueprints" field (via build_agent_data)
+        # for the "id was previously rejected" check, so that field is left
+        # exactly as before. "rejected_blueprints_prompt" is a new, separate,
+        # prompt-only view.
+        rejected_full = list(c["rejectedBlueprintIds"])
+        if len(rejected_full) > MAX_REJECTED_BLUEPRINTS_PROMPT:
+            rejected_prompt = rejected_full[-MAX_REJECTED_BLUEPRINTS_PROMPT:] + [
+                f"(+{len(rejected_full) - MAX_REJECTED_BLUEPRINTS_PROMPT} older rejected ids omitted)"]
+        else:
+            rejected_prompt = rejected_full
+
+        # approved_custom_projects: same caution -- validate_blueprint's
+        # approved_ids arg (duplicate-id + MAX_APPROVED_CUSTOM count checks)
+        # keeps reading the full "approved_custom_projects" field unchanged.
+        # "approved_custom_projects_prompt" is the new, separate, prompt-only
+        # view (in practice a no-op today since approvals are already capped
+        # at MAX_APPROVED_CUSTOM <= MAX_APPROVED_PROJECTS_PROMPT).
+        approved_full = self._custom_project_ids()
+        if len(approved_full) > MAX_APPROVED_PROJECTS_PROMPT:
+            approved_prompt = approved_full[-MAX_APPROVED_PROJECTS_PROMPT:] + [
+                f"(+{len(approved_full) - MAX_APPROVED_PROJECTS_PROMPT} older approved ids omitted)"]
+        else:
+            approved_prompt = approved_full
+
+        # active_rules: not read by validate_blueprint at all, so a plain cap
+        # on the existing field is safe. Already loosely bounded by
+        # MAX_ACTIVE_RULES (8) <= MAX_ACTIVE_RULES_PROMPT (12) today.
+        rules_full = list(c["rules"]) if RULES_ENABLED else []
+        if len(rules_full) > MAX_ACTIVE_RULES_PROMPT:
+            active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"]}
+                                 for r in rules_full[-MAX_ACTIVE_RULES_PROMPT:]]
+            active_rules_list.append(f"(+{len(rules_full) - MAX_ACTIVE_RULES_PROMPT} older rules)")
+        else:
+            active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"]}
+                                 for r in rules_full]
 
         return {
             "agent_name": agent["name"],
@@ -8150,6 +9059,7 @@ class SimEngine:
                                 if d.get("build_grid")],
             "directive": self._current_directive() or "none",
             "invention_only": invention_turn,
+            "invention_build_context": invention_build_context,
             "sprite_design_only": sprite_design_turn,
             "sprite_design_context": dict(agent["spriteDesignTurn"]) if sprite_design_turn else None,
             "upgradeable_structures": self._upgradeable_structures_brief() if STRUCTURE_UPGRADES_ENABLED else [],
@@ -8157,18 +9067,24 @@ class SimEngine:
                                  "propose_blueprint to invent a new structure.") if invention_required else "not needed",
             "commitment": agent.get("commitment"),
             "idle_agents": idle_agents,
-            "known_resources": [{"id": rid, "gather_zone": d.get("gatherZone"),
-                                 "custom": rid not in BASE_RESOURCES}
-                                for rid, d in c["resourceRegistry"].items()],
-            "pending_blueprints": [{"id": b["id"], "needs": b["needs"], "proposed_by": b["proposedBy"]}
+            "known_resources": known_resources_prompt,
+            # C3: always-full id list for server.py validation; see comment above.
+            "known_resource_ids": known_resource_ids_full,
+            "pending_blueprints": [{"id": b["id"], "needs": b["needs"], "proposed_by": b["proposedBy"],
+                                    "sage_review": b.get("sageReview", "pending"),
+                                    "sage_review_reason": b.get("sageReviewReason"),
+                                    "duplicate_of": b.get("duplicateOf")}
                                    for b in c["pendingBlueprints"]],
             "known_recipes": [{"id": rid, "inputs": r["inputs"], "station": r["station"]}
-                              for rid, r in self.RECIPES.items()] if CRAFTING_ENABLED else [],
+                              for rid, r in recipe_items] if CRAFTING_ENABLED else [],
             "pending_recipes": [{"id": r["id"], "inputs": r["inputs"], "proposed_by": r["proposedBy"]}
                                 for r in c["pendingRecipes"]],
-            "approved_custom_projects": self._custom_project_ids(),
-            "rejected_blueprints": list(c["rejectedBlueprintIds"]),
-            "known_effect_vectors": list(self._known_effect_vectors()),
+            # C3: kept full (unchanged) for server.py's validate_blueprint;
+            # *_prompt is the new, separate, capped view for rendering.
+            "approved_custom_projects": approved_full,
+            "approved_custom_projects_prompt": approved_prompt,
+            "rejected_blueprints": rejected_full,
+            "rejected_blueprints_prompt": rejected_prompt,
             "district_stocks": self._format_district_stocks_for_prompt(agent),
             "known_terraform": list(TERRAFORM_TEMPLATES.keys()) if ECOLOGY_ENABLED else [],
             # Phase C: one short prompt line (server renders it only when set,
@@ -8188,13 +9104,14 @@ class SimEngine:
                                "no": list(r["votes"].values()).count("no"),
                                "proposed_by": r["proposedBy"]}
                               for r in c["pendingRules"]] if RULES_ENABLED else [],
-            "active_rules": [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"]}
-                             for r in c["rules"]] if RULES_ENABLED else [],
+            "active_rules": active_rules_list if RULES_ENABLED else [],
             "recent_conversations": self._recent_conversations_text(),
             "inbox": self._drain_inbox(agent),
             "self_prompt": "",
             "module_reports": "none",
             "behavior_nudge": behavior_nudge,
+            "nudges_total": nudges_total,
+            "nudges_dropped": nudges_dropped,
             "needed_role": self._village_needed_role() if EMERGENT_ROLES else None,
             # Phase G: compact skills summary (folded into the existing "Your
             # skill:" line server-side, zero new template line) and a short
@@ -8205,7 +9122,7 @@ class SimEngine:
             "path1_tool_line": tool_line,
             "path1_industry_line": industry_line,
             "path1_neighbor_line": neighbor_line,
-            "settlements": list(c.get("settlements") or []) if path1_on("PATH1_DIPLOMACY_ENABLED") else None,
+            "high_stakes_reason": high_stakes_reason,
             "available_actions": [a for a in self.d["AVAILABLE_ACTIONS"]
                                   if (a != "start_terraform" or ECOLOGY_ENABLED)
                                   and (a != "repair_structure" or GOODS_ENABLED)
@@ -8486,12 +9403,16 @@ class SimEngine:
                 self._maybe_repair_market()
                 self._maybe_abandon_stalled_projects()
                 self._maybe_relocate_stuck_project()
+                self._maybe_reorganize_structures()
                 self._maybe_force_contribution()
                 self._maybe_start_idle_district_project()
                 self._maybe_build_funded_project()
                 self._maybe_start_approved_custom()
                 self._maybe_retire_blueprint()
                 self._maybe_amnesty_rejected_blueprints()
+                if SAGE_REVIEW_ENABLED:
+                    self._maybe_skip_sage_review()
+                    self._maybe_amnesty_denied_sage_reviews()
                 self._maybe_retire_custom_resource()
                 self._maybe_invention_backstop()
                 self._maybe_found_district()
@@ -8541,6 +9462,12 @@ class SimEngine:
                     a["thinkTimer"] -= 1
                     if a["thinkTimer"] <= 0:
                         self._rush_to_heal(a, em_target)
+                        a["thinkTimer"] = GOAL_STEP_FRAMES
+                    continue
+                if a.get("reorgTask"):
+                    a["thinkTimer"] -= 1
+                    if a["thinkTimer"] <= 0:
+                        self._step_reorg(a)
                         a["thinkTimer"] = GOAL_STEP_FRAMES
                     continue
                 a["thinkTimer"] -= 1
@@ -8710,6 +9637,16 @@ class SimEngine:
                 civ.setdefault("deferredProjectTypes", {})
                 civ.setdefault("rejectedBlueprintFrames", {})
                 civ.setdefault("customResourceAddedFrame", {})
+                # Agent-driven structure reorganization: purely additive, same
+                # setdefault-only back-compat as every other phase -- an old
+                # save simply starts with no reorg task pending, and the
+                # periodic backstop (_maybe_reorganize_structures) discovers
+                # any pre-existing footprint overlap (e.g. the House/Mill
+                # overlap in the live save) within the first ~10s.
+                civ.setdefault("reorgTasks", [])
+                civ.setdefault("lastReorgFrame", 0)
+                civ.setdefault("lastReorgCheckFrame", 0)
+                civ.setdefault("lastReorgNoRoomFrame", 0)
                 civ.setdefault("lastRoleSwitchFrame", 0)
                 civ.setdefault("roleNeedSinceFrame", None)
                 civ.setdefault("lastRoleRebalanceLatency", None)
@@ -8836,6 +9773,7 @@ class SimEngine:
                     a.setdefault("lastHomelessNudgeFrame", None)
                     a.setdefault("lastBurialRejection", None)
                     a.setdefault("inventionRetryUsed", False)
+                    a.setdefault("inventionBuildContext", None)
                     a.setdefault("spriteDesignTurn", None)
                     a.setdefault("lastUpgradeRejection", None)
                     a.setdefault("lastSpriteRejection", None)
@@ -8843,6 +9781,7 @@ class SimEngine:
                     a.setdefault("lastTerrainRejection", None)
                     a.setdefault("lastTreatyRejection", None)
                     a.setdefault("lastNightNote", None)
+                    a.setdefault("reorgTask", None)
                     a.setdefault("persona", "")
                     a.setdefault("moduleTick", 0)
                     a.setdefault("modules", {
@@ -9056,6 +9995,8 @@ class SimEngine:
             return {
                 "frameTick": self.frameTick,
                 "paused": self.paused,
+                "uptimeSeconds": time.time() - self.processStartTime,
+                "simEpochMs": SIM_CLOCK_EPOCH_MS + self.frameTick * SIM_MS_PER_TICK,
                 "lmStatus": self.lmStatus,
                 "agents": agents,
                 "civilization": civ,

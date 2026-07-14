@@ -592,6 +592,12 @@
       <span id="statusLabel">LM Studio: offline</span>
     </div>
     <div id="sidebarBody">
+    <section class="panel-section" id="timePanel">
+      <h2>Time</h2>
+      <div class="civ-row"><span class="civ-label">Now (EST):</span> <span class="civ-value" id="timeNow">—</span></div>
+      <div class="civ-row"><span class="civ-label">Uptime:</span> <span class="civ-value" id="timeUptime">—</span></div>
+      <div class="civ-row"><span class="civ-label">Sim time (EST):</span> <span class="civ-value" id="timeSim">—</span></div>
+    </section>
     <section class="panel-section" id="civPanel">
       <h2>Civilization</h2>
       <div class="civ-row"><span class="civ-label" id="civLevelLabel">Level:</span> <span class="civ-value" id="civLevel">1</span></div>
@@ -1214,6 +1220,9 @@ function syncAgentListSelection() {
 }
 const convListEl = document.getElementById("convList");
 const actListEl = document.getElementById("actList");
+const timeNowEl = document.getElementById("timeNow");
+const timeUptimeEl = document.getElementById("timeUptime");
+const timeSimEl = document.getElementById("timeSim");
 const civLevelEl = document.getElementById("civLevel");
 const civStructuresEl = document.getElementById("civStructures");
 const civUpgradesRowEl = document.getElementById("civUpgradesRow");
@@ -1562,8 +1571,35 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+function formatEstClock(ms) {
+  return new Date(ms).toLocaleTimeString("en-US", {
+    timeZone: "America/New_York", hour: "numeric", minute: "2-digit", second: "2-digit",
+  });
+}
+
+function formatEstDateTime(ms) {
+  return new Date(ms).toLocaleString("en-US", {
+    timeZone: "America/New_York", month: "short", day: "numeric",
+    hour: "numeric", minute: "2-digit", second: "2-digit",
+  });
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.floor(seconds));
+  const d = Math.floor(total / 86400);
+  const h = Math.floor((total % 86400) / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return d > 0 ? `${d}d ${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(h)}:${pad(m)}:${pad(s)}`;
+}
+
+setInterval(() => { timeNowEl.textContent = formatEstClock(Date.now()); }, 1000);
+
 function renderSidebar() {
   const civ = getCiv();
+  if (world.uptimeSeconds != null) timeUptimeEl.textContent = formatDuration(world.uptimeSeconds);
+  if (world.simEpochMs != null) timeSimEl.textContent = formatEstDateTime(world.simEpochMs);
   const lmStatus = world.lmStatus || "offline";
   const statusColor = lmStatus === "online" ? "#4CAF50"
     : lmStatus === "compute_error" ? "#FF9800" : "#F44336";

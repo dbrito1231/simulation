@@ -13,6 +13,8 @@ import os
 import re
 import signal
 import threading
+import time
+from collections import deque
 from datetime import datetime, timezone
 
 import requests
@@ -47,6 +49,33 @@ LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 MODEL_SMART = "qwen/qwen3.5-9b"
 MODEL_FAST = "qwen/qwen3.5-9b"
 
+# Thinking control (2026-07-11): routine villager turns run with reasoning
+# DISABLED -- the old '"thinking": {"type": "disabled"}' payload key was
+# Anthropic-API format that LM Studio ignores (every routine decision was
+# emitted through reasoning_content). Probed live against this LM Studio
+# build: top-level '"reasoning_effort": "none"' is the knob it honors;
+# chat_template_kwargs={"enable_thinking": false} and Qwen's /no_think soft
+# switch are both ignored (known bug, lmstudio-bug-tracker #1990). High-stakes
+# turns (elder / invention / sprite / invention-REQUIRED -- the MODEL_SMART
+# set in model_for_decision) keep thinking ON, which makes the smart/fast
+# routing meaningful even while both tiers point at one model.
+# Replay bench (scripts/llm_replay_bench.py, 40 calls): thinking-leak
+# 100% -> 0%, JSON validity 100% -> 100%, action diversity unchanged.
+DISABLE_THINKING_ROUTINE = True
+
+# Qwen-recommended sampling pins (model card). Only temperature was sent
+# before; top_p/top_k/min_p silently followed whatever LM Studio preset was
+# active, which drifts across app updates and reloads. Temperatures stay the
+# behavior-tuned values below.
+NON_THINKING_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0}
+THINKING_SAMPLING = {"top_p": 0.95, "top_k": 20}
+
+# Experiment lever (off by default): a small presence penalty on routine
+# turns may further cut move_to_district fixation (32% share in the
+# 2026-07-05 replay benchmark above). Flip to e.g. 0.5 and compare with
+# scripts/llm_replay_bench.py before adopting.
+ROUTINE_PRESENCE_PENALTY = 0.0
+
 # Phase D model-experiment hook (plan Part 6 / copilot-audit C4): invention-only
 # calls override the decision defaults (temperature 0.4 / max_tokens 512).
 # The 2026-07-09 council investigation found 32/171 invention completions
@@ -69,24 +98,115 @@ INVENTION_MAX_TOKENS = 1024
 # with zero proposals (12 dissolutions, only 2 successful proposals logged).
 # Invention turns are rare (a few per hour) so a generous timeout costs
 # nothing; DEFAULT_TIMEOUT_S stays tight so routine throughput is unaffected.
+#
+# THINKING_TIMEOUT_S covers ALL high-stakes turns (see is_high_stakes_turn),
+# not just invention/sprite ones -- elder-role and invention-status-REQUIRED
+# turns also keep THINKING_SAMPLING on and route to MODEL_SMART, so they're
+# just as slow. Measured ~12-20s median under 3-way concurrency; 75s covers
+# p99 plus queueing behind other in-flight thinking turns.
 DEFAULT_TIMEOUT_S = 30
-INVENTION_TIMEOUT_S = 75
+THINKING_TIMEOUT_S = 75
 
 COUNCIL_LLM_ACTIONS = frozenset({
-    "propose_blueprint", "approve_blueprint", "reject_blueprint",
+    "propose_blueprint", "approve_blueprint", "reject_blueprint", "sage_review_blueprint",
 })
 
 
-def model_for_decision(data):
+# A3: high_stakes_reason values (shadow-logged by sim_engine._build_think_payload
+# since A1) that are ALSO allowed to trigger thinking/MODEL_SMART/THINKING_TIMEOUT_S,
+# on top of the original unbudgeted four (sprite/invention/elder/REQUIRED).
+# Enabled from A1 shadow observations: rare, high-value events worth the extra
+# latency. Deliberately excluded:
+#   - "elder_blueprint_review": redundant -- elder turns are already high-stakes
+#     via the role check below, so this reason never adds a NEW thinking turn.
+#   - "repeated_rejections": too frequent/noisy to spend the thinking budget on;
+#     it fires often enough that it would dominate EXTRA_THINKING_PER_WINDOW.
+HIGH_STAKES_ENABLED_REASONS = frozenset({"emergency", "election", "treaty_vote"})
+
+# Rolling-window budget for the EXTRA thinking turns unlocked by
+# HIGH_STAKES_ENABLED_REASONS only -- the original four is_high_stakes_turn
+# conditions (sprite/invention/elder/REQUIRED) stay unbudgeted. Bounds how much
+# extra MODEL_SMART/THINKING_TIMEOUT_S load the new (rare-but-not-zero) reasons
+# can add per unit time, since run_agent_decision runs on worker threads (up to
+# MAX_CONCURRENT_LLM=3 in flight).
+EXTRA_THINKING_PER_WINDOW = 4
+EXTRA_THINKING_WINDOW_S = 60
+_extra_thinking_lock = threading.Lock()
+_extra_thinking_timestamps = deque()
+
+
+def _consume_extra_thinking_budget():
+    """Thread-safe rolling-window limiter. Returns True (and reserves a slot)
+    if under EXTRA_THINKING_PER_WINDOW turns within the last
+    EXTRA_THINKING_WINDOW_S seconds, else False."""
+    now = time.monotonic()
+    with _extra_thinking_lock:
+        while _extra_thinking_timestamps and now - _extra_thinking_timestamps[0] > EXTRA_THINKING_WINDOW_S:
+            _extra_thinking_timestamps.popleft()
+        if len(_extra_thinking_timestamps) < EXTRA_THINKING_PER_WINDOW:
+            _extra_thinking_timestamps.append(now)
+            return True
+        return False
+
+
+def _base_high_stakes(data):
+    """The original unbudgeted MODEL_SMART set: turns that keep thinking
+    enabled and route to the smart tier regardless of budget."""
     if data.get("sprite_design_only"):
-        return MODEL_SMART
+        return True
     if data.get("invention_only"):
-        return MODEL_SMART
+        return True
     if (data.get("role") or "").lower() == "elder":
-        return MODEL_SMART
+        return True
     if str(data.get("invention_status") or "").startswith("REQUIRED"):
-        return MODEL_SMART
-    return MODEL_FAST
+        return True
+    return False
+
+
+def is_high_stakes_turn(data):
+    """The MODEL_SMART set: turns that keep thinking enabled and route to the
+    smart tier. Kept as a predicate (not a MODEL_SMART == MODEL_FAST string
+    compare) because both tiers currently resolve to the same model id.
+
+    is_high_stakes_turn is called from multiple places per request
+    (model_for_decision via build_decision_payload, the timeout choice in
+    run_agent_decision, and again on the context-overflow slim retry). The
+    HIGH_STAKES_ENABLED_REASONS path consumes a stateful budget, so it must be
+    resolved exactly ONCE per request -- see resolve_high_stakes(), which
+    stamps the outcome into data["_high_stakes_resolved"]. When that stamp is
+    present, every call here (including this one) just echoes it so all call
+    sites agree; only an unstamped `data` (e.g. ad-hoc/test calls) falls back
+    to the unbudgeted base predicate."""
+    if "_high_stakes_resolved" in data:
+        return data["_high_stakes_resolved"]
+    return _base_high_stakes(data)
+
+
+def resolve_high_stakes(data):
+    """Resolve is_high_stakes_turn ONCE per request and stamp the result into
+    `data` so downstream is_high_stakes_turn() calls agree without
+    re-consuming the extra-thinking budget. Call this first thing in
+    run_agent_decision, before build_decision_payload/model_for_decision run.
+
+    Returns (resolved: bool, capped: bool) where `capped` is True only when a
+    HIGH_STAKES_ENABLED_REASONS turn qualified but was denied by the budget
+    (for log_lm's "high_stakes_capped" field)."""
+    if _base_high_stakes(data):
+        data["_high_stakes_resolved"] = True
+        return True, False
+    capped = False
+    resolved = False
+    if data.get("high_stakes_reason") in HIGH_STAKES_ENABLED_REASONS:
+        if _consume_extra_thinking_budget():
+            resolved = True
+        else:
+            capped = True
+    data["_high_stakes_resolved"] = resolved
+    return resolved, capped
+
+
+def model_for_decision(data):
+    return MODEL_SMART if is_high_stakes_turn(data) else MODEL_FAST
 
 
 class SessionLogger:
@@ -106,8 +226,6 @@ class SessionLogger:
         for path in [self.activity_path, self.conversation_path, self.lm_studio_path,
                      self.benchmark_path]:
             open(path, "a", encoding="utf-8").close()
-        logs_root = os.path.dirname(self.dir)
-        open(os.path.join(logs_root, "conversation.jsonl"), "a", encoding="utf-8").close()
         self.log_conversation(
             "system",
             "log",
@@ -124,9 +242,6 @@ class SessionLogger:
         line = json.dumps(record, ensure_ascii=False) + "\n"
         try:
             with open(path, "a", encoding="utf-8") as fh:
-                fh.write(line)
-            global_path = os.path.join(os.path.dirname(self.dir), os.path.basename(path))
-            with open(global_path, "a", encoding="utf-8") as fh:
                 fh.write(line)
         except OSError:
             # Logging must never break the simulation.
@@ -609,7 +724,7 @@ DECISION_ACTIONS = [
     "repair_structure",
     "upgrade_structure",
     "submit_structure_sprite",
-    "propose_blueprint", "approve_blueprint", "reject_blueprint",
+    "propose_blueprint", "approve_blueprint", "reject_blueprint", "sage_review_blueprint",
     "assign_task", "change_role", "rest",
     # Survival (#2) and crafting (#4) actions. The client gates these by flag,
     # but the schema enum is a fixed superset (normalize_decision filters).
@@ -629,6 +744,10 @@ DECISION_ACTIONS = [
 DECISION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
+    # normalize_decision tolerates their absence (action defaults to "rest"),
+    # but requiring them at decode time means the grammar itself guarantees
+    # the two fields every log/consumer relies on.
+    "required": ["action", "reasoning"],
     "properties": {
         "action": {"type": "string", "enum": DECISION_ACTIONS},
         "target": {"type": ["string", "null"]},
@@ -672,6 +791,7 @@ DECISION_SCHEMA = {
             },
         },
         "vote": {"type": ["string", "null"]},
+        "sage_decision": {"type": ["string", "null"], "enum": ["approve", "deny", None]},
         "sprite": {
             "type": ["object", "null"],
             "properties": {
@@ -752,11 +872,24 @@ ECOLOGY (when enabled):
 BLUEPRINTS (inventing new structures):
 6. Any agent may use propose_blueprint to invent a new structure type. Include a
    "blueprint" object (see schema below) with a required "function" block that
-   declares what the building DOES (produces/boosts/unlocks/houses). Identical
-   effect sets are rejected. Optionally bundle up to 3 new gatherable resources
-   inside "new_resources".
-7. Only the elder may approve_blueprint or reject_blueprint. The "target"
-   must be the id of a blueprint listed in Pending blueprints.
+   declares what the building DOES (produces/boosts/unlocks/houses). A proposal
+   whose effects duplicate an existing structure is still accepted (flagged
+   "duplicate of" for the elder to route to an upgrade, never a second
+   structure) — it is not rejected for that alone. Optionally bundle up to 3
+   new gatherable resources inside "new_resources". If your start_project was
+   just blocked by the invention gate, your very next turn is invention-only:
+   propose a blueprint that plausibly satisfies the build you were blocked on.
+7. Blueprint approval is two-stage and only the elder may take either step.
+   First use sage_review_blueprint (target = pending blueprint id,
+   sage_decision = "approve" or "deny") to check it against district stock
+   shortages, gather-zone availability, existing producers, and structure
+   distribution before committing. Only after that review is "approved" (or
+   skipped after a timeout when no elder was available) may approve_blueprint
+   or reject_blueprint be used on that id. approve_blueprint accepts an
+   optional "target_district" naming which district should host the project;
+   if the blueprint is flagged "duplicate of" an existing structure, approving
+   it upgrades that structure instead of creating a new one. The proposer
+   becomes the project's lead (reassigned automatically if unavailable).
 8. The elder should review Pending blueprints before starting a vanilla project
    when proposals are waiting.
 8b. If Invention status is REQUIRED, every seed structure type is already built —
@@ -798,7 +931,7 @@ SAGE PRIORITY (absolute):
    responders abandon their task for the elder.
 
 PATH 1 (when enabled):
-P1. Some resources need tools: stone needs wooden_pick, copper_ore needs stone_pick, iron_ore needs iron_pick (craft picks at workshop; smelt ores at kiln via craft_item after building kiln).
+P1. Some resources need tools: stone needs wooden_pick, copper_ore needs stone_pick, iron_ore needs iron_pick (craft picks at workshop; smelt ores at kiln via craft_item after building kiln). No pick? dig_terrain digs stone from soil tool-free.
 P2. place_block/remove_block build 2D tiles in your district (wall/floor/door/fence). dig_terrain/plant_terrain mutate local terrain (dig yields stone; plant costs wood).
 P3. propose_treaty/vote_treaty govern inter-settlement trade pacts (reuse rule object with kind treaty).
 
@@ -935,8 +1068,11 @@ EXAMPLE (trader, Marco nearby):
 EXAMPLE (gatherer proposing a library + paper):
 {"action":"propose_blueprint","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"The village needs knowledge storage.","blueprint":{"id":"library","name":"Library","needs":{"wood":4,"paper":2},"new_resources":[{"id":"paper","name":"Paper","gather_zone":"forest","color":"#E8D5B7"}],"visual_style":"house","function":{"produces":[{"resource":"paper","amount":1,"every_ticks":900,"scope":"village"}]}}}
 
-EXAMPLE (elder approving a pending blueprint):
-{"action":"approve_blueprint","target":"library","message":"Approved. Gather paper from the forest.","new_role":null,"relationship_update":null,"reasoning":"A worthy addition to the village."}"""
+EXAMPLE (elder sage-reviewing a pending blueprint's geography/resources):
+{"action":"sage_review_blueprint","target":"library","sage_decision":"approve","message":null,"new_role":null,"relationship_update":null,"reasoning":"Forest district has spare paper gather capacity and no existing knowledge structure."}
+
+EXAMPLE (elder approving a pending blueprint after sage review):
+{"action":"approve_blueprint","target":"library","target_district":"forest","message":"Approved. Gather paper from the forest.","new_role":null,"relationship_update":null,"reasoning":"A worthy addition to the village."}"""
 
 # Reduced-context variant for the context-overflow retry (see
 # run_agent_decision): drops the worked EXAMPLE blocks, which are the bulk of
@@ -1279,6 +1415,11 @@ def format_active_rules(active):
         return "none"
     parts = []
     for r in active:
+        if isinstance(r, str):
+            # C3: the engine appends a plain "(+N older rules)" marker string
+            # when active_rules is truncated -- render it as-is.
+            parts.append(r)
+            continue
         if not isinstance(r, dict):
             continue
         val = r.get("value")
@@ -1645,12 +1786,9 @@ def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
             return False, "invalid gather_zone"
         new_ids.add(rid)
 
-    if custom_resource_count + len(new_ids) > MAX_CUSTOM_RESOURCES:
-        # The engine auto-retires unreferenced custom resources at this cap
-        # (_maybe_retire_custom_resource), so hitting it here means every
-        # existing custom resource is still in use somewhere -- say so.
-        return False, ("too many custom resources -- every existing one is still in use; "
-                       "propose without new_resources until one falls out of use")
+    # Invented resources are intentionally unlimited. Keep the count argument
+    # for compatibility with older callers, but do not reject valid resources
+    # based on the former MAX_CUSTOM_RESOURCES policy.
 
     needs = blueprint.get("needs")
     if not isinstance(needs, dict) or not (1 <= len(needs) <= 8):
@@ -1705,10 +1843,10 @@ def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
             return False, (f"tier {tier} tech requires a tier-{tier} station "
                            f"built first ({hint})")
 
-    vec = canonical_effect_vector(fn)
-    known = set(known_effect_vectors or [])
-    if vec and vec in known:
-        return False, "duplicate effect vector (another structure already has identical effects)"
+    # Duplicate-effect proposals are no longer hard-rejected here: the engine
+    # (sim_engine._effect_vector_owner_map, via propose_blueprint) tags a
+    # matching proposal with duplicateOf and keeps it pending so the elder can
+    # route it to an upgrade instead of silently losing the idea.
 
     return True, None
 
@@ -1731,9 +1869,17 @@ def role_fallback_action(role, agent_data):
 
     pending_ids = agent_data.get("pending_blueprint_ids") or []
     if role == "elder" and pending_ids:
-        return {"action": "approve_blueprint", "target": pending_ids[0], "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Reviewing a pending blueprint proposal."}
+        reviews = agent_data.get("pending_blueprint_reviews") or {}
+        ready = next((bid for bid in pending_ids if reviews.get(bid) in ("approved", "skipped")), None)
+        if ready:
+            return {"action": "approve_blueprint", "target": ready, "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Reviewing a pending blueprint proposal."}
+        needs_review = next((bid for bid in pending_ids if reviews.get(bid, "pending") == "pending"), None)
+        if needs_review:
+            return {"action": "sage_review_blueprint", "target": needs_review, "message": None,
+                    "sage_decision": "approve", "new_role": None, "relationship_update": None,
+                    "reasoning": "Checking district geography/resources before approving."}
 
     idle_agents = agent_data.get("idle_agents") or []
     if role == "elder" and idle_agents:
@@ -1916,6 +2062,18 @@ def normalize_decision(decision, agent_data):
             # Surfaced to the agent's next prompt by the engine so the model
             # learns why its proposal vanished instead of repeating it.
             fallback["rejection_note"] = reason
+            return fallback
+        return decision
+
+    if action == "sage_review_blueprint":
+        role = (agent_data.get("role") or "").lower()
+        target = decision.get("target")
+        pending_ids = agent_data.get("pending_blueprint_ids") or []
+        sage_decision = decision.get("sage_decision")
+        if role != "elder" or not target or target not in pending_ids \
+                or sage_decision not in ("approve", "deny"):
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid sage review)").strip()
             return fallback
         return decision
 
@@ -2283,15 +2441,26 @@ def build_agent_data(data, nearby_formatted, known_resources, pending_blueprints
     """Assemble agent context used by normalize_decision and role_fallback_action."""
     agent_data = dict(data)
     agent_data["nearby_agents"] = nearby_formatted
-    agent_data["known_resource_ids"] = [
+    # C3: prefer the engine's always-full "known_resource_ids" (cheap id-only
+    # list) so the duplicate-resource-id/needs-reference checks in
+    # validate_blueprint never see a trimmed set, even though `known_resources`
+    # (the rich dict list used for the prompt) is now capped. Falls back to
+    # deriving from `known_resources` for callers that don't send the new field.
+    agent_data["known_resource_ids"] = list(data.get("known_resource_ids") or [
         r.get("id") for r in known_resources if isinstance(r, dict) and r.get("id")
-    ]
+    ])
     agent_data["custom_resource_count"] = sum(
         1 for r in known_resources if isinstance(r, dict) and r.get("custom")
     )
     agent_data["pending_blueprint_ids"] = [
         b.get("id") for b in pending_blueprints if isinstance(b, dict) and b.get("id")
     ]
+    # sage_review status per pending id, so role_fallback_action/normalize can
+    # tell a not-yet-reviewed blueprint apart from one ready for a verdict.
+    agent_data["pending_blueprint_reviews"] = {
+        b["id"]: b.get("sage_review", "pending")
+        for b in pending_blueprints if isinstance(b, dict) and b.get("id")
+    }
     agent_data["approved_blueprint_ids"] = [
         str(a) for a in approved_custom_projects if a
     ]
@@ -2351,8 +2520,12 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5):
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": False,
-        "thinking": {"type": "disabled", "budget_tokens": 0},
+        **NON_THINKING_SAMPLING,
     }
+    if DISABLE_THINKING_ROUTINE:
+        # See the constant's comment: reasoning_effort is the field this
+        # LM Studio build honors. All lm_complete callers are low-stakes.
+        payload["reasoning_effort"] = "none"
     try:
         resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
         body = resp.json()
@@ -2526,32 +2699,30 @@ def build_invention_prompt(data):
     the engine's _maybe_invention_backstop). Strips every competing nudge and
     state section so the model's whole budget goes into authoring a valid,
     novel blueprint."""
-    taken = sorted(set(list(data.get("structure_counts") or {})
+    # Unbuilt seed templates are not necessarily present in structure_counts,
+    # but their ids must still be reserved from invention.
+    taken = sorted(set(list(SEED_PROJECT_IDS)
+                       + list(data.get("structure_counts") or {})
                        + [str(a) for a in data.get("approved_custom_projects") or []]
                        + [b.get("id") for b in data.get("pending_blueprints") or []
                           if isinstance(b, dict) and b.get("id")]))
-    rejected = [str(r) for r in data.get("rejected_blueprints") or []]
+    # C3: prompt-only capped view; the "taken" ids above intentionally stay on
+    # the full approved_custom_projects/pending_blueprints fields since those
+    # feed id-collision avoidance, not just display.
+    rejected = [str(r) for r in (data.get("rejected_blueprints_prompt") or data.get("rejected_blueprints") or [])]
     known_resources = data.get("known_resources") or []
     resources = [r.get("id") for r in known_resources
                  if isinstance(r, dict) and r.get("id")]
     feedback = data.get("behavior_nudge") or ""
-    # 19 of 171 invention-turn rejections in the 2026-07-09 investigation were
-    # "too many custom resources" -- the model kept bundling new_resources
-    # into a blueprint even though the cap (MAX_CUSTOM_RESOURCES) was already
-    # hard, wasting the whole turn. known_resources already flags each entry
-    # "custom" (see sim_engine._build_think_payload), so tell the model up
-    # front instead of letting validate_blueprint reject it after the fact.
-    custom_resource_count = sum(1 for r in known_resources
-                                if isinstance(r, dict) and r.get("custom"))
-    if custom_resource_count >= MAX_CUSTOM_RESOURCES:
-        new_resources_line = (
-            "Every custom resource slot is full and all are still in use -- do NOT add "
-            '"new_resources" to your blueprint; invent using only the resources listed above.')
-    else:
-        new_resources_line = (
-            'You may also introduce up to 3 brand-new resources via "new_resources", each '
-            'with a gather_zone of farm, forest, village, market, beach, cave, or ocean '
-            '(or null for crafted-only goods).')
+    build_ctx = data.get("invention_build_context") or {}
+    if build_ctx.get("typeName"):
+        build_line = (f"You were trying to build: {build_ctx['typeName']}. Your invention should "
+                      f"plausibly satisfy that need or unlock a path to it.")
+        feedback = f"{build_line} {feedback}".strip()
+    new_resources_line = (
+        'You may introduce up to 3 brand-new resources via "new_resources", each '
+        'with a gather_zone of farm, forest, village, market, beach, cave, or ocean '
+        '(or null for crafted-only goods). There is no village-wide cap on invented resources.')
     # Phase D (TECH_TREE_ENABLED): one short tier line -- what the current
     # tech tier allows and how the next tier is reached. Empty (and therefore
     # byte-identical to the Phase C prompt) when the engine sends no tier.
@@ -2590,8 +2761,12 @@ def build_user_prompt(data, slim=False):
     nearby_formatted = format_nearby_agents(data.get("nearby_agents"))
     known_resources = data.get("known_resources") or []
     pending_blueprints = data.get("pending_blueprints") or []
-    approved_custom_projects = data.get("approved_custom_projects") or []
-    rejected_blueprints = data.get("rejected_blueprints") or []
+    # C3: prompt rendering uses the capped *_prompt views (falling back to the
+    # uncapped field for older callers); validation elsewhere in this file
+    # keeps reading the full "approved_custom_projects"/"rejected_blueprints"
+    # fields untouched.
+    approved_custom_projects = data.get("approved_custom_projects_prompt") or data.get("approved_custom_projects") or []
+    rejected_blueprints = data.get("rejected_blueprints_prompt") or data.get("rejected_blueprints") or []
     idle_agents = data.get("idle_agents") or []
     behavior_nudge = data.get("behavior_nudge") or ""
     # Phase C: one short season line, rendered ONLY when the engine sends a
@@ -2709,8 +2884,15 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
         system_content = INVENTION_SYSTEM_PROMPT
     else:
         system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
+    # Persona goes at the TOP OF THE USER MESSAGE, not appended to the system
+    # prompt: LM Studio reuses KV cache by longest common prefix per slot, so
+    # per-agent text inside the system message forced full prompt
+    # reprocessing (~5k tokens) on every agent rotation. With the system
+    # prompt byte-identical across agents it becomes a shared cached prefix.
+    user_content = build_user_prompt(data, slim=slim)
     if self_prompt:
-        system_content += f"\n\nYOUR PERSONA (act in character): {self_prompt}"
+        user_content = (f"YOUR PERSONA (act in character): {self_prompt}\n\n"
+                        + user_content)
     max_tokens, temperature = 512, 0.4
     if data.get("sprite_design_only"):
         max_tokens = 768
@@ -2725,13 +2907,20 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
         "model": model_for_decision(data) if _model_routing_enabled else "local-model",
         "messages": [
             {"role": "system", "content": system_content},
-            {"role": "user", "content": build_user_prompt(data, slim=slim)},
+            {"role": "user", "content": user_content},
         ],
         "max_tokens": max_tokens,
         "temperature": temperature,
         "stream": False,
-        "thinking": {"type": "disabled", "budget_tokens": 0},
     }
+    if is_high_stakes_turn(data):
+        payload.update(THINKING_SAMPLING)
+    else:
+        payload.update(NON_THINKING_SAMPLING)
+        if DISABLE_THINKING_ROUTINE:
+            payload["reasoning_effort"] = "none"
+        if ROUTINE_PRESENCE_PENALTY:
+            payload["presence_penalty"] = ROUTINE_PRESENCE_PENALTY
     if response_format is not None:
         payload["response_format"] = response_format
     return payload
@@ -2751,11 +2940,16 @@ def run_agent_decision(data):
     failure it returns either an {"error": ...} dict (engine maps these to its
     offline/compute/rest paths) or a role fallback decision."""
     try:
+        # Resolve is_high_stakes_turn (and consume the extra-thinking budget,
+        # if applicable) exactly once for this request. build_decision_payload
+        # (model_for_decision, THINKING_SAMPLING) and the timeout choice below
+        # both call is_high_stakes_turn(), which will echo this stamped value
+        # instead of re-evaluating -- see resolve_high_stakes()'s docstring.
+        high_stakes_active, high_stakes_capped = resolve_high_stakes(data)
         self_prompt = (data.get("self_prompt") or "").strip()
         response_format = build_response_format()
         payload = build_decision_payload(data, self_prompt, response_format)
-        request_timeout = INVENTION_TIMEOUT_S if (data.get("invention_only")
-                                                  or data.get("sprite_design_only")) else DEFAULT_TIMEOUT_S
+        request_timeout = THINKING_TIMEOUT_S if is_high_stakes_turn(data) else DEFAULT_TIMEOUT_S
 
         known_resources = data.get("known_resources") or []
         pending_blueprints = data.get("pending_blueprints") or []
@@ -2771,12 +2965,25 @@ def run_agent_decision(data):
         )
 
         def log_lm(latency_ms, response=None, http_status=None, decision=None, error=None):
+            # Measure the payload actually sent -- `payload` is reassigned in
+            # place if the context-overflow retry swaps in the slim payload,
+            # so reading it here (not capturing sizes earlier) reflects that.
+            messages = payload.get("messages") or []
+            system_chars = sum(len(m.get("content") or "") for m in messages if m.get("role") == "system")
+            prompt_chars = sum(len(m.get("content") or "") for m in messages if m.get("role") == "user")
             session_logger.log_lm_exchange({
                 "agent_name": agent_name,
                 "frame_tick": frame_tick,
                 "latency_ms": latency_ms,
                 "invention_only": bool(data.get("invention_only")),
                 "sprite_design_only": bool(data.get("sprite_design_only")),
+                "high_stakes_reason": data.get("high_stakes_reason"),
+                "high_stakes_active": high_stakes_active,
+                "high_stakes_capped": high_stakes_capped,
+                "prompt_chars": prompt_chars,
+                "system_chars": system_chars,
+                "nudges_total": data.get("nudges_total"),
+                "nudges_dropped": data.get("nudges_dropped"),
                 "request": payload,
                 "response": response,
                 "http_status": http_status,

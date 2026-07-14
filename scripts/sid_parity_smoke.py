@@ -161,6 +161,58 @@ def test_priority_and_repeal(engine):
     print("  OK repeal removed priority_wood")
 
 
+def test_repeal_backstop_age_gate(engine):
+    """_maybe_advance_rules's "keep village law lean" repeal backstop must not
+    repeal a rule it (or the propose branch) just enacted -- without an age
+    gate, tax+priority (the normal 2-rule steady state) triggered an immediate
+    propose/repeal oscillation every RULE_PROPOSE_COOLDOWN window."""
+    elder = next(a for a in engine.agents if a["role"] == "elder")
+
+    def enact(rule):
+        engine.apply_decision(elder, {"action": "propose_rule", "rule": rule,
+                                      "reasoning": "smoke age-gate"})
+        for pending in list(engine.civilization["pendingRules"]):
+            for a in engine.agents:
+                if a["name"] not in pending["votes"]:
+                    pending["votes"][a["name"]] = "yes"
+            engine._tally_and_maybe_enact(pending)
+
+    enact({"id": "resource_tax", "name": "Resource Tax", "kind": "resource_tax",
+          "value": 1, "description": "tax"})
+    enact({"id": "priority_wood", "name": "Wood Priority", "kind": "priority",
+          "value": "wood", "description": "prioritize wood"})
+    rule = next(r for r in engine.civilization["rules"] if r["id"] == "priority_wood")
+    assert_true(rule.get("enactedFrame") == engine.frameTick,
+                f"enactedFrame not stamped: {rule.get('enactedFrame')}")
+
+    # Freshly enacted (age 0): the repeal backstop must not touch it yet, even
+    # though len(rules) >= 2 (tax + priority) already satisfies the old
+    # (pre-fix) condition on its own.
+    engine.civilization["lastRuleActivityFrame"] = engine.frameTick - se.RULE_PROPOSE_COOLDOWN - 1
+    before = len(engine.civilization["rules"])
+    engine._maybe_advance_rules()
+    assert_true(len(engine.civilization["rules"]) == before,
+                "repeal backstop fired on a freshly-enacted rule")
+    assert_true(any(r["id"] == "priority_wood" for r in engine.civilization["rules"]),
+                "priority_wood was repealed before its minimum age")
+    print("  OK repeal backstop withholds a freshly-enacted rule")
+
+    # Advance past the minimum age: the backstop should now be willing to
+    # propose a repeal of it (auto-enacted immediately by the same
+    # deterministic voting the rest of this file relies on).
+    engine.frameTick += se.RULE_REPEAL_MIN_AGE_FRAMES
+    engine.civilization["lastRuleActivityFrame"] = engine.frameTick - se.RULE_PROPOSE_COOLDOWN - 1
+    engine._maybe_advance_rules()
+    for pending in list(engine.civilization["pendingRules"]):
+        for a in engine.agents:
+            if a["name"] not in pending["votes"]:
+                pending["votes"][a["name"]] = "yes"
+        engine._tally_and_maybe_enact(pending)
+    assert_true(not any(r["id"] == "priority_wood" for r in engine.civilization["rules"]),
+                "repeal backstop never fired once the rule aged past the minimum")
+    print("  OK repeal backstop repeals once minimum age is reached")
+
+
 def test_belief_biased_vote(engine):
     # Find a harvest_spirit believer and a river_spirit believer.
     harvest = next(
@@ -256,6 +308,10 @@ def main():
 
     engine2 = make_engine(8)
     test_priority_and_repeal(engine2)
+
+    engine3 = make_engine(8)
+    test_repeal_backstop_age_gate(engine3)
+
     test_role_fallback_switch()
     test_piano_stagger_offline()
     print("ALL PASS")
