@@ -33,7 +33,14 @@ import requests
 MODEL = "qwen/qwen3.5-9b"
 IDENTIFIER = "qwen/qwen3.5-9b"   # must match MODEL_SMART/MODEL_FAST in server.py
 CONTEXT_LENGTH = 20000
-PARALLEL = 3                      # per-slot budget 20000/3 ~ 6600 >= ~5800 max prompt
+PARALLEL = 3                      # per-slot budget 20000/3 ~= 6666. Phase 2 dropped
+                                   # this to 2 (10000/slot) to test whether thinking
+                                   # turns (needing ~950-1,300 completion tokens on
+                                   # top of a ~5,725-6,163 token prompt) would benefit
+                                   # from the extra headroom. Phase 3 (2026-07-14)
+                                   # found no measurable reasoning benefit, so
+                                   # thinking is disabled again and this reverted to
+                                   # 3 for max routine-turn throughput.
 BASE = "http://localhost:1234"
 
 # Speculative decoding draft options (see docs/... probe notes below and in
@@ -57,6 +64,14 @@ MTP_MODEL = "qwen3.5-9b-mtp"       # MTP self-speculation variant for --draft mt
 #   different (non-llama.cpp-protocol) engine on this build, so --draft
 #   simple cannot activate here. The code path is kept (and documents the
 #   failure) in case a future LM Studio/engine build lifts the restriction.
+#
+# Changed 2026-07-14 (Phase 2, see .claude/plans/only-create-the-plan-linear-
+# iverson.md): PARALLEL dropped from 3 to 2 to raise the per-slot token budget
+# from ~6,666 to 10,000 (context 20000 unchanged, so total KV-cache/VRAM stays
+# the same) -- this gives high-stakes thinking turns enough headroom to finish
+# reasoning_content and still emit JSON within max_tokens. Reverted 2026-07-14
+# (Phase 3): a live analysis of 48 high-stakes samples found thinking gave no
+# measurable reasoning benefit, so PARALLEL is back to 3.
 # - `speculative_draft_mtp` against the plain qwen/qwen3.5-9b weights: also
 #   REJECTED ("MTP speculative decoding requires a GGUF model with a bundled
 #   supported MTP head") -- confirms the flag is a no-op without MTP-head

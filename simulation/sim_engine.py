@@ -432,9 +432,15 @@ VALID_VISUAL_STYLES = {"house", "farm_plot", "workshop", "wall", "generic"}
 RULE_KINDS = {"resource_tax", "custom", "priority"}
 
 # Must match LM Studio's loaded parallel slots (scripts/lms_load.py loads
-# context 20000 / parallel 3 -- per-slot budget ~6600 tokens, above the
-# ~5.8k max prompt seen with all Path 1 flags on). Raised 2->3 on 2026-07-11
-# alongside that reload for +50% think throughput.
+# context 20000 / parallel 3 -- per-slot budget ~6666 tokens). Raised 2->3 on
+# 2026-07-11 for +50% think throughput, then dropped 3->2 on 2026-07-14
+# (Phase 2, see .claude/plans/only-create-the-plan-linear-iverson.md) to give
+# high-stakes thinking turns (needing ~950-1,300 completion tokens on top of a
+# ~5,725-6,163 token prompt) more per-slot headroom. Phase 3 (2026-07-14):
+# a live analysis of 48 high-stakes samples found thinking gave zero
+# measurable reasoning benefit, so it was disabled again
+# (THINKING_ENABLED_HIGH_STAKES=False in server.py) and parallel reverted
+# back to 3 for max routine-turn throughput.
 MAX_CONCURRENT_LLM = 3
 LLM_MIN_GAP_MS = 250
 # When _schedule_think can't dispatch (worker pool full, cooldown, min-gap),

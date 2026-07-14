@@ -63,6 +63,31 @@ MODEL_FAST = "qwen/qwen3.5-9b"
 # 100% -> 0%, JSON validity 100% -> 100%, action diversity unchanged.
 DISABLE_THINKING_ROUTINE = True
 
+# Thinking on high-stakes turns is DISABLED (reverted 2026-07-14, Phase 3 --
+# see .claude/plans/only-create-the-plan-linear-iverson.md Phase 2/3). Phase 1
+# history: a full session (6,320 calls) measured 57% of high-stakes/thinking
+# turns -- 65% of the elder's -- returning bad_response (finish_reason
+# "length", empty content), then falling back to a canned action. Cause: with
+# thinking ON the model spends its whole max_tokens budget (512-1024) on
+# reasoning_content before emitting the decision JSON. Phase 1 fixed the
+# epidemic by disabling thinking on high-stakes turns entirely. Phase 2 tried
+# fixing the root cause instead: scripts/lms_load.py dropped to parallel 2
+# (10,000 tokens/slot, same total VRAM) and HIGH_STAKES_MAX_TOKENS=1600 gave
+# the completion room to finish, so thinking was re-enabled and measured
+# against live traffic. Phase 3 verdict (2026-07-14): a live analysis of 48
+# diverse high-stakes samples (assign_task, propose_blueprint,
+# sage_review_blueprint, approve_blueprint, upgrade_structure,
+# contribute_resources, collect_resource, move_to_district) found ZERO
+# measurable reasoning benefit -- with thinking on, the model emits the same
+# direct JSON answer, just routed through reasoning_content instead of
+# content (THINKING_SAMPLING doesn't set reasoning_effort, so nothing bounds
+# or shapes the "reasoning"). The only sample showing genuine descriptive
+# text was submit_structure_sprite, an unrelated creative-task pattern
+# (always high-stakes regardless of this flag). Since thinking has no
+# measured benefit but costs 33% concurrency (parallel 3->2), reverted to
+# THINKING_ENABLED_HIGH_STAKES=False and parallel=3.
+THINKING_ENABLED_HIGH_STAKES = False
+
 # Qwen-recommended sampling pins (model card). Only temperature was sent
 # before; top_p/top_k/min_p silently followed whatever LM Studio preset was
 # active, which drifts across app updates and reloads. Temperatures stay the
@@ -88,6 +113,17 @@ ROUTINE_PRESENCE_PENALTY = 0.0
 # converging on the same idea.
 INVENTION_TEMPERATURE = 0.6
 INVENTION_MAX_TOKENS = 1024
+
+# Phase 2 (2026-07-14, see .claude/plans/only-create-the-plan-linear-iverson.md):
+# max_tokens for high-stakes turns with thinking re-enabled. A live probe
+# showed a thinking turn needs ~950-1,300 completion tokens to finish
+# reasoning_content and still emit the decision JSON; 1600 leaves headroom.
+# 6,163 tokens (worst-case measured prompt) + 1600 = 7,763 < 10,000 (the new
+# per-slot budget at parallel 2), so it fits without truncation.
+# Phase 3 (2026-07-14): THINKING_ENABLED_HIGH_STAKES reverted to False, so the
+# override below is currently dead code (only applies when thinking_active is
+# true). Left in place in case thinking on high-stakes turns is revisited.
+HIGH_STAKES_MAX_TOKENS = 1600
 
 # Request timeout (seconds). Routine decisions measured median ~18s / p90 ~22s
 # in the 2026-07-07 session, well under the old flat 30s -- but invention-only
@@ -128,7 +164,7 @@ HIGH_STAKES_ENABLED_REASONS = frozenset({"emergency", "election", "treaty_vote"}
 # conditions (sprite/invention/elder/REQUIRED) stay unbudgeted. Bounds how much
 # extra MODEL_SMART/THINKING_TIMEOUT_S load the new (rare-but-not-zero) reasons
 # can add per unit time, since run_agent_decision runs on worker threads (up to
-# MAX_CONCURRENT_LLM=3 in flight).
+# MAX_CONCURRENT_LLM=2 in flight).
 EXTRA_THINKING_PER_WINDOW = 4
 EXTRA_THINKING_WINDOW_S = 60
 _extra_thinking_lock = threading.Lock()
@@ -2893,16 +2929,23 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     if self_prompt:
         user_content = (f"YOUR PERSONA (act in character): {self_prompt}\n\n"
                         + user_content)
+    # Computed once and reused for both the max_tokens override below and the
+    # sampling branch further down, so the two conditions can't drift apart.
+    thinking_active = is_high_stakes_turn(data) and THINKING_ENABLED_HIGH_STAKES
     max_tokens, temperature = 512, 0.4
     if data.get("sprite_design_only"):
         max_tokens = 768
         temperature = 0.3
-    if data.get("invention_only"):
+    elif data.get("invention_only"):
         # Phase D experiment hook: per-call overrides for invention-only turns.
         if INVENTION_MAX_TOKENS is not None:
             max_tokens = INVENTION_MAX_TOKENS
         if INVENTION_TEMPERATURE is not None:
             temperature = INVENTION_TEMPERATURE
+    elif thinking_active:
+        # Phase 2: high-stakes turns with thinking re-enabled need extra
+        # budget for reasoning_content on top of the decision JSON.
+        max_tokens = HIGH_STAKES_MAX_TOKENS
     payload = {
         "model": model_for_decision(data) if _model_routing_enabled else "local-model",
         "messages": [
@@ -2913,7 +2956,7 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
         "temperature": temperature,
         "stream": False,
     }
-    if is_high_stakes_turn(data):
+    if thinking_active:
         payload.update(THINKING_SAMPLING)
     else:
         payload.update(NON_THINKING_SAMPLING)

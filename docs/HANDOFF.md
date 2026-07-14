@@ -185,4 +185,27 @@ Get-NetTCPConnection -LocalPort 5001 -ErrorAction SilentlyContinue
 
 ---
 
-*This HANDOFF replaces prior session content and reflects only the 2026-07-11 Path 1 conversation.*
+## 6. LM Studio thinking config update (2026-07-14, post-session)
+
+Not part of the Path 1 sprint above, but affects live behavior: a full-session
+audit found a `bad_response` epidemic (57% of high-stakes/thinking turns, 65%
+of the elder's) — with thinking on, the model burned its whole `max_tokens`
+budget on `reasoning_content` before ever emitting the decision JSON.
+
+- **Phase 1**: fixed the epidemic by disabling thinking on high-stakes turns
+  (`THINKING_ENABLED_HIGH_STAKES = False` in `simulation/server.py`).
+- **Phase 2**: tried fixing the root cause instead — dropped LM Studio
+  `parallel` 3→2 (`scripts/lms_load.py`, `MAX_CONCURRENT_LLM = 2` in
+  `simulation/sim_engine.py`) for a bigger per-slot token budget, raised
+  `HIGH_STAKES_MAX_TOKENS` to 1600, and re-enabled thinking to test it live.
+- **Phase 3 verdict**: a live analysis of 48 diverse high-stakes samples
+  showed thinking produced zero measurable reasoning benefit — the model
+  emitted the same direct JSON, just via `reasoning_content` instead of
+  `content`. Reverted to the Phase 1 fix as the final state:
+  `THINKING_ENABLED_HIGH_STAKES = False` and `parallel = 3` /
+  `MAX_CONCURRENT_LLM = 3` restored for max routine-turn throughput. See
+  `lms_config.md` ("Thinking on high-stakes turns") for the full history.
+
+---
+
+*This HANDOFF replaces prior session content and reflects only the 2026-07-11 Path 1 conversation (plus the 2026-07-14 LM Studio config note above).*

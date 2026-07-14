@@ -8,19 +8,20 @@ Target load for this project. If `lms ps` shows anything else after a restart or
 |---|---|---|---|
 | Model / identifier | `qwen/qwen3.5-9b` | model key (REST load's id defaults to it) | Must match `MODEL_SMART` / `MODEL_FAST` in `simulation/server.py` |
 | Context length | **20000** | `scripts/lms_load.py` (REST) or `lms load -c` | Per-slot budget must exceed the ~5.8k max prompt seen with all Path 1 flags on |
-| Parallel slots | **3** | `scripts/lms_load.py` (REST) or `lms load --parallel` | Matches `MAX_CONCURRENT_LLM = 3` in `simulation/sim_engine.py` |
-| Per-slot budget | ~6600 tokens (`20000 ÷ 3`) | derived | Below ~5800 you get `"Context size has been exceeded"` under concurrent load |
+| Parallel slots | **3** | `scripts/lms_load.py` (REST) or `lms load --parallel` | Matches `MAX_CONCURRENT_LLM = 3` in `simulation/sim_engine.py`; dropped to 2 on 2026-07-14 for a Phase 2 thinking experiment, reverted back to 3 the same day (Phase 3) after the experiment showed no reasoning benefit — max routine-turn throughput with `THINKING_ENABLED_HIGH_STAKES = False` |
+| Per-slot budget | ~6666 tokens (`20000 ÷ 3`) | derived | Covers the ~5,725-6,163 token max prompt seen with all Path 1 flags on; thinking is disabled on high-stakes turns so no extra completion headroom is needed |
 | Flash attention | **on** | `scripts/lms_load.py` (REST only — no `lms load` flag) | Cheaper attention at 20k context; measured neutral-to-slightly-positive |
 | API port | **1234** | LM Studio server settings | `http://localhost:1234` (OpenAI-compatible) |
 
-Not applied (evaluated 2026-07-11): **KV-cache quantization** — only settable via the `lmstudio` Python SDK, which cannot set parallel slots, and the 20000/3 load fits VRAM without it (~7.75 GiB estimated of 12 GiB). Revisit only if context needs to grow further.
+Not applied (evaluated 2026-07-11): **KV-cache quantization** — only settable via the `lmstudio` Python SDK, which cannot set parallel slots, and the 20000/3 load fits VRAM without it. Revisit only if context needs to grow further.
 
 ### Wrong config (do not use)
 
 | Setting | Bad value | Effect |
 |---|---|---|
-| Context | 13000 with parallel 3 | ~4300/slot < ~5.8k max prompt → context-overflow fallbacks |
+| Context | 13000 with parallel 3 | ~4333/slot, tight against the ~5.8k max prompt → risk of context-overflow fallbacks |
 | Parallel | 4 @ 20000 | 5000/slot < max prompt; also no throughput gain (GPU-bound) |
+| Parallel | 2 @ 20000 | ~10000/slot — this was the Phase 2 config, adopted to give high-stakes thinking turns room to finish `reasoning_content`. Phase 3 (2026-07-14) found thinking gives no measurable reasoning benefit, so this is no longer worth the 33% concurrency cost; parallel 3 is the current/correct config. |
 
 ## Restore after reset
 
@@ -59,6 +60,14 @@ Routine villager turns run with reasoning **disabled** via a top-level `"reasoni
 - Probed live 2026-07-11 against this LM Studio build: `reasoning_effort: "none"` is the only knob it honors. `chat_template_kwargs={"enable_thinking": false}`, Qwen's `/no_think` soft switch, and Anthropic-style `"thinking"` objects are all silently ignored.
 - **Contract:** in `lm_studio.jsonl`, routine decisions must show populated `content` and empty `reasoning_content`. If the JSON starts landing in `reasoning_content` again, LM Studio regressed the field — re-probe and see `DISABLE_THINKING_ROUTINE`.
 
+### Thinking on high-stakes turns (Phase 1/2 history)
+
+A full session (6,320 calls) measured 57% of high-stakes/thinking turns — 65% of the elder's — returning `bad_response` (`finish_reason: "length"`, empty `content`): with thinking ON, the model spent its whole `max_tokens` budget (512-1024) on `reasoning_content` before ever emitting the decision JSON, because a thinking turn needs ~950-1,300 completion tokens to finish and the ~5,725-6,163 token prompt left no room in the old ~6,666-token/slot budget (parallel 3). `reasoning_effort: low/medium` is ignored on this build, so reasoning can't be bounded.
+
+- **Phase 1** (2026-07-14): disabled thinking on high-stakes turns entirely (`THINKING_ENABLED_HIGH_STAKES = False`) to stop the epidemic immediately.
+- **Phase 2** (2026-07-14): fixed the root cause — dropped `parallel` 3→2 (10,000 tokens/slot, same total VRAM) and added `HIGH_STAKES_MAX_TOKENS = 1600`, then re-enabled thinking (`THINKING_ENABLED_HIGH_STAKES = True`). 6,163 worst-case prompt + 1,600 = 7,763 < 10,000, so a thinking turn now has room to finish.
+- **Phase 3 verdict** (2026-07-14): a live analysis of 48 diverse high-stakes samples (`assign_task`, `propose_blueprint`, `sage_review_blueprint`, `approve_blueprint`, `upgrade_structure`, `contribute_resources`, `collect_resource`, `move_to_district`) showed **zero measurable reasoning benefit** from thinking — with thinking on, the model emits the same direct JSON answer, just routed through `reasoning_content` instead of `content` (`THINKING_SAMPLING` doesn't set `reasoning_effort`, so nothing bounds or shapes the "reasoning"). The only sample with genuine descriptive text was `submit_structure_sprite`, an unrelated creative-task pattern (always high-stakes regardless of this flag). Since thinking has no measured upside but costs 33% concurrency, reverted to `THINKING_ENABLED_HIGH_STAKES = False` and `parallel = 3`. See `.claude/plans/only-create-the-plan-linear-iverson.md`.
+
 ## Benchmarking
 
 Repeatable replay benchmark (replays logged decision calls from a session's `lm_studio.jsonl`):
@@ -86,7 +95,7 @@ Measured cost split per routine call: ~3–4s prompt processing (~5.3k tokens) +
 These live in code; they assume the LM Studio settings above:
 
 - `MAX_CONCURRENT_LLM = 3` — `simulation/sim_engine.py`
-- `DISABLE_THINKING_ROUTINE`, `NON_THINKING_SAMPLING` / `THINKING_SAMPLING` (pinned top_p/top_k/min_p), `ROUTINE_PRESENCE_PENALTY` (experiment lever, off) — `simulation/server.py`
+- `DISABLE_THINKING_ROUTINE`, `THINKING_ENABLED_HIGH_STAKES`, `HIGH_STAKES_MAX_TOKENS`, `NON_THINKING_SAMPLING` / `THINKING_SAMPLING` (pinned top_p/top_k/min_p), `ROUTINE_PRESENCE_PENALTY` (experiment lever, off) — `simulation/server.py`
 - `INVENTION_MAX_TOKENS = 1024`, `INVENTION_TEMPERATURE = 0.6` — `simulation/server.py`
 - Context-overflow retry: `run_agent_decision()` slim-prompt retry + `context_overflow` log in `lm_studio.jsonl`
 
