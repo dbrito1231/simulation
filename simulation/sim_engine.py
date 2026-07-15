@@ -486,14 +486,6 @@ CART_CARRY_BONUS = 20
 # SHELTER_HUNGER_FLOOR (20), i.e. a night outside can never push anyone into
 # the starvation-reflex band (STARVING_HUNGER 10).
 DAY_FRAMES = 13500
-# In-world clock for the GUI's Time panel: a continuously advancing accelerated
-# date/time, derived purely from frameTick (so it persists correctly across
-# restarts and stays in sync with the day/night cycle above, including
-# freezing together while paused). SIM_CLOCK_EPOCH_MS is an arbitrary in-world
-# start instant for frameTick 0; SIM_MS_PER_TICK follows from DAY_FRAMES so one
-# sim-day always equals one real day/night cycle (~192x real time).
-SIM_CLOCK_EPOCH_MS = datetime(2026, 1, 1, 6, 0, tzinfo=timezone.utc).timestamp() * 1000
-SIM_MS_PER_TICK = 86400_000.0 / DAY_FRAMES
 HOUSE_SHELTER_OCCUPANTS = 2
 SHELTER_HUNGER_PENALTY = 6
 SHELTER_HUNGER_FLOOR = 20
@@ -519,12 +511,17 @@ REPAIR_CONDITION_RESTORE = 50
 DISASTER_PROB = 0.005
 DISASTER_DAMAGE = (40, 70)
 # Seasons: a four-season clock derived purely from frameTick (no extra state to
-# persist). One season = SEASON_FRAMES (~30 min => a full year every 2h; an
-# overnight soak sees several winters). The season multiplies district stock
-# regrowth: spring booms, winter stops regrowth entirely. Escapes: stores/
-# granary capacity built before winter (spoilage permitting), and the season
-# simply turning.
-SEASON_FRAMES = 54000
+# persist). YEAR_FRAMES is the single canonical in-world year -- 3 real hours
+# = exactly 24 day/night cycles (DAY_FRAMES) -- and seasons and aging both
+# derive from it, so the GUI calendar, the season clock, and agent ages stay
+# in sync. One season = YEAR_FRAMES/4 (~45 min = exactly 6 day/night cycles;
+# an overnight soak sees several winters). The season multiplies district
+# stock regrowth: spring booms, winter stops regrowth entirely. Escapes:
+# stores/granary capacity built before winter (spoilage permitting), and the
+# season simply turning. Note: winter lengthened 30->45 min in the 2026-07-14
+# year unification -- watch food runway across winter on the next soak.
+YEAR_FRAMES = 324_000
+SEASON_FRAMES = YEAR_FRAMES // 4  # 81_000: one season = 45 min = exactly 6 day/night cycles
 SEASONS = ["spring", "summer", "autumn", "winter"]
 SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}
 
@@ -624,10 +621,13 @@ LIFECYCLE_ENABLED = True
 # ages advance in small fractional steps. 2026-07-10: 0.02 (~1y/8.3min) wiped
 # cohorts overnight; 0.005 (~1y/33min) still felt too fast -- retuned to
 # 0.001 (~1y/2.8h, 0→90 in ~10.4 days) so multi-day 24/7 soaks see gradual
-# turnover, not near-extinction every night. Smoke-testing forces this by
-# temporarily shrinking the gate/increment, never by waiting.
+# turnover, not near-extinction every night. 2026-07-14: derived from
+# YEAR_FRAMES instead of a hand-tuned constant (~1y/3.0h, 0→90 in ~11.25
+# days) so aging stays locked to the same canonical year as the season clock
+# and GUI calendar. Smoke-testing forces this by temporarily shrinking the
+# gate/increment, never by waiting.
 LIFECYCLE_TICK_FRAMES = 300
-AGE_YEARS_PER_TICK = 0.001         # ~1 year per 300,000 frames (~2.8 h) at the gate cadence
+AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES  # = 1/1080: exactly 1 year per YEAR_FRAMES (3.0 h)
 ADULT_AGE = 18                      # below this, an agent cannot be a birth parent or election candidate
 ELDER_AGE = 55                      # life-stage label switches to "elder" (age word only, not the elder ROLE)
 MAX_LIFE_EXPECTANCY = 90            # death chance saturates approaching this age
@@ -2761,6 +2761,17 @@ class SimEngine:
         if not GOODS_ENABLED:
             return None
         return SEASONS[(self.frameTick // SEASON_FRAMES) % len(SEASONS)]
+
+    def _calendar(self):
+        """In-world calendar, a pure function of frameTick (nothing persisted)."""
+        return {
+            "year": self.frameTick // YEAR_FRAMES + 1,
+            "season": self._current_season(),
+            "dayOfSeason": (self.frameTick % SEASON_FRAMES) // DAY_FRAMES + 1,
+            "daysPerSeason": SEASON_FRAMES // DAY_FRAMES,
+            "isNight": self._is_night(),
+            "dayFraction": (self.frameTick % DAY_FRAMES) / DAY_FRAMES,
+        }
 
     def _gather_yield_bonus(self, agent, resource):
         if not STRUCTURE_EFFECTS_ENABLED:
@@ -10002,7 +10013,7 @@ class SimEngine:
                 "frameTick": self.frameTick,
                 "paused": self.paused,
                 "uptimeSeconds": time.time() - self.processStartTime,
-                "simEpochMs": SIM_CLOCK_EPOCH_MS + self.frameTick * SIM_MS_PER_TICK,
+                "calendar": self._calendar(),
                 "lmStatus": self.lmStatus,
                 "agents": agents,
                 "civilization": civ,

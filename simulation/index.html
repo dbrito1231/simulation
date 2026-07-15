@@ -596,7 +596,7 @@
       <h2>Time</h2>
       <div class="civ-row"><span class="civ-label">Now (EST):</span> <span class="civ-value" id="timeNow">—</span></div>
       <div class="civ-row"><span class="civ-label">Uptime:</span> <span class="civ-value" id="timeUptime">—</span></div>
-      <div class="civ-row"><span class="civ-label">Sim time (EST):</span> <span class="civ-value" id="timeSim">—</span></div>
+      <div class="civ-row"><span class="civ-label">Calendar:</span> <span class="civ-value" id="timeCalendar">—</span></div>
     </section>
     <section class="panel-section" id="civPanel">
       <h2>Civilization</h2>
@@ -695,7 +695,42 @@ const WORLD_H = 5400;
 let terrainCanvas = null;   // full static terrain (zones, crops, trees, dock…)
 let oceanFrames = null;     // { bounds, frames:[16 pre-rendered foam phases] } for the ocean district
 let terrainBuildScheduled = false;
+let lastSeasonRendered = null; // season the terrain cache was last tinted for; drives cache invalidation on season change
 const worldLoadingEl = document.getElementById("worldLoading");
+
+// Seasonal color grading applied once to the terrain cache (and ocean foam
+// frames) at build time -- not per frame. Composite-mode passes over the
+// full canvas; summer/unknown is the untinted baseline.
+function applySeasonTint(canvas, season) {
+  if (!season || season === "summer") return;
+  const c = canvas.getContext("2d");
+  c.save();
+  if (season === "autumn") {
+    c.globalCompositeOperation = "multiply";
+    c.fillStyle = "rgba(200,140,40,0.18)";
+    c.fillRect(0, 0, canvas.width, canvas.height);
+    c.globalCompositeOperation = "overlay";
+    c.fillStyle = "rgba(200,140,40,0.10)";
+    c.fillRect(0, 0, canvas.width, canvas.height);
+  } else if (season === "winter") {
+    // Desaturate first -- greens must lose dominance or the cool passes
+    // just read as "bright pastel spring" instead of winter light.
+    c.globalCompositeOperation = "saturation";
+    c.fillStyle = "rgba(128,128,128,0.60)";
+    c.fillRect(0, 0, canvas.width, canvas.height);
+    c.globalCompositeOperation = "overlay";
+    c.fillStyle = "rgba(150,175,235,0.30)";
+    c.fillRect(0, 0, canvas.width, canvas.height);
+    c.globalCompositeOperation = "lighter";
+    c.fillStyle = "rgba(135,160,220,0.20)";
+    c.fillRect(0, 0, canvas.width, canvas.height);
+  } else if (season === "spring") {
+    c.globalCompositeOperation = "overlay";
+    c.fillStyle = "rgba(60,200,80,0.10)";
+    c.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  c.restore();
+}
 
 function hideWorldLoading() {
   if (!worldLoadingEl || worldLoadingEl.classList.contains("hidden")) return;
@@ -964,8 +999,10 @@ function buildTerrainCache() {
   terrainCanvas.height = WORLD_H;
   const tctx = terrainCanvas.getContext("2d");
   tctx.imageSmoothingEnabled = false;
+  const season = world.calendar && world.calendar.season;
   drawTiledWorld(tctx, WORLD_W, WORLD_H, 0, null, districts,
-                 districtsData.roadNodes, districtsData.roadEdges);
+                 districtsData.roadNodes, districtsData.roadEdges, season || "summer");
+  applySeasonTint(terrainCanvas, season);
 
   // The ocean's animated foam strip is scoped to the ocean district's own
   // bounds (not the full world height) -- with the much larger world, a
@@ -982,8 +1019,10 @@ function buildTerrainCache() {
     const octx = oc.getContext("2d");
     octx.imageSmoothingEnabled = false;
     fillRectWithTile(octx, 0, 0, ow, oh, oceanTile(phase));
+    applySeasonTint(oc, season);
     oceanFrames.frames.push(oc);
   }
+  lastSeasonRendered = season || null;
 }
 
 // The dock (drawn at world 150,470, 144x36) straddles the beach/ocean line, so
@@ -991,6 +1030,20 @@ function buildTerrainCache() {
 // frame. Re-blit those exact pixels from the static cache afterward so the
 // jetty (incl. its pilings dipping into the water) isn't erased by the animation.
 const DOCK_RECT = { x: 150, y: 470, w: 144, h: 36 };
+
+// Night lighting: a cool translucent overlay whose alpha follows the day
+// phase (calendar.dayFraction; night is the last 25% of each day). Dusk
+// ramps in over 0.70-0.80, deep night holds to 0.95, dawn ramps out.
+const MAX_NIGHT_ALPHA = 0.45;
+function nightAlpha(cal) {
+  if (!cal) return 0;
+  const f = cal.dayFraction;
+  if (f == null) return cal.isNight ? MAX_NIGHT_ALPHA : 0;
+  if (f < 0.70) return 0;
+  if (f < 0.80) return MAX_NIGHT_ALPHA * (f - 0.70) / 0.10;
+  if (f < 0.95) return MAX_NIGHT_ALPHA;
+  return MAX_NIGHT_ALPHA * (1.00 - f) / 0.05;
+}
 
 function drawWorld(ctx, frameTick) {
   if (!terrainCanvas) {
@@ -1222,7 +1275,7 @@ const convListEl = document.getElementById("convList");
 const actListEl = document.getElementById("actList");
 const timeNowEl = document.getElementById("timeNow");
 const timeUptimeEl = document.getElementById("timeUptime");
-const timeSimEl = document.getElementById("timeSim");
+const timeCalendarEl = document.getElementById("timeCalendar");
 const civLevelEl = document.getElementById("civLevel");
 const civStructuresEl = document.getElementById("civStructures");
 const civUpgradesRowEl = document.getElementById("civUpgradesRow");
@@ -1577,13 +1630,6 @@ function formatEstClock(ms) {
   });
 }
 
-function formatEstDateTime(ms) {
-  return new Date(ms).toLocaleString("en-US", {
-    timeZone: "America/New_York", month: "short", day: "numeric",
-    hour: "numeric", minute: "2-digit", second: "2-digit",
-  });
-}
-
 function formatDuration(seconds) {
   const total = Math.max(0, Math.floor(seconds));
   const d = Math.floor(total / 86400);
@@ -1599,7 +1645,12 @@ setInterval(() => { timeNowEl.textContent = formatEstClock(Date.now()); }, 1000)
 function renderSidebar() {
   const civ = getCiv();
   if (world.uptimeSeconds != null) timeUptimeEl.textContent = formatDuration(world.uptimeSeconds);
-  if (world.simEpochMs != null) timeSimEl.textContent = formatEstDateTime(world.simEpochMs);
+  const cal = world.calendar;
+  if (cal) {
+    const phase = cal.isNight ? "night" : "day";
+    timeCalendarEl.textContent =
+      `Year ${cal.year} · ${cal.season} · day ${cal.dayOfSeason}/${cal.daysPerSeason} · ${phase}`;
+  }
   const lmStatus = world.lmStatus || "offline";
   const statusColor = lmStatus === "online" ? "#4CAF50"
     : lmStatus === "compute_error" ? "#FF9800" : "#F44336";
@@ -2116,6 +2167,15 @@ async function pollState() {
     if (!res.ok) throw new Error("HTTP " + res.status);
     const snapshot = await res.json();
     world = snapshot;
+    setSpriteSeason(snapshot.calendar && snapshot.calendar.season);
+    // Season changed since the terrain cache was last tinted: rebuild it
+    // (same lazy invalidate-and-reschedule mechanism pollDistricts() uses).
+    const season = snapshot.calendar && snapshot.calendar.season;
+    if (season && season !== lastSeasonRendered && terrainCanvas) {
+      terrainCanvas = null;
+      terrainBuildScheduled = false;
+      scheduleTerrainCacheBuild();
+    }
     applyFlags(snapshot.config && snapshot.config.flags);
     syncPauseButton();
     if (terrainCanvas) hideWorldLoading();
@@ -2204,6 +2264,12 @@ function tick() {
   for (const item of drawList) {
     if (item.type === "structure") drawStructureWithShadow(item.structure);
     else drawAgent(ctx, item.agent, renderFrame);
+  }
+
+  const na = nightAlpha(world.calendar);
+  if (na > 0) {
+    ctx.fillStyle = `rgba(10, 16, 48, ${na.toFixed(3)})`;
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
 
   renderSidebar();

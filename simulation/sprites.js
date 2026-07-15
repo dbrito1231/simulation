@@ -1,5 +1,11 @@
 "use strict";
 
+// Current season for seasonal sprite accents. Set by the viewer (setSpriteSeason)
+// once per state poll; the only mutable module state in this otherwise
+// stateless file (documented exception -- see CLAUDE.md "pure, stateless").
+let spriteSeason = "summer";
+function setSpriteSeason(season) { spriteSeason = season || "summer"; }
+
 const TILE = 16;
 
 function tileFromStrings(rows, colorMap) {
@@ -57,6 +63,36 @@ function fillRectWithTile(ctx, x, y, w, h, tile) {
   for (let ty = y; ty < y + h; ty += TILE) {
     for (let tx = x; tx < x + w; tx += TILE) {
       drawPixelGrid(ctx, tx, ty, tile, 1, false);
+    }
+  }
+}
+
+// Tiny deterministic hash -- NOT Math.random. Sprites (especially
+// drawStructure) redraw every frame, so any per-draw randomness would
+// flicker; this keeps the snow pattern stable for a given (x, step).
+function snowHash(n) {
+  return (Math.imul(n, 2654435761) >>> 0) % 8;
+}
+
+// Irregular snow clumps along a sprite's top edge, in place of a flat
+// straight-line accent. Walks the width in `scale`-px steps; each step
+// deterministically gets a 1- or 2-cell-tall clump, an occasional 1-step
+// gap (bare edge), or a 1-cell overhang drooping below the edge line.
+// (x, y, w) describe the sprite's drawn top-left corner and pixel width;
+// `scale` is the sprite's per-cell pixel size.
+function drawSnowCap(ctx, x, y, w, scale) {
+  const step = Math.max(1, scale);
+  const steps = Math.max(1, Math.round(w / step));
+  ctx.fillStyle = C.sn;
+  for (let i = 0; i < steps; i++) {
+    const n = snowHash(Math.floor(x / step) + i);
+    if (n === 0 || n === 4) continue; // 1-in-4 gap -- bare edge shows through
+    const sx = x + i * step;
+    const clumpH = n >= 6 ? 2 : 1; // occasional taller clump
+    ctx.fillRect(sx, y, step, clumpH * step);
+    if (n === 3) {
+      // occasional overhang drooping a cell below the edge line
+      ctx.fillRect(sx, y + clumpH * step, step, step);
     }
   }
 }
@@ -146,6 +182,7 @@ const C = {
   dk: "#6b4423", wl: "#4488cc",
   wk1: "#a8a89c", wk2: "#98988a", wk3: "#87877a", wk4: "#75756a",
   cm1: "#7a8a72", cm2: "#6a7a62", cm3: "#5a6a52",
+  bl: "#e8a8c8", al1: "#c87830", al2: "#a05820", sn: "#eef4fa", st: "#9a7a48",
 };
 
 function makePathBlendTile(baseKeys) {
@@ -240,21 +277,72 @@ const TILE_CAVE = makeTile(["cv1", "cv2", "cv3"]);
 const TILE_WORKSHOP = makeTile(["wk1", "wk2", "wk3", "wk4"]);
 const TILE_CEMETERY = makeTile(["cm1", "cm2", "cm3"]);
 
-function drawTree(ctx, x, y) {
-  const tree = tileFromStrings([
-    "....lf2lf2lf2....",
-    "...lf2lf2lf2lf2...",
-    "..lf2lf2lf2lf2lf2.",
-    ".lf2lf2lf2lf2lf2lf",
-    "lf2lf2lf2lf2lf2lf2",
-    "....trtrtrtr....",
-    "....trtrtrtr....",
-    "....trtrtrtr....",
-  ], C);
-  drawPixelGrid(ctx, x - 12, y - 12, tree, 3, false);
+// Season-keyed cache of built tree grids -- built once per season on first
+// use, never rebuilt per draw call (drawTree is called many times per
+// terrain-cache build). "summer" rows are byte-identical to the original
+// (pre-seasonal) tree art.
+const TREE_GRIDS = {};
+
+function buildTreeGrid(season) {
+  let rows;
+  if (season === "autumn") {
+    rows = [
+      "....al1al2al1....",
+      "...al2al1al2al1...",
+      "..al1al2al1al2al1.",
+      ".al2al1al2al1al2al2",
+      "al2al1al2al1al2al1",
+      "al1...trtrtrtr....",
+      "....trtrtrtr...al1",
+      "..al1.trtrtrtr....",
+    ];
+  } else if (season === "winter") {
+    // Snow follows the rounded canopy shape rather than a wholesale color
+    // swap: fully covered at the narrow top, tapering to scattered
+    // drip/clump cells lower down, and untouched canopy/trunk below that.
+    rows = [
+      "....snsnsn....",
+      "...lf2snsnlf2...",
+      "..lf2snlf2snlf2.",
+      ".lf2lf2lf2lf2lf2lf",
+      "lf2lf2lf2lf2lf2lf2",
+      "....trtrtrtr....",
+      "....trtrtrtr....",
+      "....trtrtrtr....",
+    ];
+  } else if (season === "spring") {
+    rows = [
+      "....lf2bllf2....",
+      "...lf2lf2bllf2...",
+      "..lf2lf2lf2lf2bl.",
+      ".lf2lf2lf2lf2lf2lf",
+      "lf2lf2lf2lf2lf2lf2",
+      "....trtrtrtr....",
+      "....trtrtrtr....",
+      "....trtrtrtr....",
+    ];
+  } else {
+    // summer (default/fallback) -- rows verbatim from the original art.
+    rows = [
+      "....lf2lf2lf2....",
+      "...lf2lf2lf2lf2...",
+      "..lf2lf2lf2lf2lf2.",
+      ".lf2lf2lf2lf2lf2lf",
+      "lf2lf2lf2lf2lf2lf2",
+      "....trtrtrtr....",
+      "....trtrtrtr....",
+      "....trtrtrtr....",
+    ];
+  }
+  return tileFromStrings(rows, C);
 }
 
-function drawHouse(ctx, x, y) {
+function drawTree(ctx, x, y, season = "summer") {
+  const grid = TREE_GRIDS[season] || (TREE_GRIDS[season] = buildTreeGrid(season));
+  drawPixelGrid(ctx, x - 12, y - 12, grid, 3, false);
+}
+
+function drawHouse(ctx, x, y, season = "summer") {
   const house = tileFromStrings([
     "..brdbrdbrdbrd..",
     ".brdbrdbrdbrdbrd.",
@@ -266,6 +354,12 @@ function drawHouse(ctx, x, y) {
     "brbrbrbrbrbrbrbr",
   ], C);
   drawPixelGrid(ctx, x, y, house, 4, false);
+  if (season === "winter") {
+    // Clumped snow accumulation along the roof's top edge.
+    const scale = 4;
+    const width = house.reduce((max, row) => Math.max(max, row.length), 0) * scale;
+    drawSnowCap(ctx, x, y, width, scale);
+  }
 }
 
 function drawMarketStall(ctx, x, y) {
@@ -295,7 +389,23 @@ function drawCaveEntrance(ctx, x, y) {
   ctx.stroke();
 }
 
-function drawCrop(ctx, x, y) {
+function drawCrop(ctx, x, y, season = "summer") {
+  if (season === "winter") {
+    // Stubble: short, shortened brown rows -- no live green top.
+    ctx.fillStyle = C.st;
+    ctx.fillRect(x, y + 2, 2, 3);
+    ctx.fillStyle = C.st;
+    ctx.fillRect(x - 1, y + 3, 4, 2);
+    return;
+  }
+  if (season === "spring") {
+    // Young shoots: brighter, smaller than the full summer crop.
+    ctx.fillStyle = C.fd;
+    ctx.fillRect(x, y + 1, 2, 5);
+    ctx.fillStyle = C.f1;
+    ctx.fillRect(x - 2, y - 1, 6, 3);
+    return;
+  }
   ctx.fillStyle = C.fd;
   ctx.fillRect(x, y, 2, 6);
   ctx.fillStyle = C.f1;
@@ -304,7 +414,7 @@ function drawCrop(ctx, x, y) {
 
 // --- World props ---
 
-function drawFence(ctx, x, y) {
+function drawFence(ctx, x, y, season = "summer") {
   const fence = tileFromStrings([
     "fnfnfnfnfnfnfnfn",
     "dkdkdkdkdkdkdkdk",
@@ -312,6 +422,11 @@ function drawFence(ctx, x, y) {
     "dkdkdkdkdkdkdkdk",
   ], C);
   drawPixelGrid(ctx, x, y, fence, 1, false);
+  if (season === "winter") {
+    const scale = 1;
+    const width = fence.reduce((max, row) => Math.max(max, row.length), 0) * scale;
+    drawSnowCap(ctx, x, y, width, scale);
+  }
 }
 
 function drawDock(ctx, x, y) {
@@ -328,7 +443,7 @@ function drawDock(ctx, x, y) {
   drawPixelGrid(ctx, x, y, dock, 6, false);
 }
 
-function drawWell(ctx, x, y) {
+function drawWell(ctx, x, y, season = "summer") {
   const well = tileFromStrings([
     "..cv1cv1cv1cv1..",
     ".cv1cv1cv1cv1cv1.",
@@ -338,9 +453,14 @@ function drawWell(ctx, x, y) {
     "..cv1cv1cv1cv1..",
   ], C);
   drawPixelGrid(ctx, x, y, well, 4, false);
+  if (season === "winter") {
+    const scale = 4;
+    const width = well.reduce((max, row) => Math.max(max, row.length), 0) * scale;
+    drawSnowCap(ctx, x, y, width, scale);
+  }
 }
 
-function drawRocks(ctx, x, y) {
+function drawRocks(ctx, x, y, season = "summer") {
   const rocks = tileFromStrings([
     "..rk2rk2....",
     ".rk2rk2rk2..",
@@ -348,7 +468,14 @@ function drawRocks(ctx, x, y) {
     ".rk2rk2rk2..",
     "..rk2rk2....",
   ], C);
-  drawPixelGrid(ctx, x - 9, y - 6, rocks, 3, false);
+  const rocksOriginX = x - 9;
+  const rocksOriginY = y - 6;
+  drawPixelGrid(ctx, rocksOriginX, rocksOriginY, rocks, 3, false);
+  if (season === "winter") {
+    const scale = 3;
+    const width = rocks.reduce((max, row) => Math.max(max, row.length), 0) * scale;
+    drawSnowCap(ctx, rocksOriginX, rocksOriginY, width, scale);
+  }
 }
 
 // --- Agent-built structures ---
@@ -659,6 +786,15 @@ function drawStructure(ctx, structure) {
   const scale = STRUCTURE_SCALE * structureRenderScale(structure);
   if (grid) {
     drawPixelGrid(ctx, structure.x, structure.y, grid, scale, false);
+    // Cheap per-frame winter accent for agent-built structures: clumped
+    // snow along the sprite's top edge. spriteSeason is the module-level
+    // mirror of the viewer's current season (set via setSpriteSeason) --
+    // this is the only place in this file that reads it; every other
+    // seasonal branch takes an explicit `season` parameter instead.
+    if (spriteSeason === "winter") {
+      const width = grid.reduce((max, row) => Math.max(max, row.length), 0) * scale;
+      drawSnowCap(ctx, structure.x, structure.y, width, Math.max(1, scale));
+    }
     return;
   }
   drawGenericStructure(
@@ -1323,14 +1459,14 @@ const STARTER_DISTRICTS_JS = [
 // generalized -- see world_expansion plan section 5: "inherently artistic
 // placement, not worth generalizing"). A district founded at runtime renders
 // with just its data-driven tile fill + label, no bespoke props here.
-function drawStarterProps(ctx) {
+function drawStarterProps(ctx, season = "summer") {
   // Farm (north): crops + southern fence.
   for (let fx = 500; fx < 920; fx += 34) {
     for (let fy = 110; fy < 280; fy += 30) {
-      if ((fx + fy) % 3 === 0) drawCrop(ctx, fx, fy);
+      if ((fx + fy) % 3 === 0) drawCrop(ctx, fx, fy, season);
     }
   }
-  for (let fx = 480; fx < 940; fx += 16) drawFence(ctx, fx, 424);
+  for (let fx = 480; fx < 940; fx += 16) drawFence(ctx, fx, 424, season);
 
   // Forest trees.
   const treeSpots = [
@@ -1338,50 +1474,50 @@ function drawStarterProps(ctx) {
     [1090, 290], [1190, 340], [1290, 270], [1390, 350], [1490, 300], [1540, 410],
     [1130, 420], [1320, 430], [1480, 440],
   ];
-  for (const [tx, ty] of treeSpots) drawTree(ctx, tx, ty);
+  for (const [tx, ty] of treeSpots) drawTree(ctx, tx, ty, season);
 
   // Beach jetty straddling the beach/ocean line so it reads as a pier over water.
   drawDock(ctx, 150, 470);
   drawZoneLabel(ctx, "DOCK", 186, 520);
 
   // Village (core) well, houses, cave rocks + entrance, market stall.
-  drawWell(ctx, 905, 1000);
-  drawHouse(ctx, 985, 1200);
-  drawHouse(ctx, 1085, 1200);
-  drawRocks(ctx, 1260, 1200);
-  drawRocks(ctx, 1430, 1260);
-  drawRocks(ctx, 1340, 1330);
+  drawWell(ctx, 905, 1000, season);
+  drawHouse(ctx, 985, 1200, season);
+  drawHouse(ctx, 1085, 1200, season);
+  drawRocks(ctx, 1260, 1200, season);
+  drawRocks(ctx, 1430, 1260, season);
+  drawRocks(ctx, 1340, 1330, season);
   drawCaveEntrance(ctx, 1380, 1280);
   drawMarketStall(ctx, 975, 1015);
 
   // Farm (south): a lighter second crop patch + fence, mirroring farm_north.
   for (let fx = 1650; fx < 2050; fx += 40) {
     for (let fy = 110; fy < 260; fy += 34) {
-      if ((fx + fy) % 4 === 0) drawCrop(ctx, fx, fy);
+      if ((fx + fy) % 4 === 0) drawCrop(ctx, fx, fy, season);
     }
   }
-  for (let fx = 1650; fx < 2050; fx += 16) drawFence(ctx, fx, 424);
+  for (let fx = 1650; fx < 2050; fx += 16) drawFence(ctx, fx, 424, season);
 
   // East village: a couple of houses outside the build grid's footprint.
-  drawHouse(ctx, 1990, 1300);
-  drawHouse(ctx, 2010, 1420);
+  drawHouse(ctx, 1990, 1300, season);
+  drawHouse(ctx, 2010, 1420, season);
 
   // Deep cave: rock outcrops matching cave_east's look.
-  drawRocks(ctx, 2200, 1100);
-  drawRocks(ctx, 2380, 1200);
+  drawRocks(ctx, 2200, 1100, season);
+  drawRocks(ctx, 2380, 1200, season);
 
   // Cemetery grounds: a quiet fenced plot west of the village.
-  for (let fx = 230; fx < 530; fx += 16) drawFence(ctx, fx, 900);
-  for (let fx = 230; fx < 530; fx += 16) drawFence(ctx, fx, 2184);
-  for (let fy = 900; fy < 2200; fy += 16) drawFence(ctx, 230, fy);
-  for (let fy = 900; fy < 2200; fy += 16) drawFence(ctx, 514, fy);
+  for (let fx = 230; fx < 530; fx += 16) drawFence(ctx, fx, 900, season);
+  for (let fx = 230; fx < 530; fx += 16) drawFence(ctx, fx, 2184, season);
+  for (let fy = 900; fy < 2200; fy += 16) drawFence(ctx, 230, fy, season);
+  for (let fy = 900; fy < 2200; fy += 16) drawFence(ctx, 514, fy, season);
 }
 
 const TILE_CELL_PX = 40;
 const TERRAIN_COLORS = { soil: "#6D4C41", rock: "#757575", grove: "#2E7D32", water: "#1565C0" };
 const BLOCK_COLORS = { wall: "#5D4037", floor: "#8D6E63", door: "#A1887F", fence: "#795548" };
 
-function drawDistrictTerrain(ctx, district) {
+function drawDistrictTerrain(ctx, district, season = "summer") {
   const terrain = district.terrain;
   if (!terrain || !Object.keys(terrain).length) return;
   const b = district.bounds;
@@ -1400,7 +1536,7 @@ function drawDistrictTerrain(ctx, district) {
   }
 }
 
-function drawDistrictTiles(ctx, district) {
+function drawDistrictTiles(ctx, district, season = "summer") {
   const tiles = district.tiles;
   if (!tiles || !Object.keys(tiles).length) return;
   const b = district.bounds;
@@ -1422,7 +1558,7 @@ function drawDistrictTiles(ctx, district) {
   }
 }
 
-function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges) {
+function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges, season = "summer") {
   const foamOffset = Math.floor(frameTick / 8) % 16;
   const activeDistricts = (districts && districts.length) ? districts : STARTER_DISTRICTS_JS;
   CURRENT_DISTRICTS_FOR_BLEND = activeDistricts;
@@ -1448,11 +1584,11 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
     } else {
       fillRectWithTile(ctx, b.x1, b.y1, w, h, tile);
     }
-    drawDistrictTerrain(ctx, d);
-    drawDistrictTiles(ctx, d);
+    drawDistrictTerrain(ctx, d, season);
+    drawDistrictTiles(ctx, d, season);
   }
 
-  drawStarterProps(ctx);
+  drawStarterProps(ctx, season);
 
   for (const d of activeDistricts) {
     if (!d.label) continue;
