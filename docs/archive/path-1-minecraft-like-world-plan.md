@@ -1,3 +1,5 @@
+> **Historical — completed/audited plan, archived 2026-07-15.** Current behavior will be specified in specs/10-path1.md (spec rewrite in progress; see docs/spec-docs-rebuild.md).
+
 # Path 1 — Minecraft-*Like* World Depth (2D, Single Sprint)
 
 *One coordinated delivery. No multi-week phases. Subagents work in parallel

@@ -1,3 +1,5 @@
+> **Historical — build plan for the superseded original spec set, archived 2026-07-15.** The current spec set is being rebuilt per docs/spec-docs-rebuild.md.
+
 # SPEC-BUILD-PLAN.md — AI Simulation World
 ## Master Consolidated Plan | KISS Methodology | Manager–Employee Subagent Model | Spec-Driven
 

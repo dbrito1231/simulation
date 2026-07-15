@@ -1,3 +1,5 @@
+> **Historical — diagnostic of a previously-broken state, archived 2026-07-15.** Most flagged issues were addressed by later fix work; do not treat as current.
+
 # Simulation Issues — Diagnostic Report
 
 This is a read-only diagnosis of the current state of the simulation. It documents

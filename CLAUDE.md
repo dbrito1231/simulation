@@ -57,5 +57,4 @@ Each server run writes to `simulation/logs/<timestamp>/` (gitignored): `activity
 
 - [docs/HANDOFF.md](docs/HANDOFF.md) — **start here** when resuming: snapshot + narrative catch-up.
 - [docs/REFERENCE.md](docs/REFERENCE.md) — deep mechanics: flag details, build/blueprint pipeline, Sage emergency, invention safeguards, LLM routing/context sizing, specs-vs-reality. Read when touching those systems.
-- [docs/path-1-minecraft-like-world-plan.md](docs/path-1-minecraft-like-world-plan.md) — active Path 1 plan.
 - `docs/archive/` — **historical record only. Do not read or act on files there unless the user explicitly asks.**

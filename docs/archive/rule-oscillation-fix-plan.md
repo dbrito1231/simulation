@@ -1,3 +1,5 @@
+> **Historical — implemented 2026-07-12, archived 2026-07-15.** Current behavior will be specified in specs/09-systems-society.md (spec rewrite in progress; see docs/spec-docs-rebuild.md).
+
 # Fix: priority-rule propose/repeal oscillation
 
 **Status: implemented 2026-07-12.** `enactedFrame` stamping, `RULE_REPEAL_MIN_AGE_FRAMES`, and the age-gated repeal branch are live in `simulation/sim_engine.py`; `scripts/sid_parity_smoke.py` covers it via `test_repeal_backstop_age_gate`. Live server restart still required to pick it up.

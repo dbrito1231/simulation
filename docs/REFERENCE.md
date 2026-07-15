@@ -18,7 +18,7 @@ Additive, feature-flagged systems, echoed to the viewer via `/state` `config.fla
 | `ECONOMY_ENABLED` | The `market`, scarcity-based prices, priced `trade_resource`, home/property claims, wealth gini. |
 | `CULTURE_ENABLED` | Skills-by-practice, teaching via `talk_to_nearby`, the `library`/knowledge-on-death, chronicle + meme mutation, personality drift. |
 | `LIFECYCLE_ENABLED` | Aging, death (including the elder), succession elections via `propose_rule`/`vote_rule`. |
-| `PATH1_ENABLED` | Master flag for 2D world depth: `INDUSTRY_ENABLED` (ore/kiln/tier-3 seeds), `TOOL_TIERS_ENABLED` (pick-gated gathers), `COMPOSABLE_BUILD_ENABLED` (`place_block`/`remove_block`), `TERRAIN_TILES_ENABLED` (`dig_terrain`/`plant_terrain`), `PATH1_DIPLOMACY_ENABLED` (second settlement, caravans, treaties), `TIER3_CONTENT_ENABLED`, `PRESSURE_LOOP_ENABLED` (night exposure, wildlife events). See `docs/path-1-minecraft-like-world-plan.md` and `.cursor/path-1-integration-contract.json`. Smoke: `uv run python scripts/path1_smoke.py`. |
+| `PATH1_ENABLED` | Master flag for 2D world depth: `INDUSTRY_ENABLED` (ore/kiln/tier-3 seeds), `TOOL_TIERS_ENABLED` (pick-gated gathers), `COMPOSABLE_BUILD_ENABLED` (`place_block`/`remove_block`), `TERRAIN_TILES_ENABLED` (`dig_terrain`/`plant_terrain`), `PATH1_DIPLOMACY_ENABLED` (second settlement, caravans, treaties), `TIER3_CONTENT_ENABLED`, `PRESSURE_LOOP_ENABLED` (night exposure, wildlife events). See `docs/archive/path-1-minecraft-like-world-plan.md` (historical) and `.cursor/path-1-integration-contract.json`. Smoke: `uv run python scripts/path1_smoke.py`. |
 
 Full mechanic-by-mechanic writeups (what each phase does, why, and the constants involved) are archived in `docs/archive/civilization-emergence-plan.md` and `docs/archive/docs-archive-consolidated.md` — historical design rationale only.
 
@@ -50,4 +50,4 @@ The `specs/` directory is the original 6-gate build plan and is partly **superse
 - Port 5000 → 5001; browser opens the server URL, not a local file.
 - 4 fixed projects / 3 fixed resources → dynamic registries extended at runtime by the blueprint flow.
 
-`simulation/ISSUES.md` is a diagnostic of the *previously broken* state — useful context, but most of what it flags is addressed by the fix plans.
+`docs/archive/ISSUES.md` is a diagnostic of the *previously broken* state — useful context, but most of what it flags is addressed by the fix plans.
