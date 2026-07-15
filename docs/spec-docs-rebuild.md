@@ -102,7 +102,7 @@ The inventory above is a map, **not** a citable source. Every number/name/count/
 | 1B — specs/03,04 | ☑ done | 2026-07-15 | 1,827/1,024 words — specs/03 exceeds the ~1,500 ceiling (accepted: densest spec; optional trim in Phase 5). **Plan-doc corrections:** route count is **18, not 19**; roster override is a JSON body field `{"agents": N}` on `POST /control/reset`, not a `?agents=N` query param — phases 2D/4/5 must use the corrected facts. |
 | 2C — specs/05,06,07 | ☑ done | 2026-07-15 | 1,351/1,309/1,564 words. **Plan-doc correction:** starter districts = **12, not 15** (verified against `STARTER_DISTRICTS`); plan doc fixed. All 35 actions covered in 07 (approve/reject_recipe share a row). |
 | 2D — specs/08,09,10 | ☑ done | 2026-07-15 | 1,537/1,477/1,111 words (08 ~9.8% over target, within tolerance). Anti-oscillation guard documented from code (`RULE_PROPOSE_COOLDOWN=1500`, `RULE_REPEAL_MIN_AGE_FRAMES=4×`, backstop-only scope) — archived fix plan no longer load-bearing. |
-| 3 — specs/11,12 + old-spec deletion | ☐ not started | | |
+| 3 — specs/11,12 + old-spec deletion | ☑ done | 2026-07-15 | 1,014/932 words. specs/ = exactly the 13 new files; 4 old gate specs deleted (content in git history). Correction: plan-visual-3 is fully DONE per its own status line (not "partially done") — specs/11 reflects that. |
 | 4 — CLAUDE/AGENTS/REFERENCE/README | ☐ not started | | |
 | 5 — verification suite | ☐ not started | | |
 
