@@ -97,7 +97,7 @@ The inventory above is a map, **not** a citable source. Every number/name/count/
 
 | Phase | Status | Session/date | Notes |
 |---|---|---|---|
-| 0 — moves & banners | ☑ done | 2026-07-15 | 4 files archived w/ banners; REFERENCE.md + CLAUDE.md repointed. Out-of-scope leftover: `scripts/path1_soak.py:3` docstring still cites the old path-1 plan path (code file — .md-only constraint; fix whenever that script is next touched). |
+| 0 — moves & banners | ☑ done | 2026-07-15 | 4 files archived w/ banners; REFERENCE.md + CLAUDE.md repointed. Out-of-scope leftover: `scripts/path1_soak.py:3` docstring still cites the old path-1 plan path (code file — .md-only constraint; fixed in a follow-up commit 2026-07-15). |
 | 1A — specs/00,01,02 | ☑ done | 2026-07-15 | 519/820/930 words. Flag index is code-derived and complete; notes which flags are NOT echoed to /state config.flags. |
 | 1B — specs/03,04 | ☑ done | 2026-07-15 | 1,827/1,024 words — specs/03 exceeds the ~1,500 ceiling (accepted: densest spec; optional trim in Phase 5). **Plan-doc corrections:** route count is **18, not 19**; roster override is a JSON body field `{"agents": N}` on `POST /control/reset`, not a `?agents=N` query param — phases 2D/4/5 must use the corrected facts. |
 | 2C — specs/05,06,07 | ☑ done | 2026-07-15 | 1,351/1,309/1,564 words. **Plan-doc correction:** starter districts = **12, not 15** (verified against `STARTER_DISTRICTS`); plan doc fixed. All 35 actions covered in 07 (approve/reject_recipe share a row). |
