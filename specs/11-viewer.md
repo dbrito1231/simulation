@@ -68,6 +68,13 @@ world state beyond a cached palette/season key.
   `MAX_NIGHT_ALPHA = 0.45` navy overlay in over `dayFraction` 0.70–0.80,
   holds through 0.95, ramps out to 1.00 — applied as a full-canvas `fillRect`
   after agents/structures each frame (index.html:2269-2273).
+- **Light glow** (`ENV_EFFECTS_ENABLED`): while the night overlay is active,
+  each structure flagged `light: true` in the `/state` structures payload
+  whose district is in `civilization.litDistricts` gets a warm radial
+  gradient (center ~`rgba(255,190,90,…)` fading to transparent, radius
+  ~140 world px) composited over the night overlay so lit districts visibly
+  push back the dark. No glow by day or for unfueled lights (they simply
+  lack the flag/district entry that night).
 - **Zoom**: `zoomLevel` (index.html:780) scales `canvas.style.width/height`
   over the fixed-resolution backing store (`applyZoom`, index.html:784-786);
   +/- buttons multiply by 1.25/0.8 (index.html:819-820), scroll-wheel zoom
@@ -133,6 +140,13 @@ world state beyond a cached palette/season key.
   a comment flags it **"MUST be kept in sync with sim_engine.py's
   STARTER_DISTRICTS bounds/kind/label"** (sprites.js:1440-1442) — see
   [05-world.md](05-world.md) for the server-side list it mirrors.
+
+## Civ-1 physical props
+
+`civilization.physicalProps` renders up to three large, moored sailboats in the
+expanded starter ocean beside the beach. Their positions are fixed coastal
+moorings, not structure positions; they remain server-derived decoration and
+do not create client-side resource or pathing state.
 
 ## Active viewer work
 

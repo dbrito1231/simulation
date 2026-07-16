@@ -112,7 +112,7 @@ STARTER_DISTRICTS = {
     },
     "beach": {
         "kind": "beach", "tile": "beach", "label": "BEACH",
-        "bounds": {"x1": 230, "y1": 120, "x2": 400, "y2": 880},
+        "bounds": {"x1": 290, "y1": 100, "x2": 490, "y2": 900},
         "build_grid": None, "entryNode": "beach_gate",
     },
     "cave_east": {
@@ -122,7 +122,7 @@ STARTER_DISTRICTS = {
     },
     "ocean": {
         "kind": "ocean", "tile": "ocean", "label": None,
-        "bounds": {"x1": 30, "y1": 120, "x2": 180, "y2": 880},
+        "bounds": {"x1": 0, "y1": 100, "x2": 280, "y2": 900},
         "build_grid": None, "entryNode": "beach_gate",
     },
     # --- World expansion: second instances of buildable kinds, plus a new
@@ -688,6 +688,7 @@ TEACH_TRANSFER_FRACTION = 0.3
 # retirement elsewhere in the file).
 LIBRARY_KNOWLEDGE_CAP = 12
 LIBRARY_STUDY_GAIN = 0.4             # skill gained per study session at the library
+LIBRARY_STUDY_WEIGHT_CAP = 5         # study-gain upgrade-weight cap (knowledge-capacity cap stays 10)
 # Chronicle: a capped ring of major village-level events, summarized into one
 # prompt line ("Village history: ...") so a long-running village develops a
 # legible past without growing the prompt unboundedly.
@@ -730,6 +731,11 @@ TERRAIN_TILES_ENABLED = True
 PATH1_DIPLOMACY_ENABLED = True
 TIER3_CONTENT_ENABLED = True
 PRESSURE_LOOP_ENABLED = True
+ENV_EFFECTS_ENABLED = True
+LIBRARY_SCALING_ENABLED = True
+TRANSIT_ENABLED = True
+ECONOMY_SINKS_ENABLED = True
+COMFORT_EVERY_N_GOODS_TICKS = 4  # comfort consumption fires every Nth goods tick, not every one
 
 
 def path1_on(subflag=None):
@@ -1090,6 +1096,9 @@ if path1_on("INDUSTRY_ENABLED"):
                 ("Mill Era", "mill"),
             ])
 
+if TECH_TREE_ENABLED:
+    ERA_LADDER.append(("Civic Era", "civilization"))
+
 AGENT_DEFS = [
     {"id": 1, "name": "Aria", "role": "farmer", "personality": "hardworking and cautious", "color": "#4CAF50", "zone": "farm_north"},
     {"id": 2, "name": "Marco", "role": "trader", "personality": "sociable and opportunistic", "color": "#FF9800", "zone": "market"},
@@ -1444,6 +1453,8 @@ class SimEngine:
             "taxPaid": 0,
             "effectLastFire": {},
             "districtStocks": {},
+            "upkeepLastDay": {},
+            "litDistricts": [],
             "approvedCustomApprovedFrame": {},
             "lastProjectAbandonment": None,
             "lastSpoilage": None,
@@ -2703,6 +2714,11 @@ class SimEngine:
         if any(a["resources"].get(v, 0) > 0 for a in self.agents for v in vehicles) \
                 or any(c["stockpile"].get(v, 0) > 0 for v in vehicles):
             caps.add("vehicles")
+        has_light = any(isinstance((self._get_structure_function(s.get("type")) or {}).get("light"), dict)
+                        and self._working_structure_count(s.get("type")) > 0
+                        for s in c["structures"])
+        if has_light and self._has_ocean_transit():
+            caps.add("civilization")
         return caps
 
     def _current_era_index(self):
@@ -3100,6 +3116,25 @@ class SimEngine:
         self._tick_spoilage()
         self._tick_structure_decay()
         self._maybe_disaster()
+        self._tick_comfort_consumption()
+
+    def _tick_comfort_consumption(self):
+        if not ECONOMY_SINKS_ENABLED:
+            return
+        if (self.frameTick // GOODS_TICK_FRAMES) % COMFORT_EVERY_N_GOODS_TICKS != 0:
+            return
+        stock = self.civilization["stockpile"]
+        consumed = 0
+        for agent in self._living_agents():
+            resource = next((r for r in ("pottery", "dried_fish") if stock.get(r, 0) > 0), None)
+            if not resource:
+                break
+            stock[resource] -= 1
+            agent["hunger"] = min(100, agent.get("hunger", 0) + 2)
+            agent["health"] = min(100, agent.get("health", 0) + 1)
+            consumed += 1
+        if consumed:
+            self._push_activity(f"Village comforts consumed: {consumed} crafted goods")
 
     def _tick_spoilage(self):
         """Edibles beyond village storage capacity rot: SPOILAGE_RATIO of the
@@ -3190,6 +3225,26 @@ class SimEngine:
         self._log_benchmark("disaster_damage", dmg,
                             {"structure": s.get("type"), "district": did})
 
+    def _env_shelter_capacity(self):
+        """ENV_EFFECTS_ENABLED: sum of `shelter.capacity` across every working
+        structure whose function declares a shelter effect. Stacks with the
+        implicit `houses` beds (a block declaring both counts both)."""
+        c = self.civilization
+        total = 0
+        for type_id in {s["type"] for s in c["structures"]}:
+            fn = self._get_structure_function(type_id) or {}
+            shelter = fn.get("shelter")
+            if not isinstance(shelter, dict):
+                continue
+            cap = shelter.get("capacity")
+            if not isinstance(cap, int) or cap <= 0:
+                continue
+            count = sum(1 for s in c["structures"]
+                        if s["type"] == type_id
+                        and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)
+            total += cap * count
+        return total
+
     def _tick_shelter(self):
         """Nightly (every DAY_FRAMES): each working house shelters
         HOUSE_SHELTER_OCCUPANTS villagers (nearest to a house first);
@@ -3214,6 +3269,8 @@ class SimEngine:
                     and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)
         living = self._living_agents()
         slots = len(house_structs) * HOUSE_SHELTER_OCCUPANTS
+        if ENV_EFFECTS_ENABLED:
+            slots += self._env_shelter_capacity()
         # Corpses stay in self.agents for burial; only the living need beds.
         if slots >= len(living):
             self._push_activity("Night falls -- every villager has a roof tonight")
@@ -3297,6 +3354,8 @@ class SimEngine:
         needs = tmpl.get("needs") or {"wood": 2}
         if structure.get("isRuin") or structure.get("condition", 100) <= 0:
             return {res: max(1, amt // 2) for res, amt in needs.items()}
+        if ECONOMY_SINKS_ENABLED and c["stockpile"].get("planks", 0) > 0:
+            return {"planks": 1}
         primary = next(iter(needs), "wood")
         return {primary: 1}
 
@@ -3825,6 +3884,9 @@ class SimEngine:
     def _perform_gather(self, agent, resource):
         """Ecology-aware gather with structure boosts. Returns summary string."""
         c = self.civilization
+        if (TRANSIT_ENABLED and self._gather_zone_for_resource(resource) == "ocean"
+                and not self._has_ocean_transit()):
+            return f"{agent['name']} needs a working ocean transit structure to gather {resource}"
         if LIFECYCLE_ENABLED:
             # Governance (I4): a harvest_quota rule binds before the ecology
             # gate -- this is a policy refusal, not a depletion one, so it
@@ -4270,6 +4332,9 @@ class SimEngine:
             return
         dest = other["districts"][0]
         if agent.get("currentDistrict") == dest:
+            if TRANSIT_ENABLED and self._has_ocean_transit():
+                if not self._consume_ocean_transit():
+                    return
             c["caravanLog"].append({"agent": agent["name"], "settlement": other["id"],
                                     "frame": self.frameTick})
             self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
@@ -4278,6 +4343,35 @@ class SimEngine:
             return
         if not agent.get("goal"):
             agent["goal"] = {"kind": "caravan", "target_district": dest, "ttl": STALL_THRESHOLD * 4}
+
+    def _ocean_transit_unlocks(self):
+        if not TRANSIT_ENABLED:
+            return []
+        out = []
+        for s in self.civilization["structures"]:
+            if s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD:
+                continue
+            for unlock in (self._get_structure_function(s.get("type")) or {}).get("unlocks") or []:
+                if unlock.get("kind") == "transit" and unlock.get("terrain") == "ocean":
+                    out.append(unlock)
+        return out
+
+    def _has_ocean_transit(self):
+        return bool(self._ocean_transit_unlocks())
+
+    def _consume_ocean_transit(self):
+        unlock = self._ocean_transit_unlocks()[0] if self._ocean_transit_unlocks() else None
+        if not unlock:
+            return False
+        costs = unlock.get("consumes") or {}
+        stock = self.civilization["stockpile"]
+        if any(stock.get(r, 0) < n for r, n in costs.items()):
+            self._push_activity("Ocean caravan waits for transit supplies")
+            return False
+        for resource, amount in costs.items():
+            stock[resource] -= amount
+        self._push_activity("An ocean caravan launches, consuming " + ", ".join(f"{n} {r}" for r, n in costs.items()))
+        return True
 
     def _propose_treaty(self, agent, decision):
         if not path1_on("PATH1_DIPLOMACY_ENABLED"):
@@ -4324,17 +4418,117 @@ class SimEngine:
         phase = self.frameTick % DAY_FRAMES
         return phase >= int(DAY_FRAMES * (1 - NIGHT_FRACTION))
 
+    def _pay_upkeep(self, structures, resource, total_needed):
+        """All-or-nothing: pay total_needed of resource, district stock (per
+        structure's own district) first, then the village stockpile. Returns
+        True if paid in full, False (no state change) if unaffordable."""
+        c = self.civilization
+        remaining = total_needed
+        district_pulls = []
+        seen_districts = []
+        for s in structures:
+            did = s.get("districtId")
+            if did and did not in seen_districts:
+                seen_districts.append(did)
+        for did in seen_districts:
+            if remaining <= 0:
+                break
+            avail = self._district_stock(did, resource)
+            if avail is None:
+                continue
+            take = min(avail, remaining)
+            if take > 0:
+                district_pulls.append((did, take))
+                remaining -= take
+        stockpile_avail = int(c["stockpile"].get(resource, 0))
+        if remaining > stockpile_avail:
+            return False
+        for did, amt in district_pulls:
+            self._add_district_stock(did, resource, -amt)
+        if remaining > 0:
+            c["stockpile"][resource] = stockpile_avail - remaining
+        return True
+
+    def _tick_env_upkeep(self):
+        """ENV_EFFECTS_ENABLED: at the first night-pressure tick of each day
+        (frameTick // DAY_FRAMES changes), each working structure type
+        declaring an `upkeep` effect consumes amount * count of its resource.
+        Unaffordable types go unfueled for the night (their `light` effect,
+        if any, is inactive); tracked per type in
+        civilization["upkeepLastDay"]."""
+        if not ENV_EFFECTS_ENABLED:
+            return
+        c = self.civilization
+        day = self.frameTick // DAY_FRAMES
+        last_day = c.setdefault("upkeepLastDay", {})
+        for type_id in {s["type"] for s in c["structures"]}:
+            fn = self._get_structure_function(type_id) or {}
+            upkeep = fn.get("upkeep")
+            if not isinstance(upkeep, dict):
+                continue
+            entry = last_day.get(type_id)
+            if entry and entry.get("day") == day:
+                continue
+            working = [s for s in c["structures"]
+                       if s["type"] == type_id
+                       and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD]
+            if not working:
+                last_day[type_id] = {"day": day, "fueled": False}
+                continue
+            res = upkeep.get("resource")
+            amount = upkeep.get("amount", 1)
+            needed = amount * len(working)
+            fueled = self._pay_upkeep(working, res, needed)
+            last_day[type_id] = {"day": day, "fueled": fueled}
+            if fueled:
+                name = self._structure_display_name(type_id)
+                self._push_activity(f"The {name} burns {needed} {res} through the night")
+
+    def _env_lit_types(self):
+        """ENV_EFFECTS_ENABLED: structure type ids whose function declares a
+        `light` effect and are currently fueled (charged this day's upkeep)."""
+        c = self.civilization
+        last_day = c.get("upkeepLastDay", {})
+        lit_types = set()
+        for type_id in {s["type"] for s in c["structures"]}:
+            fn = self._get_structure_function(type_id) or {}
+            if not isinstance(fn.get("light"), dict):
+                continue
+            entry = last_day.get(type_id)
+            if entry and entry.get("fueled"):
+                lit_types.add(type_id)
+        return lit_types
+
+    def _env_lit_districts(self):
+        """ENV_EFFECTS_ENABLED: district ids containing a working AND fueled
+        `light` structure right now."""
+        c = self.civilization
+        lit_types = self._env_lit_types()
+        lit = set()
+        for s in c["structures"]:
+            if (s["type"] in lit_types
+                    and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD
+                    and s.get("districtId")):
+                lit.add(s["districtId"])
+        return lit
+
     def _tick_night_pressure(self):
         if not path1_on("PRESSURE_LOOP_ENABLED") or not SURVIVAL_ENABLED:
             return
         if not self._is_night():
             return
         c = self.civilization
+        if ENV_EFFECTS_ENABLED:
+            self._tick_env_upkeep()
         house_slots = len([s for s in c["structures"]
                            if (self._get_structure_function(s.get("type")) or {}).get("houses")
                            and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD])
         house_slots *= HOUSE_SHELTER_OCCUPANTS
         house_slots += self._composable_shelter_count() * HOUSE_SHELTER_OCCUPANTS
+        if ENV_EFFECTS_ENABLED:
+            house_slots += self._env_shelter_capacity()
+        lit_districts = self._env_lit_districts() if ENV_EFFECTS_ENABLED else set()
+        c["litDistricts"] = sorted(lit_districts)
         living = self._living_agents()
         sheltered = set()
         if house_slots >= len(living):
@@ -4347,8 +4541,12 @@ class SimEngine:
         others = [a for a in living if a["name"] not in sheltered]
         sheltered.update(a["name"] for a in others[:max(0, house_slots - len(sheltered))])
         exposed = 0
+        lit_spared = 0
         for a in living:
             if a["name"] in sheltered or a["incapacitated"]:
+                continue
+            if a.get("currentDistrict") in lit_districts:
+                lit_spared += 1
                 continue
             if a["health"] > 10:
                 a["health"] = max(10, a["health"] - NIGHT_EXPOSURE_DAMAGE)
@@ -4357,8 +4555,10 @@ class SimEngine:
         c["nightSheltered"] = len(sheltered)
         c["nightTotal"] = len(living)
         rate = len(sheltered) / max(1, len(living))
-        self._log_benchmark("night_shelter_rate", round(rate, 2),
-                            {"sheltered": len(sheltered), "total": len(living)})
+        benchmark_payload = {"sheltered": len(sheltered), "total": len(living)}
+        if lit_spared:
+            benchmark_payload["lit"] = lit_spared
+        self._log_benchmark("night_shelter_rate", round(rate, 2), benchmark_payload)
         if exposed:
             self._push_activity(f"Night exposure — {exposed} villager(s) took cold damage")
 
@@ -4585,9 +4785,13 @@ class SimEngine:
         district_id = self._resolve_build_district(agent, type_, target_district)
         if not district_id or c["districtProjects"].get(district_id):
             return None
-        contributed = {res: 0 for res in tmpl["needs"]}
+        project_needs = dict(tmpl["needs"])
+        if ECONOMY_SINKS_ENABLED and self._type_tier(type_) >= 2:
+            material = next((r for r in ("planks", "bricks", "tools") if r not in project_needs), "planks")
+            project_needs[material] = project_needs.get(material, 0) + 1
+        contributed = {res: 0 for res in project_needs}
         c["districtProjects"][district_id] = {
-            "type": type_, "name": tmpl["name"], "needs": dict(tmpl["needs"]),
+            "type": type_, "name": tmpl["name"], "needs": project_needs,
             "contributed": contributed, "visualStyle": tmpl.get("visualStyle") or "generic",
             "sprite": tmpl.get("sprite"),
             "districtId": district_id,
@@ -6244,6 +6448,29 @@ class SimEngine:
             return False
         return self._working_structure_count("library", district_id) > 0
 
+    def _library_upgrade_weight(self, district_id, cap=10):
+        """Best local working Library's bounded upgrade contribution. `cap`
+        defaults to 10 for knowledge-capacity scaling; study-gain callers pass
+        LIBRARY_STUDY_WEIGHT_CAP (5) to keep skill-by-study bounded."""
+        if not LIBRARY_SCALING_ENABLED:
+            return 1
+        libraries = [s for s in self.civilization["structures"]
+                     if s.get("type") == "library"
+                     and (district_id is None or s.get("districtId") == district_id)
+                     and not s.get("isRuin")
+                     and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD]
+        return min(cap, max((self._structure_upgrade_weight(s) for s in libraries), default=1))
+
+    def _library_lessons(self, district_id):
+        if not self._library_active(district_id):
+            return None
+        knowledge = sorted(self.civilization.get("libraryKnowledge") or [],
+                           key=lambda k: k.get("level", 0), reverse=True)[:3]
+        chronicle = (self.civilization.get("chronicle") or [])[-2:]
+        parts = [f"{k.get('skill')} {k.get('level')} ({k.get('agent')})" for k in knowledge]
+        parts.extend(str(c.get("text", "")) for c in chronicle)
+        return " | ".join(parts)[:480] or None
+
     def _store_knowledge_on_death(self, agent):
         """Library (#2): while a working Library exists, a dying agent's
         single best (non-trivial) skill is preserved in
@@ -6263,7 +6490,8 @@ class SimEngine:
         knowledge = c.setdefault("libraryKnowledge", [])
         knowledge.append({"agent": agent["name"], "skill": best_kind,
                           "level": round(skills[best_kind], 2), "frame": self.frameTick})
-        while len(knowledge) > LIBRARY_KNOWLEDGE_CAP:
+        cap = LIBRARY_KNOWLEDGE_CAP * self._library_upgrade_weight(None)
+        while len(knowledge) > cap:
             weakest = min(range(len(knowledge)), key=lambda i: knowledge[i]["level"])
             knowledge.pop(weakest)
         self._push_activity(f"{agent['name']}'s knowledge of {best_kind} is preserved in the Library.")
@@ -6311,7 +6539,9 @@ class SimEngine:
         if best["level"] <= agent_skills.get(best["skill"], 0.0):
             return None
         before = agent_skills.get(best["skill"], 0.0)
-        agent_skills[best["skill"]] = min(SKILL_MAX_LEVEL, before + LIBRARY_STUDY_GAIN)
+        gain = LIBRARY_STUDY_GAIN * self._library_upgrade_weight(
+            agent.get("currentDistrict"), cap=LIBRARY_STUDY_WEIGHT_CAP)
+        agent_skills[best["skill"]] = min(SKILL_MAX_LEVEL, before + gain)
         return f"{agent['name']} studied {best['skill']} at the Library (from {best['agent']}'s preserved knowledge)"
 
     # --- Phase G: chronicle (CULTURE_ENABLED) ---
@@ -9136,6 +9366,8 @@ class SimEngine:
             # so flag-off prompts stay byte-identical to Phase F).
             "skills": {k: round(v, 1) for k, v in agent["skills"].items()} if CULTURE_ENABLED else None,
             "chronicle_line": self._chronicle_prompt_line() if CULTURE_ENABLED else None,
+            "library_lessons": (self._library_lessons(agent.get("currentDistrict"))
+                                if CULTURE_ENABLED and LIBRARY_SCALING_ENABLED else None),
             "path1_tool_line": tool_line,
             "path1_industry_line": industry_line,
             "path1_neighbor_line": neighbor_line,
@@ -9446,8 +9678,11 @@ class SimEngine:
                     self._path1_industry_benchmark()
             if path1_on("PRESSURE_LOOP_ENABLED") and ft % GOODS_TICK_FRAMES == 0:
                 self._tick_wildlife()
-            if path1_on("PRESSURE_LOOP_ENABLED") and self._is_night() and ft % 30 == 0:
-                self._tick_night_pressure()
+            if path1_on("PRESSURE_LOOP_ENABLED") and ft % 30 == 0:
+                if self._is_night():
+                    self._tick_night_pressure()
+                elif ENV_EFFECTS_ENABLED and self.civilization.get("litDistricts"):
+                    self.civilization["litDistricts"] = []
             if STRUCTURE_EFFECTS_ENABLED and ft % EFFECT_TICK_FRAMES == 0:
                 self._tick_structure_effects()
             if ECOLOGY_ENABLED and ft % ECOLOGY_REGROW_FRAMES == 0:
@@ -9696,6 +9931,16 @@ class SimEngine:
                 if ECOLOGY_ENABLED and not civ.get("districtStocks"):
                     civ["districtStocks"] = self._init_district_stocks(
                         civ.get("districts") or {}, civ.get("resourceRegistry"))
+                # Civ-1 coastal visual migration: only replace the narrow
+                # legacy starter bounds, never player-founded beaches.
+                legacy_coast = {
+                    "beach": {"x1": 230, "y1": 120, "x2": 400, "y2": 880},
+                    "ocean": {"x1": 30, "y1": 120, "x2": 180, "y2": 880},
+                }
+                for did, old_bounds in legacy_coast.items():
+                    district = (civ.get("districts") or {}).get(did)
+                    if district and district.get("bounds") == old_bounds:
+                        district["bounds"] = dict(STARTER_DISTRICTS[did]["bounds"])
                 if ECONOMY_ENABLED:
                     # Phase E: the market seed joins existing registries (old
                     # saves can build it); structures/houses from pre-Phase-E
@@ -9769,6 +10014,53 @@ class SimEngine:
                         d.setdefault("settlementId", "home")
                         if "terrain" not in d:
                             d["terrain"] = {}
+                if ENV_EFFECTS_ENABLED:
+                    civ.setdefault("upkeepLastDay", {})
+                    civ.setdefault("litDistricts", [])
+                    registry = civ.get("projectRegistry")
+                    if isinstance(registry, dict):
+                        for tid in ("hearth", "lighthouse"):
+                            tmpl = registry.get(tid)
+                            if not isinstance(tmpl, dict):
+                                instance = next((s for s in civ.get("structures", [])
+                                                 if s.get("type") == tid), None)
+                                if not instance:
+                                    continue
+                                tmpl = {
+                                    "name": instance.get("name") or tid.replace("_", " ").title(),
+                                    "needs": {"wood": 2, "stone": 2},
+                                    "visualStyle": instance.get("visualStyle") or "generic",
+                                    "function": {},
+                                    "custom": True,
+                                }
+                                registry[tid] = tmpl
+                            fn = tmpl.setdefault("function", {})
+                            if not isinstance(fn.get("light"), dict):
+                                fn["light"] = {"scope": "district"}
+                            fn.setdefault("upkeep", {"resource": "charcoal", "amount": 1})
+                if TRANSIT_ENABLED:
+                    registry = civ.get("projectRegistry")
+                    for tid in ("dock", "shipyard"):
+                        entry = registry.get(tid) if isinstance(registry, dict) else None
+                        if not isinstance(entry, dict):
+                            if not isinstance(registry, dict):
+                                continue
+                            instance = next((s for s in civ.get("structures", [])
+                                             if s.get("type") == tid), None)
+                            if not instance:
+                                continue
+                            entry = {
+                                "name": instance.get("name") or tid.replace("_", " ").title(),
+                                "needs": {"wood": 2, "stone": 2},
+                                "visualStyle": instance.get("visualStyle") or "generic",
+                                "function": {},
+                                "custom": True,
+                            }
+                            registry[tid] = entry
+                        fn = entry.setdefault("function", {})
+                        unlocks = fn.setdefault("unlocks", [])
+                        if not any(u.get("kind") == "transit" for u in unlocks if isinstance(u, dict)):
+                            unlocks.append({"kind": "transit", "terrain": "ocean", "consumes": {"boat": 1}})
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
@@ -9942,6 +10234,7 @@ class SimEngine:
                 "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
                 "buried": bool(CEMETERY_ENABLED and a.get("buried")),
             } for a in self.agents]
+            env_lit_types = self._env_lit_types() if ENV_EFFECTS_ENABLED else set()
             civ = {
                 "level": c["level"],
                 "structures": [{"id": s["id"], "type": s["type"], "x": s["x"], "y": s["y"],
@@ -9953,7 +10246,11 @@ class SimEngine:
                                 "homeOf": s.get("homeOf"),
                                 "level": s.get("level", 1),
                                 "visualTier": s.get("visualTier", 1),
-                                "renderScale": s.get("renderScale", 1.0)}
+                                "renderScale": s.get("renderScale", 1.0),
+                                "light": bool(
+                                    ENV_EFFECTS_ENABLED and s["type"] in env_lit_types
+                                    and not s.get("isRuin")
+                                    and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)}
                                for s in c["structures"]],
                 "districtProjects": district_projects,
                 "completedProjects": c["completedProjects"],
@@ -10006,6 +10303,12 @@ class SimEngine:
                 civ["settlements"] = list(c.get("settlements") or [])
                 civ["treaties"] = list(c.get("treaties") or [])
                 civ["isNight"] = self._is_night()
+            if ENV_EFFECTS_ENABLED:
+                civ["litDistricts"] = list(c.get("litDistricts") or [])
+            if TRANSIT_ENABLED:
+                boat_count = int(c.get("stockpile", {}).get("boat", 0))
+                civ["physicalProps"] = ([{"resource": "boat", "count": min(3, boat_count)}]
+                                        if boat_count >= 3 else [])
             benchmarks = dict(self.lastBenchmarks)
             activity = list(self.activityLog)
             conversation = list(self.conversationLog[:30])
@@ -10044,6 +10347,10 @@ class SimEngine:
                         "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
                         "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
                         "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
+                        "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
+                        "LIBRARY_SCALING_ENABLED": LIBRARY_SCALING_ENABLED,
+                        "TRANSIT_ENABLED": TRANSIT_ENABLED,
+                        "ECONOMY_SINKS_ENABLED": ECONOMY_SINKS_ENABLED,
                     },
                 },
             }

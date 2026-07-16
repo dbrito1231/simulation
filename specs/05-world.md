@@ -56,6 +56,11 @@ live dict, never the module constant.
 | `cave_deep` | cave | DEEP CAVE | no |
 | `cemetery_grounds` | cemetery | CEMETERY | yes (cap 1) + `grave_grid` (cap 48) |
 
+The starter coast is deliberately oversized for visible vessels: `ocean` spans
+`x=0..280, y=100..900` and `beach` spans `x=290..490, y=100..900`. Restore
+migration updates the former narrow coastal bounds in existing saves. The
+coast remains non-buildable and the beach road gate remains on shore.
+
 `DISTRICT_KIND_TEMPLATES` (sim_engine.py:173-178) covers only the kinds that
 `_maybe_found_district()` can instantiate anew: `farm`, `village`, `workshop`, `beach`.
 Forest/cave/ocean/market are single-instance by design; a founded cave would need

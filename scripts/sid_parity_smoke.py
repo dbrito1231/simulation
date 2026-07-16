@@ -298,6 +298,66 @@ def test_piano_stagger_offline():
         se.PIANO_MODULES = old
 
 
+def test_library_scaling_and_lessons():
+    engine = make_engine(4)
+    c = engine.civilization
+    did = "village_core"
+    c["structures"].append({"id": 9991, "type": "library", "districtId": did,
+                            "condition": 100, "isRuin": False, "level": 30})
+    c["libraryKnowledge"] = [
+        {"agent": "Old", "skill": "craft", "level": 5.0, "frame": 1},
+        {"agent": "Old", "skill": "build", "level": 4.0, "frame": 2},
+    ]
+    agent = engine.agents[0]
+    agent["currentDistrict"] = did
+    before = agent["skills"]["craft"]
+    engine._study_at_library(agent)
+    assert_true(agent["skills"]["craft"] - before == se.LIBRARY_STUDY_GAIN * 3,
+                agent["skills"])
+    assert_true("craft 5.0" in engine._library_lessons(did), engine._library_lessons(did))
+    assert_true(engine._library_lessons("farm_north") is None, "lessons leaked outside library district")
+    print("  OK library scaling + local prompt lessons")
+
+
+def test_civic_era_requires_both_light_and_transit():
+    """The final Civic Era rung is monotonic and requires BOTH a working
+    light structure and working ocean transit -- neither alone is enough."""
+    engine = make_engine(4)
+    c = engine.civilization
+    did = "village_core"
+    c["projectRegistry"]["hearth"] = {
+        "name": "Hearth", "needs": {"stone": 2}, "visualStyle": "generic",
+        "function": {"light": {"scope": "district"}},
+    }
+    c["structures"].append({
+        "id": 9800, "type": "hearth", "districtId": did,
+        "condition": 100, "isRuin": False,
+    })
+    caps = engine._era_capabilities()
+    assert_true("civilization" not in caps,
+                f"light alone must not unlock civilization era, got {caps}")
+    print(f"  OK light-only caps: {caps}")
+
+    c["projectRegistry"]["dock"] = {
+        "name": "Dock", "needs": {"wood": 2}, "visualStyle": "generic",
+        "function": {"unlocks": [
+            {"kind": "transit", "terrain": "ocean", "consumes": {"boat": 1}}]},
+    }
+    c["structures"].append({
+        "id": 9801, "type": "dock", "districtId": "beach",
+        "condition": 100, "isRuin": False,
+    })
+    caps = engine._era_capabilities()
+    assert_true("civilization" in caps,
+                f"light + transit should unlock civilization era, got {caps}")
+    idx = engine._current_era_index()
+    assert_true(idx == len(se.ERA_LADDER) - 1,
+                f"expected the final (Civic Era) rung, got index {idx} of {se.ERA_LADDER}")
+    assert_true(se.ERA_LADDER[idx][0] == "Civic Era",
+                f"expected Civic Era at the top rung, got {se.ERA_LADDER[idx]}")
+    print(f"  OK light + transit -> civilization era (index={idx}, caps={caps})")
+
+
 def main():
     print("Sid-parity smoke (Phases 1-3 + PIANO stagger)")
     engine = make_engine(8)
@@ -314,6 +374,8 @@ def main():
 
     test_role_fallback_switch()
     test_piano_stagger_offline()
+    test_library_scaling_and_lessons()
+    test_civic_era_requires_both_light_and_transit()
     print("ALL PASS")
 
 

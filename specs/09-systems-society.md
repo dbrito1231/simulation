@@ -67,6 +67,23 @@ Related actions: `propose_blueprint`, `sage_review_blueprint`,
 `approve_blueprint`, `reject_blueprint`, `craft_item` (tier gate) —
 [07-actions.md](07-actions.md).
 
+## Library scaling
+
+`LIBRARY_SCALING_ENABLED` defaults to True. The strongest working Library in
+the agent's district scales preservation capacity and study gain by its upgrade
+weight (`max(1, level // UPGRADE_STAT_STEP)`). The knowledge-capacity
+multiplier is capped at 10; the study-gain multiplier is capped at
+`LIBRARY_STUDY_WEIGHT_CAP = 5` (max 2.0 skill/session) — uncapped, a
+max-level library's 4.0/session equals ~27 practice actions
+(`SKILL_PRACTICE_GAIN = 0.15`) and instantly grants a `_skill_bonus` tier,
+trivializing skills-by-practice. Prompt lessons are defined in
+[03-cognition.md](03-cognition.md).
+
+The final Civic Era is monotonic and requires both a working light structure
+and working ocean transit. This makes the environmental and transit effect
+kinds load-bearing without requiring lights to be fueled during daytime era
+checks.
+
 ## RULES_ENABLED
 
 Rule kinds: `RULE_KINDS = {"resource_tax", "custom", "priority"}`

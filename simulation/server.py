@@ -713,11 +713,12 @@ def _infer_terraform_decision(decision, agent_data):
 
 VISUAL_STYLES = {"house", "farm_plot", "workshop", "wall", "generic"}
 SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,24}$")
-FUNCTION_EFFECT_KEYS = ("produces", "boosts", "unlocks", "stores", "houses")
+FUNCTION_EFFECT_KEYS = ("produces", "boosts", "unlocks", "stores", "houses",
+                        "shelter", "light", "upkeep")
 VALID_PRODUCE_SCOPES = {"village", "district"}
 VALID_BOOST_KINDS = {"gather", "craft"}
 VALID_BOOST_SCOPES = {"village", "district"}
-VALID_UNLOCK_KINDS = {"craft"}
+VALID_UNLOCK_KINDS = {"craft", "transit"}
 MAX_PENDING_BLUEPRINTS = 5
 MAX_APPROVED_CUSTOM = 15
 MAX_CUSTOM_RESOURCES = 10
@@ -1067,6 +1068,7 @@ BLUEPRINT object schema (only for propose_blueprint):
     "boosts": [{"kind":"gather","resources":["food"],"every_n":4,"bonus":1,"max_bonus":2,"scope":"district"}],
     "unlocks": [{"kind":"craft","station":"workshop"}],
     "houses": {"every_n": 3}
+    // optional: "shelter":{"capacity":1-4}, "light":{"scope":"district"}, "upkeep":{"resource":..,"amount":1-5}
   }
 }
 
@@ -1163,6 +1165,7 @@ BLUEPRINT object schema:
     "boosts": [{"kind":"gather","resources":["food"],"every_n":4,"bonus":1,"max_bonus":2,"scope":"district"}],
     "unlocks": [{"kind":"craft","station":"workshop"}],
     "houses": {"every_n": 3}
+    // optional: "shelter":{"capacity":1-4}, "light":{"scope":"district"}, "upkeep":{"resource":..,"amount":1-5}
   },
   "sprite": {                            // OPTIONAL pixel art -- only include once id/needs/function are done
     "palette": ["#8B5A2B", "#D9C08C", "#4A6B3A"],   // 2-5 hex colors; a=1st, b=2nd, c=3rd...
@@ -1188,7 +1191,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-{season_line}{prices_line}{chronicle_line}{path1_lines}{level_line}Structures built: {structures_built}
+{season_line}{prices_line}{chronicle_line}{library_lessons_line}{path1_lines}{level_line}Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
@@ -1608,6 +1611,18 @@ def canonical_effect_vector(function):
         houses = function["houses"]
         if isinstance(houses, dict):
             payload["houses"] = {k: houses[k] for k in sorted(houses)}
+    if function.get("shelter"):
+        shelter = function["shelter"]
+        if isinstance(shelter, dict):
+            payload["shelter"] = {k: shelter[k] for k in sorted(shelter)}
+    if function.get("light"):
+        light = function["light"]
+        if isinstance(light, dict):
+            payload["light"] = {k: light[k] for k in sorted(light)}
+    if function.get("upkeep"):
+        upkeep = function["upkeep"]
+        if isinstance(upkeep, dict):
+            payload["upkeep"] = {k: upkeep[k] for k in sorted(upkeep)}
     if not payload:
         return ""
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -1744,6 +1759,17 @@ def validate_function_block(function, available_resource_ids):
             return False, "invalid unlock kind"
         if kind == "craft" and not unlock.get("station"):
             return False, "craft unlock needs station"
+        if kind == "transit":
+            if unlock.get("terrain") != "ocean":
+                return False, "transit terrain must be ocean"
+            consumes = unlock.get("consumes")
+            if not isinstance(consumes, dict) or not consumes:
+                return False, "transit consumes required"
+            for res, amount in consumes.items():
+                if res not in available_resource_ids:
+                    return False, f"unknown transit resource: {res}"
+                if isinstance(amount, bool) or not isinstance(amount, int) or amount < 1:
+                    return False, "transit consumption must be positive integers"
 
     houses = function.get("houses")
     if houses is not None:
@@ -1762,6 +1788,33 @@ def validate_function_block(function, available_resource_ids):
         cap = store.get("capacity")
         if isinstance(cap, bool) or not isinstance(cap, int) or not (5 <= cap <= 100):
             return False, "store capacity must be 5-100"
+
+    shelter = function.get("shelter")
+    if shelter is not None:
+        if not isinstance(shelter, dict):
+            return False, "shelter must be an object"
+        cap = shelter.get("capacity")
+        if isinstance(cap, bool) or not isinstance(cap, int) or not (1 <= cap <= 4):
+            return False, "shelter capacity must be 1-4"
+
+    light = function.get("light")
+    if light is not None:
+        if not isinstance(light, dict):
+            return False, "light must be an object"
+        scope = light.get("scope", "district")
+        if scope != "district":
+            return False, "light scope must be district"
+
+    upkeep = function.get("upkeep")
+    if upkeep is not None:
+        if not isinstance(upkeep, dict):
+            return False, "upkeep must be an object"
+        res = upkeep.get("resource")
+        if not isinstance(res, str) or res not in available_resource_ids:
+            return False, f"unknown upkeep resource: {res}"
+        amount = upkeep.get("amount")
+        if isinstance(amount, bool) or not isinstance(amount, int) or not (1 <= amount <= 5):
+            return False, "upkeep amount must be 1-5"
 
     return True, None
 
@@ -2849,6 +2902,8 @@ def build_user_prompt(data, slim=False):
     # entry) so flag-off / empty-chronicle prompts stay byte-identical.
     chronicle_line_raw = data.get("chronicle_line")
     chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
+    lessons_raw = data.get("library_lessons")
+    library_lessons_line = f"Library lessons: {lessons_raw}\n" if lessons_raw else ""
     path1_parts = []
     if data.get("path1_tool_line"):
         path1_parts.append(data["path1_tool_line"])
@@ -2895,6 +2950,7 @@ def build_user_prompt(data, slim=False):
         season_line=season_line,
         prices_line=prices_line,
         chronicle_line=chronicle_line,
+        library_lessons_line=library_lessons_line,
         path1_lines=path1_lines,
         recent_conversations="none" if slim else data.get("recent_conversations", "none"),
         inbox=data.get("inbox", "none"),

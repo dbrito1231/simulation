@@ -63,7 +63,7 @@ engine lock for a consistent read:
 | `calendar` | day/season/year — specs/02-engine-core.md |
 | `lmStatus` | last-known LM Studio reachability |
 | `agents` | per-agent view (position, resources, health, beliefs, skills, lifecycle fields, etc.) — specs/06-agents.md |
-| `civilization` | structures, projects, resource/project registries, pending blueprints/recipes/rules, stockpile, and flag-gated sections (chronicle/library when `CULTURE_ENABLED`, era/tech-tier/council when `TECH_TREE_ENABLED`, market/prices when `ECONOMY_ENABLED`, settlements/treaties/`isNight` when Path 1 is on) — specs/05-world.md, specs/08-09-10 |
+| `civilization` | structures, projects, resource/project registries, pending blueprints/recipes/rules, stockpile, and flag-gated sections (chronicle/library when `CULTURE_ENABLED`, era/tech-tier/council when `TECH_TREE_ENABLED`, market/prices when `ECONOMY_ENABLED`, settlements/treaties/`isNight` when Path 1 is on, `litDistricts` + per-structure `light` flag when `ENV_EFFECTS_ENABLED` — specs/08) — specs/05-world.md, specs/08-09-10 |
 | `benchmarks` | latest benchmark metrics — specs/12-ops.md |
 | `activity` | recent activity log entries |
 | `conversation` | last 30 conversation log entries |
@@ -89,6 +89,13 @@ handlers (server.py:3421-3441) both call a `threading.Event`-guarded
 `engine.save_state()` to flush the full world to `simulation/state.json`
 before the process exits — covers both normal exit (atexit doesn't fire on a
 signal-killed process) and Ctrl-C/`kill`.
+
+## Civ-1 state additions
+
+When transit is enabled, `/state` includes `civilization.physicalProps`, a
+read-only list of `{resource, count}` hints for the thin viewer. It derives up
+to three boats from village stockpile quantity; the viewer places them at fixed
+moorings in the starter ocean, rather than beside ordinary structures.
 
 ## Logging endpoints: fire-and-forget contract
 

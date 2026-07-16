@@ -208,6 +208,13 @@ loops):
    and retry once; any further failure falls through to `bad_response_fallback`
    tagged `error="context_overflow"`.
 
+## Civ-1 library lessons
+
+When `LIBRARY_SCALING_ENABLED` is enabled, an agent in a district with a
+working Library receives a `library_lessons` prompt line. It contains at most
+three highest preserved skill records and two newest chronicle entries, with a
+480-character cap; it is omitted otherwise.
+
 ## Routing
 
 `model_for_decision(data)` = `MODEL_SMART` if `is_high_stakes_turn(data)` else

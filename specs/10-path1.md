@@ -132,6 +132,25 @@ arrival it logs to `civilization["caravanLog"]` and an
 within 150px of an agent from a different settlement (used for
 diplomacy-flavored prompt lines).
 
+## TRANSIT_ENABLED
+
+`TRANSIT_ENABLED` defaults to True and requires diplomacy. The `transit`
+unlock has the shape `{"kind":"transit","terrain":"ocean",
+"consumes":{"boat":1}}`; `terrain` is currently limited to `ocean` and all
+consumed resource ids must be known positive quantities. A working transit
+structure permits ocean-zone gathering and consumes its cost when an abstract
+caravan arrives at another settlement. Agents retain ordinary district/road
+movement: this does not add water pathing or vehicle entities.
+
+Save migration (`restore_state()`): the `dock` and `shipyard` types gain a
+`{"kind":"transit","terrain":"ocean","consumes":{"boat":1}}` unlock when
+missing. Like the hearth/lighthouse light migration, when the registry entry
+itself is gone (the approved-custom registry caps at 15 and retires old
+entries) but a structure instance of the type still stands, a minimal
+registry entry is recreated from the instance so old saves regain transit —
+otherwise the migration would silently no-op on exactly the saves that need
+it. Idempotent.
+
 ## TIER3_CONTENT_ENABLED
 
 Layered on top of `INDUSTRY_ENABLED` (sim_engine.py:1058): three tier-2/3
@@ -154,6 +173,14 @@ happens. Otherwise homeowners are sheltered first (`ECONOMY_ENABLED`), then
 remaining slots fill by proximity; every unsheltered, non-incapacitated
 agent above 10 health takes `NIGHT_EXPOSURE_DAMAGE = 2` health, floored at
 10, and logs a `night_shelter_rate` benchmark.
+
+`ENV_EFFECTS_ENABLED` extensions ([08-systems-economy.md](08-systems-economy.md)):
+working structures with a `shelter` function effect add their `capacity` to
+the slot total, and an unsheltered agent standing in a *lit* district (a
+working, fueled `light` structure — nightly `upkeep` fuel charged at the
+first night-pressure tick of the day) is exempt from the exposure damage.
+The `night_shelter_rate` benchmark payload gains a `lit` count when any
+agent was spared by light.
 
 **Wildlife:** `_tick_wildlife()` runs on the `GOODS_TICK_FRAMES` gate
 (900 ticks) with `WILDLIFE_EVENT_PROB = 0.02` chance per check

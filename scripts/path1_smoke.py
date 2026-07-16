@@ -6,6 +6,7 @@ No LM Studio required. Run:
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -341,6 +342,177 @@ def test_two_settlements(engine):
     print(f"  OK settlements: {len(settlements)} ({', '.join(s['id'] for s in settlements)})")
 
 
+def test_env_effects():
+    # Dedicated engine: environmental function-block effects (shelter/light/
+    # upkeep) are independent of the shared engine's accumulated structures.
+    engine = make_engine()
+    c = engine.civilization
+    did = "village_core"
+    c["projectRegistry"]["hearth"] = {
+        "name": "Hearth", "needs": {"stone": 2}, "visualStyle": "generic",
+        "function": {
+            "light": {"scope": "district"},
+            "upkeep": {"resource": "charcoal", "amount": 1},
+        },
+    }
+    c["structures"].append({
+        "id": 9500, "type": "hearth", "x": 100, "y": 100,
+        "condition": 100, "districtId": did, "isRuin": False,
+    })
+    c["stockpile"]["charcoal"] = 5
+    agent = engine.agents[0]
+    agent["currentDistrict"] = did
+    agent["homeStructureId"] = None
+    agent["incapacitated"] = False
+    agent["health"] = 50
+    engine.frameTick = 12000  # inside the night fraction of day 0
+
+    engine._tick_night_pressure()
+    assert_true(c["stockpile"]["charcoal"] == 4,
+                f"expected 1 charcoal burned, got {c['stockpile']['charcoal']}")
+    assert_true(did in (c.get("litDistricts") or []),
+                f"expected {did} lit, got {c.get('litDistricts')}")
+    assert_true(agent["health"] == 50,
+                f"lit agent should take no exposure damage, got {agent['health']}")
+    print(f"  OK env upkeep + light: charcoal={c['stockpile']['charcoal']}, "
+          f"lit={c.get('litDistricts')}")
+
+    # Drain the fuel and force a new day so upkeep is re-charged: the hearth
+    # can't pay, so it goes unfueled and the agent takes exposure damage.
+    c["stockpile"]["charcoal"] = 0
+    engine.frameTick = se.DAY_FRAMES + 12000  # day 1, still the night fraction
+    engine._tick_night_pressure()
+    assert_true(did not in (c.get("litDistricts") or []),
+                f"expected {did} unlit once fuel is drained, got {c.get('litDistricts')}")
+    assert_true(agent["health"] < 50,
+                f"unlit exposed agent should take exposure damage, got {agent['health']}")
+    print(f"  OK unfueled hearth -> unlit + exposure damage (health={agent['health']})")
+
+    # ENV_EFFECTS_ENABLED=False: legacy behavior -- no upkeep charge, no lit
+    # districts, unsheltered agents take ordinary exposure damage.
+    se.ENV_EFFECTS_ENABLED = False
+    try:
+        agent["health"] = 50
+        c["stockpile"]["charcoal"] = 5
+        engine.frameTick = se.DAY_FRAMES * 2 + 12000  # day 2, night fraction
+        engine._tick_night_pressure()
+        assert_true(c.get("litDistricts") == [],
+                    f"litDistricts should be empty with the flag off, got {c.get('litDistricts')}")
+        assert_true(c["stockpile"]["charcoal"] == 5,
+                    "flag off: upkeep must not be charged")
+        assert_true(agent["health"] < 50,
+                    f"flag off: unsheltered agent should still take exposure damage, got {agent['health']}")
+    finally:
+        se.ENV_EFFECTS_ENABLED = True
+    print("  OK ENV_EFFECTS_ENABLED=False legacy behavior")
+
+
+def test_env_upkeep_shared_district():
+    # Two working structures of the same upkeep type sharing one district:
+    # the district stock must be consulted ONCE (aggregated), not re-read
+    # per structure, so it can't be over-drawn below zero while silently
+    # reporting "fueled" with an under-payment.
+    engine = make_engine()
+    c = engine.civilization
+    did = "village_core"
+    c["projectRegistry"]["hearth"] = {
+        "name": "Hearth", "needs": {"stone": 2}, "visualStyle": "generic",
+        "function": {
+            "upkeep": {"resource": "charcoal", "amount": 1},
+        },
+    }
+    c["structures"].append({
+        "id": 9600, "type": "hearth", "x": 100, "y": 100,
+        "condition": 100, "districtId": did, "isRuin": False,
+    })
+    c["structures"].append({
+        "id": 9601, "type": "hearth", "x": 120, "y": 100,
+        "condition": 100, "districtId": did, "isRuin": False,
+    })
+    # total need = 1 * 2 structures = 2 charcoal; district holds only 1,
+    # stockpile covers the remaining 1.
+    engine._set_district_stock(did, "charcoal", 1)
+    c["stockpile"]["charcoal"] = 5
+    working = [s for s in c["structures"] if s["type"] == "hearth"]
+    fueled = engine._pay_upkeep(working, "charcoal", 2)
+    assert_true(fueled, "expected shared-district upkeep to be fueled")
+    assert_true(engine._district_stock(did, "charcoal") == 0,
+                f"expected district stock drained to 0, got {engine._district_stock(did, 'charcoal')}")
+    assert_true(c["stockpile"]["charcoal"] == 4,
+                f"expected stockpile to pay exactly the 1-unit shortfall, got {c['stockpile']['charcoal']}")
+    print(f"  OK env upkeep shared district: district=0, "
+          f"stockpile={c['stockpile']['charcoal']}, fueled={fueled}")
+
+
+def test_transit_and_economy_sinks():
+    engine = make_engine()
+    c = engine.civilization
+    c["projectRegistry"]["dock"] = {"name": "Dock", "function": {"unlocks": [
+        {"kind": "transit", "terrain": "ocean", "consumes": {"boat": 1}}]}}
+    c["structures"].append({"id": 9700, "type": "dock", "districtId": "beach",
+                            "condition": 100, "isRuin": False})
+    c["stockpile"]["boat"] = 2
+    assert_true(engine._has_ocean_transit(), "working dock should unlock transit")
+    assert_true(engine._consume_ocean_transit(), "boat-funded transit should launch")
+    assert_true(c["stockpile"]["boat"] == 1, c["stockpile"])
+    c["stockpile"]["planks"] = 1
+    structure = {"type": "house", "condition": 80, "isRuin": False}
+    assert_true(engine._repair_cost(structure) == {"planks": 1}, engine._repair_cost(structure))
+    c["stockpile"]["dried_fish"] = len(engine._living_agents())
+    hunger = engine.agents[0]["hunger"]
+    engine._tick_comfort_consumption()
+    assert_true(engine.agents[0]["hunger"] >= hunger + 2, engine.agents[0]["hunger"])
+    print("  OK transit boat sink + economy comfort/repair sinks")
+
+
+def test_transit_migration_from_instance():
+    """restore_state's dock/shipyard transit migration must recreate the
+    registry entry from the standing structure instance when the registry
+    entry itself was retired (approved-custom registry caps at 15) -- the
+    same instance-fallback idiom as the hearth/lighthouse light migration.
+    Uses a temp STATE_PATH so this never touches the real simulation/state.json."""
+    import json
+    import tempfile
+
+    source = make_engine()
+    c = source.civilization
+    c["projectRegistry"].pop("dock", None)
+    c["structures"].append({
+        "id": 9900, "type": "dock", "districtId": "beach",
+        "condition": 100, "isRuin": False, "name": "Old Dock",
+    })
+    with source.lock:
+        payload = source._serialize_state()
+
+    tmp_dir = tempfile.gettempdir()
+    tmp_path = str(Path(tmp_dir) / "path1_smoke_state_migration.json")
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh)
+
+    old_state_path = se.STATE_PATH
+    se.STATE_PATH = tmp_path
+    try:
+        target = make_engine()
+        restored = target.restore_state()
+        assert_true(restored, "restore_state should succeed from the temp save")
+        registry = target.civilization.get("projectRegistry") or {}
+        entry = registry.get("dock")
+        assert_true(isinstance(entry, dict),
+                    f"dock registry entry should be recreated from the instance, got {entry}")
+        fn = entry.get("function") or {}
+        unlocks = fn.get("unlocks") or []
+        assert_true(any(u.get("kind") == "transit" and u.get("terrain") == "ocean"
+                        for u in unlocks if isinstance(u, dict)),
+                    f"expected ocean transit unlock on recreated dock entry, got {unlocks}")
+        print("  OK dock registry entry recreated from instance with ocean transit unlock")
+    finally:
+        se.STATE_PATH = old_state_path
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 def main():
     assert_true(se.PATH1_ENABLED, "PATH1_ENABLED must be True for smoke")
     engine = make_engine()
@@ -358,6 +530,10 @@ def main():
     test_dig_cave_relocates(engine)
     test_dig_district_exhausted(engine)
     test_two_settlements(engine)
+    test_env_effects()
+    test_env_upkeep_shared_district()
+    test_transit_and_economy_sinks()
+    test_transit_migration_from_instance()
     import py_compile
     py_compile.compile(str(ROOT / "simulation" / "sim_engine.py"), doraise=True)
     py_compile.compile(str(ROOT / "simulation" / "server.py"), doraise=True)

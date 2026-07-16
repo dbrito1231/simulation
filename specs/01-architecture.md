@@ -73,7 +73,7 @@ locations, or the engine and the LLM-facing schema will silently diverge:
 Full action-by-action detail (params, gates, effects) lives in
 [07-actions.md](07-actions.md) — this file only states the invariant.
 
-## Flag index (complete — 30 module-level flags, sim_engine.py)
+## Flag index (complete — 34 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -111,3 +111,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `PATH1_DIPLOMACY_ENABLED` | True | yes (as `DIPLOMACY_ENABLED`) | [10](10-path1.md) |
 | `TIER3_CONTENT_ENABLED` | True | yes | [10](10-path1.md) |
 | `PRESSURE_LOOP_ENABLED` | True | yes | [10](10-path1.md) |
+| `ENV_EFFECTS_ENABLED` | True | yes | [08](08-systems-economy.md) |
+| `LIBRARY_SCALING_ENABLED` | True | yes | [09](09-systems-society.md) |
+| `TRANSIT_ENABLED` | True | yes | [10](10-path1.md) |
+| `ECONOMY_SINKS_ENABLED` | True | yes | [08](08-systems-economy.md) |

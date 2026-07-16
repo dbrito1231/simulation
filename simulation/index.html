@@ -1045,6 +1045,38 @@ function nightAlpha(cal) {
   return MAX_NIGHT_ALPHA * (1.00 - f) / 0.05;
 }
 
+// Light glow (ENV_EFFECTS_ENABLED): warm radial glow over lit structures while
+// the night overlay is active, pushing back the dark in lit districts. Purely
+// data-driven — a no-op when the server hasn't sent `light`/`litDistricts`
+// yet (older payload), so it's safe regardless of rollout order.
+const LIGHT_GLOW_RADIUS = 140;
+function drawLightGlows(cal) {
+  const na = nightAlpha(cal);
+  if (na <= 0) return;
+  const civ = getCiv();
+  const litDistricts = civ.litDistricts;
+  if (!litDistricts || !litDistricts.length) return;
+  const structures = civ.structures || [];
+  const strength = na / MAX_NIGHT_ALPHA;
+  const prevOp = ctx.globalCompositeOperation;
+  ctx.globalCompositeOperation = "lighter";
+  for (const s of structures) {
+    if (!s || s.light !== true) continue;
+    if (!litDistricts.includes(s.districtId)) continue;
+    const size = getStructureRenderSize(s);
+    const cx = s.x + size.width / 2;
+    const cy = s.y + size.height / 2;
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, LIGHT_GLOW_RADIUS);
+    grad.addColorStop(0, `rgba(255, 190, 90, ${(0.35 * strength).toFixed(3)})`);
+    grad.addColorStop(1, "rgba(255, 190, 90, 0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, LIGHT_GLOW_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = prevOp;
+}
+
 function drawWorld(ctx, frameTick) {
   if (!terrainCanvas) {
     scheduleTerrainCacheBuild();
@@ -2266,11 +2298,43 @@ function tick() {
     else drawAgent(ctx, item.agent, renderFrame);
   }
 
+  // Server-derived decoration only: boats remain resources, not entities.
+  for (const prop of (getCiv().physicalProps || [])) {
+    if (prop.resource !== "boat") continue;
+    const moorings = [[58, 240], [112, 470], [42, 690]];
+    for (let i = 0; i < Math.min(prop.count, moorings.length); i++) {
+      const [x, y] = moorings[i];
+      // Large moored sailboat in the expanded ocean, facing the beach.
+      ctx.fillStyle = "rgba(8, 31, 57, 0.28)";
+      ctx.fillRect(x - 4, y + 48, 128, 8);
+      ctx.fillStyle = "#4A2714";
+      ctx.beginPath();
+      ctx.moveTo(x, y + 30); ctx.lineTo(x + 118, y + 30);
+      ctx.lineTo(x + 94, y + 54); ctx.lineTo(x + 18, y + 54);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#B96D32";
+      ctx.fillRect(x + 13, y + 28, 84, 8);
+      ctx.fillStyle = "#5A321B";
+      ctx.fillRect(x + 57, y - 78, 6, 108);
+      ctx.fillStyle = "#F4E2B5";
+      ctx.beginPath();
+      ctx.moveTo(x + 65, y - 72); ctx.lineTo(x + 108, y + 14); ctx.lineTo(x + 65, y + 14);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#D8C08B";
+      ctx.beginPath();
+      ctx.moveTo(x + 55, y - 52); ctx.lineTo(x + 22, y + 14); ctx.lineTo(x + 55, y + 14);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#F7C948";
+      ctx.fillRect(x + 21, y + 18, 12, 7);
+    }
+  }
+
   const na = nightAlpha(world.calendar);
   if (na > 0) {
     ctx.fillStyle = `rgba(10, 16, 48, ${na.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
+  drawLightGlows(world.calendar);
 
   renderSidebar();
   renderMinimap();

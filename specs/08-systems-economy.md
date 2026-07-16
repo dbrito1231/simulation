@@ -103,7 +103,8 @@ think that turn) so agents stay responsive to being talked to.
 ## STRUCTURE_EFFECTS_ENABLED
 
 Every built structure type carries a **function block** (`produces`,
-`boosts`, `unlocks`, `stores`, `houses`, `modifies`) from
+`boosts`, `unlocks`, `stores`, `houses`, `modifies`, and — when
+`ENV_EFFECTS_ENABLED` — `shelter`, `light`, `upkeep`) from
 `SEED_STRUCTURE_FUNCTIONS`/`PROJECT_TEMPLATES` or a custom blueprint's own
 declaration; `_get_structure_function(type_)` (sim_engine.py:2541) resolves
 it (empty dict, i.e. no effect, when the flag is off).
@@ -127,6 +128,43 @@ scope, cap 1). `_population_cap` sums `houses` capacity
 `len(AGENT_DEFS)` unless `LIFECYCLE_ENABLED` lifts it for generated
 villagers). `_storage_capacity` sums `stores` capacity onto
 `BASE_STORAGE_CAPACITY = 25`.
+
+**Environmental effects (`shelter`/`light`/`upkeep`, `ENV_EFFECTS_ENABLED`):**
+three additional function-block keys, validated by `validate_function_block`
+(server.py) and available to custom blueprints; the engine ignores all three
+when the flag is off.
+
+- `shelter: {"capacity": 1-4}` — query-time. Each *working* structure with a
+  shelter effect adds `capacity` night-shelter slots, counted by both
+  `_tick_shelter()` (hunger penalty, GOODS) and `_tick_night_pressure()`
+  (health damage, PRESSURE_LOOP — [10-path1.md](10-path1.md)). Houses are
+  unchanged: `houses` still grants `HOUSE_SHELTER_OCCUPANTS = 2` beds
+  implicitly; a block declaring both stacks both.
+- `light: {"scope": "district"}` (only valid scope) — a working **and
+  fueled** light structure marks its district *lit* for the current night.
+  Living agents standing in a lit district take no `NIGHT_EXPOSURE_DAMAGE`
+  from `_tick_night_pressure()` (the hunger-side `_tick_shelter()` penalty is
+  NOT waived — light is warmth, not a bed). Lit district ids are echoed in
+  `/state` as `civilization["litDistricts"]` while night lasts (empty by
+  day), and working light structures carry `"light": true` in the structures
+  payload so the viewer can draw a glow ([11-viewer.md](11-viewer.md)).
+- `upkeep: {"resource": <id>, "amount": 1-5}` — nightly fuel. At the first
+  night-pressure tick of each day (`frameTick // DAY_FRAMES` changes,
+  tracked in `civilization["upkeepLastDay"]` per structure type), each
+  working structure whose function declares `upkeep` consumes
+  `amount` of `resource` — district stock first, then village stockpile. If
+  unaffordable, the structure is **unfueled** until the next day: its
+  `light` effect is inactive (other effect keys are unaffected in Phase 1;
+  upkeep generalizes in the Civ-1 Phase 4 plan). Fired consumption logs an
+  activity line (e.g. "The Hearth burns 1 charcoal through the night").
+
+Seed/migration: the save-time registry migration in `restore_state()` adds
+`light: {"scope": "district"}` + `upkeep: {"resource": "charcoal",
+"amount": 1}` to the custom registry types `hearth` and `lighthouse` when
+present and lacking a light effect. If an older save retains a built or ruined
+Hearth/Lighthouse instance but lost its registry entry, restore reconstructs a
+minimal registry entry from that instance, so `repair_structure` restores both
+the structure and its light behavior.
 
 **Saturation:** `_type_saturated(type_)` (sim_engine.py:3705) flags a
 structure type as not worth building more of once its effect is maxed —
@@ -161,6 +199,22 @@ Composable-build blocks with `shelter: True` (`wall`, `fence` — see
 
 Related actions: `repair_structure`, `upgrade_structure`, `craft_item`
 (cart/wagon recipes) — [07-actions.md](07-actions.md).
+
+## ECONOMY_SINKS_ENABLED
+
+`ECONOMY_SINKS_ENABLED` defaults to True. Repairs prefer one plank when
+available; tier-2+ projects add one crafted material (planks, then bricks,
+then tools); and comfort consumption drains one pottery or dried fish per
+living agent every `COMFORT_EVERY_N_GOODS_TICKS = 4` goods ticks (i.e. every
+~2 real minutes), giving a small hunger (+2) and health (+1) benefit, capped
+at one unit per agent per firing.
+
+Drain arithmetic (why every 4th tick): a goods tick fires every 30 real
+seconds, so per-tick consumption would drain ~1,080 goods/hour at ~9 living
+agents — a ~15k comfort backlog gone in ~14 real hours. Sampling every 4th
+tick gives ~270/hour ≈ 2.3 real days for the same backlog, matching the
+Civ-1 plan's "saturated stockpiles drain over ~2-3 real-time days" target
+while production continues underneath.
 
 ## ECONOMY_ENABLED
 
