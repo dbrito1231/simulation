@@ -8,7 +8,7 @@ A server-authoritative AI village simulation: a Python engine runs the world hea
 
 ## Model policy
 
-**One orchestrator, many Sonnet 5 subagents.** The model that initiates/plans the work (whatever tier — Fable, Mythos, Opus, Sonnet) acts as the **orchestrator only**: plans, splits into phases/steps, dispatches, reviews results. All implementation is delegated to **subagents running Sonnet 5 or lower** (`model: "sonnet"` on the Agent tool; use lower tiers when sufficient) — Sonnet 5 is the highest model any implementation agent may use. Use the `implementer` subagent type (`.claude/agents/implementer.md`, pinned to `model: sonnet`) for phase/step-level code changes. The orchestrator should not write implementation code itself except for trivial one-line fixes, and must never spawn implementation subagents on a tier above Sonnet 5.
+**One orchestrator, many Sonnet 5 subagents.** The initiating model (any tier — Fable, Mythos, Opus, Sonnet) acts as the **orchestrator only**: plans, splits into phases/steps, dispatches, reviews. All implementation is delegated to subagents on **Sonnet 5 or lower** (`model: "sonnet"` on the Agent tool; lower tiers when sufficient) — use the `implementer` subagent type (`.claude/agents/implementer.md`, pinned to `model: sonnet`) for phase/step-level code changes. The orchestrator writes no implementation code itself except trivial one-line fixes.
 
 ## Commands
 
@@ -44,7 +44,7 @@ Data flow: tick thread advances world → think timer fires → `_build_think_pa
 - The engine mutates world state only under its lock; full world persists to `simulation/state.json` (autosave + graceful-exit flush; `restore_state()` resumes old saves) — [specs/02-engine-core.md](specs/02-engine-core.md).
 - `MAX_CONCURRENT_LLM = 3` (sim_engine.py); LM Studio context must cover ~3,400 tokens × parallel slots (`uv run python scripts/lms_load.py` applies target config) — [specs/03-cognition.md](specs/03-cognition.md).
 - Core loop is the build pipeline: `start_project` → gather → contribute → `build_structure`, plus a blueprint flow where elder Sage approves new types; Sage's survival is protected by a deterministic emergency system — [specs/07-actions.md](specs/07-actions.md), [specs/02-engine-core.md](specs/02-engine-core.md#sage-emergency).
-- **specs/ must always match the repo.** Any code change that alters behavior, actions, flags, routes, constants, or data shapes MUST update the owning spec in the same change — specs are edited first under SDD, and never left stale after the fact. Ownership map: [specs/00-overview.md](specs/00-overview.md).
+- **specs/ must always match the repo.** Any code change that alters behavior, actions, flags, routes, constants, or data shapes MUST update the owning spec in the same change (SDD: specs first, code second). Ownership map: [specs/00-overview.md](specs/00-overview.md).
 
 ## Feature flags
 
@@ -57,7 +57,7 @@ Each server run writes to `simulation/logs/<timestamp>/` (gitignored): `activity
 ## Docs map
 
 - [docs/HANDOFF.md](docs/HANDOFF.md) — **start here** when resuming: snapshot + narrative catch-up.
-- [specs/00-overview.md](specs/00-overview.md) — canonical, rebuildable spec set (13 files); SDD workflow — edit specs first, code second.
+- [specs/00-overview.md](specs/00-overview.md) — index of the canonical, rebuildable 13-file spec set.
 - [docs/REFERENCE.md](docs/REFERENCE.md) — historical-rationale pointers plus LM Studio operational tips not already canonical in specs/03.
 - `docs/plan-visual-{1,2,3}-*.md` — visual-polish plans (1, 2 planned; 3 done).
 - `docs/archive/` — **historical record only. Do not read or act on files there unless the user explicitly asks.**
