@@ -1,6 +1,6 @@
 # Simulation
 
-A real-time, browser-based AI village simulation where a local LLM acts as the brain for each inhabitant. Twelve autonomous agents move, talk, trade, gather resources, and propose build projects in a top-down pixel-art world.
+A server-authoritative AI village simulation where a local LLM acts as the brain for each inhabitant. 8 autonomous agents move, talk, trade, gather resources, and propose build projects in a top-down pixel-art world by default — up to 12, via a roster override (`{"agents": N}` JSON body on `POST /control/reset`, or the `SIM_AGENTS` env var).
 
 Inspired by the multi-agent civilization research in Project Sid, kept intentionally minimal: a proof-of-concept for the LLM-as-brain loop.
 
@@ -28,15 +28,17 @@ pip install flask flask-cors requests
 
 1. Start LM Studio and load a model. The server expects the OpenAI-compatible API at `http://localhost:1234`.
 
-   > **Context length vs. parallel slots:** the app queues up to `MAX_CONCURRENT_LLM`
-   > (3, see `simulation/index.html`) requests at once, and each request's prompt is
-   > ~1500 tokens. LM Studio divides its configured context length across its
+   > **Context length vs. parallel slots:** the engine queues up to `MAX_CONCURRENT_LLM`
+   > (3, `simulation/sim_engine.py`) think requests at once, and each request's prompt is
+   > ~3,100 tokens. LM Studio divides its configured context length across its
    > parallel slots, so if `context length ÷ parallel slots` is smaller than that,
    > you'll see `"Context size has been exceeded"` errors under load (the app
-   > recovers gracefully, but agents lose a turn). Set LM Studio's context length to
-   > at least `1600 × parallel slots` (e.g. 8K context for 4 slots), and make sure
-   > LM Studio's parallel-slot/concurrency setting is at least 3. If you can't raise
-   > the context length, lower `MAX_CONCURRENT_LLM` in `simulation/index.html` instead.
+   > recovers gracefully with a slimmed-prompt retry, but agents can still lose a
+   > turn). Set LM Studio's context length to at least `3400 × parallel slots`, and
+   > make sure LM Studio's parallel-slot/concurrency setting is at least 3 — or run
+   > `uv run python scripts/lms_load.py` to apply the canonical target config
+   > directly. If you can't raise the context length, lower `MAX_CONCURRENT_LLM` in
+   > `simulation/sim_engine.py` instead. Full detail: [specs/03-cognition.md](specs/03-cognition.md).
 
 2. Start the simulation server:
 
@@ -54,9 +56,11 @@ Each server run writes session logs under `simulation/logs/` (gitignored).
 
 | Path | Purpose |
 |------|---------|
-| `simulation/server.py` | Flask API, agent logic, LM Studio integration |
+| `simulation/sim_engine.py` | The engine — all world state, 30/s tick loop, `apply_decision`, persistence |
+| `simulation/server.py` | Flask API, prompt building, LM Studio integration, decision validation |
 | `simulation/index.html` | Browser client and render loop |
 | `simulation/sprites.js` | Pixel-art drawing helpers |
+| `simulation/roles.json` | Single source of truth for role definitions |
 | `specs/` | Architecture and feature specifications |
 
 ## Specs

@@ -103,7 +103,7 @@ The inventory above is a map, **not** a citable source. Every number/name/count/
 | 2C — specs/05,06,07 | ☑ done | 2026-07-15 | 1,351/1,309/1,564 words. **Plan-doc correction:** starter districts = **12, not 15** (verified against `STARTER_DISTRICTS`); plan doc fixed. All 35 actions covered in 07 (approve/reject_recipe share a row). |
 | 2D — specs/08,09,10 | ☑ done | 2026-07-15 | 1,537/1,477/1,111 words (08 ~9.8% over target, within tolerance). Anti-oscillation guard documented from code (`RULE_PROPOSE_COOLDOWN=1500`, `RULE_REPEAL_MIN_AGE_FRAMES=4×`, backstop-only scope) — archived fix plan no longer load-bearing. |
 | 3 — specs/11,12 + old-spec deletion | ☑ done | 2026-07-15 | 1,014/932 words. specs/ = exactly the 13 new files; 4 old gate specs deleted (content in git history). Correction: plan-visual-3 is fully DONE per its own status line (not "partially done") — specs/11 reflects that. |
-| 4 — CLAUDE/AGENTS/REFERENCE/README | ☐ not started | | |
+| 4 — CLAUDE/AGENTS/REFERENCE/README | ☑ done | 2026-07-15 | CLAUDE.md 771 words (≤774 ✓, did not grow); AGENTS.md 16 lines (spec-set clause added, commit example refreshed); REFERENCE.md rewritten as slim router, 367 words; README fixed (8/12 agents, correct concurrency/context facts, layout table). All links verified to resolve. |
 | 5 — verification suite | ☐ not started | | |
 
 ## Model assignment per phase
