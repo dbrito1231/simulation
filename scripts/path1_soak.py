@@ -1,6 +1,6 @@
 """SA-9 Path 1 soak verifier — live soak orchestration + log audit.
 
-Runs the 2-hour mini-soak from docs/path-1-minecraft-like-world-plan.md and
+Runs the 2-hour mini-soak from docs/archive/path-1-minecraft-like-world-plan.md and
 fills audit rows 6–10. No LM Studio required for ``prompt-check`` or ``audit``
 of an existing session; live ``run`` needs the server (LM Studio optional but
 recommended for check 8).
