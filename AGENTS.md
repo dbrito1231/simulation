@@ -1,6 +1,6 @@
 # AGENTS.md
 
-**Read [CLAUDE.md](CLAUDE.md) first — it is the canonical AI-agent guide for this repo** (what this is, commands, architecture, invariants, flags, logs). Deep mechanics: [docs/REFERENCE.md](docs/REFERENCE.md). For behavior changes, [specs/](specs/00-overview.md) is the canonical spec set — edit specs first, then code (SDD). Only conventions not covered there are listed below.
+**Read [CLAUDE.md](CLAUDE.md) first — it is the canonical AI-agent guide for this repo** (what this is, commands, architecture, invariants, flags, logs). Deep mechanics: [docs/REFERENCE.md](docs/REFERENCE.md). For behavior changes, [specs/](specs/00-overview.md) is the canonical spec set — edit specs first, then code (SDD). **Specs must always stay in sync with the repo:** any code change that alters documented behavior, actions, flags, routes, or constants must update the owning spec in the same commit. Only conventions not covered there are listed below.
 
 ## Model policy
 

@@ -44,6 +44,7 @@ Data flow: tick thread advances world → think timer fires → `_build_think_pa
 - The engine mutates world state only under its lock; full world persists to `simulation/state.json` (autosave + graceful-exit flush; `restore_state()` resumes old saves) — [specs/02-engine-core.md](specs/02-engine-core.md).
 - `MAX_CONCURRENT_LLM = 3` (sim_engine.py); LM Studio context must cover ~3,400 tokens × parallel slots (`uv run python scripts/lms_load.py` applies target config) — [specs/03-cognition.md](specs/03-cognition.md).
 - Core loop is the build pipeline: `start_project` → gather → contribute → `build_structure`, plus a blueprint flow where elder Sage approves new types; Sage's survival is protected by a deterministic emergency system — [specs/07-actions.md](specs/07-actions.md), [specs/02-engine-core.md](specs/02-engine-core.md#sage-emergency).
+- **specs/ must always match the repo.** Any code change that alters behavior, actions, flags, routes, constants, or data shapes MUST update the owning spec in the same change — specs are edited first under SDD, and never left stale after the fact. Ownership map: [specs/00-overview.md](specs/00-overview.md).
 
 ## Feature flags
 
