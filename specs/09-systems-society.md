@@ -50,7 +50,7 @@ capped at `COUNCIL_LOG_CAP = 12`.
 
 | Guard | Constant | Behavior |
 |---|---|---|
-| Approval ceiling | `MAX_APPROVED_CUSTOM = 15` | `_maybe_retire_blueprint`: once reached, retires the oldest *built* custom type from the registry (standing structures keep their name/visuals) to free a slot. |
+| Approval ceiling | `MAX_APPROVED_CUSTOM = 15` | `_maybe_retire_blueprint`: once reached, retires the oldest *built* custom type from the registry to free a slot. Retirement means the recipe is forgotten; standing structures keep their name/visuals. Code that attaches semantics to a registry entry must tolerate its absence or recreate a minimal entry from a standing instance before attaching them. |
 | Resource/recipe ceilings | `MAX_CUSTOM_RESOURCES = 10`, `MAX_CUSTOM_RECIPES = 12` | `_validate_blueprint`/`_validate_recipe` reject new proposals past these. |
 | Rejection amnesty | `BLUEPRINT_AMNESTY_FRAMES = STALL_THRESHOLD * 60` (~20 min) | `_maybe_amnesty_rejected_blueprints`: a rejected id is no longer a permanent blacklist — it expires and can be re-proposed. |
 | Sage review timeout | `SAGE_REVIEW_TIMEOUT_FRAMES = STALL_THRESHOLD * 20` (~6.7 min) | `_maybe_skip_sage_review`: if no living, non-incapacitated elder exists, a pending review auto-skips rather than blocking forever. |

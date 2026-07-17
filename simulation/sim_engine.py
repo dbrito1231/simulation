@@ -9845,6 +9845,28 @@ class SimEngine:
             a["currentDistrict"] = kind_to_starter_district.get(kind, "village_core")
             a["waypoints"] = []
 
+    def _ensure_registry_entry_from_instance(self, civ, type_id):
+        """Restore-only fallback for retired structure recipes."""
+        registry = civ.get("projectRegistry")
+        if not isinstance(registry, dict):
+            return None
+        entry = registry.get(type_id)
+        if isinstance(entry, dict):
+            return entry
+        instance = next((s for s in civ.get("structures", [])
+                         if s.get("type") == type_id), None)
+        if not instance:
+            return None
+        entry = {
+            "name": instance.get("name") or type_id.replace("_", " ").title(),
+            "needs": {"wood": 2, "stone": 2},
+            "visualStyle": instance.get("visualStyle") or "generic",
+            "function": {},
+            "custom": True,
+        }
+        registry[type_id] = entry
+        return entry
+
     def restore_state(self):
         """If a valid state.json exists, rehydrate the world from it instead of
         the cold-start roster. Returns True on a successful restore. Accepts
@@ -10017,46 +10039,19 @@ class SimEngine:
                 if ENV_EFFECTS_ENABLED:
                     civ.setdefault("upkeepLastDay", {})
                     civ.setdefault("litDistricts", [])
-                    registry = civ.get("projectRegistry")
-                    if isinstance(registry, dict):
-                        for tid in ("hearth", "lighthouse"):
-                            tmpl = registry.get(tid)
-                            if not isinstance(tmpl, dict):
-                                instance = next((s for s in civ.get("structures", [])
-                                                 if s.get("type") == tid), None)
-                                if not instance:
-                                    continue
-                                tmpl = {
-                                    "name": instance.get("name") or tid.replace("_", " ").title(),
-                                    "needs": {"wood": 2, "stone": 2},
-                                    "visualStyle": instance.get("visualStyle") or "generic",
-                                    "function": {},
-                                    "custom": True,
-                                }
-                                registry[tid] = tmpl
-                            fn = tmpl.setdefault("function", {})
-                            if not isinstance(fn.get("light"), dict):
-                                fn["light"] = {"scope": "district"}
-                            fn.setdefault("upkeep", {"resource": "charcoal", "amount": 1})
+                    for tid in ("hearth", "lighthouse"):
+                        tmpl = self._ensure_registry_entry_from_instance(civ, tid)
+                        if not isinstance(tmpl, dict):
+                            continue
+                        fn = tmpl.setdefault("function", {})
+                        if not isinstance(fn.get("light"), dict):
+                            fn["light"] = {"scope": "district"}
+                        fn.setdefault("upkeep", {"resource": "charcoal", "amount": 1})
                 if TRANSIT_ENABLED:
-                    registry = civ.get("projectRegistry")
                     for tid in ("dock", "shipyard"):
-                        entry = registry.get(tid) if isinstance(registry, dict) else None
+                        entry = self._ensure_registry_entry_from_instance(civ, tid)
                         if not isinstance(entry, dict):
-                            if not isinstance(registry, dict):
-                                continue
-                            instance = next((s for s in civ.get("structures", [])
-                                             if s.get("type") == tid), None)
-                            if not instance:
-                                continue
-                            entry = {
-                                "name": instance.get("name") or tid.replace("_", " ").title(),
-                                "needs": {"wood": 2, "stone": 2},
-                                "visualStyle": instance.get("visualStyle") or "generic",
-                                "function": {},
-                                "custom": True,
-                            }
-                            registry[tid] = entry
+                            continue
                         fn = entry.setdefault("function", {})
                         unlocks = fn.setdefault("unlocks", [])
                         if not any(u.get("kind") == "transit" for u in unlocks if isinstance(u, dict)):

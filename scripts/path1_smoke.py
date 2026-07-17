@@ -466,20 +466,25 @@ def test_transit_and_economy_sinks():
 
 
 def test_transit_migration_from_instance():
-    """restore_state's dock/shipyard transit migration must recreate the
-    registry entry from the standing structure instance when the registry
-    entry itself was retired (approved-custom registry caps at 15) -- the
-    same instance-fallback idiom as the hearth/lighthouse light migration.
+    """Light and transit restore migrations must recreate retired registry
+    entries from standing structure instances through the shared fallback.
     Uses a temp STATE_PATH so this never touches the real simulation/state.json."""
     import json
     import tempfile
 
     source = make_engine()
     c = source.civilization
+    c["projectRegistry"].pop("hearth", None)
     c["projectRegistry"].pop("dock", None)
+    c["structures"].append({
+        "id": 9899, "type": "hearth", "districtId": "village_core",
+        "condition": 100, "isRuin": False, "name": "Old Hearth",
+        "visualStyle": "warm_stone",
+    })
     c["structures"].append({
         "id": 9900, "type": "dock", "districtId": "beach",
         "condition": 100, "isRuin": False, "name": "Old Dock",
+        "visualStyle": "harbor",
     })
     with source.lock:
         payload = source._serialize_state()
@@ -496,15 +501,39 @@ def test_transit_migration_from_instance():
         restored = target.restore_state()
         assert_true(restored, "restore_state should succeed from the temp save")
         registry = target.civilization.get("projectRegistry") or {}
+        light_entry = registry.get("hearth")
+        assert_true(isinstance(light_entry, dict),
+                    f"hearth registry entry should be recreated from the instance, got {light_entry}")
+        assert_true(light_entry.get("name") == "Old Hearth", light_entry)
+        assert_true(light_entry.get("needs") == {"wood": 2, "stone": 2}, light_entry)
+        assert_true(light_entry.get("visualStyle") == "warm_stone", light_entry)
+        assert_true(light_entry.get("custom") is True, light_entry)
+        light_fn = light_entry.get("function") or {}
+        assert_true(light_fn.get("light") == {"scope": "district"}, light_fn)
+        assert_true(light_fn.get("upkeep") == {"resource": "charcoal", "amount": 1},
+                    light_fn)
+
         entry = registry.get("dock")
         assert_true(isinstance(entry, dict),
                     f"dock registry entry should be recreated from the instance, got {entry}")
+        assert_true(entry.get("name") == "Old Dock", entry)
+        assert_true(entry.get("needs") == {"wood": 2, "stone": 2}, entry)
+        assert_true(entry.get("visualStyle") == "harbor", entry)
+        assert_true(entry.get("custom") is True, entry)
         fn = entry.get("function") or {}
         unlocks = fn.get("unlocks") or []
         assert_true(any(u.get("kind") == "transit" and u.get("terrain") == "ocean"
                         for u in unlocks if isinstance(u, dict)),
                     f"expected ocean transit unlock on recreated dock entry, got {unlocks}")
-        print("  OK dock registry entry recreated from instance with ocean transit unlock")
+        assert_true(sum(1 for u in unlocks if isinstance(u, dict)
+                        and u.get("kind") == "transit") == 1, unlocks)
+        assert_true(target._ensure_registry_entry_from_instance(
+            target.civilization, "hearth") is light_entry,
+            "shared fallback must preserve an existing light registry entry")
+        assert_true(target._ensure_registry_entry_from_instance(
+            target.civilization, "dock") is entry,
+            "shared fallback must preserve an existing transit registry entry")
+        print("  OK light + transit registry entries recreated idempotently from instances")
     finally:
         se.STATE_PATH = old_state_path
         try:
