@@ -238,22 +238,46 @@ overflow retry) that must all agree without re-consuming the budget.
 
 ## Concurrency & context sizing
 
-`MAX_CONCURRENT_LLM = 3` (sim_engine.py:444, `ThreadPoolExecutor` bound on the
-engine's think worker pool). `LLM_MIN_GAP_MS = 250` (sim_engine.py:445,
-minimum spacing between dispatches). Context formula: LM Studio's context
-length must be ≥ ~3,100-3,400 tokens × `MAX_CONCURRENT_LLM` parallel slots.
-`scripts/lms_load.py` applies the target config: `qwen/qwen3.5-9b`, context
-20,000, parallel 3 (~6,666 tokens/slot), flash attention on — the canonical
-CLI loader (REST-load rung with a `lms load` CLI fallback for context+parallel
-only; KV-cache quantization/speculative-decoding flags are GUI/SDK-only or
-build-dependent, see the script's docstring).
+`MAX_CONCURRENT_LLM = 3` (sim_engine.py, `ThreadPoolExecutor` bound on the
+engine's decision-think worker pool, `self._executor`). `LLM_MIN_GAP_MS = 250`
+(minimum spacing between decision dispatches). Context formula (decision-only
+budget): LM Studio's context length must be ≥ ~3,100-3,400 tokens ×
+`MAX_CONCURRENT_LLM` parallel slots.
 
-`PIANO_MODULES`/`META_SYSTEM` (sim_engine.py:45-46, both `False` by default) —
-experimental fan-out of staggered Perception/Social/Desire/Reflection module
-calls (~3-5× LLM calls per think turn) plus an autobiography/persona meta
-update, still bounded by the same `MAX_CONCURRENT_LLM` worker pool. Only
-enable with a reduced roster and a correspondingly raised LM Studio context —
-reduce the roster via a JSON POST body field (`{"agents": N}`) on
-`/control/reset` (see specs/04-http-api.md), not a URL query parameter, or via
-the `SIM_AGENTS` environment variable at server startup (server.py:3256-3262,
-default 8, clamped to the `AGENT_DEFS` count — see specs/06-agents.md).
+`PIANO_MODULES` (sim_engine.py, default `True` since Sid-parity Phase 1) — the
+Perception/Social/Desire/Reflection module fan-out is the default cognition
+path, not experimental. Module calls run on their own pool,
+`self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`), bounded independently of
+`MAX_CONCURRENT_LLM` so a module backlog can never starve the decision path —
+`_run_piano_modules` submits to `piano_workers` and waits on the futures, it
+never dispatches into `self._executor`. Every module call routes to
+`MODEL_FAST` with a hard, non-blocking `PIANO_MODULE_TIMEOUT_S = 15s` timeout
+(server.py `run_piano_module`); a timeout is dropped, never retried, logged to
+`lm_studio.jsonl` with `"error": "piano_module_timeout"`, and counted in the
+`piano_module_drops` benchmark. Reports are cached per `(agent, module)` with
+a `PIANO_MODULE_CACHE_TTL = 2` module-tick TTL so the perception/social/desire/
+reflection stagger (perception+desire every module-tick, social every 2nd,
+reflection every 3rd) fills an off-tick module's slot from its last real
+report instead of an empty one.
+
+Revised context formula with PIANO on: LM Studio's context length must be ≥
+~3,400 tokens × (`MAX_CONCURRENT_LLM` + `PIANO_CONCURRENT_LLM`) = ~3,400 × 5 =
+~17,000 tokens minimum. `scripts/lms_load.py` applies the target config:
+`qwen/qwen3.5-9b`, context 20,000, parallel 3 (~6,666 tokens/slot per decision
+slot; the 2 module slots draw from the same loaded context budget), flash
+attention on — the canonical CLI loader (REST-load rung with a `lms load` CLI
+fallback for context+parallel only; KV-cache quantization/speculative-decoding
+flags are GUI/SDK-only or build-dependent, see the script's docstring). 20,000
+is sufficient for the default roster; if LM Studio can't stretch the context
+budget further, reduce the roster to 6 before enabling `PIANO_MODULES` rather
+than reverting the flag — reduce it via a JSON POST body field
+(`{"agents": N}`) on `/control/reset` (see specs/04-http-api.md), not a URL
+query parameter, or via the `SIM_AGENTS` environment variable at server
+startup (server.py, default 8, clamped to the `AGENT_DEFS` count — see
+specs/06-agents.md).
+
+`META_SYSTEM` (sim_engine.py, default `True` since Sid-parity Phase 3) —
+autobiography/persona meta update, still bounded by `MAX_CONCURRENT_LLM`
+(runs inline on the decision path, not on `piano_workers`). Authored beliefs
+and adoption events give the rotating autobiography update material to
+summarize.

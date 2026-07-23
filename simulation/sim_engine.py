@@ -173,8 +173,8 @@ USE_GOALS = True
 STRUCTURE_EFFECTS_ENABLED = True
 MEMORY_ENABLED = True
 AGENT_MESSAGING = True
-PIANO_MODULES = False
-META_SYSTEM = False
+PIANO_MODULES = True
+META_SYSTEM = True
 EMERGENT_ROLES = True
 RULES_ENABLED = True
 MEMES_ENABLED = True
@@ -573,6 +573,21 @@ RULE_KINDS = {"resource_tax", "custom", "priority"}
 # (THINKING_ENABLED_HIGH_STAKES=False in server.py) and parallel reverted
 # back to 3 for max routine-turn throughput.
 MAX_CONCURRENT_LLM = 3
+# Sid-parity Phase 1: PIANO module calls (perception/social/desire/reflection)
+# get their own small pool, bounded independently of MAX_CONCURRENT_LLM, so a
+# module backlog can never starve the decision path -- see
+# SimEngine.piano_workers / _run_piano_modules. Context budget for LM Studio
+# must now cover MAX_CONCURRENT_LLM + PIANO_CONCURRENT_LLM = 5 parallel slots
+# (specs/03-cognition.md).
+PIANO_CONCURRENT_LLM = 2
+# Off-tick module reports (e.g. social/reflection on a tick they don't fire)
+# are served from the last real report instead of an empty slot, as long as
+# it is no more than this many module-ticks stale -- see _run_piano_modules.
+PIANO_MODULE_CACHE_TTL = 2
+# Wait budget for a dispatched module future -- strictly above server.py's
+# PIANO_MODULE_TIMEOUT_S (15s) HTTP timeout so that timeout, not this one,
+# is what fires and gets logged/counted as a drop in the normal case.
+PIANO_MODULE_TIMEOUT_WAIT_S = 18
 LLM_MIN_GAP_MS = 250
 # When _schedule_think can't dispatch (worker pool full, cooldown, min-gap),
 # the agent retries this soon instead of waiting a full thinkInterval (up to
@@ -800,7 +815,7 @@ CULTURE_ENABLED = True
 # small fixed amount on each successful use (deterministic -- no roll needed,
 # matching the "practice raises it" framing) and feeding a small yield/output
 # bonus so skill is legible in the numbers, not just flavor text.
-SKILL_KINDS = ("gather", "craft", "build", "heal")
+SKILL_KINDS = ("gather", "craft", "build", "heal", "reflection")
 SKILL_MAX_LEVEL = 10.0
 SKILL_PRACTICE_GAIN = 0.15           # per successful practice of that verb
 SKILL_BONUS_DIVISOR = 4.0            # +1 yield/output per this many skill levels (see _skill_bonus)
@@ -1405,12 +1420,22 @@ class SimEngine:
         self._memory_maint_index = 0
         self._stop = threading.Event()
         self._executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_LLM)
+        # Sid-parity Phase 1: separate pool for PIANO module calls so they
+        # never compete with decision calls for MAX_CONCURRENT_LLM slots.
+        self.piano_workers = ThreadPoolExecutor(max_workers=PIANO_CONCURRENT_LLM)
         self._inflight = set()      # agent names with a think job in flight
         self.RECIPES = {}
         self.roster_size = roster_size
         self._effect_period_fired = 0
         self._module_period_runs = 0
         self._last_effect_benchmark_fired = 0
+        # PIANO module report cache: {agent_name: {module_name: {"tick": int,
+        # "text": str}}} -- fills off-tick stagger slots (see
+        # _run_piano_modules) instead of leaving them empty, TTL-bounded by
+        # PIANO_MODULE_CACHE_TTL.
+        self._piano_module_cache = {}
+        self._piano_module_drops = 0     # timeouts/failures this session
+        self._piano_latency_ms = {}      # module -> [sum_ms, count] this period
         self._meta_agent_index = 0
         self.ROAD_PATH_CACHE = {}   # (nodeA, nodeB) -> [node ids]; see _recompute_road_paths
         self._reset_world(roster_size)
@@ -8113,11 +8138,27 @@ class SimEngine:
             self._log_benchmark("meme_adoption", adoption,
                                 {"rate": round(adoption_rate, 2),
                                  "by_meme": adoption_by_meme,
+                                 "authored_beliefs": sum(1 for b in self._belief_registry().values()
+                                                          if not b.get("seed")),
+                                 "belief_pitch_calls": self.civilization.get("beliefPitchCalls", 0),
                                  "of": living_n})
         if PIANO_MODULES or META_SYSTEM:
             self._log_benchmark("module_total", self._module_period_runs,
                                 {"period_ticks": BENCHMARK_TICK_FRAMES})
             self._module_period_runs = 0
+        if PIANO_MODULES:
+            # Sid-parity Phase 1: surface module-pool health so regressions
+            # (slow modules, timeout spikes) are visible in soak runs.
+            latency = {
+                module: round(total_ms / count, 1)
+                for module, (total_ms, count) in self._piano_latency_ms.items()
+                if count
+            }
+            self.lastBenchmarks["piano_module_latency"] = latency
+            self.lastBenchmarks["piano_module_drops"] = self._piano_module_drops
+            self._log_benchmark("piano_module_latency", latency,
+                                {"period_ticks": BENCHMARK_TICK_FRAMES})
+            self._log_benchmark("piano_module_drops", self._piano_module_drops)
         self._log_benchmark("memory_store_size", self.lastMemorySize)
         if STRUCTURE_EFFECTS_ENABLED:
             fired = self._effect_period_fired
@@ -9535,10 +9576,13 @@ class SimEngine:
         return "; ".join(str(p) for p in parts if p)
 
     def _run_piano_modules(self, agent_name, modules, module_tick, context):
-        """Sid-parity Phase 5: run staggered PIANO modules in-process inside
-        the same worker-pool slot as the Cognitive Controller decision.
-        Stagger: perception+desire every turn; social every 2nd; reflection
-        every 3rd. Returns (report_string, new_module_tick, runs)."""
+        """Sid-parity Phase 1/5: run staggered PIANO modules on the dedicated
+        piano_workers pool (never the decision pool), so a module backlog can
+        never starve the Cognitive Controller decision call. Stagger:
+        perception+desire every turn; social every 2nd; reflection every 3rd.
+        Modules not due this turn are served from the module-report cache
+        (PIANO_MODULE_CACHE_TTL module-ticks) instead of an empty slot.
+        Returns (report_string, new_module_tick, runs)."""
         runner = self.d.get("run_piano_module")
         if not runner or not PIANO_MODULES:
             return "none", module_tick, 0
@@ -9555,15 +9599,46 @@ class SimEngine:
             to_run.append("social")
         if modules.get("reflection", True) and tick % 3 == 0:
             to_run.append("reflection")
-        if not to_run:
-            return "none", tick, 0
-        reports = []
+        # Off-tick modules: enabled but not due this turn. Filled from cache
+        # (if fresh) so the decision payload keeps seeing their last real
+        # report instead of a gap on the ticks they don't fire.
+        off_tick = [m for m in ("social", "reflection")
+                    if modules.get(m, True) and m not in to_run]
+        cache = self._piano_module_cache.setdefault(agent_name, {})
+        ordered = list(to_run)
+        for module in off_tick:
+            if module not in ordered:
+                ordered.append(module)
+        report_by_module = {}
         runs = 0
-        for module in to_run:
-            text = runner(module, agent_name, context, frame_tick=self.frameTick)
-            if text:
-                reports.append(f"{module}: {text}")
-                runs += 1
+        if to_run:
+            futures = {}
+            dispatch_started = {}
+            for module in to_run:
+                start_ts = time.time()
+                dispatch_started[module] = start_ts
+                futures[module] = self.piano_workers.submit(
+                    runner, module, agent_name, context, frame_tick=self.frameTick)
+            for module, fut in futures.items():
+                try:
+                    text = fut.result(timeout=PIANO_MODULE_TIMEOUT_WAIT_S)
+                except Exception:
+                    text = None
+                latency_ms = (time.time() - dispatch_started[module]) * 1000.0
+                totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
+                totals[0] += latency_ms
+                totals[1] += 1
+                if text:
+                    cache[module] = {"tick": tick, "text": text}
+                    report_by_module[module] = f"{module}: {text}"
+                    runs += 1
+                else:
+                    self._piano_module_drops += 1
+        for module in off_tick:
+            cached = cache.get(module)
+            if cached and (tick - cached["tick"]) <= PIANO_MODULE_CACHE_TTL:
+                report_by_module[module] = f"{module}: {cached['text']}"
+        reports = [report_by_module[m] for m in ordered if m in report_by_module]
         return (" | ".join(reports) if reports else "none"), tick, runs
 
     def _maybe_meta_update(self):
@@ -9616,9 +9691,12 @@ class SimEngine:
                     piano_modules = dict(agent.get("modules") or {})
                     piano_tick = int(agent.get("moduleTick") or 0)
             if PIANO_MODULES:
-                # Module fan-out stays inside this worker slot (no extra
-                # ThreadPoolExecutor jobs) so MAX_CONCURRENT_LLM still bounds
-                # total LM Studio concurrency.
+                # Module fan-out dispatches onto self.piano_workers (its own
+                # PIANO_CONCURRENT_LLM-sized pool, see _run_piano_modules) --
+                # decoupled from MAX_CONCURRENT_LLM so a module backlog can
+                # never starve the decision path. Still called outside the
+                # lock so this worker-pool thread can block waiting on it
+                # without freezing the tick.
                 reports, new_tick, runs = self._run_piano_modules(
                     agent_name, piano_modules, piano_tick, piano_context)
                 payload["module_reports"] = reports
@@ -9633,6 +9711,11 @@ class SimEngine:
                 if PIANO_MODULES:
                     agent["moduleTick"] = new_tick
                     self._module_period_runs += runs
+                    # Reflection reports are actual deliberate practice: this
+                    # makes the high-reflection founder gate reachable without
+                    # adding a separate action or blocking a decision turn.
+                    if new_tick % 3 == 0 and "reflection:" in reports:
+                        self._practice_skill(agent, "reflection")
                 # In-flight guard (#A): if a Sage emergency began and THIS agent is
                 # a designated responder, discard the decision and rush instead.
                 em = self._sage_emergency()
@@ -10273,6 +10356,9 @@ class SimEngine:
             self._reset_world(roster_size if roster_size else self.roster_size)
             if roster_size:
                 self.roster_size = roster_size
+            self._piano_module_cache = {}
+            self._piano_module_drops = 0
+            self._piano_latency_ms = {}
             ms = self.d.get("memory_store")
             if ms is not None:
                 try:

@@ -87,8 +87,8 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `STRUCTURE_EFFECTS_ENABLED` | True | no | [08](08-systems-economy.md) |
 | `MEMORY_ENABLED` | True | no | [06](06-agents.md) |
 | `AGENT_MESSAGING` | True | no | [06](06-agents.md) |
-| `PIANO_MODULES` | False | yes | [03](03-cognition.md) |
-| `META_SYSTEM` | False | yes | [03](03-cognition.md) |
+| `PIANO_MODULES` | True | yes | [03](03-cognition.md) |
+| `META_SYSTEM` | True | yes | [03](03-cognition.md) |
 | `EMERGENT_ROLES` | True | yes | [06](06-agents.md) |
 | `RULES_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `MEMES_ENABLED` | True | yes | [09](09-systems-society.md) |

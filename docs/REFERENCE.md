@@ -31,9 +31,9 @@ tips only:
   Studio config (model, context, parallel slots, flash attention) — run it
   instead of clicking through the LM Studio GUI. `--check` reads back the
   current config without applying anything.
-- **PIANO/META roster advice:** `PIANO_MODULES`/`META_SYSTEM` (off by
-  default, sim_engine.py) fan out multiple LLM calls per think turn. Only
-  enable them with a reduced roster and a correspondingly raised LM Studio
+- **PIANO/META roster advice:** `PIANO_MODULES`/`META_SYSTEM` default on in
+  sim_engine.py and fan out multiple LLM calls per think turn. For local LM
+  Studio setups, use a reduced roster and a correspondingly raised
   context — reduce the roster via `{"agents": N}` in the JSON body of
   `POST /control/reset`, or the `SIM_AGENTS` env var at startup, not a URL
   query param. Details: [specs/03-cognition.md](../specs/03-cognition.md).

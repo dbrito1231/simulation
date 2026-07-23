@@ -2396,12 +2396,21 @@ MODULE_PROMPTS = {
 }
 
 
-def run_piano_module(module, agent_name, context, frame_tick=None):
-    """In-process PIANO module runner (Sid-parity Phase 5).
+# Sid-parity Phase 1 rollout: PIANO modules run on their own worker pool
+# (SimEngine.piano_workers, PIANO_CONCURRENT_LLM slots), routed to MODEL_FAST
+# with a hard, non-blocking timeout -- a slow module is dropped, never
+# retried, so it can't stall the decision turn that consumes its report.
+PIANO_MODULE_TIMEOUT_S = 15
 
-    Called from SimEngine._think_job inside the same worker-pool slot as the
-    Cognitive Controller decision -- never fans out past MAX_CONCURRENT_LLM.
-    Returns a one-sentence report string, or None on failure.
+
+def run_piano_module(module, agent_name, context, frame_tick=None):
+    """In-process PIANO module runner (Sid-parity Phase 5/1).
+
+    Dispatched onto SimEngine.piano_workers -- a small pool bounded
+    independently of MAX_CONCURRENT_LLM (the decision pool), so a module
+    backlog can never starve agent decisions. Always MODEL_FAST, always a
+    hard PIANO_MODULE_TIMEOUT_S timeout. Returns a one-sentence report
+    string, or None on failure/timeout (dropped, not retried).
     """
     sysp = MODULE_PROMPTS.get(module)
     if not sysp:
@@ -2411,6 +2420,7 @@ def run_piano_module(module, agent_name, context, frame_tick=None):
             sysp,
             f"Agent {agent_name} context: {context}",
             max_tokens=60, temperature=0.5,
+            timeout=PIANO_MODULE_TIMEOUT_S, raise_timeout=True,
         )
         if text:
             text = text.strip().strip('"').strip()[:200]
@@ -2419,6 +2429,52 @@ def run_piano_module(module, agent_name, context, frame_tick=None):
             {"agent": agent_name, "module": module},
         )
         return text or None
+    except requests.exceptions.Timeout:
+        session_logger.log_lm_exchange({
+            "agent_name": agent_name,
+            "frame_tick": frame_tick,
+            "module": module,
+            "error": "piano_module_timeout",
+            "timeout_s": PIANO_MODULE_TIMEOUT_S,
+        })
+        return None
+    except Exception:
+        return None
+
+
+def run_belief_pitch(speaker_name, listener_name, belief, pitch, relationship,
+                     listener_beliefs, frame_tick=None):
+    """Score one explicit persuasion pitch outside SimEngine's lock.
+
+    Returns a bounded quality float or None, allowing the engine to use its
+    deterministic offline quality/roll when LM Studio is unavailable. The
+    engine owns the session cap and only calls this from an already-bounded
+    cognition request.
+    """
+    if not isinstance(belief, dict) or not isinstance(pitch, str):
+        return None
+    tenet = str(belief.get("tenet") or "").strip()
+    if not tenet or not pitch.strip():
+        return None
+    try:
+        text = lm_complete(
+            "Judge how persuasive a village belief pitch is for the named listener. "
+            "Reply only with one decimal from 0.00 (unpersuasive) to 1.00 (very persuasive).",
+            f"Speaker: {speaker_name}. Listener: {listener_name}. Relationship: {relationship}. "
+            f"Belief: {belief.get('name')} — {tenet}. Listener already believes: {listener_beliefs or 'none'}. "
+            f"Pitch: {pitch.strip()}",
+            max_tokens=8, temperature=0.0,
+        )
+        match = re.search(r"(?:0(?:\.\d+)?|1(?:\.0+)?)", text or "")
+        if not match:
+            return None
+        quality = max(0.0, min(1.0, float(match.group(0))))
+        session_logger.log_benchmark(
+            "belief_pitch_quality", quality, frame_tick,
+            {"speaker": speaker_name, "listener": listener_name,
+             "belief": belief.get("id")},
+        )
+        return quality
     except Exception:
         return None
 
@@ -2588,17 +2644,18 @@ def lm_message_text(message):
     return (message.get("reasoning_content") or "").strip()
 
 
-def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5):
+def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
+                timeout=30, raise_timeout=False):
     """Plain-text LM Studio completion for the background cognition loops
     (Summarizer, meta system, PIANO modules / Cognitive Controller). Returns the
     text or None on any failure so every caller can degrade gracefully.
 
-    Unlike lm_message_text() (used on the JSON-decision path, where any
-    surrounding text is harmless because extract_json_decision() picks the
-    JSON out of it), this inspects the raw message dict itself: when the
-    model left `content` empty and routed everything into `reasoning_content`,
-    that field holds a chain-of-thought scaffold and only the trailing answer
-    should be kept -- and rejected outright if it still looks scaffolded."""
+    `timeout` defaults to 30s (specs/03:24 background-call budget); PIANO
+    module calls pass 15s so a slow module never blocks a decision turn --
+    see run_piano_module(). `raise_timeout=True` re-raises
+    requests.exceptions.Timeout instead of swallowing it, so a caller that
+    wants to log/count timeouts distinctly (run_piano_module) can -- every
+    other caller keeps the original swallow-and-return-None behavior."""
     payload = {
         # Background cognition is routine work -- always the fast model.
         "model": MODEL_FAST if _model_routing_enabled else "local-model",
@@ -2616,11 +2673,15 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5):
         # LM Studio build honors. All lm_complete callers are low-stakes.
         payload["reasoning_effort"] = "none"
     try:
-        resp = requests.post(LM_STUDIO_URL, json=payload, timeout=30)
+        resp = requests.post(LM_STUDIO_URL, json=payload, timeout=timeout)
         body = resp.json()
         choice = body["choices"][0]
         message = choice["message"]
         finish_reason = choice.get("finish_reason")
+    except requests.exceptions.Timeout:
+        if raise_timeout:
+            raise
+        return None
     except (requests.exceptions.RequestException, ValueError, KeyError,
             IndexError, TypeError):
         return None
