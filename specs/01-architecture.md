@@ -22,7 +22,7 @@ for the action catalog.
   render; closing the browser tab does not stop the simulation.
 
 The engine mutates state only under `self.lock`; the full world is persisted to
-`simulation/state.json` (see [02-engine-core.md](02-engine-core.md)).
+`simulation/state.db` (see [02-engine-core.md](02-engine-core.md)).
 
 ## Data flow (one agent's think cycle)
 

@@ -179,7 +179,7 @@ uv run python simulation/server.py
 ```
 
 ```powershell
-# Confirm port free before manual state.json edits
+# Confirm port free before manual state.db edits
 Get-NetTCPConnection -LocalPort 5001 -ErrorAction SilentlyContinue
 ```
 

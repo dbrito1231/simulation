@@ -17,22 +17,153 @@ import math
 import os
 import random
 import re
+import sqlite3
 import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-# Full-state persistence (Contract 3). Resolved relative to this module so it
-# lands next to server.py/sim_engine.py regardless of the launch cwd.
-# Bumped 1 -> 2 for the world-expansion plan: civilization.activeProject ->
-# districtProjects, new districts/roadNodes/roadEdges/frontierPlots. See
-# restore_state()'s migration shim for pre-v2 saves.
+# Full-state persistence (Contract 3), backed by a SQLite database. Resolved
+# relative to this module so it lands next to server.py/sim_engine.py
+# regardless of the launch cwd.
+# STATE_VERSION was bumped 1 -> 2 for the world-expansion plan
+# (civilization.activeProject -> districtProjects, new
+# districts/roadNodes/roadEdges/frontierPlots); v1 saves are no longer
+# supported.
 STATE_VERSION = 2
-STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.db")
 AUTOSAVE_SECONDS = 10
 # Sets on the civilization that serialize to JSON arrays and back.
 _CIV_SET_KEYS = ("rejectedBlueprintIds", "rejectedRecipeIds", "builtTypes")
+
+
+_DB_DDL = """
+CREATE TABLE IF NOT EXISTS meta   (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS civ    (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agents (name TEXT PRIMARY KEY, ord INTEGER NOT NULL, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS memory (
+    rowid_pk INTEGER PRIMARY KEY, id INTEGER, agent TEXT NOT NULL, text TEXT NOT NULL,
+    salience REAL, kind TEXT, tier TEXT, frame_tick INTEGER, ts REAL);
+"""
+
+
+def _connect_db(path):
+    conn = sqlite3.connect(path, timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.executescript(_DB_DDL)
+    return conn
+
+
+def _write_state_db(path, payload):
+    """Atomically persist a Contract-3 payload dict into the SQLite state
+    database at `path`. All table rewrites happen in a single transaction so
+    a crash mid-write can never leave the DB half-updated. May raise; callers
+    (SimEngine.save_state) swallow exceptions."""
+    conn = _connect_db(path)
+    try:
+        civ = payload.get("civilization") or {}
+        agents = payload.get("agents") or []
+        memory = payload.get("memory") or []
+        with conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                ("version", str(payload.get("version"))),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                ("frameTick", str(payload.get("frameTick"))),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                ("savedAt", str(payload.get("savedAt"))),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                ("roster_size", str(payload.get("roster_size"))),
+            )
+            conn.execute("DELETE FROM civ")
+            conn.executemany(
+                "INSERT INTO civ (key, value) VALUES (?, ?)",
+                [(k, json.dumps(v, ensure_ascii=False)) for k, v in civ.items()],
+            )
+            conn.execute("DELETE FROM agents")
+            conn.executemany(
+                "INSERT INTO agents (name, ord, data) VALUES (?, ?, ?)",
+                [(a.get("name"), i, json.dumps(a, ensure_ascii=False))
+                 for i, a in enumerate(agents)],
+            )
+            conn.execute("DELETE FROM memory")
+            conn.executemany(
+                "INSERT INTO memory (id, agent, text, salience, kind, tier, frame_tick, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(m.get("id"), m.get("agent"), m.get("text"), m.get("salience"),
+                  m.get("kind"), m.get("tier"), m.get("frame_tick"), m.get("ts"))
+                 for m in memory],
+            )
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+def _read_state_db(path):
+    """Read a Contract-3 payload dict back out of the SQLite state database at
+    `path`, or return None if it doesn't exist, is empty, or is corrupt."""
+    if not os.path.exists(path):
+        return None
+    conn = None
+    try:
+        conn = _connect_db(path)
+        meta = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+        if "version" not in meta:
+            return None
+        try:
+            version = int(meta.get("version"))
+        except (TypeError, ValueError):
+            return None
+        try:
+            frame_tick = int(meta.get("frameTick"))
+        except (TypeError, ValueError):
+            frame_tick = 0
+        try:
+            roster_size = int(meta.get("roster_size"))
+        except (TypeError, ValueError):
+            roster_size = None
+        civilization = {
+            k: json.loads(v)
+            for k, v in conn.execute("SELECT key, value FROM civ").fetchall()
+        }
+        agents = [
+            json.loads(data)
+            for (data,) in conn.execute("SELECT data FROM agents ORDER BY ord").fetchall()
+        ]
+        memory = [
+            {
+                "id": row[0], "agent": row[1], "text": row[2], "salience": row[3],
+                "kind": row[4], "tier": row[5], "frame_tick": row[6], "ts": row[7],
+            }
+            for row in conn.execute(
+                "SELECT id, agent, text, salience, kind, tier, frame_tick, ts FROM memory"
+            ).fetchall()
+        ]
+        return {
+            "version": version,
+            "frameTick": frame_tick,
+            "savedAt": meta.get("savedAt"),
+            "roster_size": roster_size,
+            "civilization": civilization,
+            "agents": agents,
+            "memory": memory,
+        }
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 # --- Feature flags (ported from index.html consts; now server config) ---
@@ -328,7 +459,7 @@ PROJECT_DEFER_COOLDOWN = STALL_THRESHOLD * 20  # defer serially-abandoned types 
 BLUEPRINT_STALL_THRESHOLD = 1800
 # A leader directive is broadcast to every agent's prompt with "Prioritize
 # it"; without an expiry it dominates decisions forever (and persists across
-# sessions via state.json). ~3 minutes at 30 ticks/s = several think cycles.
+# sessions via state.db). ~3 minutes at 30 ticks/s = several think cycles.
 DIRECTIVE_TTL_FRAMES = 5400
 # Cap on how many behavior_nudge strings get concatenated into one prompt.
 # P0 (emergency/survival) nudges always pass through uncapped since they are
@@ -4811,7 +4942,7 @@ class SimEngine:
 
     def _current_directive(self):
         """The leader directive, or None once it has aged past its TTL
-        (covers stale directives restored from state.json too)."""
+        (covers stale directives restored from state.db too)."""
         c = self.civilization
         if not c["directive"]:
             return None
@@ -7040,7 +7171,7 @@ class SimEngine:
         """Tick-gated like the other _maybe_* backstops. When built housing
         raises the population cap above the current roster, the next unused
         AGENT_DEFS entry moves in (at most one per gate interval). Newcomers
-        persist via state.json like any other agent."""
+        persist via state.db like any other agent."""
         if not STRUCTURE_EFFECTS_ENABLED:
             return
         # Corpses remain in self.agents for burial; only the living occupy beds.
@@ -8942,7 +9073,7 @@ class SimEngine:
         if agent["assignedTask"] and \
                 self.frameTick - (agent.get("lastTaskedFrame") or 0) > DIRECTIVE_TTL_FRAMES:
             # Same staleness problem as the directive: an old task (possibly
-            # restored from state.json) shouldn't bias decisions forever.
+            # restored from state.db) shouldn't bias decisions forever.
             agent["assignedTask"] = None
         if agent["assignedTask"]:
             note(1, f"Your leader assigned you: {agent['assignedTask']}. Do it now.")
@@ -9758,7 +9889,7 @@ class SimEngine:
     def _save_loop(self):
         while not self._stop.is_set():
             # Wait first so we don't immediately overwrite a freshly restored
-            # state.json with a near-identical one before any work happens.
+            # state.db with a near-identical one before any work happens.
             if self._stop.wait(AUTOSAVE_SECONDS):
                 break
             self.save_state()
@@ -9796,54 +9927,25 @@ class SimEngine:
         }
 
     def save_state(self):
-        """Atomically write the complete world to STATE_PATH. Never raises."""
+        """Atomically write the complete world to state.db. Never raises."""
         try:
             with self.lock:
                 payload = self._serialize_state()
-            tmp = STATE_PATH + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(payload, fh, ensure_ascii=False)
-            os.replace(tmp, STATE_PATH)
+            _write_state_db(DB_PATH, payload)
             return True
         except Exception:
             # Persistence must never crash the sim.
             return False
 
     def clear_state(self):
-        """Remove state.json so the next start cold-starts. Never raises."""
-        try:
-            if os.path.exists(STATE_PATH):
-                os.remove(STATE_PATH)
-        except Exception:
-            pass
-
-    def _migrate_v1_to_v2(self, civ, agents):
-        """One-time migration shim for pre-districts (STATE_VERSION 1) saves:
-        old state.json files have the singular activeProject, no
-        districts/roadNodes/roadEdges/frontierPlots at all (they were static
-        constants before this plan), and no
-        districtProjects/currentDistrict/waypoints. Seed all of those from the
-        starter blueprint and drop the old in-flight activeProject -- a
-        one-time, low-stakes loss of a build-in-progress only. Agent
-        identity/memory/resources/relationships all carry over untouched."""
-        civ["districts"] = json.loads(json.dumps(STARTER_DISTRICTS))
-        civ["roadNodes"] = json.loads(json.dumps(STARTER_ROAD_NODES))
-        civ["roadEdges"] = [list(e) for e in STARTER_ROAD_EDGES]
-        civ["frontierPlots"] = _build_frontier_plots()
-        civ["districtProjects"] = {did: None for did, d in civ["districts"].items() if d.get("build_grid")}
-        civ["districtLastContribution"] = {did: 0 for did in civ["districtProjects"]}
-        civ["kindLastActivityFrame"] = {}
-        civ["lastDistrictFoundFrame"] = 0
-        civ["frontierExhaustedLogged"] = False
-        civ.pop("activeProject", None)
-        civ.pop("lastProjectContributionFrame", None)
-        kind_to_starter_district = {}
-        for did, d in civ["districts"].items():
-            kind_to_starter_district.setdefault(d["kind"], did)
-        for a in agents:
-            kind = a.get("currentZone") or "village"
-            a["currentDistrict"] = kind_to_starter_district.get(kind, "village_core")
-            a["waypoints"] = []
+        """Remove state.db so the next start cold-starts. Never raises."""
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                path = DB_PATH + suffix
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
 
     def _ensure_registry_entry_from_instance(self, civ, type_id):
         """Restore-only fallback for retired structure recipes."""
@@ -9868,19 +9970,10 @@ class SimEngine:
         return entry
 
     def restore_state(self):
-        """If a valid state.json exists, rehydrate the world from it instead of
-        the cold-start roster. Returns True on a successful restore. Accepts
-        both the current STATE_VERSION and the pre-districts version 1 (run
-        through _migrate_v1_to_v2 below) so an old save cold-starts the new
-        fields cleanly instead of crashing or being silently discarded."""
-        try:
-            if not os.path.exists(STATE_PATH):
-                return False
-            with open(STATE_PATH, "r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception:
-            return False
-        if not isinstance(data, dict) or data.get("version") not in (1, STATE_VERSION):
+        """If a valid state.db exists, rehydrate the world from it instead of
+        the cold-start roster. Returns True on a successful restore."""
+        data = _read_state_db(DB_PATH)
+        if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
             return False
         try:
             with self.lock:
@@ -10125,7 +10218,7 @@ class SimEngine:
                         a["skills"] = {k: float((skills or {}).get(k, 0.0)) for k in SKILL_KINDS}
                         a.setdefault("personalityTraits", [])
                         a.setdefault("lastTeachFrame", 0)
-                    # state.json may have been written before scaffold
+                    # state.db may have been written before scaffold
                     # validation existed (or before a clean cycle ran), so a
                     # saved agent's memory.longTerm list can carry leaked
                     # chain-of-thought text wholesale -- scrub it on load too.

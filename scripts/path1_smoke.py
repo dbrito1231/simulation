@@ -468,8 +468,7 @@ def test_transit_and_economy_sinks():
 def test_transit_migration_from_instance():
     """Light and transit restore migrations must recreate retired registry
     entries from standing structure instances through the shared fallback.
-    Uses a temp STATE_PATH so this never touches the real simulation/state.json."""
-    import json
+    Uses a temp DB_PATH so this never touches the real simulation/state.db."""
     import tempfile
 
     source = make_engine()
@@ -490,12 +489,11 @@ def test_transit_migration_from_instance():
         payload = source._serialize_state()
 
     tmp_dir = tempfile.gettempdir()
-    tmp_path = str(Path(tmp_dir) / "path1_smoke_state_migration.json")
-    with open(tmp_path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh)
+    tmp_path = str(Path(tmp_dir) / "path1_smoke_state_migration.db")
+    se._write_state_db(tmp_path, payload)
 
-    old_state_path = se.STATE_PATH
-    se.STATE_PATH = tmp_path
+    old_state_path = se.DB_PATH
+    se.DB_PATH = tmp_path
     try:
         target = make_engine()
         restored = target.restore_state()
@@ -535,9 +533,17 @@ def test_transit_migration_from_instance():
             "shared fallback must preserve an existing transit registry entry")
         print("  OK light + transit registry entries recreated idempotently from instances")
     finally:
-        se.STATE_PATH = old_state_path
+        se.DB_PATH = old_state_path
         try:
             os.remove(tmp_path)
+        except OSError:
+            pass
+        try:
+            os.remove(tmp_path + "-wal")
+        except OSError:
+            pass
+        try:
+            os.remove(tmp_path + "-shm")
         except OSError:
             pass
 

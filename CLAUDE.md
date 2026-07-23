@@ -30,7 +30,7 @@ uv run python simulation/server.py   # start server, then open http://127.0.0.1:
 
 **Server-authoritative**: the world runs headless in Python; the browser is a thin viewer holding no simulation state.
 
-- **[simulation/sim_engine.py](simulation/sim_engine.py)** — the engine (`SimEngine`). Owns ALL world state, runs the 30/s tick loop, applies decisions via `apply_decision()`, runs every deterministic system, dispatches LLM think jobs to a bounded worker pool, persists to `simulation/state.json`.
+- **[simulation/sim_engine.py](simulation/sim_engine.py)** — the engine (`SimEngine`). Owns ALL world state, runs the 30/s tick loop, applies decisions via `apply_decision()`, runs every deterministic system, dispatches LLM think jobs to a bounded worker pool, persists to `simulation/state.db`.
 - **[simulation/server.py](simulation/server.py)** — Flask app + cognition. Serves viewer/state/controls; `run_agent_decision()` prompts LM Studio, extracts JSON; `normalize_decision()` + `role_fallback_action()` reject invalid actions. `SessionLogger` writes per-session JSONL.
 - **[simulation/index.html](simulation/index.html)** — thin viewer only. Polls `GET /state` (~10 Hz) and renders; closing it does not stop the sim.
 - **[simulation/sprites.js](simulation/sprites.js)** — pure, stateless Canvas drawing.
@@ -41,7 +41,7 @@ Data flow: tick thread advances world → think timer fires → `_build_think_pa
 ## Critical invariants
 
 - New actions must stay in sync across `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT` (server.py), `apply_decision()` + payload `available_actions` (sim_engine.py), and `ACTION_LABELS` (index.html, display only) — [specs/01-architecture.md](specs/01-architecture.md#action-sync-invariant).
-- The engine mutates world state only under its lock; full world persists to `simulation/state.json` (autosave + graceful-exit flush; `restore_state()` resumes old saves) — [specs/02-engine-core.md](specs/02-engine-core.md).
+- The engine mutates world state only under its lock; full world persists to `simulation/state.db` (autosave + graceful-exit flush; `restore_state()` resumes old saves) — [specs/02-engine-core.md](specs/02-engine-core.md).
 - `MAX_CONCURRENT_LLM = 3` (sim_engine.py); LM Studio context must cover ~3,400 tokens × parallel slots (`uv run python scripts/lms_load.py` applies target config) — [specs/03-cognition.md](specs/03-cognition.md).
 - Core loop is the build pipeline: `start_project` → gather → contribute → `build_structure`, plus a blueprint flow where elder Sage approves new types; Sage's survival is protected by a deterministic emergency system — [specs/07-actions.md](specs/07-actions.md), [specs/02-engine-core.md](specs/02-engine-core.md#sage-emergency).
 - **specs/ must always match the repo.** Any code change that alters behavior, actions, flags, routes, constants, or data shapes MUST update the owning spec in the same change (SDD: specs first, code second). Ownership map: [specs/00-overview.md](specs/00-overview.md).

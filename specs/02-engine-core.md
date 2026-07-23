@@ -5,7 +5,7 @@ emergency system, and full-state persistence.
 
 **Canonical for:** tick loop + per-system frame cadence, day/season/year time
 constants, think-scheduling constants, pause/resume/reset semantics, Sage
-emergency trigger/response, state.json shape and migration.
+emergency trigger/response, state.db schema and payload shape.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index and
 threading model; [03-cognition.md](03-cognition.md) for what happens inside a
 think job's network call.
@@ -83,7 +83,7 @@ on dispatch and discarded in the job's `finally` block (sim_engine.py:9360).
   the lock; `_tick_once` early-returns while paused, freezing `frameTick`.
 - `reset(roster_size=None)` (sim_engine.py:9891) rebuilds the world
   (`_reset_world`), clears the in-process memory store, then deletes and
-  immediately rewrites `state.json` via `clear_state()` + `save_state()` so a
+  immediately rewrites `state.db` via `clear_state()` + `save_state()` so a
   reset persists cleanly.
 
 ## Sage emergency
@@ -108,19 +108,43 @@ over a stale in-flight decision.
 
 ## Persistence
 
-`_serialize_state()` (sim_engine.py:9531) builds the save payload under the
-lock: top-level keys are `version` (`STATE_VERSION = 2`, sim_engine.py:31),
-`frameTick`, `savedAt` (UTC ISO timestamp), `roster_size`, `civilization`,
-`agents`, `memory`. `save_state()` writes to `state.json.tmp` then
-`os.replace()`s it into place atomically (sim_engine.py:9563-9575) and never
-raises. A dedicated `SimSaver` daemon thread calls `save_state()` every
-`AUTOSAVE_SECONDS = 10` s (sim_engine.py:33, 9523-9529). `atexit` and signal
-handlers in server.py additionally flush a final save on graceful shutdown
-(server.py:3420-3439). `restore_state()` (sim_engine.py:9613) accepts either
-`STATE_VERSION` or the pre-districts version 1, running `_migrate_v1_to_v2`
-(sim_engine.py:9585) to seed `districts`/`roadNodes`/`roadEdges`/`frontierPlots`/
-`districtProjects` from the starter blueprint and drop the old singular
-`activeProject` field; further `setdefault` backfills handle every
-phase added since (basePopulation, effect/reorg/role-switch state, rule
-diversity tracking, spoilage nudges, etc.). `clear_state()` deletes
-`state.json` for a cold start.
+World state is persisted to a SQLite database at `DB_PATH` (`<module dir>/
+state.db`), replacing the earlier monolithic `state.json` file. `_serialize_state()`
+(sim_engine.py:9531) still builds the save payload under the lock, with the
+same shape as before: top-level keys `version` (`STATE_VERSION = 2`,
+sim_engine.py:31), `frameTick`, `savedAt` (UTC ISO timestamp), `roster_size`,
+`civilization`, `agents`, `memory` (sets are serialized as sorted arrays,
+`isThinking` is dropped, memory rows are vec-stripped for storage and
+re-embedded on import).
+
+`_connect_db(path)` opens a SQLite connection in WAL mode
+(`synchronous=NORMAL`) and idempotently runs the schema DDL. The schema has
+four tables: `meta(key, value)` (one row each for `version`, `frameTick`,
+`savedAt`, `roster_size`); `civ(key, value)` (one row per top-level
+`civilization` key, value JSON-encoded); `agents(name PK, ord, data)` (one row
+per agent, `data` JSON-encoded, `ord` preserving roster order on load); and
+`memory(rowid_pk, id, agent, text, salience, kind, tier, frame_tick, ts)`.
+
+`_write_state_db(path, payload)` performs a full rewrite on every save: it
+upserts `meta`, then deletes and re-inserts all `civ`/`agents`/`memory` rows,
+all inside a single transaction, followed by a `wal_checkpoint`. `save_state()`
+serializes the payload under the lock, then writes it outside the lock via a
+per-call connection (`_write_state_db`) and never raises — the single-
+transaction commit gives crash safety without the old tmp-file-plus-rename
+trick. A dedicated `SimSaver` daemon thread calls `save_state()` every
+`AUTOSAVE_SECONDS = 10` s (sim_engine.py:33, 9523-9529), unchanged. `atexit`
+and signal handlers in server.py additionally flush a final save on graceful
+shutdown (server.py:3420-3439).
+
+`_read_state_db(path)` checks the file exists, connects, and returns the same
+payload dict shape as `_serialize_state()` produced, or `None` if the file is
+missing or `meta.version` isn't present. `restore_state()` (sim_engine.py:9613)
+accepts only `STATE_VERSION = 2` — the old v1→v2 migration
+(`_migrate_v1_to_v2`, which seeded `districts`/`roadNodes`/`roadEdges`/
+`frontierPlots`/`districtProjects` from the starter blueprint for pre-districts
+saves) has been removed. The `setdefault`/flag-gated backfill chain for
+everything added since v2 (basePopulation, effect/reorg/role-switch state,
+rule diversity tracking, spoilage nudges, etc.) still runs on every restore,
+for forward-compat with DBs saved under older feature-flag sets.
+`clear_state()` deletes `state.db` along with its `state.db-wal` and
+`state.db-shm` sidecar files for a cold start.

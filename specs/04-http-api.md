@@ -86,7 +86,7 @@ body field, which only takes effect on an explicit reset.
 Graceful shutdown: `atexit.register(_flush_on_exit)` plus `SIGINT`/`SIGTERM`
 handlers (server.py:3421-3441) both call a `threading.Event`-guarded
 `_flush_on_exit()` exactly once, which stops the engine and calls
-`engine.save_state()` to flush the full world to `simulation/state.json`
+`engine.save_state()` to flush the full world to `simulation/state.db`
 before the process exits — covers both normal exit (atexit doesn't fire on a
 signal-killed process) and Ctrl-C/`kill`.
 

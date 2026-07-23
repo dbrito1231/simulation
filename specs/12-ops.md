@@ -42,7 +42,7 @@ folder for its lifetime.
   size, entries: [{id, agent, text, salience, kind, tier, frame_tick, ts}]}`
   — the 128-float `vec` is stripped before writing (recomputable, pure disk
   bloat, server.py:600-609). It's a per-session **inspection artifact
-  only**, never read back by the running server (state.json carries the
+  only**, never read back by the running server (state.db carries the
   authoritative memory export across restarts).
 - **Record shapes** beyond the common `ts`/`session_id` envelope:
   - `activity`: `{type, message, frame_tick}`.

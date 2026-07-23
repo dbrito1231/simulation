@@ -3317,16 +3317,16 @@ except ValueError:
 
 engine = _sim_engine.SimEngine(_ENGINE_DEPS, roster_size=_roster_size)
 
-# Full-state resume (Contract 3): if a valid state.json exists, rehydrate the
+# Full-state resume (Contract 3): if a valid state.db exists, rehydrate the
 # world (frameTick, civilization, agents, re-embedded memory) instead of using
 # the cold-start roster the constructor just built. Otherwise keep cold start.
 if engine.restore_state():
-    print(f"[server] resumed from state.json @ frameTick={engine.frameTick} "
+    print(f"[server] resumed from state.db @ frameTick={engine.frameTick} "
           f"(level {engine.civilization['level']}, "
           f"{len(engine.civilization['structures'])} structures, "
           f"memory {memory_store.size()})")
 else:
-    print("[server] cold start (no valid state.json)")
+    print("[server] cold start (no valid state.db)")
 
 
 @app.route("/council-llm-log")
