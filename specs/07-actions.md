@@ -3,7 +3,7 @@
 **The action catalog** — the sole source for every decision action an agent can be
 offered. No other spec lists actions.
 
-**Canonical for:** all 35 `DECISION_ACTIONS`: params, flag gate/preconditions,
+**Canonical for:** all 38 `DECISION_ACTIONS`: params, flag gate/preconditions,
 effect, validation. The build pipeline and blueprint two-stage flow as the core
 game loop.
 **See also:** [01-architecture.md](01-architecture.md#action-sync-invariant) for the
@@ -16,10 +16,11 @@ for districts/terrain/structures referenced by params; [08](08-systems-economy.m
 [09](09-systems-society.md)/[10](10-path1.md) for the flag semantics gating many
 of these actions.
 
-Fact source: `DECISION_ACTIONS` (server.py:752-777, verified 35 entries, listed
+Fact source: `DECISION_ACTIONS` (server.py, verified 38 entries, listed
 here in declaration order). Params legend: `target` (agent name / district id /
 structure id / grid `"gx,gy"` depending on action), `target_district`, `message`,
-`new_role`, `blueprint` (object), `recipe` (object), `rule` (object), `vote`
+`new_role`, `blueprint` (object), `recipe` (object), `rule` (object), `belief`
+(object), `belief_pitch` (object), `vote`
 (`yes`/`no`), `sage_decision` (`approve`/`deny`), `sprite` (grid block).
 
 ## Action table
@@ -29,7 +30,8 @@ structure id / grid `"gx,gy"` depending on action), `target_district`, `message`
 | `move_to_district` | `target` or `target_district` | none | Sets movement target to the resolved district; accepts either param since models commonly put the id in `target_district` |
 | `move_to_agent` | `target` (agent name) | none | Moves toward the named agent, or the nearest agent if `target` is missing/unresolved |
 | `collect_resource` | `target` (resource id, optional), `target_district` | none | Gathers a resource in-zone (subject to ecology gate, [05](05-world.md)); if no active project district resolves, falls through to `start_project` |
-| `talk_to_nearby` | `target` (recipient or "everyone"), `message` | `AGENT_MESSAGING` for delivery ([06](06-agents.md)) | Sets `agent["message"]`, logs conversation, delivers to inbox, may spread beliefs/teach ([09](09-systems-society.md)) |
+| `talk_to_nearby` | `target` (recipient or "everyone"), `message`, optional `belief_pitch` (`belief_id`/`pitch`) | `AGENT_MESSAGING` for delivery ([06](06-agents.md)); a pitch requires an existing adjacent (≤80px) recipient + speaker-held belief | Sets `agent["message"]`, logs conversation, delivers to inbox, may teach; ordinary distant talk retains move/delivery behavior, but an explicit belief pitch cannot score or persuade until adjacent ([09](09-systems-society.md)) |
+| `found_belief` | `belief` (`id`/`name`/`tenet`/`affinity`) | `MEMES_ENABLED`; any agent may author; live registry below `MAX_BELIEFS` | Validates and persists an authored belief, adds it to the founder, and logs/memorializes the founding ([09](09-systems-society.md)) |
 | `trade_resource` | `target` (agent name) | `ECONOMY_ENABLED` for priced trade | Moves toward target if not adjacent; within 80px, trades the agent's most-abundant resource — priced via market if `ECONOMY_ENABLED` and a market is active, else 1-for-nothing barter |
 | `start_project` | `target` (project type), `target_district` | project type must exist in `PROJECT_TEMPLATES`/`projectRegistry` | Starts a district build project (see build pipeline below) |
 | `contribute_resources` | `target` (resource id, optional), `target_district` | active project in the district | Deposits a resource toward the active project; auto-builds if complete; falls back to gathering the unmet resource |
@@ -50,6 +52,9 @@ structure id / grid `"gx,gy"` depending on action), `target_district`, `message`
 | `propose_recipe` | `recipe` (object) | `CRAFTING_ENABLED` | Adds to `pendingRecipes` for elder review |
 | `approve_recipe` / `reject_recipe` | `target` (recipe id), `message` | actor role `elder` | Registers or discards a pending recipe |
 | `switch_role` | `new_role` or `target` | `EMERGENT_ROLES`; `new_role` must be a known role and differ from current | Sets role, clears `assignedTask`/`idleCycles` — same code path the deterministic auto-switch backstop uses ([06](06-agents.md)) |
+| `propose_role` | `role` (`slug`/`name`/`specialty`/`preferredProject`/`skill`) | `EMERGENT_ROLES`; proposal must pass live-registry validation and the `MAX_PENDING_ROLES = 5` queue cap | Adds the role definition to `pendingRoles` for elder review; seed-role data remains in `roles.json` ([06](06-agents.md)) |
+| `approve_role` | `target` (pending role slug) | actor role `elder`; proposal must be pending | Adds the validated role to the persistent live registry and rebuilds all derived role maps, making it immediately switchable |
+| `reject_role` | `target` (pending role slug) | actor role `elder`; proposal must be pending | Discards the pending role definition |
 | `propose_rule` | `rule` (id/name/kind/value/description) | `RULES_ENABLED`; must pass `_validate_rule` | Adds to `pendingRules` with the proposer's own `yes` vote, tallies immediately |
 | `vote_rule` | `target` (rule id), `vote` | `RULES_ENABLED`; rule must be pending | Records the agent's vote; succession ballots cross-cancel sibling candidate votes ([06](06-agents.md), [09](09-systems-society.md)) |
 | `repeal_rule` | `target` (enacted rule id) | `RULES_ENABLED`; rule must be currently enacted; pending-rule cap not exceeded | Opens a `repeal_<id>` ballot reusing the same vote/quorum scaffold |
@@ -69,7 +74,8 @@ requires `CEMETERY_ENABLED`; `repeal_rule` requires `RULES_ENABLED`;
 `submit_structure_sprite` only appears on an agent's actual sprite-design turn;
 `place_block`/`remove_block` require `COMPOSABLE_BUILD_ENABLED`;
 `dig_terrain`/`plant_terrain` require `TERRAIN_TILES_ENABLED`;
-`propose_treaty`/`vote_treaty` require `PATH1_DIPLOMACY_ENABLED`. All other
+`propose_treaty`/`vote_treaty` require `PATH1_DIPLOMACY_ENABLED`; the three role
+proposal actions require `EMERGENT_ROLES`. All other
 actions in the table are always offered (subject to `DECISION_SCHEMA`'s fixed
 enum superset — [03-cognition.md](03-cognition.md)). Invalid or disallowed choices
 are replaced by `normalize_decision` + `role_fallback_action` (server.py) before

@@ -160,26 +160,63 @@ the remaining candidates rather than crowning a corpse. State fields
 
 ## MEMES_ENABLED
 
-`_spread_beliefs_by_proximity()` runs every `MEME_TICK_FRAMES = 90` ticks
-(3s) — proximity-based belief transmission between nearby agents. Seed
-memes: `harvest_spirit` and `river_spirit` (rival) (`MEME_SEED_IDS`,
-sim_engine.py:411). Ordinary transmission has a
-`MEME_MUTATION_PROB = 0.08` chance of also mutating the belief's text via
-exactly one `lm_complete` call, hard-capped at
-`MEME_MUTATION_SESSION_CAP = 30` calls for the process's lifetime — the
-only LLM involvement in this system. `HARVEST_SPIRIT_CONTRIB_BOOST = True`
-makes seed-meme believers contribute food more readily (a deterministic
-behavioral tilt folded into `_pick_contribution_resource`, not a new
-action). Believer counts feed the `meme_adoption` benchmark.
+Seed memes (`harvest_spirit` and rival `river_spirit`, `MEME_SEED_IDS`) give
+a new village two starting points, but are ordinary live beliefs rather than a
+closed catalogue. Any agent may take `found_belief` at any time with `{id,
+name, tenet, affinity}`. Ids use the normal slug rule; names and tenets are short bounded text;
+`affinity` is a bounded subset of `RULE_KINDS`. `MAX_BELIEFS = 6` caps the
+live registry, including the seeds. Beliefs, their author, and affinities live
+in `civilization["beliefRegistry"]`, so they persist with state.db; legacy
+seed text/affinities remain the compatible fallback if an old save has no
+registry.
+
+The resolved Phase-3 mix ships as three **authoring exemplars** in
+`BELIEF_ARCHETYPES`: `forest_steward` (practical), `egalitarian` (political),
+and `dreamwalker` (outlier). They are supplied in the prompt/catalog but are
+not pre-adopted or inserted into `beliefRegistry`: this preserves the existing
+competing dual-seed opening and leaves the live `MAX_BELIEFS` budget open for
+agent authorship. Agents may use an exemplar exactly, adapt it, or author an
+unrelated belief.
+
+There is no periodic proximity-conversion roll. The retained
+`_spread_beliefs_by_proximity` tick hook performs no conversion; adjacent
+mixed-belief pairs are exposed in think payloads so the holder can use
+`talk_to_nearby`. A talk can carry a `belief_pitch` object identifying one
+belief and its pitch text. `_maybe_spread_beliefs` evaluates that pitch through
+`run_belief_pitch` when LM Studio is available. The resulting `quality`, the
+speaker/listener relationship, and the listener's current beliefs determine
+the conversion chance. Both the scorer and engine require the target to be in
+the existing 80px nearby-talk radius; ordinary distant `talk_to_nearby` still
+moves/delivers as before, but cannot score or convert a belief until contact.
+Calls are bounded by `BELIEF_PITCH_SESSION_CAP = 30`,
+following the mutation-session-cap pattern; unavailable, malformed, or
+over-budget LLM scoring uses the deterministic `BELIEF_FALLBACK_QUALITY`
+instead, keeping offline behavior reproducible. A successful adoption is
+logged, messaged, remembered, and added to the chronicle.
+
+The engine increments the cap under its lock when it applies a scored pitch.
+Because scoring follows an already-dispatched decision request outside that
+lock, concurrent workers can race on a stale remaining-budget value; at most
+`MAX_CONCURRENT_LLM` (3) surplus model score calls can occur, and scores that
+arrive after the cap are ignored without changing belief state.
+
+Beliefs have mechanical consequences beyond votes. Their affinity continues
+to bias `_belief_biased_vote`; believers prefer matching projects when choosing
+the role-default project and co-believers receive a reciprocal relationship
+bonus on adoption/persuasion. `HARVEST_SPIRIT_CONTRIB_BOOST = True` remains a
+small compatible food-contribution tilt. `meme_adoption` benchmarks include
+all live beliefs with a per-belief holder breakdown, including authored
+beliefs.
 
 ## CULTURE_ENABLED
 
-**Skills:** `SKILL_KINDS = ("gather", "craft", "build", "heal")`, one float
+**Skills:** `SKILL_KINDS = ("gather", "craft", "build", "heal", "reflection")`, one float
 level `0..SKILL_MAX_LEVEL = 10.0` per verb, rising
 `SKILL_PRACTICE_GAIN = 0.15` per successful practice (deterministic, no
 roll). Feeds a small yield/output bonus every `SKILL_BONUS_DIVISOR = 4.0`
 levels (`SKILL_HEAL_BONUS_PER_LEVEL = 0.6` extra health per heal-skill
-level, applied directly rather than via the divisor).
+level, applied directly rather than via the divisor). A completed PIANO
+Reflection report also practices `reflection`; it has no yield bonus.
 
 **Teaching:** a `talk_to_nearby` message containing a teach-intent keyword
 (`TEACH_KEYWORDS`: teach/train/"show you how"/apprentice/mentor) plus a

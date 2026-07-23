@@ -503,6 +503,7 @@ SOCIAL_SILENCE_FRAMES = 4500
 COMMITMENT_EXPIRE_FRAMES = 6000
 
 MAX_PENDING_BLUEPRINTS = 5
+MAX_PENDING_ROLES = 5
 MAX_APPROVED_CUSTOM = 15
 MAX_CUSTOM_RESOURCES = 10
 MAX_CUSTOM_RECIPES = 12
@@ -520,6 +521,7 @@ BLUEPRINT_AMNESTY_FRAMES = STALL_THRESHOLD * 60
 SAGE_REVIEW_TIMEOUT_FRAMES = STALL_THRESHOLD * 20
 MAX_PENDING_RULES = 4
 MAX_ACTIVE_RULES = 8
+MAX_EMERGENT_ROLES = 8
 
 ROLE_SWITCH_TICK_FRAMES = 120
 ROLE_SWITCH_COOLDOWN = 600
@@ -549,9 +551,36 @@ MEME_RULE_AFFINITY = {
     "harvest_spirit": {"rationing", "harvest_quota", "resource_tax"},
     "river_spirit": {"priority"},  # prefers free waters / fish priority over food rationing
 }
+# Resolved Phase-3 belief mix. These are authoring exemplars, not preloaded
+# live beliefs: keeping them out of beliefRegistry preserves the competing
+# dual-seed opening and leaves four of MAX_BELIEFS slots for actual authors.
+BELIEF_ARCHETYPES = {
+    "forest_steward": {
+        "id": "forest_steward", "name": "Forest Stewardship",
+        "tenet": "The forest stays generous when we harvest with care.",
+        "affinity": ["priority"], "kind": "practical",
+    },
+    "egalitarian": {
+        "id": "egalitarian", "name": "Equal Share",
+        "tenet": "Every household deserves an equal share of the village stores.",
+        "affinity": ["resource_tax"], "kind": "political",
+    },
+    "dreamwalker": {
+        "id": "dreamwalker", "name": "Dreamwalkers",
+        "tenet": "Dreams reveal the village's next useful path.",
+        "affinity": ["custom"], "kind": "outlier",
+    },
+}
 MEME_SPREAD_PROB = 0.5
 MEME_PROXIMITY_PROB = 0.2
 MEME_TICK_FRAMES = 90
+# Phase 3: beliefs are live authored records, bounded so a long-running
+# civilization cannot turn every conversation into unbounded prompt/state work.
+MAX_BELIEFS = 6
+BELIEF_PITCH_SESSION_CAP = 30
+BELIEF_FALLBACK_QUALITY = 0.55
+BELIEF_EXISTING_PENALTY = 0.55
+BELIEF_RELATIONSHIP_WEIGHT = {"ally": 1.0, "neutral": 0.68, "rival": 0.32}
 
 INBOX_CAP = 6
 WORKING_MEM_CAP = 6
@@ -1580,6 +1609,11 @@ class SimEngine:
             "resourceRegistry": {**{k: dict(v) for k, v in BASE_RESOURCES.items()},
                                  **{k: dict(v) for k, v in CRAFTED_RESOURCES.items()}},
             "projectRegistry": {k: dict(v) for k, v in PROJECT_TEMPLATES.items()},
+            # roles.json remains the seed authoring source. This copy is the
+            # persistent, per-world registry that can receive elder-approved
+            # emergent roles without ever mutating the seed file.
+            "roleRegistry": {role: dict(defn) for role, defn in self.d["ROLES"].items()},
+            "pendingRoles": [],
             "builtTypes": set(),
             "inventionRequiredStreak": 0,
             "inventionBackstopFires": 0,
@@ -1641,6 +1675,13 @@ class SimEngine:
             "libraryKnowledge": [],         # capped ring: {"agent": name, "skill": kind, "level": float, "frame": int}
             "memeTexts": {},                # belief id -> mutated text override (see _belief_text)
             "memeMutations": 0,             # session-lifetime count, enforces MEME_MUTATION_SESSION_CAP
+            "beliefRegistry": {
+                bid: {"id": bid, "name": bid.replace("_", " ").title(),
+                      "tenet": text, "affinity": sorted(MEME_RULE_AFFINITY.get(bid, set())),
+                      "authoredBy": None, "createdFrame": 0, "seed": True}
+                for bid, text in MEMES.items()
+            },
+            "beliefPitchCalls": 0,
             "skillPracticeCount": 0,        # benchmark helper for skill_spread
             "teachCount": 0,                # benchmark helper for skill_spread
             # Path 1: settlements, treaties, composable/terrain counters.
@@ -1670,6 +1711,7 @@ class SimEngine:
                 self._ensure_district_terrain(d)
             self._init_settlements()
         self._recompute_road_paths()
+        self._rebuild_role_maps()
         active_defs = self._select_active_defs(roster_size)
         self.agent_names = set(d["name"] for d in active_defs)
         self.agents = self._make_agents(active_defs)
@@ -4802,7 +4844,28 @@ class SimEngine:
     def _project_resource_list(self, project):
         return " and ".join(project["needs"].keys())
 
-    def _role_default_project(self, role):
+    def _belief_project_score(self, agent, project_id):
+        """Match an available project to belief tenets and affinity vectors."""
+        if not agent or not agent.get("beliefs"):
+            return 0
+        tmpl = self.civilization["projectRegistry"].get(project_id) or {}
+        haystack = " ".join([project_id, str(tmpl.get("name") or "")]
+                              + list((tmpl.get("needs") or {}).keys())).lower()
+        score = 0
+        for belief_id in agent["beliefs"]:
+            entry = self._belief_entry(belief_id)
+            words = {w for w in re.findall(r"[a-z]{3,}", str(entry.get("tenet") or "").lower())}
+            score += sum(1 for word in words if word in haystack)
+            affinity = set(entry.get("affinity") or ())
+            if "priority" in affinity and self._active_priority_resource() in (tmpl.get("needs") or {}):
+                score += 2
+            if "resource_tax" in affinity and project_id in ("granary", "market", "house"):
+                score += 1
+            if "custom" in affinity and tmpl.get("custom"):
+                score += 2
+        return score
+
+    def _role_default_project(self, role, agent=None):
         pref = self.d["ROLE_PROJECT"].get((role or "").lower(), "house")
         prefs = pref if isinstance(pref, list) else [pref]
         prefs = prefs or ["house"]
@@ -4811,7 +4874,7 @@ class SimEngine:
                       and not self._type_tier_locked(p)[0]
                       and not self._type_has_unmaxed_instance(p)]
         if open_prefs:
-            return random.choice(open_prefs)
+            return max(open_prefs, key=lambda project_id: self._belief_project_score(agent, project_id))
         # Every preferred type is saturated: fall back to any unsaturated
         # registry type (this is what steers the default loop toward the
         # granary and approved customs once the basics are overbuilt).
@@ -4821,7 +4884,7 @@ class SimEngine:
                     and not self._type_tier_locked(tid)[0]
                     and not self._type_has_unmaxed_instance(tid)]
         if fallback:
-            return random.choice(fallback)
+            return max(fallback, key=lambda project_id: self._belief_project_score(agent, project_id))
         return prefs[0]
 
     def _seed_exhausted(self, tid):
@@ -4877,7 +4940,7 @@ class SimEngine:
     def _start_project_for(self, agent, target, target_district=None):
         c = self.civilization
         explicit = bool(target and target in c["projectRegistry"])
-        type_ = target if explicit else self._role_default_project(agent["role"])
+        type_ = target if explicit else self._role_default_project(agent["role"], agent)
         if not explicit:
             # Bias the default (role-based) pick toward an approved-but-
             # unbuilt custom project of the same kind, before any seed
@@ -6361,6 +6424,92 @@ class SimEngine:
             village_tier=self._village_tech_tier() if TECH_TREE_ENABLED else None,
         )
 
+    # --- live role registry ---
+    def _rebuild_role_maps(self):
+        """Derive every role lookup from this world's persistent registry.
+
+        The injected maps are intentionally replaced rather than mutating the
+        server's seed maps: roles.json remains seed-only authoring data while a
+        running world can safely specialize independently of another engine.
+        """
+        registry = self.civilization.get("roleRegistry") or {}
+        self.d["ROLE_PROJECT"] = {
+            role: definition.get("preferredProject", "house")
+            for role, definition in registry.items() if isinstance(definition, dict)
+        }
+        self.d["ROLE_SKILLS"] = {
+            role: definition.get("skill", "helps the village")
+            for role, definition in registry.items() if isinstance(definition, dict)
+        }
+        self.d["ROLE_PRIMARY_RESOURCE"] = {
+            role: definition["specialty"][0]
+            for role, definition in registry.items()
+            if isinstance(definition, dict) and definition.get("specialty")
+        }
+        gather_roles = {}
+        for role, definition in registry.items():
+            if not isinstance(definition, dict):
+                continue
+            for resource in definition.get("specialty") or []:
+                gather_roles.setdefault(resource, []).append(role)
+        self.d["RESOURCE_GATHER_ROLES"] = {
+            resource: tuple(roles) for resource, roles in gather_roles.items()
+        }
+
+    def _validate_role(self, role):
+        """Validate an emergent role proposal against the live world state."""
+        c = self.civilization
+        if not isinstance(role, dict):
+            return False, "role must be an object"
+        if len(c.get("pendingRoles") or []) >= MAX_PENDING_ROLES:
+            return False, "too many pending roles"
+        allowed = {"slug", "name", "specialty", "preferredProject", "skill"}
+        extra = set(role) - allowed
+        if extra:
+            return False, f"unknown role fields: {', '.join(sorted(extra))}"
+        slug = role.get("slug")
+        if not isinstance(slug, str) or not self.SLUG_RE.match(slug):
+            return False, "invalid role slug"
+        registry = c.get("roleRegistry") or {}
+        if slug in registry:
+            return False, "role already exists"
+        if any(p.get("slug") == slug for p in c.get("pendingRoles") or [] if isinstance(p, dict)):
+            return False, "role is already pending"
+        seed_roles = set(self.d["ROLES"])
+        emergent_count = len(set(registry) - seed_roles)
+        if emergent_count >= MAX_EMERGENT_ROLES:
+            return False, "too many emergent roles"
+        name = role.get("name")
+        if not isinstance(name, str) or not (1 <= len(name.strip()) <= 32):
+            return False, "invalid role name"
+        skill = role.get("skill")
+        if not isinstance(skill, str) or not (1 <= len(skill.strip()) <= 160) or "\n" in skill:
+            return False, "skill must be one line of 1-160 characters"
+        specialty = role.get("specialty")
+        if not isinstance(specialty, list) or len(specialty) > 4 \
+                or any(not isinstance(resource, str) or resource not in c["resourceRegistry"]
+                       for resource in specialty):
+            return False, "specialty must list up to 4 known resources"
+        preferred = role.get("preferredProject")
+        projects = c["projectRegistry"]
+        preferred_values = preferred if isinstance(preferred, list) else [preferred]
+        if not preferred_values or len(preferred_values) > 4 \
+                or any(not isinstance(project, str) or project not in projects
+                       for project in preferred_values):
+            return False, "preferredProject must name 1-4 known project types"
+        return True, None
+
+    @staticmethod
+    def _role_record(role):
+        """Copy the proposal into the registry's seed-compatible shape."""
+        preferred = role["preferredProject"]
+        return {
+            "name": role["name"].strip(),
+            "skill": role["skill"].strip(),
+            "specialty": list(role["specialty"]),
+            "preferredProject": list(preferred) if isinstance(preferred, list) else preferred,
+        }
+
     # --- relationships / helpers ---
     def _nudge_ally(self, agent, other_name):
         cur = agent["relationships"].get(other_name)
@@ -6413,12 +6562,31 @@ class SimEngine:
         return None
 
     # --- memes ---
+    def _belief_registry(self):
+        """Live seed + authored beliefs; old saves gain seed records lazily."""
+        registry = self.civilization.get("beliefRegistry")
+        if not isinstance(registry, dict):
+            registry = {}
+            self.civilization["beliefRegistry"] = registry
+        for bid, tenet in MEMES.items():
+            registry.setdefault(bid, {
+                "id": bid, "name": bid.replace("_", " ").title(),
+                "tenet": tenet, "affinity": sorted(MEME_RULE_AFFINITY.get(bid, set())),
+                "authoredBy": None, "createdFrame": 0, "seed": True,
+            })
+        return registry
+
+    def _belief_entry(self, belief_id):
+        return self._belief_registry().get(belief_id) or {}
+
+    def _belief_name(self, belief_id):
+        return self._belief_entry(belief_id).get("name") or belief_id.replace("_", " ").title()
+
     def _belief_text(self, bid):
-        # Phase G: a mutated belief's text lives in civilization["memeTexts"]
-        # (per-world override), checked before the module-level seed MEMES
-        # dict so mutation never touches shared state across civilizations/
-        # resets. Absent CULTURE_ENABLED or with no mutation yet, this is
-        # exactly the Phase A-F lookup.
+        entry = self._belief_entry(bid)
+        if entry.get("tenet"):
+            return entry["tenet"]
+        # Keep legacy mutation overrides readable when restoring an old state.
         if CULTURE_ENABLED:
             override = self.civilization.get("memeTexts", {}).get(bid)
             if override:
@@ -6444,7 +6612,8 @@ class SimEngine:
     def _belief_favored_kinds(self, agent):
         favored = set()
         for bid in agent.get("beliefs") or ():
-            favored |= MEME_RULE_AFFINITY.get(bid, set())
+            affinity = self._belief_entry(bid).get("affinity")
+            favored |= set(affinity if isinstance(affinity, list) else MEME_RULE_AFFINITY.get(bid, set()))
         return favored
 
     def _belief_biased_vote(self, agent, pending):
@@ -6464,32 +6633,98 @@ class SimEngine:
             return "no"
         return None
 
-    def _transmit_belief(self, speaker, recipient, prob):
-        if not MEMES_ENABLED or not speaker or not speaker["beliefs"]:
-            return None
-        if not recipient or recipient is speaker or recipient["incapacitated"]:
-            return None
-        if random.random() > prob:
-            return None
-        belief = random.choice(list(speaker["beliefs"]))
-        if belief in recipient["beliefs"]:
-            return None
-        recipient["beliefs"].add(belief)
-        if CULTURE_ENABLED:
-            self._maybe_mutate_meme(belief, speaker, recipient)
-        self._push_activity(f'{recipient["name"]} adopted "{self._belief_text(belief)}" from {speaker["name"]}')
-        self._push_communication("belief", speaker["name"], recipient["name"], self._belief_text(belief))
-        self._push_memory(recipient, f"Came to believe: {self._belief_text(belief)}")
-        return belief
+    def _found_belief(self, agent, belief):
+        if not MEMES_ENABLED:
+            return f"{agent['name']} cannot found a belief while culture is disabled"
+        if not isinstance(belief, dict):
+            return f"{agent['name']} did not provide a belief"
+        belief_id, name, tenet, affinity = (belief.get("id"), belief.get("name"),
+                                             belief.get("tenet"), belief.get("affinity"))
+        registry = self._belief_registry()
+        if not isinstance(belief_id, str) or not self.SLUG_RE.match(belief_id):
+            return f"{agent['name']} proposed an invalid belief id"
+        if belief_id in registry:
+            return f"{agent['name']} cannot found {belief_id} — it already exists"
+        if len(registry) >= MAX_BELIEFS:
+            return f"{agent['name']} cannot found another belief — the village has reached its belief limit"
+        if not isinstance(name, str) or not (1 <= len(name.strip()) <= 32):
+            return f"{agent['name']} proposed an invalid belief name"
+        if not isinstance(tenet, str) or not (8 <= len(tenet.strip()) <= 160) or "\n" in tenet:
+            return f"{agent['name']} proposed an invalid belief tenet"
+        if not isinstance(affinity, list) or not affinity or len(affinity) > len(RULE_KINDS) \
+                or any(not isinstance(kind, str) for kind in affinity) \
+                or len(set(affinity)) != len(affinity) or not set(affinity).issubset(RULE_KINDS):
+            return f"{agent['name']} proposed an invalid belief affinity"
+        registry[belief_id] = {
+            "id": belief_id, "name": name.strip(), "tenet": tenet.strip(),
+            "affinity": list(affinity), "authoredBy": agent["name"],
+            "createdFrame": self.frameTick, "seed": False,
+        }
+        agent["beliefs"].add(belief_id)
+        self._push_activity(f"{agent['name']} founded {name.strip()}: \"{tenet.strip()}\"")
+        self._push_communication("belief_founded", agent["name"], "everyone", tenet.strip())
+        self._push_memory(agent, f"Founded {name.strip()}: {tenet.strip()}")
+        self._push_chronicle(f"{agent['name']} founded {name.strip()}", kind="belief_founded")
+        return f"{agent['name']} founded {name.strip()}"
 
-    def _maybe_spread_beliefs(self, agent, recipient_name, message):
-        if not MEMES_ENABLED or not recipient_name or recipient_name == "everyone":
+    def _adopt_belief(self, speaker, recipient, belief_id, quality, fallback=False):
+        if not MEMES_ENABLED or not speaker or not recipient \
+                or belief_id not in speaker.get("beliefs", set()) \
+                or belief_id in recipient.get("beliefs", set()) \
+                or recipient is speaker or recipient["incapacitated"]:
+            return None
+        recipient["beliefs"].add(belief_id)
+        self._nudge_ally(speaker, recipient["name"])
+        self._nudge_ally(recipient, speaker["name"])
+        source = "deterministic fallback" if fallback else f"pitch quality {quality:.2f}"
+        self._push_activity(f'{recipient["name"]} adopted {self._belief_name(belief_id)} from {speaker["name"]} ({source})')
+        self._push_communication("belief", speaker["name"], recipient["name"], self._belief_text(belief_id))
+        self._push_memory(recipient, f"Came to believe {self._belief_name(belief_id)}: {self._belief_text(belief_id)}")
+        self._push_chronicle(f'{recipient["name"]} adopted {self._belief_name(belief_id)}', kind="belief_adoption")
+        return belief_id
+
+    def _belief_conversion_probability(self, speaker, recipient, quality):
+        left = BELIEF_RELATIONSHIP_WEIGHT.get(self._relationship_between(speaker, recipient["name"]), 0.68)
+        right = BELIEF_RELATIONSHIP_WEIGHT.get(self._relationship_between(recipient, speaker["name"]), 0.68)
+        probability = 0.08 + (0.70 * max(0.0, min(1.0, quality)) * ((left + right) / 2.0))
+        if recipient.get("beliefs"):
+            probability *= BELIEF_EXISTING_PENALTY
+        return max(0.02, min(0.88, probability))
+
+    def _deterministic_belief_roll(self, speaker, recipient, belief_id):
+        material = f"{self.frameTick}|{speaker['name']}|{recipient['name']}|{belief_id}"
+        return (sum((idx + 1) * ord(ch) for idx, ch in enumerate(material)) % 1000) / 1000.0
+
+    def _maybe_spread_beliefs(self, agent, recipient_name, message, belief_pitch=None,
+                              judged_quality=None, model_scored=False):
+        if not MEMES_ENABLED or not recipient_name or recipient_name == "everyone" \
+                or not isinstance(belief_pitch, dict):
             return
         recipient = self._find_agent(recipient_name)
-        belief = self._transmit_belief(agent, recipient, MEME_SPREAD_PROB)
-        if belief:
-            self._deliver_message(agent["name"], recipient_name,
-                                  f"(belief shared) {self._belief_text(belief)}", "belief")
+        belief_id = belief_pitch.get("belief_id")
+        pitch_text = belief_pitch.get("pitch")
+        # Count an actual returned model score before checking whether the
+        # pair remained adjacent while the decision was in flight. Otherwise
+        # rapid movement could spend unbounded scores that never reach the
+        # conversion branch. The server never requests a score for a target
+        # absent from the original nearby payload.
+        use_model = (model_scored and isinstance(judged_quality, (int, float))
+                     and not isinstance(judged_quality, bool) and 0.0 <= judged_quality <= 1.0
+                     and self.civilization.get("beliefPitchCalls", 0) < BELIEF_PITCH_SESSION_CAP)
+        if use_model:
+            self.civilization["beliefPitchCalls"] = self.civilization.get("beliefPitchCalls", 0) + 1
+        # `talk_to_nearby` preserves its historical move-and-deliver behavior
+        # for a named distant target. Belief persuasion is stricter: it is an
+        # adjacent conversation only, never a remote conversion while walking.
+        if not recipient or self._distance_to(agent, recipient) > 80 \
+                or belief_id not in agent.get("beliefs", set()) \
+                or belief_id in recipient.get("beliefs", set()) \
+                or not isinstance(pitch_text, str) or not (4 <= len(pitch_text.strip()) <= 240):
+            return
+        quality = float(judged_quality) if use_model else BELIEF_FALLBACK_QUALITY
+        if self._deterministic_belief_roll(agent, recipient, belief_id) \
+                <= self._belief_conversion_probability(agent, recipient, quality):
+            self._adopt_belief(agent, recipient, belief_id, quality, fallback=not use_model)
 
     def _maybe_form_commitment(self, agent, recipient_name, message):
         """Consequential conversations (#5.4): talk stops being purely
@@ -6509,21 +6744,17 @@ class SimEngine:
                                    "madeAt": self.frameTick, "resource": matched}
 
     def _spread_beliefs_by_proximity(self):
-        if not MEMES_ENABLED:
-            return
-        for speaker in self.agents:
-            if speaker["incapacitated"] or not speaker["beliefs"]:
-                continue
-            for name in self._get_nearby_agents(speaker):
-                recipient = self._find_agent(name)
-                self._transmit_belief(speaker, recipient, MEME_PROXIMITY_PROB)
+        """Retained tick hook: adjacency creates a pitch opportunity only.
+        A belief changes hands exclusively through talk_to_nearby's explicit
+        belief_pitch payload, never through a background probability roll."""
+        return
 
     def _meme_adoption_counts(self):
         """Per-meme living-agent adoption counts (Sid-parity Phase 3)."""
         if not MEMES_ENABLED:
             return {}
         living = [a for a in self.agents if a.get("deathFrame") is None]
-        counts = {mid: 0 for mid in MEMES}
+        counts = {mid: 0 for mid in self._belief_registry()}
         for a in living:
             for bid in a.get("beliefs") or ():
                 if bid in counts:
@@ -6531,11 +6762,11 @@ class SimEngine:
         return counts
 
     def _meme_adoption_count(self):
-        """Backward-compatible total: agents holding any seeded meme."""
+        """Total living agents holding one or more live beliefs."""
         if not MEMES_ENABLED:
             return 0
         living = [a for a in self.agents if a.get("deathFrame") is None]
-        return len([a for a in living if a.get("beliefs") and (a["beliefs"] & set(MEME_SEED_IDS))])
+        return len([a for a in living if a.get("beliefs")])
 
     def _maybe_mutate_meme(self, belief_id, speaker, recipient):
         """Event-driven, capped mutation of a belief's text on spread (#3).
@@ -8297,7 +8528,8 @@ class SimEngine:
                  "library_knowledge_entries": len(c.get("libraryKnowledge") or [])})
             self._log_benchmark(
                 "chronicle_size", len(c.get("chronicle") or []),
-                {"meme_mutations": c.get("memeMutations", 0)})
+                {"meme_mutations": c.get("memeMutations", 0),
+                 "belief_pitch_calls": c.get("beliefPitchCalls", 0)})
 
     # --- memory maintenance (round-robin summarizer + periodic cleaner) ---
     def _run_memory_maintenance(self):
@@ -8396,6 +8628,9 @@ class SimEngine:
             self._set_agent_target(agent, kind)
             summary = f"{agent['name']} heads to the {kind}"
 
+        elif action == "found_belief":
+            summary = self._found_belief(agent, decision.get("belief"))
+
         elif action == "collect_resource":
             c["collectAttempts"] += 1
             district_id = self._resolve_contribution_district(agent, decision.get("target_district"))
@@ -8450,7 +8685,9 @@ class SimEngine:
                 agent["lastSpokeFrame"] = self.frameTick
                 self._push_conversation(agent["name"], recipient, decision["message"])
                 self._deliver_message(agent["name"], recipient, decision["message"], "speech")
-                self._maybe_spread_beliefs(agent, recipient, decision["message"])
+                self._maybe_spread_beliefs(
+                    agent, recipient, decision["message"], decision.get("belief_pitch"),
+                    decision.get("belief_pitch_quality"), decision.get("belief_pitch_scored", False))
                 self._maybe_form_commitment(agent, recipient, decision["message"])
                 if CULTURE_ENABLED:
                     self._maybe_teach(agent, recipient, decision["message"])
@@ -8734,6 +8971,48 @@ class SimEngine:
             else:
                 summary = f"{agent['name']} could not reject that blueprint"
 
+        elif action == "propose_role":
+            role = decision.get("role")
+            ok, reason = self._validate_role(role)
+            if ok:
+                pending = dict(role)
+                pending["specialty"] = list(role["specialty"])
+                if isinstance(role["preferredProject"], list):
+                    pending["preferredProject"] = list(role["preferredProject"])
+                pending["proposedBy"] = agent["name"]
+                pending["proposedFrame"] = self.frameTick
+                c["pendingRoles"].append(pending)
+                summary = f"{agent['name']} proposed the {role['name']} role"
+            else:
+                summary = f"{agent['name']} drafted an invalid role ({reason})"
+
+        elif action == "approve_role":
+            idx = next((i for i, p in enumerate(c["pendingRoles"])
+                        if p.get("slug") == decision.get("target")), -1)
+            if agent["role"] != "elder" or idx == -1:
+                summary = f"{agent['name']} could not approve that role"
+            else:
+                role = c["pendingRoles"][idx]
+                registry = c["roleRegistry"]
+                seed_roles = set(self.d["ROLES"])
+                emergent_count = len(set(registry) - seed_roles)
+                if role["slug"] in registry or emergent_count >= MAX_EMERGENT_ROLES:
+                    summary = f"{agent['name']} could not approve the {role['name']} role"
+                else:
+                    c["pendingRoles"].pop(idx)
+                    registry[role["slug"]] = self._role_record(role)
+                    self._rebuild_role_maps()
+                    summary = f"{agent['name']} approved the {role['name']} role"
+
+        elif action == "reject_role":
+            idx = next((i for i, p in enumerate(c["pendingRoles"])
+                        if p.get("slug") == decision.get("target")), -1)
+            if agent["role"] == "elder" and idx != -1:
+                role = c["pendingRoles"].pop(idx)
+                summary = f"{agent['name']} rejected the {role['name']} role"
+            else:
+                summary = f"{agent['name']} could not reject that role"
+
         elif action == "assign_task":
             target = self._find_agent(decision.get("target"))
             if agent["role"] == "elder" and target and self._is_idle(target) and decision.get("message"):
@@ -8746,7 +9025,6 @@ class SimEngine:
                 # villager's errand (measured 83% move_to_district sessions).
                 self._push_communication("directive", agent["name"], target["name"], task_text)
                 self._deliver_message(agent["name"], target["name"], task_text, "directive")
-                self._transmit_belief(agent, target, MEME_SPREAD_PROB)
                 summary = f"Elder {agent['name']} tasked {target['name']}: {task_text}"
             else:
                 summary = f"{agent['name']} could not assign that task"
@@ -8758,7 +9036,7 @@ class SimEngine:
 
         elif action == "switch_role":
             new_role = decision.get("new_role") or decision.get("target")
-            if EMERGENT_ROLES and new_role and new_role in self.d["ROLES"] and new_role != agent["role"]:
+            if EMERGENT_ROLES and new_role and new_role in c["roleRegistry"] and new_role != agent["role"]:
                 old = agent["role"]
                 agent["role"] = new_role
                 agent["assignedTask"] = None
@@ -9437,6 +9715,11 @@ class SimEngine:
                 and self.frameTick - agent.get("lastSpokeFrame", 0) > SOCIAL_SILENCE_FRAMES:
             note(3, "NOTE: You haven't spoken with anyone in a while and someone is nearby. "
                     "Consider talk_to_nearby to coordinate plans, ask for help, or share what you know.")
+        if MEMES_ENABLED and agent.get("beliefs"):
+            listener = next((self._find_agent(n.get("name")) for n in nearby_detailed
+                             if n.get("name") and not (self._find_agent(n.get("name")) or {}).get("beliefs")), None)
+            if listener:
+                note(3, f"NOTE: {listener['name']} is nearby and has no belief. You may use talk_to_nearby with a belief_pitch to persuade them.")
         tool_line = None
         industry_line = None
         neighbor_line = None
@@ -9533,6 +9816,14 @@ class SimEngine:
         # be trimmed -- only the rich known_resources list below (used for
         # the prompt) is capped.
         known_resource_ids_full = [r["id"] for r in resource_items]
+        belief_records = [{"id": bid, "name": entry.get("name"), "tenet": entry.get("tenet"),
+                           "affinity": list(entry.get("affinity") or [])}
+                          for bid, entry in self._belief_registry().items()]
+        belief_examples = [dict(example) for example in BELIEF_ARCHETYPES.values()]
+        nearby_beliefs = {
+            n["name"]: sorted((self._find_agent(n["name"]) or {}).get("beliefs") or [])
+            for n in nearby_detailed if n.get("name")
+        }
         seed_resources = [r for r in resource_items if not r["custom"]]
         custom_resources = [r for r in resource_items if r["custom"]]
         if len(seed_resources) + len(custom_resources) > MAX_KNOWN_RESOURCES_PROMPT:
@@ -9595,6 +9886,11 @@ class SimEngine:
             "health": agent["health"],
             "relationships": dict(agent["relationships"]),
             "beliefs": [self._belief_text(b) for b in agent["beliefs"]] if MEMES_ENABLED else [],
+            "belief_ids": sorted(agent["beliefs"]) if MEMES_ENABLED else [],
+            "belief_registry": belief_records if MEMES_ENABLED else [],
+            "belief_examples": belief_examples if MEMES_ENABLED else [],
+            "nearby_beliefs": nearby_beliefs if MEMES_ENABLED else {},
+            "belief_pitch_budget_remaining": max(0, BELIEF_PITCH_SESSION_CAP - c.get("beliefPitchCalls", 0)),
             "nearby_agents": nearby_detailed,
             "world_zone": agent["currentZone"],
             "current_district": agent.get("currentDistrict") or "none",
@@ -9662,6 +9958,26 @@ class SimEngine:
             "nudges_total": nudges_total,
             "nudges_dropped": nudges_dropped,
             "needed_role": self._village_needed_role() if EMERGENT_ROLES else None,
+            "known_role_ids": sorted(c["roleRegistry"]),
+            "pending_role_count": len(c["pendingRoles"]),
+            "emergent_role_count": len(set(c["roleRegistry"]) - set(self.d["ROLES"])),
+            "known_project_ids": sorted(c["projectRegistry"]),
+            # Server fallback helpers run outside the engine and must consult
+            # this world's live registry, never server.py's process-start seed
+            # maps. Copy list values so the think payload remains a snapshot.
+            "role_project_map": {
+                role: list(project) if isinstance(project, list) else project
+                for role, project in self.d["ROLE_PROJECT"].items()
+            },
+            "role_primary_resource_map": dict(self.d["ROLE_PRIMARY_RESOURCE"]),
+            "resource_gather_roles_map": {
+                resource: list(roles)
+                for resource, roles in self.d["RESOURCE_GATHER_ROLES"].items()
+            },
+            "pending_roles": [{"slug": role["slug"], "name": role["name"],
+                               "specialty": list(role.get("specialty") or []),
+                               "proposed_by": role.get("proposedBy")}
+                              for role in c["pendingRoles"]],
             # Phase G: compact skills summary (folded into the existing "Your
             # skill:" line server-side, zero new template line) and a short
             # rotating village-history line (server renders it only when set,
@@ -9676,12 +9992,14 @@ class SimEngine:
             "high_stakes_reason": high_stakes_reason,
             "available_actions": [a for a in self.d["AVAILABLE_ACTIONS"]
                                   if (a != "start_terraform" or ECOLOGY_ENABLED)
+                                  and (a != "found_belief" or MEMES_ENABLED)
                                   and (a != "repair_structure" or GOODS_ENABLED)
                                   and (a != "bury_agent" or CEMETERY_ENABLED)
                                   and (a != "repeal_rule" or RULES_ENABLED)
                                   and (a != "upgrade_structure" or STRUCTURE_UPGRADES_ENABLED)
-                                  and (a != "submit_structure_sprite" or sprite_design_turn)
-                                  and (a not in ("place_block", "remove_block") or path1_on("COMPOSABLE_BUILD_ENABLED"))
+                                   and (a != "submit_structure_sprite" or sprite_design_turn)
+                                   and (a not in ("propose_role", "approve_role", "reject_role") or EMERGENT_ROLES)
+                                   and (a not in ("place_block", "remove_block") or path1_on("COMPOSABLE_BUILD_ENABLED"))
                                   and (a not in ("dig_terrain", "plant_terrain") or path1_on("TERRAIN_TILES_ENABLED"))
                                   and (a not in ("propose_treaty", "vote_treaty") or path1_on("PATH1_DIPLOMACY_ENABLED"))],
         }
@@ -10230,6 +10548,16 @@ class SimEngine:
                 civ.setdefault("lastRoleSwitchFrame", 0)
                 civ.setdefault("roleNeedSinceFrame", None)
                 civ.setdefault("lastRoleRebalanceLatency", None)
+                # Phase 2 role registry migration: older saves only know the
+                # roles.json seeds, while newer saves carry per-world approved
+                # roles. Merge missing seeds without overwriting live entries.
+                registry = civ.get("roleRegistry")
+                if not isinstance(registry, dict):
+                    registry = {}
+                for role, definition in self.d["ROLES"].items():
+                    registry.setdefault(role, dict(definition))
+                civ["roleRegistry"] = registry
+                civ.setdefault("pendingRoles", [])
                 civ.setdefault("ruleKindsEverEnacted", [])
                 # Backfill diversity from currently enacted rules so old saves
                 # don't report 0 forever after a restore.
@@ -10313,6 +10641,13 @@ class SimEngine:
                     civ.setdefault("libraryKnowledge", [])
                     civ.setdefault("memeTexts", {})
                     civ.setdefault("memeMutations", 0)
+                    civ.setdefault("beliefRegistry", {
+                        bid: {"id": bid, "name": bid.replace("_", " ").title(),
+                              "tenet": text, "affinity": sorted(MEME_RULE_AFFINITY.get(bid, set())),
+                              "authoredBy": None, "createdFrame": 0, "seed": True}
+                        for bid, text in MEMES.items()
+                    })
+                    civ.setdefault("beliefPitchCalls", 0)
                     civ.setdefault("skillPracticeCount", 0)
                     civ.setdefault("teachCount", 0)
                 if CEMETERY_ENABLED:
@@ -10445,9 +10780,8 @@ class SimEngine:
                     agents.append(a)
                 if not agents or not civ:
                     return False
-                if data.get("version") == 1:
-                    self._migrate_v1_to_v2(civ, agents)
                 self.civilization = civ
+                self._rebuild_role_maps()
                 self.agents = agents
                 self.agent_names = set(a["name"] for a in agents)
                 self.frameTick = int(data.get("frameTick") or 0)
@@ -10582,6 +10916,8 @@ class SimEngine:
                 civ["chronicle"] = list((c.get("chronicle") or [])[-CHRONICLE_CAP:])
                 civ["libraryKnowledge"] = list(c.get("libraryKnowledge") or [])
                 civ["memeMutations"] = c.get("memeMutations", 0)
+                civ["beliefRegistry"] = json.loads(json.dumps(self._belief_registry(), default=str))
+                civ["beliefPitchCalls"] = c.get("beliefPitchCalls", 0)
             if TECH_TREE_ENABLED:
                 # Phase D: era chip, council banner, and the persisted debate
                 # records for the viewer's Council panel.

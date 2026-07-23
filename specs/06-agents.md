@@ -52,9 +52,12 @@ This guarantees an elder always exists regardless of roster size.
 
 ## roles.json schema
 
-`simulation/roles.json` is the single source of truth for role data (12 entries,
-one per `AGENT_DEFS` role). Edit role data there, never in code maps. Schema per
-entry (role name -> object):
+`simulation/roles.json` is the single source of truth for the 12 **seed** role
+definitions (one per `AGENT_DEFS` role). Edit seed role data there, never in code
+maps. At cold start, the engine copies those entries into the persistent live
+`civilization["roleRegistry"]`; approved emergent roles are added only to that
+per-world registry and therefore persist in `state.db` without modifying the
+authoring file. Schema per seed entry (role name -> object):
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -64,6 +67,11 @@ entry (role name -> object):
 | `leader` | bool (optional) | Present and `true` only for `elder` — marks the sole leader role |
 
 Data itself (all 12 roles' values) is not restated here — read `roles.json`.
+
+An emergent registry entry is keyed by its validated slug and additionally stores
+its display `name`. Its `skill`, `specialty`, and `preferredProject` fields use
+the same meanings and shapes as the seed schema. `leader` is never accepted for
+an emergent role, so the single elder role remains a seed-only invariant.
 
 ## Agent state fields (`_make_agents`, sim_engine.py:1298-1388)
 
@@ -149,6 +157,23 @@ memory — see server.py's scaffold-detection regexes).
 section from the last 3 longTerm + 4 shortTerm + 4 working entries.
 
 ## Emergent roles (`EMERGENT_ROLES`, default True)
+
+Any agent may submit `propose_role` with a role object containing `slug`, `name`,
+`specialty`, `preferredProject`, and `skill`. The proposal is held in
+`civilization["pendingRoles"]` until an elder uses `approve_role` or
+`reject_role`. Approval validates the slug, display name, one-line skill,
+known-resource specialties, and project preference; it rejects collisions with
+the live registry and caps approvals at `MAX_EMERGENT_ROLES = 8` beyond the seed
+set. The pending queue is independently capped at `MAX_PENDING_ROLES = 5`, so
+additional proposals are rejected until the elder resolves one. Rejected
+proposals are discarded. On approval, the engine rebuilds its
+derived `ROLE_PROJECT`, `ROLE_SKILLS`, `ROLE_PRIMARY_RESOURCE`, and
+`RESOURCE_GATHER_ROLES` maps from the live registry before any future prompt,
+need-detection, or role-switch read. `switch_role` may then select the approved
+slug exactly as it can a seed role. Each think payload also carries these live
+role maps, so server-side fallback/project/task helpers use the world's approved
+roles rather than the process-start seed-map conveniences; separate engine worlds
+therefore cannot leak role specializations into one another.
 
 `_is_flexible_role(role)` (sim_engine.py:6401-6402): a role is "flexible" (eligible
 for auto-switch) if it has no fixed specialty resource and isn't `elder`.

@@ -48,7 +48,8 @@ def make_engine(roster_size=8):
         "ROLE_PRIMARY_RESOURCE": role_primary,
         "RESOURCE_GATHER_ROLES": _build_resource_gather_roles(roles),
         "AVAILABLE_ACTIONS": [
-            "switch_role", "propose_rule", "vote_rule", "repeal_rule",
+            "switch_role", "propose_role", "approve_role", "reject_role",
+            "propose_rule", "vote_rule", "repeal_rule", "found_belief", "talk_to_nearby",
             "collect_resource", "contribute_resources", "rest",
         ],
         "SLUG_RE": re.compile(r"^[a-z][a-z0-9_]{1,24}$"),
@@ -75,6 +76,10 @@ def test_dual_meme_seed(engine):
     counts = engine._meme_adoption_counts()
     assert_true(counts.get("harvest_spirit", 0) >= 1, "harvest_spirit not seeded")
     assert_true(counts.get("river_spirit", 0) >= 1, "river_spirit not seeded")
+    assert_true(set(se.BELIEF_ARCHETYPES) == {"forest_steward", "egalitarian", "dreamwalker"},
+                "resolved practical/political/outlier belief exemplars missing")
+    assert_true(not set(se.BELIEF_ARCHETYPES) & set(engine.civilization["beliefRegistry"]),
+                "belief archetypes must not consume live slots before an agent authors one")
     print(f"  OK dual meme seed: {counts}")
 
 
@@ -104,6 +109,138 @@ def test_auto_switch_and_latency(engine):
     assert_true(latency is not None and latency >= 50, f"bad latency {latency}")
     print(f"  OK auto switch {switched[0]['name']} -> {switched[0]['role']} "
           f"(latency={latency})")
+
+
+def test_emergent_role_registry(engine):
+    """A proposed role must become persistent, switchable, and visible to
+    the gathered-resource map only after elder approval."""
+    elder = next(a for a in engine.agents if a["role"] == "elder")
+    proposer = next(a for a in engine.agents if a is not elder)
+    proposal = {
+        "slug": "herbalist", "name": "Herbalist", "specialty": ["herbs"],
+        "preferredProject": "farm_plot", "skill": "Gathers herbs for remedies.",
+    }
+    engine.apply_decision(proposer, {
+        "action": "propose_role", "role": proposal, "reasoning": "smoke role",
+    })
+    assert_true(engine.civilization["pendingRoles"][0]["slug"] == "herbalist",
+                engine.civilization["pendingRoles"])
+    assert_true("herbalist" not in engine.civilization["roleRegistry"],
+                "pending role leaked into registry")
+
+    engine.apply_decision(elder, {
+        "action": "approve_role", "target": "herbalist", "reasoning": "smoke approval",
+    })
+    assert_true("herbalist" in engine.civilization["roleRegistry"],
+                engine.civilization["roleRegistry"])
+    assert_true("herbalist" in engine.d["RESOURCE_GATHER_ROLES"].get("herbs", ()),
+                engine.d["RESOURCE_GATHER_ROLES"])
+    assert_true(engine.d["ROLE_PRIMARY_RESOURCE"].get("herbalist") == "herbs",
+                engine.d["ROLE_PRIMARY_RESOURCE"])
+    assert_true(engine.d["ROLE_SKILLS"].get("herbalist") == proposal["skill"],
+                engine.d["ROLE_SKILLS"])
+    persisted = engine._serialize_state()["civilization"].get("roleRegistry") or {}
+    assert_true("herbalist" in persisted, "approved role missing from persistence payload")
+    think_payload = engine._build_think_payload(proposer)
+    assert_true(think_payload["role_project_map"].get("herbalist") == "farm_plot",
+                think_payload["role_project_map"])
+    assert_true("herbalist" in think_payload["resource_gather_roles_map"].get("herbs", []),
+                think_payload["resource_gather_roles_map"])
+    engine.apply_decision(proposer, {
+        "action": "switch_role", "new_role": "herbalist", "reasoning": "smoke switch",
+    })
+    assert_true(proposer["role"] == "herbalist", proposer)
+    print("  OK role proposal -> approval -> switch; herbs gather map refreshed")
+
+
+def test_server_fallback_uses_live_role_maps(engine):
+    """The server's pure fallback helpers must honor this engine's approved
+    role, not only their module-global roles.json seed maps."""
+    from server import ROLE_PROJECT, role_fallback_action  # noqa: E402
+
+    assert_true("herbalist" not in ROLE_PROJECT,
+                "test requires herbalist to be absent from server seed map")
+    dynamic = {
+        "role_project_map": engine.d["ROLE_PROJECT"],
+        "role_primary_resource_map": engine.d["ROLE_PRIMARY_RESOURCE"],
+        "resource_gather_roles_map": engine.d["RESOURCE_GATHER_ROLES"],
+        "active_project": "none", "pending_blueprint_ids": [],
+        "pending_roles": [], "idle_agents": [], "invention_status": "not needed",
+    }
+    fallback = role_fallback_action("herbalist", dynamic)
+    assert_true(fallback["action"] == "start_project" and fallback["target"] == "farm_plot",
+                f"dynamic preferred project ignored: {fallback}")
+
+    dynamic.update({
+        "active_project": "Herb Store", "project_progress": "herbs 0/2",
+        "idle_agents": [
+            {"name": "Generic", "role": "trader"},
+            {"name": "Herbalist", "role": "herbalist"},
+        ],
+    })
+    elder = role_fallback_action("elder", dynamic)
+    assert_true(elder["action"] == "assign_task" and elder["target"] == "Herbalist",
+                f"dynamic gather specialty ignored: {elder}")
+    assert_true(elder["message"] == "gather herbs for the active project", elder)
+
+    # The server must not spend a pitch-scoring call merely because an LLM
+    # named an agent who is not in the engine's current nearby payload.
+    import server  # noqa: E402
+    scorer_calls = []
+    original_scorer = server.run_belief_pitch
+    try:
+        server.run_belief_pitch = lambda *args, **kwargs: scorer_calls.append(args) or 0.9
+        distant = server.score_belief_pitch_decision(
+            {"action": "talk_to_nearby", "target": "FarAway",
+             "belief_pitch": {"belief_id": "forest_steward", "pitch": "Protect the forest."}},
+            {"belief_pitch_budget_remaining": 1,
+             "belief_registry": [se.BELIEF_ARCHETYPES["forest_steward"]],
+             "belief_ids": ["forest_steward"], "nearby_beliefs": {"Near": []},
+             "agent_name": "Speaker", "relationships": {}, "frame_tick": 0},
+        )
+    finally:
+        server.run_belief_pitch = original_scorer
+    assert_true(not scorer_calls and "belief_pitch_scored" not in distant,
+                f"distant pitch unexpectedly invoked scorer: {distant}")
+    print("  OK server fallback uses live role project + specialty maps")
+
+
+def test_pending_role_cap():
+    """The engine and prompt-side validator both reject role proposals once
+    the bounded review queue is full."""
+    from server import MAX_EMERGENT_ROLES, MAX_PENDING_ROLES, validate_role  # noqa: E402
+
+    engine = make_engine(8)
+    proposal = {
+        "slug": "queue_tester", "name": "Queue Tester", "specialty": ["herbs"],
+        "preferredProject": "farm_plot", "skill": "Tests role queue limits.",
+    }
+    engine.civilization["pendingRoles"] = [
+        {"slug": f"pending_role_{i}"} for i in range(se.MAX_PENDING_ROLES)
+    ]
+    ok, reason = engine._validate_role(proposal)
+    assert_true(not ok and reason == "too many pending roles", (ok, reason))
+    proposer = engine.agents[0]
+    engine.apply_decision(proposer, {
+        "action": "propose_role", "role": proposal, "reasoning": "smoke queue cap",
+    })
+    assert_true(len(engine.civilization["pendingRoles"]) == se.MAX_PENDING_ROLES,
+                engine.civilization["pendingRoles"])
+
+    known_resources = list(engine.civilization["resourceRegistry"])
+    known_roles = list(engine.civilization["roleRegistry"])
+    known_projects = list(engine.civilization["projectRegistry"])
+    ok, reason = validate_role(
+        proposal, known_resources, known_roles, [], known_projects,
+        pending_role_count=MAX_PENDING_ROLES, emergent_role_count=0,
+    )
+    assert_true(not ok and reason == "too many pending roles", (ok, reason))
+    ok, reason = validate_role(
+        proposal, known_resources, known_roles, [], known_projects,
+        pending_role_count=0, emergent_role_count=MAX_EMERGENT_ROLES,
+    )
+    assert_true(not ok and reason == "too many emergent roles", (ok, reason))
+    print("  OK pending-role cap + server queue/emergent prechecks")
 
 
 def test_priority_and_repeal(engine):
@@ -231,9 +368,99 @@ def test_belief_biased_vote(engine):
     print("  OK belief-biased votes")
 
 
+def test_authored_belief_persuasion_and_project_preference(engine):
+    # The resolved Phase-3 rule is fully emergent: a villager with neither a
+    # seed belief nor reflection practice can author the first new belief.
+    uninitiated = next(a for a in engine.agents if not a.get("beliefs"))
+    uninitiated["skills"]["reflection"] = 0.0
+    ungated_payload = engine._build_think_payload(uninitiated)
+    assert_true("found_belief" in ungated_payload["available_actions"],
+                "belief authoring was hidden from an uninitiated agent")
+    engine.apply_decision(uninitiated, {
+        "action": "found_belief",
+        "belief": {
+            "id": "first_voice", "name": "First Voice",
+            "tenet": "A new village learns by naming what it hopes for.",
+            "affinity": ["custom"],
+        },
+        "reasoning": "Giving the village its first original belief.",
+    })
+    assert_true("first_voice" in uninitiated["beliefs"],
+                "zero-reflection, belief-free agent could not found a belief")
+
+    founder = next(a for a in engine.agents if se.MEME_SEED_ID in a.get("beliefs", ()))
+    listener = next(a for a in engine.agents if a is not founder and not a.get("beliefs"))
+    engine.apply_decision(founder, {
+        "action": "found_belief",
+        "belief": {
+            "id": "granary_steward", "name": "Granary Stewardship",
+            "tenet": "A granary stores the shared harvest safely.",
+            "affinity": ["resource_tax"],
+        },
+        "reasoning": "A shared store makes our harvest secure.",
+    })
+    registry = engine.civilization.get("beliefRegistry") or {}
+    assert_true("granary_steward" in registry, "authored belief was not persisted in registry")
+    assert_true("granary_steward" in founder["beliefs"], "founder did not hold authored belief")
+    serialized = engine._serialize_state()
+    assert_true("granary_steward" in serialized["civilization"].get("beliefRegistry", {}),
+                "authored belief missing from persisted state")
+
+    engine.civilization["projectRegistry"]["shared_harvest_store"] = {
+        "name": "Shared Harvest Store", "needs": {"wood": 1}, "custom": True,
+    }
+    engine.d["ROLE_PROJECT"][founder["role"]] = ["farm_plot", "shared_harvest_store"]
+    preferred = engine._role_default_project(founder["role"], founder)
+    assert_true(preferred == "shared_harvest_store",
+                f"belief did not prefer matching project: {preferred}")
+
+    # A named distant agent is valid for ordinary talk/movement, but it must
+    # neither be eligible for server pitch scoring nor convert before contact.
+    founder["x"] = founder["y"] = 0
+    listener["x"] = listener["y"] = 1000
+    distant_payload = engine._build_think_payload(founder)
+    assert_true(listener["name"] not in distant_payload["nearby_beliefs"],
+                "distant target was incorrectly eligible for pitch scoring")
+    before_pitch_calls = engine.civilization.get("beliefPitchCalls", 0)
+    engine.apply_decision(founder, {
+        "action": "talk_to_nearby", "target": listener["name"],
+        "message": "Our shared granary protects every family through lean days.",
+        "belief_pitch": {"belief_id": "granary_steward",
+                          "pitch": "Our shared granary protects every family through lean days."},
+        "reasoning": "Trying to persuade from too far away.",
+    })
+    assert_true("granary_steward" not in listener["beliefs"],
+                "distant belief pitch converted before the speakers met")
+    assert_true(engine.civilization.get("beliefPitchCalls", 0) == before_pitch_calls,
+                "distant belief pitch consumed a scorer result")
+
+    founder["x"] = listener["x"] = 700
+    founder["y"] = listener["y"] = 1000
+    founder["relationships"][listener["name"]] = "ally"
+    listener["relationships"][founder["name"]] = "ally"
+    belief_id = "granary_steward"
+    for frame in range(1000):
+        engine.frameTick = frame
+        if engine._deterministic_belief_roll(founder, listener, belief_id) <= \
+                engine._belief_conversion_probability(founder, listener, se.BELIEF_FALLBACK_QUALITY):
+            break
+    engine.apply_decision(founder, {
+        "action": "talk_to_nearby", "target": listener["name"],
+        "message": "Our shared granary protects every family through lean days.",
+        "belief_pitch": {"belief_id": belief_id,
+                          "pitch": "Our shared granary protects every family through lean days."},
+        "reasoning": "Persuading a neighbor to protect the harvest.",
+    })
+    assert_true(belief_id in listener["beliefs"], "offline belief pitch did not convert listener")
+    assert_true(founder["relationships"].get(listener["name"]) == "ally"
+                and listener["relationships"].get(founder["name"]) == "ally",
+                "co-believers did not receive reciprocal relationship bonus")
+    print("  OK authored belief, project preference, deterministic persuasion")
+
+
 def test_role_fallback_switch():
     # Avoid importing simulation.server (it constructs the live SimEngine and
-    # resumes state.json). Replicate the Phase-1 switch_role branch of
+    # resumes state.db). Replicate the Phase-1 switch_role branch of
     # role_fallback_action with the same guard conditions.
     role = "trader"
     needed_role = "farmer"
@@ -363,8 +590,12 @@ def main():
     engine = make_engine(8)
     test_dual_meme_seed(engine)
     test_belief_biased_vote(engine)
+    test_authored_belief_persuasion_and_project_preference(engine)
     test_survival_need_role(engine)
     test_auto_switch_and_latency(engine)
+    test_emergent_role_registry(engine)
+    test_server_fallback_uses_live_role_maps(engine)
+    test_pending_role_cap()
 
     engine2 = make_engine(8)
     test_priority_and_repeal(engine2)

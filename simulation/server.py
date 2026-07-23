@@ -720,6 +720,8 @@ VALID_BOOST_KINDS = {"gather", "craft"}
 VALID_BOOST_SCOPES = {"village", "district"}
 VALID_UNLOCK_KINDS = {"craft", "transit"}
 MAX_PENDING_BLUEPRINTS = 5
+MAX_PENDING_ROLES = 5
+MAX_EMERGENT_ROLES = 8
 MAX_APPROVED_CUSTOM = 15
 MAX_CUSTOM_RESOURCES = 10
 # Phase D (TECH_TREE_ENABLED): blueprint tech-tier bounds. Tier gating only
@@ -752,7 +754,7 @@ STRUCTURED_OUTPUT_MODE = "json_schema"
 # can be founded at runtime rather than fixed at code-authoring time.
 DECISION_ACTIONS = [
     "move_to_district", "move_to_agent",
-    "collect_resource", "talk_to_nearby", "trade_resource",
+    "collect_resource", "talk_to_nearby", "found_belief", "trade_resource",
     "start_project", "contribute_resources", "build_structure",
     "start_terraform",
     # Phase C (GOODS_ENABLED): structure upkeep. The engine filters it from
@@ -768,7 +770,8 @@ DECISION_ACTIONS = [
     "heal_agent",
     "craft_item", "propose_recipe", "approve_recipe", "reject_recipe",
     # CMA + Sid enhancement actions (emergent roles + collective rules/voting).
-    "switch_role", "propose_rule", "vote_rule", "repeal_rule",
+    "switch_role", "propose_role", "approve_role", "reject_role",
+    "propose_rule", "vote_rule", "repeal_rule",
     # Cemetery/burial (permanent-death handling): the engine filters it from
     # available_actions when CEMETERY_ENABLED is off, same pattern as repair_structure.
     "bury_agent",
@@ -817,6 +820,16 @@ DECISION_SCHEMA = {
                 "station": {"type": ["string", "null"]},
             },
         },
+        "role": {
+            "type": ["object", "null"],
+            "properties": {
+                "slug": {"type": "string"},
+                "name": {"type": "string"},
+                "specialty": {"type": "array", "items": {"type": "string"}},
+                "preferredProject": {"type": ["string", "array", "null"]},
+                "skill": {"type": "string"},
+            },
+        },
         "rule": {
             "type": ["object", "null"],
             "properties": {
@@ -825,6 +838,22 @@ DECISION_SCHEMA = {
                 "kind": {"type": "string"},
                 "value": {"type": ["number", "string", "null"]},
                 "description": {"type": ["string", "null"]},
+            },
+        },
+        "belief": {
+            "type": ["object", "null"],
+            "properties": {
+                "id": {"type": "string"},
+                "name": {"type": "string"},
+                "tenet": {"type": "string"},
+                "affinity": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "belief_pitch": {
+            "type": ["object", "null"],
+            "properties": {
+                "belief_id": {"type": "string"},
+                "pitch": {"type": "string"},
             },
         },
         "vote": {"type": ["string", "null"]},
@@ -977,7 +1006,13 @@ EMERGENT ROLES:
    lacks a gatherer for a needed resource and you have no gathering specialty,
    use switch_role with new_role set to the needed role (e.g. farmer, gatherer,
    miner, fisher) to fill the gap. Don't switch away from a role the village
-   still needs.
+    still needs.
+16b. Any villager may propose_role for a profession the village lacks. Include a
+    "role" object with a unique lowercase slug, display name, one-line skill,
+    a specialty list using only Known resources, and a preferredProject using a
+    known project type. Only the elder may approve_role or reject_role with the
+    proposal slug as target. Approval makes the role immediately available to
+    switch_role; it does not alter the seed roles.json file.
 
 COLLECTIVE RULES (voting):
 17. Any agent may propose_rule to suggest a village-wide rule (include a "rule"
@@ -1035,6 +1070,14 @@ KNOWLEDGE & CULTURE (when practiced skills are shown):
    (optionally name the skill, e.g. "let me teach you to craft") — this
    transfers some of your skill to them. A Library preserves a dead agent's
    best skill so others can still study it there.
+26. BELIEFS: Any agent may use found_belief at any time to author one with a
+   short tenet and an affinity list
+   drawn from resource_tax, custom, priority. To persuade a nearby agent who
+   lacks one of your beliefs, use talk_to_nearby and include belief_pitch with
+   that belief id and a sincere short pitch. Trust and the listener's existing
+   beliefs affect adoption. Forest Stewardship (practical), Equal Share
+   (political), and Dreamwalkers (outlier) are authoring exemplars, not
+   preloaded beliefs; improve on or depart from them freely.
 
 Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
 Do not use chain-of-thought or reasoning — output the JSON object immediately.
@@ -1047,7 +1090,10 @@ The JSON must match this structure exactly:
   "new_role": "<a new role name if changing role, or null>",
   "relationship_update": {"<agent_name>": "ally|neutral|rival"} or null,
   "reasoning": "<one short sentence>",
-  "blueprint": <blueprint object for propose_blueprint, otherwise omit or null>
+  "blueprint": <blueprint object for propose_blueprint, otherwise omit or null>,
+  "role": <role object for propose_role, otherwise omit or null>,
+  "belief": <belief object for found_belief, otherwise omit or null>,
+  "belief_pitch": <pitch object for talk_to_nearby, otherwise omit or null>
 }
 
 BLUEPRINT object schema (only for propose_blueprint):
@@ -1093,6 +1139,25 @@ For repeal_rule set "target" to an enacted rule's id (starts a repeal ballot).
 Succession ballots (kind "succession") are created automatically by the
 village when the elder dies -- never propose_rule one yourself; just vote_rule
 on the candidate ids a NOTE gives you.
+
+BELIEF object schema (only for found_belief):
+{
+  "id": "forest_steward",               // ^[a-z][a-z0-9_]{1,24}$, not a duplicate
+  "name": "Forest Stewardship",         // 1-32 chars
+  "tenet": "The forest thrives when we harvest with care.",
+  "affinity": ["priority"]              // nonempty subset of resource_tax | custom | priority
+}
+For a persuasion talk, include "belief_pitch":{"belief_id":"forest_steward","pitch":"..."}
+and set target/message normally. Only pitch a belief shown in Your beliefs.
+
+ROLE object schema (only for propose_role):
+{
+  "slug": "herbalist",                 // ^[a-z][a-z0-9_]{1,24}$, not a known/pending role
+  "name": "Herbalist",                 // 1-32 chars
+  "specialty": ["herbs"],              // 0-4 Known resource ids
+  "preferredProject": "farm_plot",     // known project type, or 1-4 such ids
+  "skill": "Gathers herbs for remedies." // one line, 1-160 chars
+}
 
 EXAMPLE (farmer, no one nearby):
 {"action":"collect_resource","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"I should gather food for the village."}
@@ -1179,12 +1244,16 @@ EXAMPLE (gatherer proposing a library + paper):
 USER_PROMPT_TEMPLATE = """Your name: {agent_name}
 Your role: {role}
 Your skill: {role_skill}
+Known roles (switch_role targets): {known_roles}
 Your personality: {personality}
 Recent memory: {memory}
 Resources: {resources}
 Hunger: {hunger}/100  Health: {health}/100
 Relationships: {relationships}
 Your beliefs: {beliefs}
+Known beliefs (id/name/tenet): {belief_registry}
+Belief authoring exemplars: {belief_examples}
+Nearby agents' belief ids: {nearby_beliefs}
 Agents near you: {nearby_agents}
 Current zone: {world_zone}
 Current district: {current_district}
@@ -1202,6 +1271,7 @@ Known resources: {known_resources}
 Known recipes (craft_item targets): {known_recipes}
 Pending blueprints: {pending_blueprints}
 Pending recipes: {pending_recipes}
+Pending roles (elder: approve_role/reject_role by slug): {pending_roles}
 Approved custom builds: {approved_custom_projects}
 Reserved structure ids (propose_blueprint id must avoid ALL of these -- includes unbuilt seed types like forge/granary/market/library): {reserved_structure_ids}
 Rejected blueprints (do NOT re-propose these ids): {rejected_blueprints}
@@ -1495,8 +1565,14 @@ def format_idle_agents(idle_agents):
     return "; ".join(parts) if parts else "none"
 
 
-def role_default_project(role):
-    pref = ROLE_PROJECT.get((role or "").lower(), "house")
+def role_default_project(role, role_project_map=None):
+    """Return a role's preferred project from a live payload map when given.
+
+    The module global is deliberately only a seed fallback: each engine world
+    owns its emergent role registry independently.
+    """
+    projects = role_project_map if isinstance(role_project_map, dict) else ROLE_PROJECT
+    pref = projects.get((role or "").lower(), "house")
     # preferredProject may be a list (e.g. builder -> ["house", "wall"]); pick
     # the first deterministically.
     if isinstance(pref, list):
@@ -1538,12 +1614,14 @@ def parse_project_shortfalls(project_progress):
     return shortfalls
 
 
-def pick_idle_agent_for_project(idle_agents, project_progress):
+def pick_idle_agent_for_project(idle_agents, project_progress, resource_gather_roles_map=None):
     """Prefer idle agents whose role gathers the resource the project still needs."""
+    gather_roles = (resource_gather_roles_map if isinstance(resource_gather_roles_map, dict)
+                    else RESOURCE_GATHER_ROLES)
     shortfalls = parse_project_shortfalls(project_progress)
     if shortfalls:
         needed_res = shortfalls[0][0]
-        preferred_roles = RESOURCE_GATHER_ROLES.get(needed_res, ())
+        preferred_roles = gather_roles.get(needed_res, ())
         for role in preferred_roles:
             for agent in idle_agents:
                 if (agent.get("role") or "").lower() == role:
@@ -1551,17 +1629,21 @@ def pick_idle_agent_for_project(idle_agents, project_progress):
     return idle_agents[0] if idle_agents else None
 
 
-def task_for_role(role, active_project=None, project_progress=None):
+def task_for_role(role, active_project=None, project_progress=None,
+                  role_primary_resource_map=None, role_project_map=None):
     role = (role or "").lower()
+    primary_resources = (role_primary_resource_map
+                         if isinstance(role_primary_resource_map, dict)
+                         else ROLE_PRIMARY_RESOURCE)
     shortfalls = parse_project_shortfalls(project_progress)
     if shortfalls:
         needed_res = shortfalls[0][0]
-        if ROLE_PRIMARY_RESOURCE.get(role) == needed_res:
+        if primary_resources.get(role) == needed_res:
             return f"gather {needed_res} for the active project"
         return f"gather or contribute {needed_res} to the active project"
     if active_project and active_project not in ("none", "null", None, ""):
         return f"gather or contribute resources to {active_project}"
-    project = role_default_project(role).replace("_", " ")
+    project = role_default_project(role, role_project_map).replace("_", " ")
     return f"prepare to start a {project} project"
 
 
@@ -1940,18 +2022,70 @@ def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
     return True, None
 
 
+def validate_role(role, known_resource_ids, known_role_ids, pending_role_slugs,
+                  known_project_ids, pending_role_count=None,
+                  emergent_role_count=None):
+    """Validate the wire shape of an emergent role proposal.
+
+    The engine repeats this validation against its locked live registry before
+    storing a proposal; this prompt-side version keeps invalid structured LLM
+    output from consuming a decision turn.
+    """
+    if not isinstance(role, dict):
+        return False, "role must be an object"
+    # Counts come from the engine's locked snapshot. Defaults preserve direct
+    # helper callers while still deriving a conservative answer from ids.
+    if isinstance(pending_role_count, bool) or not isinstance(pending_role_count, int):
+        pending_role_count = len(set(pending_role_slugs))
+    if isinstance(emergent_role_count, bool) or not isinstance(emergent_role_count, int):
+        emergent_role_count = len(set(known_role_ids) - set(ROLES))
+    if pending_role_count >= MAX_PENDING_ROLES:
+        return False, "too many pending roles"
+    if emergent_role_count >= MAX_EMERGENT_ROLES:
+        return False, "too many emergent roles"
+    if set(role) - {"slug", "name", "specialty", "preferredProject", "skill"}:
+        return False, "role has unknown fields"
+    slug = role.get("slug")
+    if not isinstance(slug, str) or not SLUG_RE.match(slug):
+        return False, "invalid role slug"
+    if slug in set(known_role_ids) or slug in set(pending_role_slugs):
+        return False, "role slug already exists or is pending"
+    name = role.get("name")
+    if not isinstance(name, str) or not (1 <= len(name.strip()) <= 32):
+        return False, "invalid role name"
+    skill = role.get("skill")
+    if not isinstance(skill, str) or not (1 <= len(skill.strip()) <= 160) or "\n" in skill:
+        return False, "skill must be one line of 1-160 characters"
+    specialty = role.get("specialty")
+    if not isinstance(specialty, list) or len(specialty) > 4 \
+            or any(not isinstance(resource, str) or resource not in set(known_resource_ids)
+                   for resource in specialty):
+        return False, "specialty must list up to 4 known resources"
+    preferred = role.get("preferredProject")
+    preferences = preferred if isinstance(preferred, list) else [preferred]
+    if not preferences or len(preferences) > 4 \
+            or any(not isinstance(project, str) or project not in set(known_project_ids)
+                   for project in preferences):
+        return False, "preferredProject must name 1-4 known project types"
+    return True, None
+
+
 def role_fallback_action(role, agent_data):
     """Return a role-appropriate fallback decision when talk is invalid."""
     role = (role or "").lower()
     active_project = agent_data.get("active_project")
     has_project = active_project and active_project not in ("none", "null", None, "")
+    role_projects = agent_data.get("role_project_map")
+    primary_resources = agent_data.get("role_primary_resource_map")
+    gather_roles = agent_data.get("resource_gather_roles_map")
 
     # Sid-parity Phase 1: when the village needs a gather role this agent can
     # fill, prefer switch_role over a generic wander/collect fallback.
     needed_role = agent_data.get("needed_role")
     if (needed_role and needed_role != role
             and role not in ("elder", "builder", "healer")
-            and not ROLE_PRIMARY_RESOURCE.get(role)):
+            and not (primary_resources if isinstance(primary_resources, dict)
+                     else ROLE_PRIMARY_RESOURCE).get(role)):
         return {"action": "switch_role", "target": None, "message": None,
                 "new_role": needed_role, "relationship_update": None,
                 "reasoning": f"The village needs a {needed_role}; retraining to fill the gap."}
@@ -1968,17 +2102,26 @@ def role_fallback_action(role, agent_data):
         if needs_review:
             return {"action": "sage_review_blueprint", "target": needs_review, "message": None,
                     "sage_decision": "approve", "new_role": None, "relationship_update": None,
-                    "reasoning": "Checking district geography/resources before approving."}
+                "reasoning": "Checking district geography/resources before approving."}
+
+    pending_roles = agent_data.get("pending_roles") or []
+    if role == "elder" and pending_roles:
+        target = next((p.get("slug") for p in pending_roles if isinstance(p, dict) and p.get("slug")), None)
+        if target:
+            return {"action": "approve_role", "target": target, "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Reviewing a pending role proposal."}
 
     idle_agents = agent_data.get("idle_agents") or []
     if role == "elder" and idle_agents:
         project_progress = agent_data.get("project_progress")
-        target = pick_idle_agent_for_project(idle_agents, project_progress)
+        target = pick_idle_agent_for_project(idle_agents, project_progress, gather_roles)
         target_name = target.get("name") if target else None
         if target_name:
             return {"action": "assign_task", "target": target_name,
                     "message": task_for_role(
                         target.get("role"), active_project, project_progress,
+                        primary_resources, role_projects,
                     ),
                     "new_role": None, "relationship_update": None,
                     "reasoning": "Assigning work to an idle villager."}
@@ -2001,7 +2144,7 @@ def role_fallback_action(role, agent_data):
                     "new_role": None, "relationship_update": None,
                     "reasoning": "The village needs a new invention before building again; "
                                  "gathering resources for now."}
-        return {"action": "start_project", "target": role_default_project(role), "message": None,
+        return {"action": "start_project", "target": role_default_project(role, role_projects), "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Starting a role-appropriate build project."}
 
@@ -2188,13 +2331,43 @@ def normalize_decision(decision, agent_data):
 
     if action == "switch_role":
         new_role = decision.get("new_role") or decision.get("target")
-        if new_role in ROLES:
+        known_roles = agent_data.get("known_role_ids") or ROLES
+        if new_role in known_roles:
             decision["new_role"] = new_role
             decision.pop("blueprint", None)
             return decision
         fallback = role_fallback_action(agent_data.get("role"), agent_data)
         fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid role switch)").strip()
         return fallback
+
+    if action == "propose_role":
+        role = decision.get("role")
+        pending_roles = agent_data.get("pending_roles") or []
+        pending_slugs = {p.get("slug") for p in pending_roles if isinstance(p, dict)}
+        ok, reason = validate_role(
+            role, agent_data.get("known_resource_ids") or [],
+            agent_data.get("known_role_ids") or [], pending_slugs,
+            agent_data.get("known_project_ids") or [],
+            pending_role_count=agent_data.get("pending_role_count"),
+            emergent_role_count=agent_data.get("emergent_role_count"),
+        )
+        if ok:
+            decision.pop("blueprint", None)
+            return decision
+        fallback = role_fallback_action(agent_data.get("role"), agent_data)
+        fallback["reasoning"] = (fallback.get("reasoning", "") + f" (invalid role: {reason})").strip()
+        return fallback
+
+    if action in ("approve_role", "reject_role"):
+        role = (agent_data.get("role") or "").lower()
+        target = decision.get("target")
+        pending_slugs = {p.get("slug") for p in agent_data.get("pending_roles") or []
+                         if isinstance(p, dict)}
+        if role != "elder" or not target or target not in pending_slugs:
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid role review)").strip()
+            return fallback
+        return decision
 
     if action == "move_to_district" and not decision.get("target"):
         # Models reliably put the district id in target_district (the schema
@@ -2918,6 +3091,7 @@ def build_user_prompt(data, slim=False):
     approved_custom_projects = data.get("approved_custom_projects_prompt") or data.get("approved_custom_projects") or []
     rejected_blueprints = data.get("rejected_blueprints_prompt") or data.get("rejected_blueprints") or []
     idle_agents = data.get("idle_agents") or []
+    pending_roles = data.get("pending_roles") or []
     behavior_nudge = data.get("behavior_nudge") or ""
     # Phase C: one short season line, rendered ONLY when the engine sends a
     # season (GOODS_ENABLED) so flag-off prompts stay byte-identical.
@@ -2978,6 +3152,7 @@ def build_user_prompt(data, slim=False):
         agent_name=data.get("agent_name"),
         role=data.get("role"),
         role_skill=role_skill_text,
+        known_roles=", ".join(data.get("known_role_ids") or []) or "none",
         personality=personality_text,
         memory="none" if slim else compose_memory(data),
         hunger=data.get("hunger", 100),
@@ -2985,6 +3160,15 @@ def build_user_prompt(data, slim=False):
         resources=data.get("resources"),
         relationships=data.get("relationships"),
         beliefs=data.get("beliefs") or "none",
+        belief_registry="; ".join(
+            f"{b.get('id')} / {b.get('name')}: {b.get('tenet')}"
+            for b in (data.get("belief_registry") or []) if isinstance(b, dict)
+        ) or "none",
+        belief_examples="; ".join(
+            f"{b.get('id')} ({b.get('kind')}): {b.get('tenet')}"
+            for b in (data.get("belief_examples") or []) if isinstance(b, dict)
+        ) or "none",
+        nearby_beliefs=data.get("nearby_beliefs") or "none",
         nearby_agents=nearby_formatted,
         world_zone=data.get("world_zone"),
         current_district=data.get("current_district", "none"),
@@ -3003,6 +3187,10 @@ def build_user_prompt(data, slim=False):
         known_recipes=format_known_recipes(data.get("known_recipes") or []),
         pending_blueprints=format_pending_blueprints(pending_blueprints),
         pending_recipes=format_pending_recipes(data.get("pending_recipes") or []),
+        pending_roles="; ".join(
+            f"{role.get('slug')} ({role.get('name')}; specialty: {', '.join(role.get('specialty') or []) or 'none'})"
+            for role in pending_roles if isinstance(role, dict)
+        ) or "none",
         approved_custom_projects=format_approved_custom(approved_custom_projects),
         reserved_structure_ids=format_reserved_structure_ids(approved_custom_projects, pending_blueprints),
         rejected_blueprints=format_rejected_blueprints(rejected_blueprints),
@@ -3090,6 +3278,43 @@ def is_context_overflow_error(err_text):
     """True for LM Studio's per-slot context-window error, e.g.
     {"error": "Context size has been exceeded."}."""
     return "context size has been exceeded" in (err_text or "").lower()
+
+
+def score_belief_pitch_decision(decision, data):
+    """Attach a model score to a validated belief pitch when the engine's
+    bounded budget says one remains. This runs in the decision worker, after
+    the normal request and never while SimEngine's state lock is held."""
+    if not isinstance(decision, dict) or decision.get("action") != "talk_to_nearby":
+        return decision
+    pitch = decision.get("belief_pitch")
+    if not isinstance(pitch, dict) or not data.get("belief_pitch_budget_remaining"):
+        return decision
+    belief_id = pitch.get("belief_id")
+    belief = next((b for b in data.get("belief_registry") or []
+                   if isinstance(b, dict) and b.get("id") == belief_id), None)
+    if not belief or belief_id not in (data.get("belief_ids") or []):
+        return decision
+    listener = decision.get("target")
+    nearby_beliefs = data.get("nearby_beliefs") or {}
+    # The engine's payload includes only agents within the existing 80px talk
+    # radius. Ordinary talk may target a distant agent and walk toward them,
+    # but do not spend a pitch-scoring call until this is a real conversation.
+    if listener not in nearby_beliefs:
+        return decision
+    # The per-world cap is authoritatively checked/incremented under the
+    # engine lock when the score is applied. Concurrent decision workers can
+    # observe the same remaining budget, so at most MAX_CONCURRENT_LLM stale
+    # score calls can overshoot external LM spend; late scores are ignored by
+    # the engine rather than mutating belief state past the cap.
+    quality = run_belief_pitch(
+        data.get("agent_name"), listener, belief, pitch.get("pitch"),
+        (data.get("relationships") or {}).get(listener, "neutral"),
+        nearby_beliefs.get(listener) or [], data.get("frame_tick"),
+    )
+    if quality is not None:
+        decision["belief_pitch_quality"] = quality
+        decision["belief_pitch_scored"] = True
+    return decision
 
 
 def run_agent_decision(data):
@@ -3280,7 +3505,7 @@ def run_agent_decision(data):
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
                                           error=error_kind or "bad_response")
 
-        decision = normalize_decision(decision, agent_data)
+        decision = score_belief_pitch_decision(normalize_decision(decision, agent_data), data)
 
         log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=error_kind)
         return decision

@@ -73,6 +73,13 @@ locations, or the engine and the LLM-facing schema will silently diverge:
 Full action-by-action detail (params, gates, effects) lives in
 [07-actions.md](07-actions.md) — this file only states the invariant.
 
+The emergent-role actions (`propose_role`, `approve_role`, `reject_role`) follow
+this complete table as well: their role-object field is in `DECISION_SCHEMA`,
+their instructions are in `SYSTEM_PROMPT`, and the engine filters them when
+`EMERGENT_ROLES` is disabled. Approval rebuilds the engine's live derived role
+maps; server startup maps remain seed-only conveniences and are not a second role
+registry.
+
 ## Flag index (complete — 34 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
