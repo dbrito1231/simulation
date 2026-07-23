@@ -27,7 +27,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | `RULES_ENABLED` | 150 | `_maybe_advance_rules` |
 | `LIFECYCLE_ENABLED` | 150 | `_maybe_resolve_stalled_succession` |
 | `LIFECYCLE_ENABLED` | 300 | `_tick_lifecycle` |
-| (unconditional) | 150 | a fixed batch: `_maybe_feed_starving`, `_maybe_repair_housing`, `_maybe_repair_market`, `_maybe_abandon_stalled_projects`, `_maybe_relocate_stuck_project`, `_maybe_reorganize_structures`, `_maybe_force_contribution`, `_maybe_start_idle_district_project`, `_maybe_build_funded_project`, `_maybe_start_approved_custom`, `_maybe_retire_blueprint`, `_maybe_amnesty_rejected_blueprints`, `_maybe_retire_custom_resource`, `_maybe_invention_backstop`, `_maybe_found_district`, `_maybe_welcome_newcomer` |
+| (unconditional) | 150 | a fixed batch: `_maybe_feed_starving`, `_maybe_repair_critical`, `_maybe_abandon_stalled_projects`, `_maybe_relocate_stuck_project`, `_maybe_reorganize_structures`, `_maybe_force_contribution`, `_maybe_start_idle_district_project`, `_maybe_build_funded_project`, `_maybe_start_approved_custom`, `_maybe_retire_blueprint`, `_maybe_amnesty_rejected_blueprints`, `_maybe_retire_custom_resource`, `_maybe_invention_backstop`, `_maybe_found_district`, `_maybe_welcome_newcomer` |
 | within the 150-batch, `SAGE_REVIEW_ENABLED` | 150 | `_maybe_skip_sage_review`, `_maybe_amnesty_denied_sage_reviews` |
 | within the 150-batch, `TECH_TREE_ENABLED` | 150 | `_maybe_era_transition`, `_maybe_dissolve_council` |
 | within the 150-batch, `CULTURE_ENABLED` | 150 | `_maybe_study_at_library` |

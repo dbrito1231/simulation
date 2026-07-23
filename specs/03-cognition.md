@@ -120,6 +120,43 @@ rejected blueprints/recipes/rules, reserved structure ids), social (recent
 conversations, inbox, module reports), a `behavior_nudge` line, and finally
 `available_actions`.
 
+**`behavior_nudge` composition** (`_build_think_payload`, sim_engine.py
+~8888-9330): candidate nudges are collected as `(priority, text)` pairs via a
+local `note(prio, text)` helper, then capped to `MAX_BEHAVIOR_NUDGES = 3`
+(sim_engine.py:467) — all P0 nudges are kept, then remaining slots fill from
+P1/P2/P3 in ascending priority order (stable sort preserves emission order
+within a class). Lower number = more urgent: P0 emergency/survival, P1
+governance/commitment (succession vote, ruin-pressure), P2 rejection-recovery/
+stall, P3 opportunity/idle. Invention-only and sprite-design-only turns bypass
+this cap entirely with their own single-nudge override.
+
+Repair/decay nudges use condition-dependent priority so decay competes fairly
+for the 3 slots instead of being starved by P2 rejection notes every turn: a
+locally-visible structure in disrepair (`condition < STRUCTURE_DISREPAIR_
+THRESHOLD`, not a ruin) nudges at P2; a locally-visible ruin nudges at P1. A
+second, village-wide ruin-pressure nudge (P1, independent of the agent's
+current district) fires when either (a) more than 25% of all structures in the
+civilization are ruins, or (b) any of the categories `house`, `market`,
+`workshop`, `foundry`, `granary`, `farm_plot` has at least one built instance
+but zero instances currently working (`condition >= STRUCTURE_DISREPAIR_
+THRESHOLD` and not a ruin) — it names up to the 3 worst (lowest-condition)
+structures village-wide with their `districtId` so an agent elsewhere can
+travel and `repair_structure`.
+
+**Per-kind rejection-nudge cooldown** (`_should_renudge`, sim_engine.py, just
+above `_build_think_payload`): P2 rejection-recovery notes (gather, craft,
+project, trade, recipe, upgrade, repair) previously re-fired identically on
+every think turn for the full `DIRECTIVE_TTL_FRAMES` window even when nothing
+about the rejection had changed, permanently crowding out the other 2 nudge
+slots. Each agent now tracks a `lastRejectionNudgeFrame` dict keyed by
+rejection kind, storing the rejection's own `frame` and the tick it was last
+actually emitted as a nudge. A nudge for a given kind re-emits only if the
+underlying rejection is new (its `frame` differs from what was last nudged) or
+`DIRECTIVE_TTL_FRAMES` has fully elapsed since that kind was last nudged.
+Other P2/P3 nudges (spoilage, shelter, homeless, blueprint/terraform/sprite/
+quota/rationing/burial/abandonment rejections, idle/opportunity notes) are
+unaffected.
+
 **Persona-at-top-of-user-message rationale** (server.py:2923-2927): the
 per-agent persona line is prepended to the *user* message, not appended to the
 system prompt, because LM Studio reuses KV cache by longest common prefix per

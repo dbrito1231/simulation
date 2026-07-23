@@ -197,8 +197,44 @@ Composable-build blocks with `shelter: True` (`wall`, `fence` — see
 [10-path1.md](10-path1.md)) also count toward night shelter capacity via
 `_composable_shelter_count`.
 
+**Critical-structure repair backstop.** `_maybe_repair_critical` (sim_engine.py,
+called unconditionally once per RULES_TICK gate, [02-engine-core.md](02-engine-core.md))
+is a deterministic escape for when an entire structure category has zero
+working instances village-wide — `repair_structure` is reachable by the LLM
+and funds itself from the stockpile, but under survival pressure agents
+reliably lose the priority contest and never pick it, permanently locking the
+category. Table-driven (`_critical_structure_categories`): walks an ordered
+list of `(type_, guard, trigger, message)` entries and repairs at most ONE
+category per call (so competing emergencies don't drain the same scarce
+stockpile in a single tick), using `_repair_backstop_agent` to pick the
+nearest living, non-Sage-responding agent who can fund the repair. Categories
+covered, in priority order:
+
+| Type | Guard | Trigger |
+|---|---|---|
+| `house` | `GOODS_ENABLED` | zero working houses |
+| `market` | `GOODS_ENABLED`, `ECONOMY_ENABLED`, at least one market built | `not _market_active()` (no pricing-unlock market working) |
+| `workshop` | `GOODS_ENABLED`, at least one workshop built | zero working workshops |
+| `foundry` | `GOODS_ENABLED`, `path1_on("TIER3_CONTENT_ENABLED")`, at least one foundry built | zero working foundries |
+| `granary` | `GOODS_ENABLED`, `CRAFTING_ENABLED`, at least one granary built | zero working granaries |
+| `farm_plot` | `GOODS_ENABLED`, at least one farm plot built | zero working farm plots |
+
 Related actions: `repair_structure`, `upgrade_structure`, `craft_item`
 (cart/wagon recipes) — [07-actions.md](07-actions.md).
+
+**`structure_health` benchmark.** `_tick_structure_health_benchmark`
+(sim_engine.py) logs a `structure_health` benchmark every `GOODS_TICK_FRAMES`
+goods tick (same cadence as `_tick_goods`/`_tick_structure_decay`), gated on
+`GOODS_ENABLED`, so mass structural decay shows up in `benchmarks.jsonl`
+automatically during any soak or test run instead of requiring an ad-hoc
+`/state` query to discover it — the same silent-decay blind spot that
+motivated the `_maybe_repair_critical` backstop above (a live world once
+decayed to 54/66 structures ruined with nobody noticing). Skips logging
+entirely if no structures exist yet. The benchmark `value` is the working
+fraction (`working / total`, rounded to 2 decimals); `detail` carries the
+exact `total`, `working`, `disrepaired` (below `STRUCTURE_DISREPAIR_THRESHOLD`
+but not yet a ruin), and `ruined` (`isRuin`) counts so a soak-analysis script
+can reconstruct the full picture, not just the ratio.
 
 ## ECONOMY_SINKS_ENABLED
 

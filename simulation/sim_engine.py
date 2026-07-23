@@ -646,9 +646,10 @@ SHELTER_HUNGER_FLOOR = 20
 # ~8.6h sim while agents were heal-spamming, all 15 houses non-working, births
 # stalled (pop 16→5). Now 0.05/tick: ~11.7h of neglect to disrepair, ~16.7h to
 # ruin -- survives one unattended overnight; sprawl still decays across days.
-# Paired with _maybe_repair_housing so zero working houses can't permanently
-# lock the population cap. A ruin is rebuilt via repair_structure for half the
-# original needs (min 1 each) -- cheaper than new, the deterministic escape.
+# Paired with _maybe_repair_critical (house category) so zero working houses
+# can't permanently lock the population cap. A ruin is rebuilt via
+# repair_structure for half the original needs (min 1 each) -- cheaper than
+# new, the deterministic escape.
 STRUCTURE_DECAY_PER_GOODS_TICK = 0.05
 STRUCTURE_DISREPAIR_THRESHOLD = 30
 REPAIR_CONDITION_RESTORE = 50
@@ -3358,6 +3359,36 @@ class SimEngine:
                     self._push_activity(f"{s['homeOf']} is left homeless — the {name} they lived in is a ruin")
                     s["homeOf"] = None
 
+    def _tick_structure_health_benchmark(self):
+        """Logs a `structure_health` benchmark every goods tick so village-wide
+        structural collapse (like the 2026-07 incident where 54/66 structures
+        silently rotted into ruins with zero automated visibility) shows up in
+        benchmarks.jsonl automatically during any soak/test run, instead of
+        requiring an ad-hoc /state query to discover after the fact."""
+        if not GOODS_ENABLED:
+            return
+        structures = self.civilization["structures"]
+        total = len(structures)
+        if total == 0:
+            return
+        working = 0
+        disrepaired = 0
+        ruined = 0
+        for s in structures:
+            if s.get("isRuin"):
+                ruined += 1
+                continue
+            cond = s.get("condition", 100)
+            if cond >= STRUCTURE_DISREPAIR_THRESHOLD:
+                working += 1
+            elif cond > 0:
+                disrepaired += 1
+        self._log_benchmark(
+            "structure_health",
+            round(working / total, 2),
+            {"total": total, "working": working, "disrepaired": disrepaired, "ruined": ruined},
+        )
+
     def _maybe_disaster(self):
         """Rare random structure damage (DISASTER_PROB per goods tick), so
         decay isn't perfectly predictable and repair stays relevant even in a
@@ -5876,54 +5907,91 @@ class SimEngine:
             return min(pool, key=lambda a: self._distance_to_district(a, did))
         return pool[0]
 
-    def _maybe_repair_housing(self):
-        """Deterministic escape when decay has zeroed working houses.
-        2026-07-10 morning soak: all 15 houses non-working → population cap
-        collapsed → 0 births overnight → living pop 16→5 while heal_agent ate
-        half of all LLM turns. repair_structure already funds from stockpile
-        and is reachable by the model, but under survival pressure it loses
-        the priority contest. One house rebuild per RULES_TICK gate is enough
-        to reopen housing headroom; the LLM still owns routine upkeep."""
-        if not GOODS_ENABLED:
-            return
-        if self._working_structure_count("house") > 0:
-            return
-        houses = [s for s in self.civilization["structures"] if s.get("type") == "house"]
-        agent = self._repair_backstop_agent(houses)
-        if not agent:
-            return
-        agent["goal"] = None
-        summary = self._repair_structure(agent, "house")
-        if summary and "lacks" not in summary and "nothing" not in summary:
-            self._push_activity(
-                f"Housing emergency -- {summary} (no working houses left; "
-                f"population cap was locked)"
-            )
+    def _critical_structure_categories(self):
+        """Ordered table of (type_, guard_fn, trigger_fn, message_template)
+        driving `_maybe_repair_critical`. Guard/trigger are zero-arg
+        callables closed over `self` so the table can be built once per call
+        without repeating boilerplate. Order matters: only the first
+        matching category is repaired per call (see `_maybe_repair_critical`)."""
+        c = self.civilization
 
-    def _maybe_repair_market(self):
-        """Deterministic escape when every pricing-unlock market is
-        non-working. 2026-07-10 day soak: both seed markets stayed at
-        condition 0 all afternoon (`market_active` false the whole session)
-        while Fish Markets (gold producers, no pricing unlock) thrived —
-        Phase E priced trade never reopened. One market rebuild per
-        RULES_TICK gate restores the gate; the LLM still owns routine upkeep."""
-        if not GOODS_ENABLED or not ECONOMY_ENABLED:
+        def has_type(type_):
+            return any(s.get("type") == type_ for s in c["structures"])
+
+        return (
+            (
+                "house",
+                lambda: GOODS_ENABLED,
+                lambda: self._working_structure_count("house") == 0,
+                "Housing emergency -- {summary} (no working houses left; "
+                "population cap was locked)",
+            ),
+            (
+                "market",
+                lambda: GOODS_ENABLED and ECONOMY_ENABLED and has_type("market"),
+                lambda: not self._market_active(),
+                "Market emergency -- {summary} (no working market left; "
+                "priced trade was locked)",
+            ),
+            (
+                "workshop",
+                lambda: GOODS_ENABLED and has_type("workshop"),
+                lambda: self._working_structure_count("workshop") == 0,
+                "Workshop emergency -- {summary} (no working workshop left; "
+                "crafting was locked)",
+            ),
+            (
+                "foundry",
+                lambda: GOODS_ENABLED and path1_on("TIER3_CONTENT_ENABLED") and has_type("foundry"),
+                lambda: self._working_structure_count("foundry") == 0,
+                "Foundry emergency -- {summary} (no working foundry left; "
+                "tier-3 crafting was locked)",
+            ),
+            (
+                "granary",
+                lambda: GOODS_ENABLED and CRAFTING_ENABLED and has_type("granary"),
+                lambda: self._working_structure_count("granary") == 0,
+                "Granary emergency -- {summary} (no working granary left; "
+                "food storage was locked)",
+            ),
+            (
+                "farm_plot",
+                lambda: GOODS_ENABLED and has_type("farm_plot"),
+                lambda: self._working_structure_count("farm_plot") == 0,
+                "Farm emergency -- {summary} (no working farm plot left; "
+                "food production was locked)",
+            ),
+        )
+
+    def _maybe_repair_critical(self):
+        """Deterministic escape when a whole critical-structure category has
+        zero working instances village-wide. Generalizes the 2026-07-10
+        house/market backstops (see git history) that were added after soaks
+        showed repair_structure -- though reachable by the model and funded
+        from the stockpile -- consistently loses the priority contest under
+        survival pressure, permanently locking housing or priced trade.
+        Table-driven (`_critical_structure_categories`) so the same escape
+        covers workshop/foundry/granary/farm_plot too, without duplicating
+        the guard/trigger/repair/log boilerplate per category.
+
+        Walks the table in order and repairs at most ONE category per call
+        (matching the original "one house/market rebuild per RULES_TICK
+        gate" behavior) so multiple emergencies never compete for the same
+        scarce stockpile resources within a single gate tick."""
+        for type_, guard, trigger, message in self._critical_structure_categories():
+            if not guard():
+                continue
+            if not trigger():
+                continue
+            structures = [s for s in self.civilization["structures"] if s.get("type") == type_]
+            agent = self._repair_backstop_agent(structures)
+            if not agent:
+                continue
+            agent["goal"] = None
+            summary = self._repair_structure(agent, type_)
+            if summary and "lacks" not in summary and "nothing" not in summary:
+                self._push_activity(message.format(summary=summary))
             return
-        if self._market_active():
-            return
-        markets = [s for s in self.civilization["structures"] if s.get("type") == "market"]
-        if not markets:
-            return
-        agent = self._repair_backstop_agent(markets)
-        if not agent:
-            return
-        agent["goal"] = None
-        summary = self._repair_structure(agent, "market")
-        if summary and "lacks" not in summary and "nothing" not in summary:
-            self._push_activity(
-                f"Market emergency -- {summary} (no working market left; "
-                f"priced trade was locked)"
-            )
 
     # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
     def _start_succession_election(self):
@@ -8925,6 +8993,29 @@ class SimEngine:
         self._push_memory(agent, f"{agent['name']} wandered toward {district_id}")
         self._push_activity(f"{agent['name']} wandered toward {district_id} (LLM fallback)")
 
+    def _should_renudge(self, agent, kind, rejection_frame):
+        """Per-kind rejection-nudge cooldown for P2 recovery notes.
+
+        Without this, a rejection note re-fires on every think turn for the
+        entire DIRECTIVE_TTL_FRAMES window even when nothing has changed,
+        crowding out the fixed MAX_BEHAVIOR_NUDGES slots. Re-emit only if
+        this is a NEW rejection (different frame than last nudged) or the
+        cooldown has fully elapsed since this kind was last nudged.
+        """
+        last_nudged = agent.setdefault("lastRejectionNudgeFrame", {})
+        last_frame_for_kind = last_nudged.get(kind)
+        if last_frame_for_kind is None:
+            allow = True
+        elif rejection_frame != last_frame_for_kind.get("rejectionFrame"):
+            allow = True
+        elif self.frameTick - last_frame_for_kind.get("nudgedFrame", 0) >= DIRECTIVE_TTL_FRAMES:
+            allow = True
+        else:
+            allow = False
+        if allow:
+            last_nudged[kind] = {"rejectionFrame": rejection_frame, "nudgedFrame": self.frameTick}
+        return allow
+
     # --- LLM think job (runs in worker; builds payload, calls LM, applies) ---
     def _build_think_payload(self, agent):
         """Mirror index.html thinkAgent payload, computed under lock."""
@@ -8981,13 +9072,14 @@ class SimEngine:
         gather_rejection = agent.get("lastGatherRejection")
         if gather_rejection and self.frameTick - gather_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             fresh_rejection_kinds.add("gather")
-            reason_text = gather_rejection.get("reason") or ""
-            if "pick" in reason_text:
-                note(2, f"NOTE: Your last gather failed: {reason_text}. "
-                        f"Craft the required pick at the workshop (craft_item), or dig_terrain for stone.")
-            else:
-                note(2, f"NOTE: Your last gather failed: {reason_text}. "
-                        f"Contribute to an active terraform or start_terraform here before moving elsewhere.")
+            if self._should_renudge(agent, "gather", gather_rejection.get("frame", 0)):
+                reason_text = gather_rejection.get("reason") or ""
+                if "pick" in reason_text:
+                    note(2, f"NOTE: Your last gather failed: {reason_text}. "
+                            f"Craft the required pick at the workshop (craft_item), or dig_terrain for stone.")
+                else:
+                    note(2, f"NOTE: Your last gather failed: {reason_text}. "
+                            f"Contribute to an active terraform or start_terraform here before moving elsewhere.")
         terraform_rejection = agent.get("lastTerraformRejection")
         if terraform_rejection and self.frameTick - terraform_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             fresh_rejection_kinds.add("terraform")
@@ -8996,22 +9088,26 @@ class SimEngine:
         craft_rejection = agent.get("lastCraftRejection")
         if craft_rejection and self.frameTick - craft_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             fresh_rejection_kinds.add("craft")
-            note(2, f"NOTE: Your last craft failed: {craft_rejection['reason']}. "
-                    f"Gather the missing input first.")
+            if self._should_renudge(agent, "craft", craft_rejection.get("frame", 0)):
+                note(2, f"NOTE: Your last craft failed: {craft_rejection['reason']}. "
+                        f"Gather the missing input first.")
         if TECH_TREE_ENABLED:
             recipe_rejection = agent.get("lastRecipeRejection")
             if recipe_rejection and self.frameTick - recipe_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
                 fresh_rejection_kinds.add("recipe")
-                note(2, f"NOTE: Your last recipe proposal was refused: {recipe_rejection['reason']}.")
+                if self._should_renudge(agent, "recipe", recipe_rejection.get("frame", 0)):
+                    note(2, f"NOTE: Your last recipe proposal was refused: {recipe_rejection['reason']}.")
         project_rejection = agent.get("lastProjectRejection")
         if project_rejection and self.frameTick - project_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             fresh_rejection_kinds.add("project")
-            note(2, f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
+            if self._should_renudge(agent, "project", project_rejection.get("frame", 0)):
+                note(2, f"NOTE: Your last start_project failed: {project_rejection['reason']}.")
         if STRUCTURE_UPGRADES_ENABLED:
             upgrade_rejection = agent.get("lastUpgradeRejection")
             if upgrade_rejection and self.frameTick - upgrade_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
                 fresh_rejection_kinds.add("upgrade")
-                note(2, f"NOTE: Your last upgrade failed: {upgrade_rejection['reason']}.")
+                if self._should_renudge(agent, "upgrade", upgrade_rejection.get("frame", 0)):
+                    note(2, f"NOTE: Your last upgrade failed: {upgrade_rejection['reason']}.")
             sprite_rejection = agent.get("lastSpriteRejection")
             if sprite_rejection and self.frameTick - sprite_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
                 fresh_rejection_kinds.add("sprite")
@@ -9028,7 +9124,8 @@ class SimEngine:
             repair_rejection = agent.get("lastRepairRejection")
             if repair_rejection and self.frameTick - repair_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
                 fresh_rejection_kinds.add("repair")
-                note(2, f"NOTE: Your last repair failed: {repair_rejection['reason']}.")
+                if self._should_renudge(agent, "repair", repair_rejection.get("frame", 0)):
+                    note(2, f"NOTE: Your last repair failed: {repair_rejection['reason']}.")
             spoilage = c.get("lastSpoilage")
             if spoilage and self.frameTick - spoilage.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
                 note(3, f"NOTE: {spoilage['reason']}.")
@@ -9040,14 +9137,47 @@ class SimEngine:
                                and (s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD)),
                               key=lambda s: s.get("condition", 100), default=None)
             if worst_local:
-                state_word = "in ruins" if worst_local.get("isRuin") else "in disrepair and not working"
-                note(3, f"NOTE: The {worst_local.get('name') or worst_local.get('type')} here is "
-                        f"{state_word} (condition {int(worst_local.get('condition', 0))}). "
-                        f"Use repair_structure to restore it.")
+                is_ruin = bool(worst_local.get("isRuin"))
+                state_word = "in ruins" if is_ruin else "in disrepair and not working"
+                note(1 if is_ruin else 2,
+                     f"NOTE: The {worst_local.get('name') or worst_local.get('type')} here is "
+                     f"{state_word} (condition {int(worst_local.get('condition', 0))}). "
+                     f"Use repair_structure to restore it.")
+            # Village-wide ruin-pressure nudge (P1): independent of the
+            # agent's current district, fires when decay is widespread even
+            # if the agent isn't standing next to the worst offender. Two
+            # triggers: >25% of all structures are ruins, or an entire
+            # structure category (house/market/workshop/foundry/granary/
+            # farm_plot) has zero working instances village-wide.
+            all_structures = c["structures"]
+            if all_structures:
+                ruin_count = sum(1 for s in all_structures if s.get("isRuin"))
+                ruin_ratio_trigger = (ruin_count / len(all_structures)) > 0.25
+                zero_working_category = False
+                for kind in ("house", "market", "workshop", "foundry", "granary", "farm_plot"):
+                    of_kind = [s for s in all_structures if s.get("type") == kind]
+                    if of_kind and not any(
+                            not s.get("isRuin") and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD
+                            for s in of_kind):
+                        zero_working_category = True
+                        break
+                if ruin_ratio_trigger or zero_working_category:
+                    failing = sorted(
+                        (s for s in all_structures
+                         if s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD),
+                        key=lambda s: s.get("condition", 100))
+                    worst_few = failing[:3]
+                    if worst_few:
+                        parts = ", ".join(
+                            f"{s.get('name') or s.get('type')} ({s.get('districtId')}, "
+                            f"condition {int(s.get('condition', 0))})" for s in worst_few)
+                        note(1, f"NOTE: The village has {len(failing)} ruined/failing structures "
+                                f"village-wide, including {parts}. Travel there and use repair_structure.")
         if ECONOMY_ENABLED:
             trade_rejection = agent.get("lastTradeRejection")
             if trade_rejection and self.frameTick - trade_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                note(2, f"NOTE: Your last trade was refused: {trade_rejection['reason']}.")
+                if self._should_renudge(agent, "trade", trade_rejection.get("frame", 0)):
+                    note(2, f"NOTE: Your last trade was refused: {trade_rejection['reason']}.")
             if not agent.get("homeStructureId") \
                     and (self.frameTick - (agent.get("lastHomelessNudgeFrame") or -HOMELESS_NUDGE_FRAMES)) \
                     >= HOMELESS_NUDGE_FRAMES:
@@ -9862,8 +9992,7 @@ class SimEngine:
                 self._tick_lifecycle()
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_feed_starving()
-                self._maybe_repair_housing()
-                self._maybe_repair_market()
+                self._maybe_repair_critical()
                 self._maybe_abandon_stalled_projects()
                 self._maybe_relocate_stuck_project()
                 self._maybe_reorganize_structures()
@@ -9903,6 +10032,7 @@ class SimEngine:
                 self._tick_ecology_regrow()
             if GOODS_ENABLED and ft % GOODS_TICK_FRAMES == 0:
                 self._tick_goods()
+                self._tick_structure_health_benchmark()
             if GOODS_ENABLED and ft % DAY_FRAMES == 0:
                 self._tick_shelter()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
