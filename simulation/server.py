@@ -832,12 +832,60 @@ DECISION_SCHEMA = {
         },
         "rule": {
             "type": ["object", "null"],
+            "additionalProperties": False,
             "properties": {
                 "id": {"type": "string"},
                 "name": {"type": "string"},
                 "kind": {"type": "string"},
                 "value": {"type": ["number", "string", "null"]},
                 "description": {"type": ["string", "null"]},
+                "supersedes": {"type": ["string", "null"]},
+                "effect": {
+                    "type": ["object", "null"],
+                    "additionalProperties": False,
+                    "required": ["subject", "condition", "modifier"],
+                    "properties": {
+                        "subject": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "resource": {"type": "string"},
+                                "role": {"type": "string"},
+                                "district": {"type": "string"},
+                                "action": {"type": "string", "enum": [
+                                    "collect_resource", "contribute_resources", "craft_item"]},
+                            },
+                            "oneOf": [
+                                {"required": ["resource"], "properties": {"resource": {"type": "string"}}},
+                                {"required": ["role"], "properties": {"role": {"type": "string"}}},
+                                {"required": ["district"], "properties": {"district": {"type": "string"}}},
+                                {"required": ["action"], "properties": {
+                                    "action": {"type": "string", "enum": [
+                                        "collect_resource", "contribute_resources", "craft_item"]}}},
+                            ],
+                        },
+                        "condition": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "action": {"type": "string", "enum": [
+                                    "collect_resource", "contribute_resources", "craft_item"]},
+                                "resource": {"type": "string"},
+                                "role": {"type": "string"},
+                                "district": {"type": "string"},
+                            },
+                        },
+                        "modifier": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["kind", "value"],
+                            "properties": {
+                                "kind": {"type": "string", "enum": ["add"]},
+                                "value": {"type": "integer", "minimum": 1, "maximum": 3},
+                            },
+                        },
+                    },
+                },
             },
         },
         "belief": {
@@ -1021,7 +1069,13 @@ COLLECTIVE RULES (voting):
    mechanically (e.g. a resource tax on contributions funds a shared stockpile).
    Use repeal_rule with target set to an enacted rule's id to start a repeal
    vote; the same majority removes it. Kind "priority" (value = a resource id)
-   biases contribute_resources toward that resource while enacted.
+   biases contribute_resources toward that resource while enacted. A custom
+   rule may have a safe structured effect: subject is exactly one resource,
+   role, district, or action; condition selects collect_resource,
+   contribute_resources, or craft_item plus optional resource/role/district
+   filters; modifier is only {"kind":"add","value":1..3}. It adds that
+   many units to matching real action output. To amend an active provision,
+   set supersedes to its rule id; the cited provision is replaced.
 
 COGNITIVE CONTROLLER:
 18. If "Module reports" are present, you are the Cognitive Controller: weigh the
@@ -1132,7 +1186,13 @@ RULE object schema (only for propose_rule):
   "name": "Resource Tax",                // 1-32 chars
   "kind": "resource_tax",                // resource_tax | custom | priority | harvest_quota | rationing
   "value": 1,                            // tax magnitude (0-3) for resource_tax; resource id string for priority; 1-20 for harvest_quota; 1+ for rationing
-  "description": "Contributors add 1 to the shared stockpile."
+  "description": "Contributors add 1 to the shared stockpile.",
+  "supersedes": null,                  // active rule id to amend, otherwise null/omit
+  "effect": {                          // custom only; omit for a prose-only custom rule
+    "subject": {"resource":"wood"},
+    "condition": {"action":"collect_resource"},
+    "modifier": {"kind":"add","value":1}
+  }
 }
 For vote_rule set "target" to the rule id and "vote" to "yes" or "no".
 For repeal_rule set "target" to an enacted rule's id (starts a repeal ballot).
@@ -1277,6 +1337,7 @@ Reserved structure ids (propose_blueprint id must avoid ALL of these -- includes
 Rejected blueprints (do NOT re-propose these ids): {rejected_blueprints}
 Pending rules (vote with vote_rule): {pending_rules}
 Enacted rules: {active_rules}
+Constitution (ordered provisions): {constitution}
 Recent village conversations: {recent_conversations}
 Incoming messages (reply or act on these): {inbox}
 Module reports (Cognitive Controller — weigh these): {module_reports}
@@ -1534,6 +1595,22 @@ def format_active_rules(active):
         val = r.get("value")
         val_str = f" {val}" if val not in (None, "") else ""
         parts.append(f"{r.get('name', '?')} ({r.get('kind', 'custom')}{val_str})")
+    return "; ".join(parts) if parts else "none"
+
+
+def format_constitution(constitution):
+    """Render the bounded constitutional ledger without exposing raw JSON."""
+    if not isinstance(constitution, list) or not constitution:
+        return "none"
+    parts = []
+    for provision in constitution[-12:]:
+        if not isinstance(provision, dict):
+            continue
+        status = provision.get("status") or "active"
+        text = f"{provision.get('id', '?')} / {provision.get('name', '?')} [{status}]"
+        if provision.get("supersedes"):
+            text += f" supersedes {provision['supersedes']}"
+        parts.append(text)
     return "; ".join(parts) if parts else "none"
 
 
@@ -2369,6 +2446,22 @@ def normalize_decision(decision, agent_data):
             return fallback
         return decision
 
+    if action == "propose_rule":
+        # Keep the effect/supersession fields explicit through normalization;
+        # SimEngine owns registry-aware grammar validation under its lock.
+        rule = decision.get("rule")
+        effect = rule.get("effect") if isinstance(rule, dict) else None
+        supersedes = rule.get("supersedes") if isinstance(rule, dict) else None
+        malformed = (not isinstance(rule, dict)
+                     or (effect is not None and not isinstance(effect, dict))
+                     or (supersedes is not None and not isinstance(supersedes, str)))
+        if malformed:
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid rule shape)").strip()
+            return fallback
+        decision.pop("blueprint", None)
+        return decision
+
     if action == "move_to_district" and not decision.get("target"):
         # Models reliably put the district id in target_district (the schema
         # describes that field as "district id"); the engine reads only
@@ -3196,6 +3289,7 @@ def build_user_prompt(data, slim=False):
         rejected_blueprints=format_rejected_blueprints(rejected_blueprints),
         pending_rules=format_pending_rules(data.get("pending_rules") or []),
         active_rules=format_active_rules(data.get("active_rules") or []),
+        constitution=format_constitution(data.get("constitution") or []),
         season_line=season_line,
         prices_line=prices_line,
         chronicle_line=chronicle_line,

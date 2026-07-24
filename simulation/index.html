@@ -1734,7 +1734,7 @@ function renderSidebar() {
   // --- Civilization detail rows (change-detected) ---
   const sidebarKey = JSON.stringify([
     civ.resourceRegistry, villageResourceBreakdown(), customProjectIds(),
-    civ.recipes, civ.rules, civ.pendingRules, civ.pendingBlueprints,
+    civ.recipes, civ.rules, civ.constitution, civ.pendingRules, civ.pendingBlueprints,
     world.benchmarks, civ.collectAttempts, civ.collectSuccesses,
     civ.councilLog, civ.era, civ.techTier,
     CRAFTING_ENABLED, RULES_ENABLED, BENCHMARKS_ENABLED, MEMES_ENABLED, MEMORY_ENABLED
@@ -1771,12 +1771,17 @@ function renderSidebar() {
     }
 
     const rules = civ.rules || [];
+    const constitution = civ.constitution || [];
     const pendingRules = civ.pendingRules || [];
-    if (RULES_ENABLED && (rules.length > 0 || pendingRules.length > 0)) {
+    if (RULES_ENABLED && (rules.length > 0 || constitution.length > 0 || pendingRules.length > 0)) {
       civRulesRow.style.display = "block";
       civRuleCountEl.textContent = rules.length;
-      const enacted = rules.map((r) =>
-        `<span class="res-chip civ-value">${escapeHtml(r.name)}</span>`
+      const enacted = (constitution.length ? constitution : rules).map((r) => {
+        const status = r.status ? ` <span class="civ-label">[${escapeHtml(r.status)}]</span>` : "";
+        const amendment = r.supersedes
+          ? ` <span class="civ-label">→ ${escapeHtml(r.supersedes)}</span>` : "";
+        return `<span class="res-chip civ-value">${escapeHtml(r.name || r.id)}${status}${amendment}</span>`;
+      }
       ).join("");
       const pending = pendingRules.map((r) => {
         const votes = r.votes || {};

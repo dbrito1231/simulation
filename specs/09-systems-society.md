@@ -93,6 +93,33 @@ Rule kinds: `RULE_KINDS = {"resource_tax", "custom", "priority"}`
 mechanics). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
 enacted at `MAX_ACTIVE_RULES = 8`.
 
+**Effectful custom rules.** A `kind: "custom"` proposal may include one safe
+`effect` object; arbitrary code, expressions, and free-form selectors are
+never evaluated. Its grammar is:
+
+```json
+{
+  "subject": {"resource" | "role" | "district" | "action": "<whitelisted id>"},
+  "condition": {"action": "collect_resource|contribute_resources|craft_item",
+                "resource"?: "<known resource>", "role"?: "<known role>",
+                "district"?: "<known live district>"},
+  "modifier": {"kind": "add", "value": 1}
+}
+```
+
+`subject` has exactly one selector. `condition.action` is required unless the
+subject itself is `action`; optional condition selectors further narrow the
+match. District selectors may name any current live district (including a
+non-buildable forest, market, beach, cave, or ocean district). Selector values
+must be current registry ids and a subject/action pair
+must name one of the three supported downstream computations. The sole
+modifier is bounded integer addition (`1..3`): it adds units to a matching
+collect, contribution, or craft output. `_validate_rule` normalizes this
+grammar, and `_apply_governance_rule` compiles enacted effects into the
+persisted `customRuleModifiers` lookup. The three computations query that
+lookup deterministically; `_clear_governance_rule` removes an entry on repeal
+or supersession.
+
 **Propose → vote → enact:** `propose_rule` validates and appends to
 `pendingRules` with the proposer's own `"yes"` vote pre-cast, then calls
 `_tally_and_maybe_enact` (sim_engine.py:4891) immediately (so a lone
@@ -110,11 +137,29 @@ district per `HARVEST_QUOTA_PERIOD_FRAMES = STALL_THRESHOLD * 3` ≈5 min);
 utilization is below `RATIONING_STORAGE_LOW_RATIO = 0.5` — it self-lifts
 once storage recovers).
 
+**Constitution.** `civilization["constitution"]` is a persisted, ordered
+ledger of enacted ongoing rules. A provision records its rule id, name, kind,
+description, effect (when any), `enactedFrame`, and status (`"active"`,
+`"superseded"`, or `"repealed"`). It is rendered in the think payload and
+the read-only viewer. An ordinary enactment appends an active provision. An
+amendment supplies `supersedes: "<active rule id>"`: validation requires that
+target to be active, enactment clears/removes the target's live effect, marks
+its provision superseded with `supersededBy`, then appends the new active
+provision. It therefore replaces a provision without exceeding the same
+active-rule budget of eight. Repeal clears/removes the target's live effect
+and marks its active provision repealed; it does not automatically revive an
+older superseded provision. Old saves derive active provisions from their
+ordered `rules` list and rebuild the compiled custom-effect lookup on restore.
+The same active-target and projected-`MAX_ACTIVE_RULES` checks run again at
+enactment under the engine lock: if a pending amendment loses its target, or a
+pending ordinary rule loses its budget slot, its passed ballot is discarded as
+rejected without mutating effects or the constitution.
+
 **`repeal_rule`** action → `_propose_repeal` (sim_engine.py:5008): opens a
 new pending ballot (kind `"repeal"`, id `repeal_<target>`) reusing the same
 vote/quorum scaffold; `_enact_repeal` removes the target from
-`civilization["rules"]` and reverses its governance effect
-(`_clear_governance_rule`) on success.
+`civilization["rules"]`, marks its constitution provision repealed, and
+reverses its governance effect (`_clear_governance_rule`) on success.
 
 **Anti-oscillation guard** (implemented 2026-07-12; the archived
 `docs/archive/rule-oscillation-fix-plan.md` describes the incident this
@@ -130,7 +175,8 @@ branch to fire the very next cooldown window after the propose branch
 enacted the priority rule, undoing it immediately and oscillating
 propose/repeal forever. The floor lets a freshly-enacted rule stand for
 several cooldown cycles before it becomes eligible for this "exercise
-amendment" repeal, breaking the loop. This guard governs only the
+amendment" repeal, breaking the loop. This guard governs every ongoing
+non-tax rule, including an effectful `custom` rule, but only the
 *deterministic backstop's own repeal proposals*; an LLM-driven
 `repeal_rule` call is unaffected and can target any enacted rule at any
 time.

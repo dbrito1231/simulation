@@ -590,6 +590,10 @@ LONG_MEM_CAP = 8
 VALID_GATHER_ZONES = {"farm", "forest", "village", "market", "beach", "cave", "ocean"}
 VALID_VISUAL_STYLES = {"house", "farm_plot", "workshop", "wall", "generic"}
 RULE_KINDS = {"resource_tax", "custom", "priority"}
+# A custom rule can only select one of these existing computations. Its
+# structured effect is interpreted below; it is never eval'd or executed.
+CUSTOM_RULE_ACTIONS = {"collect_resource", "contribute_resources", "craft_item"}
+CUSTOM_RULE_MODIFIER_MAX = 3
 
 # Must match LM Studio's loaded parallel slots (scripts/lms_load.py loads
 # context 20000 / parallel 3 -- per-slot budget ~6666 tokens). Raised 2->3 on
@@ -1639,6 +1643,13 @@ class SimEngine:
             "rules": [],
             "pendingRules": [],
             "ruleKindsEverEnacted": [],
+            # Ordered historical document of enacted ongoing rules. Active
+            # provisions mirror rules; superseded/repealed entries remain so
+            # amendments are legible after their live effects are gone.
+            "constitution": [],
+            # rule id -> normalized custom-effect grammar. This is compiled
+            # on enact/restore and queried by real action computations.
+            "customRuleModifiers": {},
             "stockpile": {},
             "taxDue": 0,
             "taxPaid": 0,
@@ -2711,6 +2722,7 @@ class SimEngine:
         amount = 1
         if CULTURE_ENABLED:
             amount += self._skill_bonus(agent, "build")
+        amount += self._custom_rule_modifier("contribute_resources", agent, res, district_id)
         amount = max(1, min(amount, need - have, agent["resources"].get(res, 0)))
         agent["resources"][res] -= amount
         p["contributed"][res] = have + amount
@@ -4150,6 +4162,7 @@ class SimEngine:
                 amount += TOOL_YIELD_BONUS
         if CULTURE_ENABLED:
             amount += self._skill_bonus(agent, "gather")
+        amount += self._custom_rule_modifier("collect_resource", agent, resource)
         if ECOLOGY_ENABLED and scale < 1.0:
             amount = max(1, int(amount * scale))
         if ECOLOGY_ENABLED and path1_on("TERRAIN_TILES_ENABLED"):
@@ -5168,6 +5181,7 @@ class SimEngine:
             output += self._craft_output_bonus(recipe, agent.get("currentDistrict"))
         if CULTURE_ENABLED:
             output += self._skill_bonus(agent, "craft")
+        output += self._custom_rule_modifier("craft_item", agent, recipe_id)
         agent["resources"][recipe_id] = agent["resources"].get(recipe_id, 0) + output
         agent["lastCraftRejection"] = None
         self.civilization["lastCraftActivityFrame"] = self.frameTick
@@ -5280,13 +5294,168 @@ class SimEngine:
     def _vote_quorum(self):
         return (self._active_agent_count() // 2) + 1
 
+    def _normalize_custom_rule_effect(self, effect):
+        """Return a canonical, safe custom-rule effect or None.
+
+        The grammar deliberately has no expressions: one subject selector,
+        an action plus optional context selectors, and a small additive
+        modifier. Canonicalizing before it reaches persisted state makes the
+        downstream lookup both deterministic and simple to audit.
+        """
+        c = self.civilization
+        if not isinstance(effect, dict) or set(effect) != {"subject", "condition", "modifier"}:
+            return None
+        subject = effect.get("subject")
+        condition = effect.get("condition")
+        modifier = effect.get("modifier")
+        if not isinstance(subject, dict) or len(subject) != 1 or not isinstance(condition, dict) \
+                or not isinstance(modifier, dict):
+            return None
+        subject_kind, subject_value = next(iter(subject.items()))
+        if subject_kind not in {"resource", "role", "district", "action"} \
+                or not isinstance(subject_value, str):
+            return None
+        if subject_kind == "resource" and subject_value not in c["resourceRegistry"]:
+            return None
+        if subject_kind == "role" and subject_value not in c["roleRegistry"]:
+            return None
+        if subject_kind == "district" and subject_value not in c["districts"]:
+            return None
+        if subject_kind == "action" and subject_value not in CUSTOM_RULE_ACTIONS:
+            return None
+        if not set(condition).issubset({"action", "resource", "role", "district"}):
+            return None
+        action = condition.get("action") if subject_kind != "action" else subject_value
+        if action not in CUSTOM_RULE_ACTIONS:
+            return None
+        if subject_kind == "action" and "action" in condition and condition["action"] != action:
+            return None
+        for selector, registry in (("resource", c["resourceRegistry"]),
+                                   ("role", c["roleRegistry"]),
+                                   ("district", c["districts"])):
+            value = condition.get(selector)
+            if value is not None and (not isinstance(value, str) or value not in registry):
+                return None
+        if set(modifier) != {"kind", "value"} or modifier.get("kind") != "add":
+            return None
+        value = modifier.get("value")
+        if isinstance(value, bool) or not isinstance(value, int) \
+                or not (1 <= value <= CUSTOM_RULE_MODIFIER_MAX):
+            return None
+        return {
+            "subject": {subject_kind: subject_value},
+            "condition": {key: condition[key] for key in ("action", "resource", "role", "district")
+                          if key in condition},
+            "modifier": {"kind": "add", "value": value},
+        }
+
+    def _custom_rule_modifier(self, action, agent, resource=None, district=None):
+        """Total enacted custom-rule addition for one real action context."""
+        if not RULES_ENABLED or action not in CUSTOM_RULE_ACTIONS:
+            return 0
+        total = 0
+        district = district or agent.get("currentDistrict")
+        for effect in (self.civilization.get("customRuleModifiers") or {}).values():
+            if not isinstance(effect, dict):
+                continue
+            subject = effect.get("subject") or {}
+            condition = effect.get("condition") or {}
+            if condition.get("action", action) != action:
+                continue
+            subject_kind, subject_value = next(iter(subject.items()), (None, None))
+            if subject_kind == "resource" and subject_value != resource:
+                continue
+            if subject_kind == "role" and subject_value != agent.get("role"):
+                continue
+            if subject_kind == "district" and subject_value != district:
+                continue
+            if subject_kind == "action" and subject_value != action:
+                continue
+            if condition.get("resource") not in (None, resource):
+                continue
+            if condition.get("role") not in (None, agent.get("role")):
+                continue
+            if condition.get("district") not in (None, district):
+                continue
+            total += int((effect.get("modifier") or {}).get("value") or 0)
+        return total
+
+    def _constitution_provision(self, rule, status="active"):
+        """Compact, viewer/prompt-safe historical record for one law."""
+        provision = {
+            "id": rule["id"], "name": rule.get("name") or rule["id"],
+            "kind": rule.get("kind") or "custom",
+            "description": rule.get("description") or "",
+            "enactedFrame": rule.get("enactedFrame", self.frameTick),
+            "status": status,
+        }
+        if rule.get("effect") is not None:
+            provision["effect"] = rule["effect"]
+        if rule.get("supersedes"):
+            provision["supersedes"] = rule["supersedes"]
+        return provision
+
+    def _ensure_constitution(self):
+        """Backfill missing active provisions without duplicating history."""
+        c = self.civilization
+        constitution = c.get("constitution")
+        if not isinstance(constitution, list):
+            constitution = []
+        # Rule ids are globally non-reusable. Keep the last duplicate so a
+        # status update made before an old duplicate is cleaned cannot leave a
+        # stale active provision behind; then restore chronological order.
+        seen_ids = set()
+        cleaned_reversed = []
+        for provision in reversed(constitution):
+            if not isinstance(provision, dict) or not isinstance(provision.get("id"), str):
+                continue
+            if provision["id"] in seen_ids:
+                continue
+            seen_ids.add(provision["id"])
+            cleaned_reversed.append(provision)
+        cleaned = list(reversed(cleaned_reversed))
+        by_id = {p["id"]: p for p in cleaned}
+        for rule in c.get("rules") or []:
+            if not isinstance(rule, dict) or not rule.get("id"):
+                continue
+            provision = by_id.get(rule["id"])
+            if provision is None:
+                provision = self._constitution_provision(rule)
+                cleaned.append(provision)
+                by_id[rule["id"]] = provision
+            else:
+                provision.setdefault("name", rule.get("name") or rule["id"])
+                provision.setdefault("kind", rule.get("kind") or "custom")
+                provision.setdefault("description", rule.get("description") or "")
+                provision.setdefault("enactedFrame", rule.get("enactedFrame", 0))
+                provision["status"] = "active"
+        c["constitution"] = cleaned
+        return cleaned
+
+    def _set_constitution_status(self, rule_id, status, **extra):
+        for provision in reversed(self._ensure_constitution()):
+            if provision.get("id") == rule_id:
+                provision["status"] = status
+                provision.update(extra)
+                return
+
+    def _rebuild_custom_rule_modifiers(self):
+        """Restore-safe compilation of only currently enacted custom laws."""
+        compiled = {}
+        for rule in self.civilization.get("rules") or []:
+            if rule.get("kind") != "custom":
+                continue
+            effect = self._normalize_custom_rule_effect(rule.get("effect"))
+            if effect is not None:
+                rule["effect"] = effect
+                compiled[rule["id"]] = effect
+        self.civilization["customRuleModifiers"] = compiled
+
     def _validate_rule(self, rule):
         c = self.civilization
         if not RULES_ENABLED or not isinstance(rule, dict):
             return False
         if len(c["pendingRules"]) >= MAX_PENDING_RULES:
-            return False
-        if len(c["rules"]) >= MAX_ACTIVE_RULES:
             return False
         rid = rule.get("id")
         if not isinstance(rid, str) or not self.SLUG_RE.match(rid):
@@ -5295,11 +5464,23 @@ class SimEngine:
             return False
         if any(r["id"] == rid for r in c["pendingRules"]):
             return False
+        if any(p.get("id") == rid for p in (c.get("constitution") or []) if isinstance(p, dict)):
+            return False
         name = rule.get("name")
         if not isinstance(name, str) or not (1 <= len(name) <= 32):
             return False
         kind = rule.get("kind") or "custom"
         if kind not in RULE_KINDS:
+            return False
+        supersedes = rule.get("supersedes")
+        target = None
+        if supersedes is not None:
+            if not isinstance(supersedes, str) or supersedes == rid:
+                return False
+            target = next((r for r in c["rules"] if r.get("id") == supersedes), None)
+            if target is None:
+                return False
+        if len(c["rules"]) >= MAX_ACTIVE_RULES and target is None:
             return False
         if kind == "succession":
             # Succession ballots are created deterministically by
@@ -5334,6 +5515,9 @@ class SimEngine:
                 return False
             if not (1 <= v <= RATIONING_WITHDRAW_CAP * 4):
                 return False
+        if kind == "custom" and rule.get("effect") is not None \
+                and self._normalize_custom_rule_effect(rule.get("effect")) is None:
+            return False
         return True
 
     def _record_rule_kind_enacted(self, kind):
@@ -5349,12 +5533,15 @@ class SimEngine:
         no = votes.count("no")
         quorum = self._vote_quorum()
         if yes >= quorum:
-            rule["enacted"] = True
-            c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
-            c["lastRuleActivityFrame"] = self.frameTick
             if rule.get("kind") == "repeal":
+                rule["enacted"] = True
+                c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                c["lastRuleActivityFrame"] = self.frameTick
                 return self._enact_repeal(rule, yes)
             if LIFECYCLE_ENABLED and rule["kind"] == "succession":
+                rule["enacted"] = True
+                c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                c["lastRuleActivityFrame"] = self.frameTick
                 # Succession ballots are a leadership record, not an ongoing
                 # governance constraint -- they deliberately do NOT join
                 # c["rules"] (which has a small MAX_ACTIVE_RULES budget shared
@@ -5365,8 +5552,42 @@ class SimEngine:
                 # benchmark are the permanent record instead.
                 self._enact_succession_winner(rule)
             else:
+                superseded = None
+                if rule.get("supersedes"):
+                    superseded = next((r for r in c["rules"]
+                                       if r.get("id") == rule["supersedes"]), None)
+                    if superseded is None:
+                        c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                        c["lastRuleActivityFrame"] = self.frameTick
+                        self._push_activity(
+                            f'Rule "{rule["name"]}" rejected: its amendment target is no longer active')
+                        return "rejected"
+                # A normal enact adds one rule; an amendment first removes one.
+                # Re-check under the engine lock because other ballots may have
+                # changed the active set after this proposal was validated.
+                projected_rules = len(c["rules"]) - (1 if superseded is not None else 0)
+                if projected_rules >= MAX_ACTIVE_RULES:
+                    c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                    c["lastRuleActivityFrame"] = self.frameTick
+                    self._push_activity(
+                        f'Rule "{rule["name"]}" rejected: the active-rule budget is full')
+                    return "rejected"
+                rule["enacted"] = True
                 rule["enactedFrame"] = self.frameTick
+                c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                c["lastRuleActivityFrame"] = self.frameTick
+                if superseded is not None:
+                    # An amendment replaces an active provision atomically:
+                    # reverse its effect exactly once before applying the new
+                    # one, then retain only the historical constitution row.
+                    c["rules"] = [r for r in c["rules"] if r.get("id") != superseded["id"]]
+                    self._clear_governance_rule(superseded)
+                    self._set_constitution_status(
+                        superseded["id"], "superseded", supersededBy=rule["id"])
                 c["rules"].append(rule)
+                # _ensure_constitution backfills the newly active rule once;
+                # do not append a second provision after that migration pass.
+                self._ensure_constitution()
                 self._record_rule_kind_enacted(rule.get("kind"))
                 self._push_activity(f'Rule "{rule["name"]}" enacted by vote ({yes} yes)')
                 self._log_benchmark("rule_enacted", len(c["rules"]), {
@@ -5381,10 +5602,7 @@ class SimEngine:
         return "pending"
 
     def _apply_governance_rule(self, rule):
-        """Give harvest_quota/rationing/priority mechanical teeth the moment
-        they're enacted. Rules stay in effect while in civilization["rules"];
-        repeal_rule reverses them. Rationing additionally self-lifts once
-        storage recovers (checked at withdrawal time in _rationing_gate)."""
+        """Compile/apply an enacted law; repeal and amendment reverse it."""
         c = self.civilization
         if rule["kind"] == "harvest_quota":
             try:
@@ -5406,6 +5624,14 @@ class SimEngine:
             rid = rule.get("value")
             self._push_activity(
                 f'Priority rule "{rule["name"]}" now biases contributions toward {rid}')
+        elif rule["kind"] == "custom":
+            effect = self._normalize_custom_rule_effect(rule.get("effect"))
+            if effect is not None:
+                rule["effect"] = effect
+                c.setdefault("customRuleModifiers", {})[rule["id"]] = effect
+                self._push_activity(
+                    f'Custom rule "{rule["name"]}" now adds {effect["modifier"]["value"]} '
+                    f'to matching {effect["condition"].get("action", next(iter(effect["subject"].values())))} actions')
 
     def _clear_governance_rule(self, rule):
         """Reverse _apply_governance_rule side effects on repeal."""
@@ -5415,6 +5641,7 @@ class SimEngine:
             return
         c.get("harvestQuotas", {}).pop(rid, None)
         c.get("rationingActive", {}).pop(rid, None)
+        c.get("customRuleModifiers", {}).pop(rid, None)
 
     def _enact_repeal(self, repeal_ballot, yes_count):
         """Remove the targeted enacted rule after a successful repeal vote."""
@@ -5429,6 +5656,7 @@ class SimEngine:
             return "enacted"
         c["rules"] = [r for r in c["rules"] if r["id"] != target_id]
         self._clear_governance_rule(target)
+        self._set_constitution_status(target_id, "repealed")
         self._push_activity(
             f'Rule "{target["name"]}" repealed by vote ({yes_count} yes)')
         self._log_benchmark("rule_repealed", len(c["rules"]),
@@ -5447,11 +5675,17 @@ class SimEngine:
             value = float(rule["value"])
         else:
             value = rule.get("value")
+        effect = self._normalize_custom_rule_effect(rule.get("effect")) \
+            if kind == "custom" and rule.get("effect") is not None else None
         entry = {
             "id": rule["id"], "name": rule["name"], "kind": kind, "value": value,
             "description": rule.get("description", ""), "proposedBy": agent["name"],
             "enacted": False, "votes": {agent["name"]: "yes"},
         }
+        if effect is not None:
+            entry["effect"] = effect
+        if rule.get("supersedes"):
+            entry["supersedes"] = rule["supersedes"]
         c["pendingRules"].append(entry)
         c["lastRuleActivityFrame"] = self.frameTick
         self._push_communication("rule_proposal", agent["name"], "everyone",
@@ -9866,11 +10100,13 @@ class SimEngine:
         # MAX_ACTIVE_RULES (8) <= MAX_ACTIVE_RULES_PROMPT (12) today.
         rules_full = list(c["rules"]) if RULES_ENABLED else []
         if len(rules_full) > MAX_ACTIVE_RULES_PROMPT:
-            active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"]}
+            active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
+                                  "effect": r.get("effect"), "supersedes": r.get("supersedes")}
                                  for r in rules_full[-MAX_ACTIVE_RULES_PROMPT:]]
             active_rules_list.append(f"(+{len(rules_full) - MAX_ACTIVE_RULES_PROMPT} older rules)")
         else:
-            active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"]}
+            active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
+                                  "effect": r.get("effect"), "supersedes": r.get("supersedes")}
                                  for r in rules_full]
 
         return {
@@ -9950,6 +10186,7 @@ class SimEngine:
                                "proposed_by": r["proposedBy"]}
                               for r in c["pendingRules"]] if RULES_ENABLED else [],
             "active_rules": active_rules_list if RULES_ENABLED else [],
+            "constitution": [dict(p) for p in self._ensure_constitution()] if RULES_ENABLED else [],
             "recent_conversations": self._recent_conversations_text(),
             "inbox": self._drain_inbox(agent),
             "self_prompt": "",
@@ -10565,6 +10802,35 @@ class SimEngine:
                     kind = r.get("kind")
                     if kind and kind not in civ["ruleKindsEverEnacted"]:
                         civ["ruleKindsEverEnacted"].append(kind)
+                # Phase 4 governance migration: old saves have active rules
+                # but no constitutional ledger or compiled custom effects.
+                # Keep any already-persisted history in order and append only
+                # missing active provisions, so repeated restore cycles cannot
+                # duplicate a law.
+                constitution = civ.get("constitution")
+                if not isinstance(constitution, list):
+                    constitution = []
+                constitution = [p for p in constitution
+                                if isinstance(p, dict) and isinstance(p.get("id"), str)]
+                provision_ids = {p["id"] for p in constitution}
+                for r in (civ.get("rules") or []):
+                    if not isinstance(r, dict) or not r.get("id"):
+                        continue
+                    if r["id"] not in provision_ids:
+                        provision = {
+                            "id": r["id"], "name": r.get("name") or r["id"],
+                            "kind": r.get("kind") or "custom",
+                            "description": r.get("description") or "",
+                            "enactedFrame": r.get("enactedFrame", 0), "status": "active",
+                        }
+                        if r.get("effect") is not None:
+                            provision["effect"] = r["effect"]
+                        if r.get("supersedes"):
+                            provision["supersedes"] = r["supersedes"]
+                        constitution.append(provision)
+                        provision_ids.add(r["id"])
+                civ["constitution"] = constitution
+                civ.setdefault("customRuleModifiers", {})
                 # Phase C: spoilage nudge state. Structure condition/isRuin
                 # deliberately have NO migration -- every read defaults via
                 # .get(cond, 100), so pre-Phase-C structures start pristine.
@@ -10782,6 +11048,8 @@ class SimEngine:
                     return False
                 self.civilization = civ
                 self._rebuild_role_maps()
+                self._ensure_constitution()
+                self._rebuild_custom_rule_modifiers()
                 self.agents = agents
                 self.agent_names = set(a["name"] for a in agents)
                 self.frameTick = int(data.get("frameTick") or 0)
@@ -10904,6 +11172,7 @@ class SimEngine:
                             for rid, r in self.RECIPES.items()} if CRAFTING_ENABLED else {},
                 "rules": [dict(r) for r in c["rules"]],
                 "pendingRules": [dict(r) for r in c["pendingRules"]],
+                "constitution": [dict(p) for p in self._ensure_constitution()],
                 "directive": self._current_directive(),
                 "season": self._current_season(),
                 "stockpile": dict(c["stockpile"]),
