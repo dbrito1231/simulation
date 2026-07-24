@@ -397,7 +397,7 @@ STARVING_HUNGER = 10        # below this, a foodless agent deterministically see
 # soft caps make the Nth duplicate worthless so agents move on to new types.
 FARM_PLOTS_PER_EXTRA = 4    # farm plots in the agent's district per +1 edible gathered
 FARM_YIELD_BONUS_CAP = 2    # max bonus units per gather, so plots beyond 8/district are waste
-HOUSES_PER_NEW_VILLAGER = 3  # each 3 houses raise the population cap by 1 (hard cap: len(AGENT_DEFS))
+HOUSES_PER_NEW_VILLAGER = 3  # each 3 houses raise the population cap by 1 (hard cap: MAX_ROSTER_SIZE)
 WORKSHOPS_PER_CRAFT_BONUS = 3  # workshops village-wide per +1 crafted output (max +1)
 WALL_SOFT_CAP = 10
 WORKSHOP_DISTRICT_CAP = 3   # per buildable village/workshop-kind district
@@ -1329,6 +1329,60 @@ AGENT_DEFS = [
 ]
 ROSTER = ["Zara", "Sage", "Aria", "Luna", "Marco", "Colt", "Finn", "Mia"]
 
+# Sid-parity Phase 6: scale headroom past the 12 hand-written AGENT_DEFS.
+# Not a bid for Project Sid's ~500-agent scale (explicit non-goal, see
+# specs/00-overview.md) -- just enough room that emergent roles (Phase 2) and
+# belief factions (Phase 3) can differentiate into more than a 2-3 person
+# "faction". Raise this, not the individual roster-size clamps scattered
+# through the file, to change the ceiling.
+MAX_ROSTER_SIZE = 20
+
+# Fixed pools for procedurally generated agents (roster indices
+# len(AGENT_DEFS)..MAX_ROSTER_SIZE-1) -- see _generated_agent_defs. Sized to
+# exactly cover MAX_ROSTER_SIZE - len(AGENT_DEFS) = 8 slots; if MAX_ROSTER_SIZE
+# ever grows past that, _generated_agent_defs appends a numeric suffix rather
+# than silently duplicating a name.
+_GENERATED_AGENT_NAMES = ["Wren", "Ash", "Briar", "Juno", "Rowan", "Sable", "Tarn", "Vesper"]
+_GENERATED_AGENT_PERSONALITIES = [
+    "steady and dependable", "watchful and reserved", "eager and talkative",
+    "practical and blunt", "warm and easygoing", "restless and inventive",
+    "careful and thoughtful", "spirited and stubborn",
+]
+_GENERATED_AGENT_COLORS = ["#3F51B5", "#009688", "#CDDC39", "#673AB7",
+                           "#FFC085", "#03A9F4", "#8D6E63", "#EC407A"]
+
+
+def _generated_agent_defs(count):
+    """AGENT_DEFS-shaped entries for roster slots beyond the 12 hand-written
+    ones. Deterministic in `count` (no randomness) so a given roster_size
+    always yields the same generated roster, which every other system --
+    roles, beliefs, relationships, think scheduling -- treats identically to
+    a hand-written def. Role/zone rotate across the seed's 12 non-elder
+    roles.json roles (one generated agent per role before any role repeats),
+    reusing the zone the matching hand-written def already spawns into, so
+    generated agents spread across specialties instead of clustering into
+    one and land in a district that actually supports their role."""
+    non_elder_defs = [d for d in AGENT_DEFS if d["role"] != "elder"]
+    next_id = max(d["id"] for d in AGENT_DEFS) + 1
+    out = []
+    for i in range(count):
+        base = non_elder_defs[i % len(non_elder_defs)]
+        name = _GENERATED_AGENT_NAMES[i % len(_GENERATED_AGENT_NAMES)]
+        if i >= len(_GENERATED_AGENT_NAMES):
+            name = f"{name}{i // len(_GENERATED_AGENT_NAMES) + 1}"
+        personality = _GENERATED_AGENT_PERSONALITIES[i % len(_GENERATED_AGENT_PERSONALITIES)]
+        color = _GENERATED_AGENT_COLORS[i % len(_GENERATED_AGENT_COLORS)]
+        out.append({"id": next_id + i, "name": name, "role": base["role"],
+                    "personality": personality, "color": color, "zone": base["zone"]})
+    return out
+
+
+# Sid-parity Phase 6: proximity radius shared by _get_nearby_agents /
+# _get_nearby_detailed and the district-bucket cache that backs them (see
+# SimEngine._nearby_candidate_pool). A single constant so the bucket
+# adjacency computation and the actual distance check never drift apart.
+NEARBY_RADIUS = 80
+
 
 def _dist(ax, ay, bx, by):
     dx = bx - ax
@@ -1510,7 +1564,13 @@ class SimEngine:
 
     # --- roster + cold start ---
     def _select_active_defs(self, roster_size):
-        roster_size = max(1, min(len(AGENT_DEFS), roster_size))
+        roster_size = max(1, min(MAX_ROSTER_SIZE, roster_size))
+        if roster_size > len(AGENT_DEFS):
+            # Phase 6 headroom: all 12 hand-written defs plus procedurally
+            # generated ones for the remaining slots. roster_size <= 12
+            # (today's default/range) never reaches this branch, so that
+            # path's behavior is unchanged.
+            return list(AGENT_DEFS) + _generated_agent_defs(roster_size - len(AGENT_DEFS))
         if roster_size >= len(AGENT_DEFS):
             return list(AGENT_DEFS)
         names = []
@@ -1553,6 +1613,11 @@ class SimEngine:
                 "currentZone": district["kind"], "currentDistrict": d["zone"],
                 "waypoints": [], "message": None, "messageTimer": 0,
                 "thinkTimer": 0, "thinkInterval": 300, "isThinking": False,
+                # Sid-parity Phase 6: frame of this agent's last successfully
+                # dispatched think (see _tick_once's staleness-priority
+                # dispatch order). 0 at cold start so the initial round breaks
+                # ties by roster order, same as before this field existed.
+                "lastThinkFrame": 0,
                 "lastAction": None, "lastReasoning": None, "consecutiveTalks": 0,
                 "pendingThink": False, "assignedTask": None, "idleCycles": 0,
                 "lastTaskedFrame": None, "lastContributedFrame": None,
@@ -1643,7 +1708,7 @@ class SimEngine:
             "frontierExhaustedLogged": False,
             "completedProjects": 0,
             "nextStructureId": 1,
-            "basePopulation": max(1, min(len(AGENT_DEFS), roster_size)),
+            "basePopulation": max(1, min(MAX_ROSTER_SIZE, roster_size)),
             "resourceRegistry": {**{k: dict(v) for k, v in BASE_RESOURCES.items()},
                                  **{k: dict(v) for k, v in CRAFTED_RESOURCES.items()}},
             "projectRegistry": {k: dict(v) for k, v in PROJECT_TEMPLATES.items()},
@@ -1837,22 +1902,81 @@ class SimEngine:
                 return a
         return None
 
+    # --- Sid-parity Phase 6: district-bucketed proximity scan ---
+    # _get_nearby_agents/_get_nearby_detailed run once per agent per think
+    # payload build (the hottest per-tick pass over the roster), each doing a
+    # flat O(n) scan. At roster 20 that's ~400 comparisons per full think
+    # round -- not huge, but the district bucket below turns it into a scan
+    # of just the agents sharing (or bordering) this agent's district, which
+    # is what the plan calls out. Districts are far bigger than NEARBY_RADIUS
+    # in the common case, but a few starter districts sit closer together
+    # than that (e.g. village_core/market are only ~70px apart, narrower than
+    # the 80-unit radius) -- so a same-district-only bucket would silently
+    # drop cross-border neighbors that a flat scan would have found. The
+    # adjacency cache below fixes that: an agent's candidate pool is its own
+    # district's bucket plus every other district whose bounds, expanded by
+    # NEARBY_RADIUS, still reach this district -- so results stay identical
+    # to the flat O(n) scan for any hand-placed position, just computed over
+    # a much smaller candidate set at scale.
+    def _rebuild_district_buckets(self):
+        buckets = {}
+        for o in self.agents:
+            buckets.setdefault(o.get("currentDistrict"), []).append(o)
+        self._district_agent_buckets = buckets
+        self._district_agent_buckets_frame = self.frameTick
+
+    def _district_adjacency_for(self, did):
+        districts = self.civilization["districts"]
+        cache = getattr(self, "_district_adjacency", None)
+        if cache is None or getattr(self, "_district_adjacency_n", None) != len(districts):
+            cache = {}
+            items = list(districts.items())
+            for a_id, a_d in items:
+                eb = {"x1": a_d["bounds"]["x1"] - NEARBY_RADIUS, "y1": a_d["bounds"]["y1"] - NEARBY_RADIUS,
+                      "x2": a_d["bounds"]["x2"] + NEARBY_RADIUS, "y2": a_d["bounds"]["y2"] + NEARBY_RADIUS}
+                neighbors = {a_id}
+                for b_id, b_d in items:
+                    if b_id == a_id:
+                        continue
+                    if _rects_overlap(eb, b_d["bounds"]):
+                        neighbors.add(b_id)
+                cache[a_id] = neighbors
+            self._district_adjacency = cache
+            self._district_adjacency_n = len(districts)
+        return cache.get(did) or {did}
+
+    def _nearby_candidate_pool(self, agent):
+        """Agents worth an actual distance check against `agent` -- its own
+        district bucket plus any district close enough to matter, per the
+        adjacency cache above. Falls back to a full flat scan if the agent
+        has no currentDistrict (shouldn't happen in practice, but keeps this
+        provably never less correct than the old scan)."""
+        did = agent.get("currentDistrict")
+        if not did:
+            return self.agents
+        if getattr(self, "_district_agent_buckets_frame", None) != self.frameTick:
+            self._rebuild_district_buckets()
+        pool = []
+        for other_id in self._district_adjacency_for(did):
+            pool.extend(self._district_agent_buckets.get(other_id, ()))
+        return pool
+
     def _get_nearby_agents(self, agent):
         near = []
-        for o in self.agents:
+        for o in self._nearby_candidate_pool(agent):
             if o is agent:
                 continue
-            if _dist(agent["x"], agent["y"], o["x"], o["y"]) <= 80:
+            if _dist(agent["x"], agent["y"], o["x"], o["y"]) <= NEARBY_RADIUS:
                 near.append(o["name"])
         return near
 
     def _get_nearby_detailed(self, agent):
         near = []
-        for o in self.agents:
+        for o in self._nearby_candidate_pool(agent):
             if o is agent:
                 continue
             d = _dist(agent["x"], agent["y"], o["x"], o["y"])
-            if d <= 80:
+            if d <= NEARBY_RADIUS:
                 near.append((d, {"name": o["name"], "role": o["role"],
                              "food": o["resources"].get("food", 0),
                              "wood": o["resources"].get("wood", 0),
@@ -4103,7 +4227,7 @@ class SimEngine:
             # would make birth impossible the moment the named roster fills,
             # even with houses to spare.
             return cap
-        return min(len(AGENT_DEFS), cap)
+        return min(MAX_ROSTER_SIZE, cap)
 
     def _type_saturated(self, type_):
         """Soft cap per structure type, derived from what the type actually
@@ -10722,6 +10846,7 @@ class SimEngine:
             em_target = self._sage_emergency()
             responders = self._sage_responders(em_target) if em_target else None
 
+            think_ready = []
             for a in self.agents:
                 if a["messageTimer"] > 0:
                     a["messageTimer"] -= 1
@@ -10747,8 +10872,24 @@ class SimEngine:
                         continuing = self._step_goal(a)
                         a["thinkTimer"] = GOAL_STEP_FRAMES if continuing else 1
                     else:
-                        dispatched = self._schedule_think(a)
-                        a["thinkTimer"] = a["thinkInterval"] if dispatched else THINK_RETRY_FRAMES
+                        think_ready.append(a)
+
+            # Sid-parity Phase 6: dispatch ready agents in staleness-priority
+            # order (most overdue since their last successful think first),
+            # not fixed roster order. With MAX_CONCURRENT_LLM slots per tick,
+            # a naive `for a in self.agents` dispatch order systematically
+            # favors early-indexed agents whenever more agents are ready than
+            # there are free slots -- late-roster agents could retry at the
+            # same fixed THINK_RETRY_FRAMES cadence indefinitely without ever
+            # winning the race. Sorting by lastThinkFrame (ascending = longest
+            # ago = most overdue) means whoever has waited longest gets first
+            # crack at a freed slot each tick, regardless of roster position.
+            think_ready.sort(key=lambda ag: ag.get("lastThinkFrame", -1))
+            for a in think_ready:
+                dispatched = self._schedule_think(a)
+                if dispatched:
+                    a["lastThinkFrame"] = ft
+                a["thinkTimer"] = a["thinkInterval"] if dispatched else THINK_RETRY_FRAMES
 
     def _run_loop(self):
         while not self._stop.is_set():
@@ -10880,7 +11021,7 @@ class SimEngine:
                 # existed have no record of the starting roster -- treat the
                 # saved roster as the base so existing houses grow it from here.
                 if not civ.get("basePopulation"):
-                    civ["basePopulation"] = max(1, min(len(AGENT_DEFS),
+                    civ["basePopulation"] = max(1, min(MAX_ROSTER_SIZE,
                                                        len(data.get("agents") or []) or 8))
                 civ.setdefault("effectLastFire", {})
                 civ.setdefault("approvedCustomApprovedFrame", {})

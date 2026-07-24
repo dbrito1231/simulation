@@ -125,8 +125,9 @@ district scope). `_craft_output_bonus`/`_craft_station_unlocked` gate and
 boost crafting (workshops: `WORKSHOPS_PER_CRAFT_BONUS = 3`/+1, village
 scope, cap 1). `_population_cap` sums `houses` capacity
 (`HOUSES_PER_NEW_VILLAGER = 3` houses/+1 cap, hard-floored at
-`len(AGENT_DEFS)` unless `LIFECYCLE_ENABLED` lifts it for generated
-villagers). `_storage_capacity` sums `stores` capacity onto
+`MAX_ROSTER_SIZE = 20` — see specs/02-engine-core.md — unless
+`LIFECYCLE_ENABLED` lifts it further for generated villagers born past that
+cap). `_storage_capacity` sums `stores` capacity onto
 `BASE_STORAGE_CAPACITY = 25`.
 
 **Environmental effects (`shelter`/`light`/`upkeep`, `ENV_EFFECTS_ENABLED`):**

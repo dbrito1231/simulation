@@ -36,16 +36,36 @@ detail beyond the summary here; [07-actions.md](07-actions.md) for `switch_role`
 `ROSTER = ["Zara", "Sage", "Aria", "Luna", "Marco", "Colt", "Finn", "Mia"]`
 (sim_engine.py:1107) is the ordered default-8 subset used at cold start.
 
-`_select_active_defs(roster_size)` (sim_engine.py:1279-1296): clamps
-`roster_size` to `[1, len(AGENT_DEFS)]`; if the request is the full 12 it returns
-`AGENT_DEFS` unchanged. Otherwise it fills names from `ROSTER` in order up to
-`roster_size`, then backfills from `AGENT_DEFS` order for any remainder, and
-**forces Sage in** — if Sage isn't already selected, she overwrites the last slot.
-This guarantees an elder always exists regardless of roster size.
+`MAX_ROSTER_SIZE = 20` (sim_engine.py, Sid-parity Phase 6) is the hard ceiling
+on `roster_size` — headroom past the 12 hand-written `AGENT_DEFS` so emergent
+roles/belief factions have room to differentiate, deliberately not a bid at
+Project Sid's ~500-agent scale (non-goal, specs/00-overview.md).
+
+`_select_active_defs(roster_size)`: clamps `roster_size` to `[1,
+MAX_ROSTER_SIZE]`.
+- `roster_size <= len(AGENT_DEFS)` (today's 8-12 default/range, unchanged
+  behavior): if the request is the full 12 it returns `AGENT_DEFS` unchanged.
+  Otherwise it fills names from `ROSTER` in order up to `roster_size`, then
+  backfills from `AGENT_DEFS` order for any remainder, and **forces Sage in**
+  — if Sage isn't already selected, she overwrites the last slot. This
+  guarantees an elder always exists regardless of roster size.
+- `roster_size > len(AGENT_DEFS)`: all 12 hand-written defs plus
+  `_generated_agent_defs(roster_size - len(AGENT_DEFS))` for the remaining
+  slots (indices 12..roster_size-1). Generation is deterministic: name and
+  personality cycle through small fixed pools (`_GENERATED_AGENT_NAMES`,
+  `_GENERATED_AGENT_PERSONALITIES`, 8 entries each — exactly covering
+  `MAX_ROSTER_SIZE - len(AGENT_DEFS)`), role rotates across the 12 non-elder
+  seed roles (one generated agent per role before any repeats — no generated
+  agent is ever seeded into the singular elder role), and starting zone is
+  copied from the hand-written def sharing that role. Generated agents are
+  built by the same `_make_agents` as hand-written ones and are
+  indistinguishable to every other system (roles, beliefs, relationships,
+  think scheduling) — only their name/personality are pool-drawn instead of
+  bespoke.
 
 **Overrides:**
-- `SIM_AGENTS` environment variable (server.py:3256) sets the roster size at
-  process start.
+- `SIM_AGENTS` environment variable (server.py:3692) sets the roster size at
+  process start (default 8, clamped to `MAX_ROSTER_SIZE`).
 - `POST /control/reset` accepts a JSON body `{"agents": N}` (not a query
   parameter) to reset with a different roster size at runtime — see
   [04-http-api.md](04-http-api.md).

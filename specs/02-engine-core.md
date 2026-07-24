@@ -64,6 +64,34 @@ emergency responder, either a reorg task steps, a goal steps, or the agent's
   `year`, `season`, `dayOfSeason`, `daysPerSeason`, `isNight`, `dayFraction` — all
   derived, nothing persisted separately.
 
+## Roster / cold start
+
+`AGENT_DEFS` (sim_engine.py:1316) is 12 hand-written entries (name, role,
+personality, color, starting district). `MAX_ROSTER_SIZE = 20` is the hard
+ceiling for `roster_size` — a Sid-parity Phase 6 headroom increase from the
+8-12 agent range, *not* a bid at Project Sid's ~500-agent scale (explicit
+non-goal, specs/00-overview.md). `SimEngine._select_active_defs(roster_size)`
+clamps to `[1, MAX_ROSTER_SIZE]` and resolves the active def list:
+- `roster_size <= len(AGENT_DEFS)` (today's 8-12 default/range): unchanged
+  from before Phase 6 — `ROSTER` (the 8 default names) fills first, then
+  remaining `AGENT_DEFS` entries in def order, with Sage force-included if
+  dropped. `roster_size == len(AGENT_DEFS)` returns `AGENT_DEFS` verbatim.
+- `roster_size > len(AGENT_DEFS)`: all 12 hand-written defs plus
+  `_generated_agent_defs(roster_size - len(AGENT_DEFS))` for the rest.
+  Generation is deterministic (no randomness): name and personality cycle
+  through small fixed pools (`_GENERATED_AGENT_NAMES`,
+  `_GENERATED_AGENT_PERSONALITIES`), and role/starting-district rotate across
+  the 12 non-elder `roles.json` seed roles (one generated agent per role
+  before any role repeats) — a generated agent's zone is copied from the
+  hand-written def that shares its role, so it spawns in a district that
+  actually supports that role. Generated agents are built by the same
+  `_make_agents` as hand-written ones and are indistinguishable to every
+  other system (roles, beliefs, relationships, think scheduling); they just
+  carry pool-drawn flavor text instead of bespoke hand-authored text.
+  `civilization["basePopulation"]` reflects the full `roster_size` (clamped to
+  `MAX_ROSTER_SIZE`, not `len(AGENT_DEFS)`), so the Structure-Effects house
+  population cap (specs/08) computes correctly above 12 agents too.
+
 ## Think scheduling
 
 Each agent gets a staggered `thinkInterval` at construction:
@@ -77,6 +105,52 @@ dispatch. If any of these block it, the caller retries after
 `THINK_RETRY_FRAMES = 15` frames (0.5 s) instead of waiting a full interval.
 `self._inflight` is a set of agent names with a job in flight; entries are added
 on dispatch and discarded in the job's `finally` block (sim_engine.py:9360).
+
+**Dispatch fairness (Phase 6).** `MAX_CONCURRENT_LLM`/`LLM_MIN_GAP_MS` remain
+the de facto global throughput cap (unchanged); the gap Phase 6 closes is
+*ordering* under contention. `_tick_once` no longer attempts dispatch in fixed
+`self.agents` roster order — every agent whose `thinkTimer` reached 0 this
+tick (and isn't mid-goal/reorg/emergency-response) is collected into a
+`think_ready` list, then sorted by `lastThinkFrame` ascending (least-recent
+successful think first, i.e. most overdue) before `_schedule_think` is tried
+in that order. `lastThinkFrame` is stamped with the current `frameTick` only
+on a successful dispatch; a failed attempt (pool full, cooldown, min-gap)
+leaves it unchanged, so the same agent keeps front-of-line priority on its
+next retry instead of losing it to fixed-order bias. Without this, a roster
+larger than `MAX_CONCURRENT_LLM` could starve late-indexed agents indefinitely
+under sustained pool contention, since every failed retry reset to the same
+`THINK_RETRY_FRAMES` with no memory of how overdue the agent actually was.
+
+## Proximity scans (district-bucketed, Phase 6)
+
+`_get_nearby_agents`/`_get_nearby_detailed` (both `NEARBY_RADIUS = 80`) back
+the `nearby_agents`/`nearby_agents_detailed` think-payload fields and are
+called once per agent per think-payload build — the hottest per-tick pass
+over the roster, so a flat `for o in self.agents` scan is O(n) per call
+(O(n²) per full think round). Both now route through
+`_nearby_candidate_pool(agent)` instead of scanning `self.agents` directly:
+
+- `_rebuild_district_buckets()` groups `self.agents` by `currentDistrict`
+  into `self._district_agent_buckets`, rebuilt lazily once per `frameTick`
+  (cached by frame stamp, not per-call).
+- `_district_adjacency_for(did)` returns the set of district ids whose
+  bounds — expanded by `NEARBY_RADIUS` on every side — overlap district
+  `did`'s bounds (via the same `_rects_overlap` used for district-founding
+  validation), cached and invalidated only when the district count changes.
+  This matters because starter districts aren't always farther apart than
+  `NEARBY_RADIUS`: `village_core` and `market` are only ~70px apart at their
+  closest edge, narrower than the 80-unit radius, so a same-district-only
+  bucket would silently drop real cross-border neighbors a flat scan would
+  have found. The candidate pool for an agent is its own district's bucket
+  plus every adjacent district's bucket — provably equivalent to the flat
+  O(n) scan for any hand-placed position (see
+  `scripts/sid_parity_smoke.py::test_district_bucket_matches_flat_scan`),
+  just computed over a much smaller candidate set at roster 20.
+- `_find_nearest_agent` (used only for the reactive `move_to_agent` fallback
+  when no explicit target is given, not the hot think-payload path)
+  deliberately stays a flat scan — it has no radius bound and must find the
+  true global nearest agent even across the whole map, which a
+  district-local candidate pool cannot guarantee.
 
 ## Pause / resume / reset
 

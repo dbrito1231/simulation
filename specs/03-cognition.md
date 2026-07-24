@@ -310,11 +310,32 @@ budget further, reduce the roster to 6 before enabling `PIANO_MODULES` rather
 than reverting the flag — reduce it via a JSON POST body field
 (`{"agents": N}`) on `/control/reset` (see specs/04-http-api.md), not a URL
 query parameter, or via the `SIM_AGENTS` environment variable at server
-startup (server.py, default 8, clamped to the `AGENT_DEFS` count — see
-specs/06-agents.md).
+startup (server.py, default 8, clamped to `MAX_ROSTER_SIZE = 20` — see
+specs/02-engine-core.md and specs/06-agents.md).
 
 `META_SYSTEM` (sim_engine.py, default `True` since Sid-parity Phase 3) —
 autobiography/persona meta update, still bounded by `MAX_CONCURRENT_LLM`
 (runs inline on the decision path, not on `piano_workers`). Authored beliefs
 and adoption events give the rotating autobiography update material to
 summarize.
+
+### Scale headroom (Phase 6) — concurrency unchanged
+
+Sid-parity Phase 6 raises the roster ceiling to `MAX_ROSTER_SIZE = 20` (see
+specs/02-engine-core.md) but deliberately does **not** raise
+`MAX_CONCURRENT_LLM` or `PIANO_CONCURRENT_LLM` — the 5-slot context budget
+above was sized for LM Studio's loaded config and reopening it needs its own
+measured soak, not a side effect of a roster-size change. `MAX_CONCURRENT_LLM`
++ `LLM_MIN_GAP_MS` are the throughput cap regardless of roster size; the
+actual scaling risk at a bigger roster was *fairness*, not throughput — more
+agents contending for the same fixed number of slots meant some agents could
+lose the pool-full race indefinitely under the old fixed-roster-order dispatch
+(see "Dispatch fairness (Phase 6)" in specs/02-engine-core.md). That ordering
+fix is what keeps average think latency reasonable at roster 20 without
+touching either concurrency constant; per-agent `thinkInterval` staggering is
+otherwise unchanged (still `360 + i*60`, `240` for the elder), so total LLM
+call volume per unit time still scales with roster size — a roster of 20 at
+the default cadence does dispatch more decision calls/minute in aggregate
+than a roster of 8, but no single agent is starved by it, and the existing
+worker-pool cap prevents that aggregate demand from exceeding what LM Studio's
+loaded config already serves for the default roster.
