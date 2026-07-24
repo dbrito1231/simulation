@@ -295,7 +295,39 @@ never dispatches into `self._executor`. Every module call routes to
 a `PIANO_MODULE_CACHE_TTL = 2` module-tick TTL so the perception/social/desire/
 reflection stagger (perception+desire every module-tick, social every 2nd,
 reflection every 3rd) fills an off-tick module's slot from its last real
-report instead of an empty one.
+report instead of an empty one. That decision-payload fill is age-labeled —
+a fresh, same-tick report renders as the bare `module: text` form, while an
+off-tick fill served from cache renders as `module (N turns ago): text` so
+the Cognitive Controller can discount stale advice.
+
+**Working memory survives save/restore.** `_piano_module_cache` is
+engine-memory, but after every think the post-think callback (still holding
+`self.lock`, right after it sets `agent["moduleTick"]`) mirrors that agent's
+cache entry into `agent["moduleReports"] = {module: {"tick", "text"}}` — a
+persistence-only field the hot path never reads. Because `state.db` already
+serializes each agent dict wholesale (`_serialize_state`), this rides along
+for free. `restore_state()` rebuilds `self._piano_module_cache` from every
+restored agent's `moduleReports` (defaulting to `{}` for pre-Phase-B saves),
+so a restart no longer runs every module blind for up to
+`PIANO_MODULE_CACHE_TTL` ticks. `/control/reset` is unchanged — it still wipes
+`_piano_module_cache` to `{}` — only `restore_state` rehydrates it.
+
+**Cross-module visibility (working-memory half-step).** Before dispatching
+`to_run` for an agent's turn, `_run_piano_modules` builds one shared
+`last_reports=` suffix from every cached report still within
+`PIANO_CROSS_CONTEXT_TTL = 6` module-ticks (a separate, more tolerant TTL
+than `PIANO_MODULE_CACHE_TTL` above, which only gates the decision payload's
+off-tick fills) and appends it (`context + "; " + suffix`) to the context
+string every module dispatched this turn receives, e.g.
+`last_reports=desire(1 ago): stockpile wood | social(2 ago): ask Sage about
+the blueprint`. Entries are formatted `module(N ago): text`; a module seeing
+its own previous report is intentional (continuity, especially for
+Reflection). `MODULE_PROMPTS` (server.py) each carry one added clause telling
+the module to build on or correct prior reports rather than repeat them. No
+extra LLM call is added — the suffix rides on the existing module calls.
+Reports are capped at 200 chars (server.py), so the suffix adds at most
+~4 × 60 ≈ 240 tokens per module call, comfortably inside the ~3,400-token/slot
+formula above with no change to the formula itself.
 
 Revised context formula with PIANO on: LM Studio's context length must be ≥
 ~3,400 tokens × (`MAX_CONCURRENT_LLM` + `PIANO_CONCURRENT_LLM`) = ~3,400 × 5 =

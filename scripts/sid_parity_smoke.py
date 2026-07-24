@@ -720,7 +720,13 @@ def test_role_fallback_switch():
 def test_piano_stagger_offline():
     """Phase 5: module stagger works without LM (runner returns None)."""
     engine = make_engine(4)
-    engine.d["run_piano_module"] = lambda *a, **k: "ok"
+    calls = []
+
+    def stub(module, agent_name, context, frame_tick=None):
+        calls.append((module, context))
+        return "ok"
+
+    engine.d["run_piano_module"] = stub
     # Force-enable for this unit check only.
     old = se.PIANO_MODULES
     se.PIANO_MODULES = True
@@ -736,6 +742,12 @@ def test_piano_stagger_offline():
         assert_true(runs1 == 2, runs1)
         assert_true("perception" in reports1 and "desire" in reports1, reports1)
         assert_true("social" not in reports1 and "reflection" not in reports1, reports1)
+        # Cross-module visibility: tick 1 has nothing cached yet, so no
+        # last_reports suffix should be attached to any dispatched context.
+        tick1_calls = calls[:2]
+        assert_true(len(tick1_calls) == 2, tick1_calls)
+        assert_true(all("last_reports" not in ctx for _, ctx in tick1_calls),
+                    tick1_calls)
 
         reports2, tick2, runs2 = engine._run_piano_modules(
             "Aria",
@@ -746,6 +758,20 @@ def test_piano_stagger_offline():
         # tick 2: perception + desire + social
         assert_true(tick2 == 2 and runs2 == 3, (tick2, runs2, reports2))
         assert_true("social" in reports2, reports2)
+        # Every module dispatched on tick 2 should see both tick-1 reports,
+        # each labeled "1 ago" (tick2 - tick1 == 1).
+        tick2_calls = calls[2:5]
+        assert_true(len(tick2_calls) == 3, tick2_calls)
+        assert_true(all("perception(1 ago)" in ctx and "desire(1 ago)" in ctx
+                        for _, ctx in tick2_calls), tick2_calls)
+
+        # Force social's cache entry to look 2 ticks stale (as if it were
+        # last reported on tick 1 instead of tick 2), then dispatch an
+        # off-tick turn (social doesn't run on odd ticks) to confirm the
+        # decision payload age-labels the stale fill distinctly from the
+        # bare "module:" form fresh reports use.
+        cache = engine._piano_module_cache["Aria"]
+        cache["social"]["tick"] = tick2 - 1
 
         reports3, tick3, runs3 = engine._run_piano_modules(
             "Aria",
@@ -753,12 +779,103 @@ def test_piano_stagger_offline():
             tick2,
             "role=farmer",
         )
-        # tick 3: perception + desire + reflection
+        # tick 3: perception + desire + reflection run fresh; social is
+        # off-tick, served from cache and age-labeled "2 turns ago".
         assert_true(tick3 == 3 and runs3 == 3, (tick3, runs3, reports3))
         assert_true("reflection" in reports3, reports3)
-        print("  OK PIANO stagger (2 / 3 / 3 modules across ticks 1-3)")
+        assert_true("social (2 turns ago):" in reports3, reports3)
+
+        # TTL boundary: a report older than PIANO_CROSS_CONTEXT_TTL must be
+        # excluded from the last_reports suffix. Force "desire"'s cache entry
+        # to look stale, then confirm the next dispatch's context omits it.
+        cache["desire"]["tick"] = tick3 - se.PIANO_CROSS_CONTEXT_TTL - 1
+        before = len(calls)
+        reports4, tick4, runs4 = engine._run_piano_modules(
+            "Aria",
+            {"perception": True, "social": True, "desire": True, "reflection": True},
+            tick3,
+            "role=farmer",
+        )
+        tick4_calls = calls[before:]
+        assert_true(len(tick4_calls) == 3, tick4_calls)
+        assert_true(all("desire(" not in ctx for _, ctx in tick4_calls),
+                    tick4_calls)
+        print("  OK PIANO stagger (2 / 3 / 3 modules across ticks 1-3) "
+              "+ cross-module last_reports visibility, age labels, TTL cutoff")
     finally:
         se.PIANO_MODULES = old
+
+
+def test_piano_cache_restore_roundtrip():
+    """Phase B: _piano_module_cache survives a save/restore round-trip via
+    each agent's persistence-only moduleReports mirror."""
+    import tempfile
+
+    engine = make_engine(4)
+
+    def stub(module, agent_name, context, frame_tick=None):
+        return f"{module} report for {agent_name}"
+
+    engine.d["run_piano_module"] = stub
+    old_piano = se.PIANO_MODULES
+    se.PIANO_MODULES = True
+    old_db_path = se.DB_PATH
+    tmpdir = tempfile.mkdtemp()
+    tmp_db = str(Path(tmpdir) / "state_roundtrip.db")
+    try:
+        agent_name = engine.agents[0]["name"]
+        modules = {"perception": True, "social": True, "desire": True, "reflection": True}
+        # Tick 1: perception + desire only. Tick 2: + social (tick % 2 == 0).
+        # This leaves "social" freshly cached right before the restart.
+        _, tick1, _ = engine._run_piano_modules(agent_name, modules, 0, "role=farmer")
+        reports2, tick2, runs2 = engine._run_piano_modules(
+            agent_name, modules, tick1, "role=farmer")
+        assert_true(tick2 == 2 and "social" in reports2, (tick2, reports2))
+        # Mirror the cache into the agent dict the same way the post-think
+        # callback does (sim_engine.py, right after agent["moduleTick"] = new_tick).
+        agent = engine._find_agent(agent_name)
+        agent["moduleTick"] = tick2
+        agent["moduleReports"] = {
+            m: dict(v) for m, v in engine._piano_module_cache.get(agent_name, {}).items()
+        }
+        cache_before = deepcopy(engine._piano_module_cache.get(agent_name))
+        assert_true(cache_before and "social" in cache_before,
+                    "cache should hold a fresh social report before the restart")
+
+        # Serialize + persist to a throwaway state.db, then simulate a fresh
+        # process by wiping the in-memory cache (as a restart would) before
+        # restoring from disk.
+        se.DB_PATH = tmp_db
+        engine.save_state()
+        engine._piano_module_cache = {}
+
+        restored = engine.restore_state()
+        assert_true(restored, "restore_state should succeed against the just-written db")
+        assert_true(agent_name in engine._piano_module_cache,
+                    f"restore did not rehydrate cache for {agent_name}: "
+                    f"{engine._piano_module_cache}")
+        restored_entry = engine._piano_module_cache[agent_name]
+        for module, report in cache_before.items():
+            assert_true(restored_entry.get(module) == report,
+                        f"restored cache entry for {module} mismatched: "
+                        f"{restored_entry.get(module)} != {report}")
+
+        # First post-restore turn: dispatch tick 3, where social is off-tick
+        # (tick % 2 != 0). It must be served as an age-labeled fill from the
+        # rehydrated cache instead of an empty slot.
+        agent2 = engine._find_agent(agent_name)
+        restored_tick = int(agent2.get("moduleTick") or 0)
+        assert_true(restored_tick == tick2, (restored_tick, tick2))
+        reports3, tick3, runs3 = engine._run_piano_modules(
+            agent_name, modules, restored_tick, "role=farmer")
+        assert_true(tick3 == restored_tick + 1, (tick3, restored_tick))
+        assert_true("social (" in reports3 and "turns ago):" in reports3,
+                    f"restored cache did not serve an off-tick social fill: {reports3}")
+        print("  OK PIANO module cache rehydrates from state.db after restore "
+              "and serves an off-tick fill on the first post-restore turn")
+    finally:
+        se.PIANO_MODULES = old_piano
+        se.DB_PATH = old_db_path
 
 
 def test_library_scaling_and_lessons():
@@ -1072,6 +1189,7 @@ def main():
 
     test_role_fallback_switch()
     test_piano_stagger_offline()
+    test_piano_cache_restore_roundtrip()
     test_library_scaling_and_lessons()
     test_civic_era_requires_both_light_and_transit()
 

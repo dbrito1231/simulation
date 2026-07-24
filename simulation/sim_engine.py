@@ -617,6 +617,14 @@ PIANO_CONCURRENT_LLM = 2
 # are served from the last real report instead of an empty slot, as long as
 # it is no more than this many module-ticks stale -- see _run_piano_modules.
 PIANO_MODULE_CACHE_TTL = 2
+# Cross-module context injection (working-memory half-step): modules see a
+# shared "last_reports=" suffix built from every cached report within this
+# many module-ticks -- see _run_piano_modules. Deliberately more tolerant of
+# staleness than PIANO_MODULE_CACHE_TTL above (which gates the *decision*
+# payload's off-tick fills); a 6-tick-old report is still useful orientation
+# for a peer module even though it's too stale to stand in as that module's
+# own fresh output. Keep these two TTLs as separate constants.
+PIANO_CROSS_CONTEXT_TTL = 6
 # Wait budget for a dispatched module future -- strictly above server.py's
 # PIANO_MODULE_TIMEOUT_S (15s) HTTP timeout so that timeout, not this one,
 # is what fires and gets logged/counted as a drop in the normal case.
@@ -1633,6 +1641,7 @@ class SimEngine:
                 "lastRecipeRejection": None, "lastBurialRejection": None,
                 "lastShelterNote": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0, "moduleTick": 0,
+                "moduleReports": {},
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
                 # Phase E: home structure id (None = homeless) + refusal nudges.
                 "homeStructureId": None, "lastTradeRejection": None,
@@ -10549,13 +10558,29 @@ class SimEngine:
         report_by_module = {}
         runs = 0
         if to_run:
+            # Cross-module visibility (working-memory half-step): build one
+            # shared "last_reports=" suffix from every cached report still
+            # within PIANO_CROSS_CONTEXT_TTL module-ticks, and give it to
+            # every module dispatched this turn. A module seeing its own
+            # previous report is intentional (continuity, esp. reflection).
+            fresh = []
+            for mod_name, cached in cache.items():
+                age = tick - cached["tick"]
+                if 0 < age <= PIANO_CROSS_CONTEXT_TTL:
+                    fresh.append((age, mod_name, cached["text"]))
+            dispatch_context = context
+            if fresh:
+                fresh.sort(key=lambda t: t[0])
+                suffix = "last_reports=" + " | ".join(
+                    f"{mod_name}({age} ago): {text}" for age, mod_name, text in fresh)
+                dispatch_context = context + "; " + suffix
             futures = {}
             dispatch_started = {}
             for module in to_run:
                 start_ts = time.time()
                 dispatch_started[module] = start_ts
                 futures[module] = self.piano_workers.submit(
-                    runner, module, agent_name, context, frame_tick=self.frameTick)
+                    runner, module, agent_name, dispatch_context, frame_tick=self.frameTick)
             for module, fut in futures.items():
                 try:
                     text = fut.result(timeout=PIANO_MODULE_TIMEOUT_WAIT_S)
@@ -10574,7 +10599,8 @@ class SimEngine:
         for module in off_tick:
             cached = cache.get(module)
             if cached and (tick - cached["tick"]) <= PIANO_MODULE_CACHE_TTL:
-                report_by_module[module] = f"{module}: {cached['text']}"
+                age = tick - cached["tick"]
+                report_by_module[module] = f"{module} ({age} turns ago): {cached['text']}"
         reports = [report_by_module[m] for m in ordered if m in report_by_module]
         return (" | ".join(reports) if reports else "none"), tick, runs
 
@@ -10647,6 +10673,15 @@ class SimEngine:
                     return
                 if PIANO_MODULES:
                     agent["moduleTick"] = new_tick
+                    # Persistence-only mirror of this agent's module cache
+                    # entry: the engine keeps reading _piano_module_cache on
+                    # the hot path; this field only exists so restore_state
+                    # can rebuild the cache after a restart (state.db already
+                    # persists the agent dict, so this piggybacks on that).
+                    agent["moduleReports"] = {
+                        m: dict(v)
+                        for m, v in self._piano_module_cache.get(agent_name, {}).items()
+                    }
                     self._module_period_runs += runs
                     # Reflection reports are actual deliberate practice: this
                     # makes the high-reflection founder gate reachable without
@@ -11277,6 +11312,7 @@ class SimEngine:
                         a["resources"].setdefault("coin", 0)
                     a.setdefault("persona", "")
                     a.setdefault("moduleTick", 0)
+                    a.setdefault("moduleReports", {})
                     a.setdefault("modules", {
                         "perception": True, "social": True,
                         "desire": True, "reflection": True,
@@ -11334,6 +11370,19 @@ class SimEngine:
                 self._rebuild_custom_rule_modifiers()
                 self.agents = agents
                 self.agent_names = set(a["name"] for a in agents)
+                # Rehydrate PIANO module working memory: state.db already
+                # persists each agent's moduleReports mirror (written
+                # alongside moduleTick after every think), so a restore need
+                # not start every module blind for PIANO_MODULE_CACHE_TTL
+                # ticks. /control/reset intentionally keeps wiping this cache
+                # from scratch -- only restore rehydrates it.
+                self._piano_module_cache = {}
+                for a in agents:
+                    reports = a.get("moduleReports") or {}
+                    if isinstance(reports, dict) and reports:
+                        self._piano_module_cache[a["name"]] = {
+                            m: dict(v) for m, v in reports.items() if isinstance(v, dict)
+                        }
                 self.frameTick = int(data.get("frameTick") or 0)
                 rs = data.get("roster_size")
                 if rs:

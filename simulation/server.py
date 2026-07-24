@@ -2647,18 +2647,24 @@ def memory_summarize_endpoint():
 MODULE_PROMPTS = {
     "perception": "You are the Perception module of a village agent. In ONE "
                   "sentence, state the key facts of the current situation and "
-                  "any immediate threat or opportunity. Output only the sentence.",
+                  "any immediate threat or opportunity. If last_reports are "
+                  "present, build on or correct them rather than repeating "
+                  "them. Output only the sentence.",
     "social": "You are the Social module of a village agent. In ONE sentence, "
               "suggest who to coordinate with and what to say or request, based "
-              "on nearby agents, relationships, and incoming messages. Output "
-              "only the sentence.",
+              "on nearby agents, relationships, and incoming messages. If "
+              "last_reports are present, build on or correct them rather than "
+              "repeating them. Output only the sentence.",
     "desire": "You are the Desire/Goal module of a village agent. In ONE "
               "sentence, name the single most useful goal right now given the "
-              "village's needs and this agent's role and resources. Output only "
-              "the sentence.",
+              "village's needs and this agent's role and resources. If "
+              "last_reports are present, build on or correct them rather than "
+              "repeating them. Output only the sentence.",
     "reflection": "You are the Reflection module of a village agent. In ONE "
                   "sentence, note one lesson or pattern from the agent's "
-                  "memories worth applying now. Output only the sentence.",
+                  "memories worth applying now. If last_reports are present, "
+                  "build on or correct them rather than repeating them. "
+                  "Output only the sentence.",
 }
 
 
