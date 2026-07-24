@@ -465,6 +465,78 @@ def test_transit_and_economy_sinks():
     print("  OK transit boat sink + economy comfort/repair sinks")
 
 
+def test_mint_coin_currency():
+    """Market + mint together: minting converts stockpiled gold to coin, and
+    a priced trade settles in coin (not gold) -- the seller's wealth
+    benchmark rises accordingly."""
+    engine = make_engine()
+    c = engine.civilization
+    c["structures"].append({"id": 9820, "type": "market", "districtId": "village_core",
+                            "condition": 100, "isRuin": False})
+    c["structures"].append({"id": 9821, "type": "mint", "districtId": "village_core",
+                            "condition": 100, "isRuin": False})
+    assert_true(engine._market_active(), "working market should unlock pricing")
+    assert_true(engine._mint_active(), "working mint should unlock currency")
+    assert_true(engine._active_currency() == "coin", "active currency should be coin once minted")
+
+    c["stockpile"]["gold"] = 5
+    c["stockpile"]["coin"] = 0
+    engine._maybe_mint_coin()
+    assert_true(c["stockpile"]["coin"] == se.MINT_RATE,
+                f"expected {se.MINT_RATE} coin minted, got {c['stockpile']}")
+    assert_true(c["stockpile"]["gold"] == 5 - se.MINT_RATE, c["stockpile"])
+
+    seller, buyer = engine.agents[0], engine.agents[1]
+    seller["resources"]["wood"] = 3
+    seller["resources"]["gold"] = 0
+    seller["resources"]["coin"] = 0
+    buyer["resources"]["coin"] = 10
+    buyer["resources"]["gold"] = 10
+    # A fair-priced (neutral) trade is value-neutral by design: the coin
+    # received equals the priced value of the good given up, so wealth is
+    # unchanged. A rival surcharge is the case that actually moves the
+    # seller's wealth benchmark (they collect more coin than the good's
+    # base-priced value) -- use that to assert a genuine rise.
+    seller["relationships"][buyer["name"]] = "rival"
+    wealth_before = engine._agent_wealth(seller)
+    summary = engine._priced_trade(seller, buyer, "wood")
+    assert_true("sold" in summary, summary)
+    assert_true(seller["resources"].get("coin", 0) > 0,
+                f"seller should have received coin, got {seller['resources']}")
+    assert_true(seller["resources"].get("gold", 0) == 0,
+                "a coin-settled trade must never touch gold")
+    assert_true(buyer["resources"]["coin"] < 10, "buyer's coin balance should drop")
+    assert_true(buyer["resources"]["gold"] == 10, "buyer's gold balance must stay untouched")
+    wealth_after = engine._agent_wealth(seller)
+    assert_true(wealth_after > wealth_before,
+                f"seller wealth should rise from the coin-settled sale: {wealth_before} -> {wealth_after}")
+    print("  OK mint mints coin from stockpile gold; priced trade settles in coin; wealth rises")
+
+
+def test_market_only_settles_in_gold():
+    """Control case: a market with no mint must keep settling priced trades
+    in gold exactly as before -- pre-mint behavior stays byte-identical."""
+    engine = make_engine()
+    c = engine.civilization
+    c["structures"].append({"id": 9822, "type": "market", "districtId": "village_core",
+                            "condition": 100, "isRuin": False})
+    assert_true(engine._market_active(), "working market should unlock pricing")
+    assert_true(not engine._mint_active(), "no mint built -- currency stays gold")
+    assert_true(engine._active_currency() == "gold", "no mint -> active currency must stay gold")
+
+    seller, buyer = engine.agents[2], engine.agents[3]
+    seller["resources"]["wood"] = 3
+    seller["resources"]["gold"] = 0
+    buyer["resources"]["gold"] = 10
+    summary = engine._priced_trade(seller, buyer, "wood")
+    assert_true("sold" in summary, summary)
+    assert_true(seller["resources"].get("gold", 0) > 0,
+                f"seller should have received gold (pre-mint fallback), got {seller['resources']}")
+    assert_true(seller["resources"].get("coin", 0) == 0,
+                "no coin should ever appear without a mint")
+    print("  OK market-only (no mint) still settles priced trades in gold, unchanged")
+
+
 def test_transit_migration_from_instance():
     """Light and transit restore migrations must recreate retired registry
     entries from standing structure instances through the shared fallback.
@@ -568,6 +640,8 @@ def main():
     test_env_effects()
     test_env_upkeep_shared_district()
     test_transit_and_economy_sinks()
+    test_mint_coin_currency()
+    test_market_only_settles_in_gold()
     test_transit_migration_from_instance()
     import py_compile
     py_compile.compile(str(ROOT / "simulation" / "sim_engine.py"), doraise=True)

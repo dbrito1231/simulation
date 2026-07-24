@@ -255,12 +255,13 @@ while production continues underneath.
 ## ECONOMY_ENABLED
 
 Activates once a market structure exists and is working
-(`_market_active()`, sim_engine.py:2835 — any built type whose function
-block `unlocks` a `pricing` kind).
+(`_market_active()` — any built type whose function block `unlocks` a
+`pricing` kind).
 
-**Pricing** (`_resource_price`, sim_engine.py:2847): `base * multiplier`,
+**Pricing** (`_resource_price`): `base * multiplier`,
 no persisted state. `base` from `BASE_PRICE` (food/fish/water/wood/herbs=1,
-stone/planks/bricks=2, tools=3, cart=4, wagon=6; gold is always 1).
+stone/planks/bricks=2, tools=3, cart=4, wagon=6; gold and coin are always 1
+— a currency never prices itself, whichever one is the active trade medium).
 `multiplier = 1 + (1 - scarcity) * (PRICE_SCARCITY_MULT - 1)`,
 `PRICE_SCARCITY_MULT = 4.0`, floored at `PRICE_MIN = 1`. `scarcity`
 (1.0 = comfortable, 0.0 = depleted) is the minimum of up to two signals:
@@ -269,7 +270,7 @@ depth vs. `_storage_capacity` (`GOODS_ENABLED`, edibles only) — either
 signal alone can move price; both compound; if neither applies, scarcity
 is 1.0 (base price).
 
-**Relationship modifiers** (`_priced_trade_terms`, sim_engine.py:2894):
+**Relationship modifiers** (`_priced_trade_terms`):
 ally = `ALLY_PRICE_DISCOUNT = 0.75`×, rival = `RIVAL_PRICE_SURCHARGE =
 1.5`×, from the *seller's* opinion of the buyer. A rival trade the buyer
 can't afford even at the surcharge is refused outright (inventories
@@ -277,15 +278,67 @@ untouched); an ally/neutral trade the buyer can't afford falls back to a
 1-for-1 barter swap instead of blocking. `trade_resource` with no market
 active is always the flag-off barter swap.
 
-**Property:** `_claim_home`/`_maybe_auto_claim_home` (sim_engine.py:2961) —
+**Property:** `_claim_home`/`_maybe_auto_claim_home` —
 first agent to build or repair-from-ruin a house claims it (`homeOf` on the
 structure, `homeStructureId` on the agent; one home at a time, claiming a
 new one releases the old). Homeowners get the nightly shelter benefit in
 their own house regardless of proximity. `HOMELESS_NUDGE_FRAMES` (~10 min)
 periodically nudges a homeless agent's prompt.
 
-**Wealth:** `_agent_wealth(agent)` (sim_engine.py:2989) = held gold + goods
-valued at current prices; returns 0 when no market exists (goods aren't
+**Wealth:** `_agent_wealth(agent)` = held gold + held coin + goods valued
+at current prices. Gold/coin always count (a currency is always valuable);
+goods only count once a market exists (0 signal otherwise — nothing
 tradeable-priced yet). Used in benchmark/prompt wealth signals.
+
+### Mint / coin (currency, distinct from gold)
+
+`coin` is a separate resource from `gold`, seeded into `resourceRegistry`
+whenever `ECONOMY_ENABLED` (`BASE_RESOURCES["coin"]`, no `gatherZone` — it
+can never be foraged or mined, only minted). `gold` is unchanged: it stays a
+minable commodity and structure-cost input forever, and remains the
+fallback trade currency for as long as no mint exists.
+
+**Mint structure:** `PROJECT_TEMPLATES["mint"]` (needs `stone: 3, gold: 3`),
+gated `ECONOMY_ENABLED`, same plain tier-1/any-village-district buildability
+as market/library/cemetery. Its function block unlocks a new kind,
+`"currency"`, mirroring how `market` unlocks `"pricing"`.
+
+**`_mint_active()`** mirrors `_market_active()` exactly: true while at least
+one WORKING mint's function unlocks `kind == "currency"`.
+
+**Minting** (`_maybe_mint_coin`): a deterministic backstop in the same
+`RULES_TICK_FRAMES` (150-frame / ~5s) unconditional batch as
+`_maybe_repair_critical` etc. While a mint is working, converts up to
+`MINT_RATE = 1` gold from the **village stockpile** (not agents' held gold)
+into that many coin, each call — slow and small by design so a fresh mint
+can't drain an entire treasury in one tick. No agent/LLM action is involved;
+minting is infrastructure, the same way `_market_active` itself needs no
+action.
+
+**`_active_currency()`**: returns `"coin"` once `_mint_active()`, else
+`"gold"` (the pre-mint, byte-identical default). Consulted only from
+`_priced_trade`, which is itself already gated on `_market_active()` at its
+call site (`apply_decision`'s `trade_resource` handler) — this only decides
+*which* resource settles the price once **both** a market and a mint exist.
+`_priced_trade` reads/writes the active currency on both sides of the trade
+instead of a hardcoded `"gold"` key; refusal/barter-fallback messages report
+whichever currency is active.
+
+**Treasury tax collection** (`_enforce_resource_tax`): once a mint exists
+and the taxed agent holds coin, `resource_tax` collects coin from the
+agent's balance into the village coin stockpile *instead of* the
+just-gathered/contributed resource (never both, so a single tax event can't
+double-charge). Falls back to the original per-resource tax whenever the
+agent holds no coin — and is a complete no-op behavior change with no mint
+built, keeping `test_priority_and_repeal`/`test_repeal_backstop_age_gate`
+unaffected.
+
+**Spending the treasury** (`_maybe_fund_project_coin`): another
+`RULES_TICK_FRAMES`-batch backstop — once a mint exists, the village coin
+stockpile tops up any active district project's `needs["coin"]` directly, no
+elder-only gate (coin is spendable like any other stockpiled resource once
+minted; the elder's role in provisioning the treasury is upstream, via the
+`resource_tax` rule they enact). A no-op today since no seed project needs
+coin yet — the mechanism is ready the moment one does.
 
 Related actions: `trade_resource` — [07-actions.md](07-actions.md).

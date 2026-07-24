@@ -776,6 +776,13 @@ PRICE_MIN = 1
 # deterministic escape when gold is short or no market exists).
 ALLY_PRICE_DISCOUNT = 0.75
 RIVAL_PRICE_SURCHARGE = 1.5
+# Mint/coin: a genuinely separate currency from gold (gold stays a minable
+# commodity and structure-cost input forever). MINT_RATE is how much village
+# stockpile gold -> coin each _maybe_mint_coin() call, which fires on the same
+# RULES_TICK_FRAMES (150-frame / ~5s) cadence as every other unconditional
+# backstop in that batch -- deliberately slow and small so a fresh mint can't
+# instantly convert an entire treasury in one tick.
+MINT_RATE = 1
 # Property: the first agent to build OR repair-from-ruin a house claims it as
 # home (stored on the structure as "homeOf"; an agent can hold only one home
 # at a time -- claiming a new one releases the old). Homeowners get the Phase
@@ -1054,6 +1061,12 @@ BASE_RESOURCES = {
     "herbs": {"name": "Herbs", "gatherZone": "forest", "color": "#8BC34A"},
     "water": {"name": "Water", "gatherZone": "village", "color": "#03A9F4"},
 }
+if ECONOMY_ENABLED:
+    # Coin: a currency, not a commodity -- no gatherZone (never foraged/mined
+    # directly, unlike gold). Registered here purely/always once ECONOMY_ENABLED
+    # is on, mirroring how gold itself is always seeded; whether it can ever
+    # be MINTED is gated separately by _mint_active() (needs a working Mint).
+    BASE_RESOURCES["coin"] = {"name": "Coin", "gatherZone": None, "color": "#F5D76E"}
 CRAFTED_RESOURCES = {
     "planks": {"name": "Planks", "gatherZone": None, "color": "#C19A6B", "crafted": True},
     "bricks": {"name": "Bricks", "gatherZone": None, "color": "#B7410E", "crafted": True},
@@ -1127,6 +1140,27 @@ if ECONOMY_ENABLED:
     PROJECT_KIND["market"] = "village"
     SEED_STRUCTURE_FUNCTIONS["market"] = {
         "unlocks": [{"kind": "pricing", "station": "market"}],
+    }
+
+    # The mint: the seed currency-unlock STATION. Plain tier-1, buildable in
+    # any village-kind district exactly like market/library/cemetery -- the
+    # deterministic escape means a village never needs an uninvented resource
+    # (or a market first) to reach a mint. Its "unlocks" effect is a new kind
+    # ("currency") consulted by _mint_active(); once WORKING it also feeds
+    # _maybe_mint_coin() (the periodic backstop in the RULES_TICK_FRAMES
+    # batch) that converts the village's gold stockpile into coin. Coin is
+    # distinct from gold: gold stays a minable/spendable commodity forever,
+    # coin exists only once minted -- see specs/08-systems-economy.md.
+    PROJECT_TEMPLATES["mint"] = {
+        "name": "Mint",
+        "needs": {"stone": 3, "gold": 3},
+        "visualStyle": "workshop",
+        **({"tier": 1} if TECH_TREE_ENABLED else {}),
+    }
+    PROJECT_ORDER.append("mint")
+    PROJECT_KIND["mint"] = "village"
+    SEED_STRUCTURE_FUNCTIONS["mint"] = {
+        "unlocks": [{"kind": "currency", "station": "mint"}],
     }
 
 if CULTURE_ENABLED:
@@ -1514,7 +1548,7 @@ class SimEngine:
                 "targetX": center["x"] + ox, "targetY": center["y"] + oy,
                 "speed": speed,
                 "memory": {"working": [], "shortTerm": [], "longTerm": []},
-                "resources": {"food": 2, "wood": 0, "gold": 0},
+                "resources": {"food": 2, "wood": 0, "gold": 0, "coin": 0},
                 "relationships": {}, "inbox": [], "beliefs": set(), "votes": {},
                 "currentZone": district["kind"], "currentDistrict": d["zone"],
                 "waypoints": [], "message": None, "messageTimer": 0,
@@ -3071,14 +3105,77 @@ class SimEngine:
                     return True
         return False
 
+    def _mint_active(self):
+        """True while at least one WORKING mint unlocks currency (mirrors
+        _market_active exactly, checking the "currency" unlock kind)."""
+        if not ECONOMY_ENABLED or not STRUCTURE_EFFECTS_ENABLED:
+            return False
+        for type_id in {s["type"] for s in self.civilization["structures"]}:
+            fn = self._get_structure_function(type_id)
+            for unlock in fn.get("unlocks") or []:
+                if unlock.get("kind") == "currency" and self._working_structure_count(type_id) > 0:
+                    return True
+        return False
+
+    def _active_currency(self):
+        """Which resource settles a priced trade: "coin" once a mint exists,
+        else "gold" (the pre-mint, byte-identical default). Only ever
+        consulted from the priced-trade path, which is itself already gated
+        on _market_active() at its call site -- this decides WHICH resource
+        settles once both a market and a mint exist, nothing else."""
+        return "coin" if self._mint_active() else "gold"
+
+    def _maybe_mint_coin(self):
+        """Deterministic treasury mechanic, same RULES_TICK_FRAMES batch as
+        _maybe_repair_critical etc: while a WORKING mint exists, convert up to
+        MINT_RATE gold from the VILLAGE STOCKPILE (not agents' held gold) into
+        that many coin. No LLM action needed -- minting is infrastructure, the
+        same way _market_active itself needs no agent action. With no mint
+        built this is a no-op every call (the pre-mint, byte-identical path)."""
+        if not ECONOMY_ENABLED or not self._mint_active():
+            return
+        c = self.civilization
+        gold = c["stockpile"].get("gold", 0)
+        minted = min(gold, MINT_RATE)
+        if minted <= 0:
+            return
+        c["stockpile"]["gold"] = gold - minted
+        c["stockpile"]["coin"] = c["stockpile"].get("coin", 0) + minted
+
+    def _maybe_fund_project_coin(self):
+        """Deterministic backstop, same RULES_TICK_FRAMES batch: once a mint
+        exists, the coin treasury (village stockpile, built by minting +
+        resource_tax) tops up any active project's coin requirement directly
+        -- coin is spendable like any other stockpiled resource once minted,
+        no elder-only gate (the elder's role in provisioning the treasury is
+        upstream, via the tax rule they enact -- see specs/08). No-op today
+        since no seed project needs coin; ready the moment one does."""
+        if not ECONOMY_ENABLED or not self._mint_active():
+            return
+        c = self.civilization
+        for p in c["districtProjects"].values():
+            if not p or "coin" not in (p.get("needs") or {}):
+                continue
+            need = p["needs"]["coin"]
+            have = p["contributed"].get("coin", 0)
+            if have >= need:
+                continue
+            avail = c["stockpile"].get("coin", 0)
+            take = min(need - have, avail)
+            if take <= 0:
+                continue
+            c["stockpile"]["coin"] = avail - take
+            p["contributed"]["coin"] = have + take
+
     def _resource_price(self, resource_id):
         """Deterministic price in gold, no persisted state. base * a scarcity
         multiplier derived from (a) the average district-stock ratio for this
         resource village-wide (ECOLOGY_ENABLED) and (b) the village stockpile
         depth relative to storage capacity (GOODS_ENABLED) -- either signal
-        alone is enough to move price; both compound. Gold itself is priced at
-        1 (the medium doesn't price itself)."""
-        if resource_id == "gold":
+        alone is enough to move price; both compound. Gold and coin are both
+        priced at 1 (a currency never prices itself, whichever one is
+        currently the active trade medium -- see _active_currency)."""
+        if resource_id == "gold" or resource_id == "coin":
             return 1
         base = BASE_PRICE.get(resource_id, 2)
         scarcity = 1.0  # 1.0 = comfortable stock, 0.0 = fully depleted
@@ -3112,7 +3209,7 @@ class SimEngine:
         if not self._market_active():
             return None
         ids = sorted(self.civilization["resourceRegistry"].keys())
-        parts = [f"{rid} {self._resource_price(rid)}g" for rid in ids if rid != "gold"]
+        parts = [f"{rid} {self._resource_price(rid)}g" for rid in ids if rid not in ("gold", "coin")]
         return ", ".join(parts) if parts else None
 
     def _relationship_between(self, agent, other_name):
@@ -3135,44 +3232,48 @@ class SimEngine:
 
     def _priced_trade(self, agent, target, resource_id):
         """Priced exchange (market active): target buys 1 unit of resource_id
-        from agent at the relationship-adjusted price, in gold. Refusals are
-        NEVER silent: every one sets lastTradeRejection (read by the next
-        prompt) and logs an in-world activity line. Deterministic escapes:
-        a rival refusal doesn't touch either agent's inventory (both keep
-        everything they came with -- gather more gold, wait for price to
+        from agent at the relationship-adjusted price, settled in the active
+        currency (_active_currency: coin once a mint exists, else gold -- the
+        pre-mint, byte-identical default). Refusals are NEVER silent: every
+        one sets lastTradeRejection (read by the next prompt) and logs an
+        in-world activity line. Deterministic escapes: a rival refusal
+        doesn't touch either agent's inventory (both keep everything they
+        came with -- gather more of the active currency, wait for price to
         move, or approach a different, non-rival partner); an ally/neutral
         trade the buyer can't afford falls back to the barter swap (never
-        blocked just because gold is short)."""
+        blocked just because the currency is short)."""
         price, rel = self._priced_trade_terms(agent, target["name"], resource_id)
-        buyer_gold = target["resources"].get("gold", 0)
-        if rel == "rival" and buyer_gold < price:
+        currency = self._active_currency()
+        suffix = "c" if currency == "coin" else "g"
+        buyer_funds = target["resources"].get(currency, 0)
+        if rel == "rival" and buyer_funds < price:
             reason = (f"{target['name']} can't afford {agent['name']}'s rival surcharge "
-                      f"for {resource_id} ({price}g, has {buyer_gold}g)")
+                      f"for {resource_id} ({price}{suffix}, has {buyer_funds}{suffix})")
             agent["lastTradeRejection"] = {"reason": reason, "frame": self.frameTick}
             self._push_activity(f"{agent['name']} refused to trade with his rival {target['name']}")
             return f"{agent['name']} refused to trade with rival {target['name']}"
-        if buyer_gold < price:
-            # Ally/neutral, gold short: barter fallback (the deterministic
-            # escape -- a thin gold supply never blocks trade outright).
+        if buyer_funds < price:
+            # Ally/neutral, currency short: barter fallback (the deterministic
+            # escape -- a thin coin/gold supply never blocks trade outright).
             agent["resources"][resource_id] -= 1
             target["resources"][resource_id] = target["resources"].get(resource_id, 0) + 1
             self._nudge_ally(agent, target["name"])
             self._nudge_ally(target, agent["name"])
-            self._push_memory(target, f"Received {resource_id} from {agent['name']} (bartered, short on gold)")
+            self._push_memory(target, f"Received {resource_id} from {agent['name']} (bartered, short on {currency})")
             agent["lastTradeRejection"] = None
-            return f"{agent['name']} bartered {resource_id} to {target['name']} (short on gold)"
+            return f"{agent['name']} bartered {resource_id} to {target['name']} (short on {currency})"
         agent["resources"][resource_id] -= 1
         target["resources"][resource_id] = target["resources"].get(resource_id, 0) + 1
-        target["resources"]["gold"] = buyer_gold - price
-        agent["resources"]["gold"] = agent["resources"].get("gold", 0) + price
+        target["resources"][currency] = buyer_funds - price
+        agent["resources"][currency] = agent["resources"].get(currency, 0) + price
         self._nudge_ally(agent, target["name"])
         self._nudge_ally(target, agent["name"])
-        self._push_memory(target, f"Bought {resource_id} from {agent['name']} for {price}g")
+        self._push_memory(target, f"Bought {resource_id} from {agent['name']} for {price}{suffix}")
         agent["lastTradeRejection"] = None
         term = f" ({rel} price)" if rel != "neutral" else ""
         self._push_activity(
-            f"{target['name']} bought {resource_id} from {agent['name']} for {price}g{term}")
-        return f"{agent['name']} sold {resource_id} to {target['name']} for {price}g"
+            f"{target['name']} bought {resource_id} from {agent['name']} for {price}{suffix}{term}")
+        return f"{agent['name']} sold {resource_id} to {target['name']} for {price}{suffix}"
 
     def _find_house_to_claim(self, agent):
         """The nearest WORKING, unclaimed house -- built houses first-come."""
@@ -3214,23 +3315,25 @@ class SimEngine:
             self._claim_home(agent, structure)
 
     def _agent_wealth(self, agent):
-        """gold + goods valued at current prices (0 signal when no market
-        exists -- goods are worth nothing tradeable yet, matching barter-only
+        """gold + coin + goods valued at current prices. Coin (once minted)
+        counts unconditionally, same as gold -- a currency is always valuable,
+        unlike other goods which need an active market to have a price (0
+        signal from goods when no market exists -- matching barter-only
         reality)."""
-        gold = agent["resources"].get("gold", 0)
+        currency_total = agent["resources"].get("gold", 0) + agent["resources"].get("coin", 0)
         if not self._market_active():
-            return gold
-        value = gold
+            return currency_total
+        value = currency_total
         for rid, amt in agent["resources"].items():
-            if rid == "gold" or amt <= 0:
+            if rid in ("gold", "coin") or amt <= 0:
                 continue
             value += amt * self._resource_price(rid)
         return value
 
     def _wealth_gini(self):
-        """Standard Gini coefficient over per-agent wealth (gold + priced
-        goods). 0 = perfect equality, ~1 = maximal inequality. None when there
-        are no agents (never during a live session)."""
+        """Standard Gini coefficient over per-agent wealth (gold + coin +
+        priced goods). 0 = perfect equality, ~1 = maximal inequality. None
+        when there are no agents (never during a live session)."""
         if not self.agents:
             return None
         values = sorted(self._agent_wealth(a) for a in self.agents)
@@ -5784,6 +5887,20 @@ class SimEngine:
             return
         c = self.civilization
         c["taxDue"] += tax
+        # Once a mint exists, resource_tax prefers collecting coin (the
+        # treasury's native currency) over the just-gathered/contributed
+        # resource `res` -- but only INSTEAD of, never in addition to, so a
+        # single tax event never double-charges an agent. Falls back to the
+        # original per-resource tax whenever the agent holds no coin, and
+        # is a complete no-op change with no mint built (ECONOMY_ENABLED off
+        # or _mint_active() False), keeping pre-mint behavior byte-identical.
+        if ECONOMY_ENABLED and self._mint_active() and agent["resources"].get("coin", 0) > 0:
+            pay = min(tax, agent["resources"]["coin"])
+            if pay > 0:
+                agent["resources"]["coin"] -= pay
+                c["stockpile"]["coin"] = c["stockpile"].get("coin", 0) + pay
+                c["taxPaid"] += pay
+            return
         pay = min(tax, agent["resources"].get(res, 0))
         if pay > 0:
             agent["resources"][res] -= pay
@@ -6500,7 +6617,7 @@ class SimEngine:
         # role bonus differently from an adult -- it starts at the young
         # life stage, which _life_stage already surfaces in prompts, and
         # begins with empty resources rather than the usual starter stash.
-        newborn["resources"] = {"food": 0, "wood": 0, "gold": 0}
+        newborn["resources"] = {"food": 0, "wood": 0, "gold": 0, "coin": 0}
         if MEMES_ENABLED:
             newborn["beliefs"] = set(parent_a.get("beliefs") or set()) | set(parent_b.get("beliefs") or set())
         # Inherit a share of goods from both parents (#2). Integer amounts --
@@ -10571,6 +10688,9 @@ class SimEngine:
                     self._maybe_study_at_library()
                 if CEMETERY_ENABLED:
                     self._maybe_handle_burials()
+                if ECONOMY_ENABLED:
+                    self._maybe_mint_coin()
+                    self._maybe_fund_project_coin()
                 if path1_on():
                     self._maybe_found_settlement()
                     self._path1_industry_benchmark()
@@ -10871,6 +10991,14 @@ class SimEngine:
                     # shape consistent) rather than load-bearing.
                     if isinstance(civ.get("projectRegistry"), dict):
                         civ["projectRegistry"].setdefault("market", dict(PROJECT_TEMPLATES["market"]))
+                        # The mint + coin: a save from before this feature has
+                        # neither. Purely additive -- an old village starts
+                        # with the mint buildable and coin registered but
+                        # unminted (0 everywhere), same setdefault-only
+                        # back-compat as every other phase.
+                        civ["projectRegistry"].setdefault("mint", dict(PROJECT_TEMPLATES["mint"]))
+                    if isinstance(civ.get("resourceRegistry"), dict):
+                        civ["resourceRegistry"].setdefault("coin", dict(BASE_RESOURCES["coin"]))
                     for s in (civ.get("structures") or []):
                         s.setdefault("homeOf", None)
                 if STRUCTURE_UPGRADES_ENABLED:
@@ -10993,6 +11121,8 @@ class SimEngine:
                     a.setdefault("lastTreatyRejection", None)
                     a.setdefault("lastNightNote", None)
                     a.setdefault("reorgTask", None)
+                    if isinstance(a.get("resources"), dict):
+                        a["resources"].setdefault("coin", 0)
                     a.setdefault("persona", "")
                     a.setdefault("moduleTick", 0)
                     a.setdefault("modules", {

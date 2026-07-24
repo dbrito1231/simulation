@@ -32,6 +32,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | within the 150-batch, `TECH_TREE_ENABLED` | 150 | `_maybe_era_transition`, `_maybe_dissolve_council` |
 | within the 150-batch, `CULTURE_ENABLED` | 150 | `_maybe_study_at_library` |
 | within the 150-batch, `CEMETERY_ENABLED` | 150 | `_maybe_handle_burials` |
+| within the 150-batch, `ECONOMY_ENABLED` | 150 | `_maybe_mint_coin`, `_maybe_fund_project_coin` |
 | within the 150-batch, `path1_on()` | 150 | `_maybe_found_settlement`, `_path1_industry_benchmark` |
 | `path1_on("PRESSURE_LOOP_ENABLED")` | 900 | `_tick_wildlife` |
 | `path1_on("PRESSURE_LOOP_ENABLED")` and `_is_night()` | 30 | `_tick_night_pressure` |
