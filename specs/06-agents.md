@@ -101,7 +101,7 @@ an emergent role, so the single elder role remains a seed-only invariant.
 | Movement | `x`, `y`, `targetX`, `targetY`, `speed`, `waypoints`, `currentZone`, `currentDistrict` |
 | Social | `relationships`, `inbox`, `beliefs`, `votes`, `message`, `messageTimer`, `consecutiveTalks`, `lastSpokeFrame` |
 | Survival | `resources`, `hunger`, `health`, `incapacitated` |
-| Cognition | `memory` (`{working, shortTerm, longTerm}`), `thinkTimer`, `thinkInterval`, `isThinking`, `pendingThink`, `lastAction`, `lastReasoning`, `persona`, `idleFrames`, `moduleTick`, `modules` (`{perception, social, desire, reflection}`), `moduleReports` (`{module: {tick, text}}` — persistence-only mirror of the engine's `_piano_module_cache` entry for this agent, written alongside `moduleTick` after every think; never read on the hot path, only rehydrated by `restore_state()`), `goal`, `commitment`, `actionCounts` |
+| Cognition | `memory` (`{working, shortTerm, longTerm}`), `memoryWiki` (`{relationships, goals, lessons}`, each capped at `WIKI_SECTION_CHAR_CAP`=300 chars — see below), `thinkTimer`, `thinkInterval`, `isThinking`, `pendingThink`, `lastAction`, `lastReasoning`, `persona`, `idleFrames`, `moduleTick`, `modules` (`{perception, social, desire, reflection}`), `moduleReports` (`{module: {tick, text}}` — persistence-only mirror of the engine's `_piano_module_cache` entry for this agent, written alongside `moduleTick` after every think; never read on the hot path, only rehydrated by `restore_state()`), `goal`, `commitment`, `actionCounts` |
 | Task/build | `assignedTask`, `idleCycles`, `lastTaskedFrame`, `lastContributedFrame`, `consecutiveIdleMoves`, `homeStructureId`, `reorgTask` |
 | Invention/sprite | `inventionTurn`, `inventionRetryUsed`, `inventionBuildContext`, `spriteDesignTurn` |
 | Rejection-note fields | `lastBlueprintRejection`, `lastGatherRejection`, `lastUpgradeRejection`, `lastSpriteRejection`, `lastProjectRejection`, `lastTerraformRejection`, `lastCraftRejection`, `lastRepairRejection`, `lastRecipeRejection`, `lastBurialRejection`, `lastTradeRejection`, `lastShelterNote`, `lastHomelessNudgeFrame` — each surfaces *why* the agent's last attempt at that action was rejected, back into its next prompt |
@@ -175,6 +175,23 @@ entries (guards against reasoning-model chain-of-thought scaffolding leaking int
 memory — see server.py's scaffold-detection regexes).
 `_memory_for_prompt(agent)` (sim_engine.py:1574-1576) composes the prompt's memory
 section from the last 3 longTerm + 4 shortTerm + 4 working entries.
+
+### Wiki-style compounding memory (`WIKI_MEMORY`, default False)
+
+See [03-cognition.md](03-cognition.md#wiki-memory) for full merge/lint semantics.
+Summary for the agent data-shape lens: `agent["memoryWiki"]` is always present
+(`{"relationships": "", "goals": "", "lessons": ""}` initial shape from
+`_make_agents`; `restore_state()` `setdefault`s it for old saves) so
+persistence via `state.db` is automatic — same pattern as `moduleReports`, no
+schema migration needed. Populated only when `WIKI_MEMORY` is True; each
+section is hard-capped at `WIKI_SECTION_CHAR_CAP = 300` chars
+(sim_engine.py, next to `LONG_MEM_CAP`). The flag reuses
+`_run_memory_maintenance`'s existing round-robin slot — no new LLM call site
+or cadence. When on, `_memory_for_prompt` prepends up to three
+`"wiki <section>: ..."` lines ahead of the existing longTerm/shortTerm/working
+slices (never replacing them); `server.py`'s `MEMORY_PROMPT_CHAR_BUDGET` was
+raised 600 -> 900 so those lines have headroom instead of being the first
+thing evicted by the char-budget's oldest-first trim.
 
 ## Emergent roles (`EMERGENT_ROLES`, default True)
 

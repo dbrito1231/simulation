@@ -99,6 +99,14 @@ These live in code; they assume the LM Studio settings above:
 - `INVENTION_MAX_TOKENS = 1024`, `INVENTION_TEMPERATURE = 0.6` — `simulation/server.py`
 - Context-overflow retry: `run_agent_decision()` slim-prompt retry + `context_overflow` log in `lm_studio.jsonl`
 
+## Load-time system prompt research (2026-07-24)
+
+**Verdict: NOT SUPPORTED.** Neither `lms load` (no --preset/--system-prompt/config-file flags) nor `POST /api/v1/models/load` (strict schema — all system_prompt/preset/defaultSystemPrompt variants rejected) can set a default system prompt at model load time on this build. LM Studio's GUI presets do not auto-apply to API calls. The only available request-time lever is the `"preset"` field on `/v1/chat/completions` (verified honored), but that is per-request, not load-time. Recommendation: keep Phase 2's prefix-cache hardening (item 2a) as the shipped state. Re-verify after any LM Studio upgrade.
+
+Re-checked 2026-07-24 after upgrading to CLI commit `71bd99c` (from `6041ae0`): **verdict unchanged.** `lms load` flag list identical; REST load endpoint still rejects `system_prompt` and `preset` keys; new subcommands (link/runtime/dev) are unrelated. Next re-check: after the next LM Studio upgrade.
+
+**Preset concatenate-vs-replace probe (2026-07-24):** the preset schema's system-prompt field is `llm.prediction.systemPrompt` (found in the LM Studio SDK bundle under `.lmstudio/extensions/.../@lmstudio/sdk/dist/index.cjs`, `llmSharedPredictionConfigSchematics`). Built a throwaway preset with that field set to a distinctive string, hit `/v1/chat/completions` on `llama-3.2-3b-instruct` three ways (deleted the preset file after): preset-only → confirm-word from the preset appears (`prompt_tokens: 37`), confirming a preset's `systemPrompt` *is* applied as a real system message. Preset + an explicit request `system` message → only the explicit message's confirm-word appears, `prompt_tokens: 30` (matches explicit-only, not the preset-only count) — the explicit system message **replaces** the preset's system prompt, it does not concatenate. No preset/no system baseline → neither confirm-word, `prompt_tokens: 9`. **Verdict: replace, not concatenate.** Since this repo's `server.py` must keep sending its own explicit `SYSTEM_PROMPT` every turn regardless, the preset route cannot be used to offload the rulebook — the preset's content would just be discarded whenever the sim's own system message is present. **Not a usable lever for the overflow problem**; 2a (prefix-cache hardening) remains the shipped answer.
+
 ## Notes
 
 - LM Studio does not always persist context/parallel across unload/reload or app restart — re-run `scripts/lms_load.py` if `lms ps` drifts.

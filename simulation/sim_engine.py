@@ -172,6 +172,12 @@ CRAFTING_ENABLED = True
 USE_GOALS = True
 STRUCTURE_EFFECTS_ENABLED = True
 MEMORY_ENABLED = True
+# Wiki-style compounding memory (TASKS_PENDING item 3 / plan Phase 4): when
+# True, _run_memory_maintenance's existing round-robin summarizer call is
+# upgraded to a merge-and-reconcile call that writes agent["memoryWiki"]
+# instead of a plain summarize-and-append. No new LLM call cadence -- same
+# call site, same MEMORY_TICK_FRAMES cadence. Default off; one-flag revert.
+WIKI_MEMORY = True
 AGENT_MESSAGING = True
 PIANO_MODULES = True
 META_SYSTEM = True
@@ -586,6 +592,9 @@ INBOX_CAP = 6
 WORKING_MEM_CAP = 6
 SHORT_MEM_CAP = 12
 LONG_MEM_CAP = 8
+# Wiki-style memory (WIKI_MEMORY flag): hard char cap per named section in
+# agent["memoryWiki"] ({"relationships", "goals", "lessons"}).
+WIKI_SECTION_CHAR_CAP = 300
 
 VALID_GATHER_ZONES = {"farm", "forest", "village", "market", "beach", "cave", "ocean"}
 VALID_VISUAL_STYLES = {"house", "farm_plot", "workshop", "wall", "generic"}
@@ -1616,6 +1625,10 @@ class SimEngine:
                 "targetX": center["x"] + ox, "targetY": center["y"] + oy,
                 "speed": speed,
                 "memory": {"working": [], "shortTerm": [], "longTerm": []},
+                # Wiki-style compounding memory (WIKI_MEMORY flag, plan Phase
+                # 4): merged/reconciled sections, populated only when the
+                # flag is on. Always present so persistence is free.
+                "memoryWiki": {},
                 "resources": {"food": 2, "wood": 0, "gold": 0, "coin": 0},
                 "relationships": {}, "inbox": [], "beliefs": set(), "votes": {},
                 "currentZone": district["kind"], "currentDistrict": d["zone"],
@@ -1902,7 +1915,20 @@ class SimEngine:
 
     def _memory_for_prompt(self, agent):
         m = agent["memory"]
-        return m["longTerm"][-3:] + m["shortTerm"][-4:] + m["working"][-4:]
+        lines = m["longTerm"][-3:] + m["shortTerm"][-4:] + m["working"][-4:]
+        if WIKI_MEMORY:
+            wiki = agent.get("memoryWiki") or {}
+            wiki_lines = []
+            for key, label in (("relationships", "wiki relationships"),
+                                ("goals", "wiki goals"),
+                                ("lessons", "wiki lessons")):
+                text = wiki.get(key)
+                if text:
+                    wiki_lines.append(f"{label}: {text}")
+            # Prepended, never replacing the existing longTerm/shortTerm/
+            # working slices -- nothing the LLM previously saw is removed.
+            lines = wiki_lines + lines
+        return lines
 
     # --- agent lookups + movement ---
     def _find_agent(self, name):
@@ -9026,6 +9052,72 @@ class SimEngine:
                 {"meme_mutations": c.get("memeMutations", 0),
                  "belief_pitch_calls": c.get("beliefPitchCalls", 0)})
 
+    def _run_wiki_memory_merge(self, agent, ms, joined):
+        """WIKI_MEMORY path for _run_memory_maintenance. Replaces the plain
+        summarize-and-append call with a single merge-and-reconcile call
+        (same one-call-per-pass budget) that updates agent["memoryWiki"]'s
+        three named sections instead of FIFO-dropping into longTerm. The
+        contradiction lint rides the same prompt/response -- no extra call."""
+        wiki = agent.setdefault("memoryWiki", {})
+        cur_rel = wiki.get("relationships") or ""
+        cur_goals = wiki.get("goals") or ""
+        cur_lessons = wiki.get("lessons") or ""
+        system = (
+            "You are the memory keeper for an agent in a village simulation. "
+            "You maintain three short wiki sections describing the agent: "
+            "RELATIONSHIPS, GOALS, LESSONS. Given the agent's CURRENT sections "
+            "and a batch of recent raw memories, return UPDATED sections that "
+            "merge the new facts into the existing text: deduplicate repeats, "
+            "keep everything still relevant (drop nothing that still matters), "
+            "and if two facts contradict, resolve to the better-supported one "
+            "and briefly note the resolution. Output EXACTLY these labeled "
+            "lines and nothing else:\n"
+            "RELATIONSHIPS: <text>\nGOALS: <text>\nLESSONS: <text>\n"
+            "Only if you found and resolved a contradiction, append one more "
+            "line:\nCONTRADICTION: <brief note>\n"
+            f"Keep each section under {WIKI_SECTION_CHAR_CAP} characters."
+        )
+        user = (
+            f"Agent {agent['name']}'s current sections:\n"
+            f"RELATIONSHIPS: {cur_rel}\nGOALS: {cur_goals}\nLESSONS: {cur_lessons}\n\n"
+            f"Recent raw memories: {joined}\n"
+        )
+        response = self.d["lm_complete"](system, user, max_tokens=220, temperature=0.4)
+        if not response:
+            return
+        is_scaffold = self.d.get("is_scaffold_text")
+        parsed = {}
+        contradiction = None
+        for line in response.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if low.startswith("relationships:"):
+                parsed["relationships"] = line.split(":", 1)[1].strip()
+            elif low.startswith("goals:"):
+                parsed["goals"] = line.split(":", 1)[1].strip()
+            elif low.startswith("lessons:"):
+                parsed["lessons"] = line.split(":", 1)[1].strip()
+            elif low.startswith("contradiction:"):
+                contradiction = line.split(":", 1)[1].strip()
+        for key, cur in (("relationships", cur_rel), ("goals", cur_goals),
+                         ("lessons", cur_lessons)):
+            new_val = parsed.get(key)
+            if new_val and is_scaffold and is_scaffold(new_val):
+                # Poisoned/scaffold output -- discard, keep prior text (same
+                # guard as the flag-off longTerm-cleaning pass below).
+                new_val = None
+            wiki[key] = (new_val if new_val else cur)[:WIKI_SECTION_CHAR_CAP]
+        lessons_text = wiki.get("lessons") or ""
+        if lessons_text:
+            # Mirror the flag-off path: feed the semantic recall store so
+            # recall keeps working in both modes.
+            ms.store(agent["name"], lessons_text, salience=0.9, kind="summary",
+                     frame_tick=self.frameTick, tier="longTerm")
+        if contradiction:
+            self._push_activity(f"{agent['name']} reconciled a memory: {contradiction}")
+
     # --- memory maintenance (round-robin summarizer + periodic cleaner) ---
     def _run_memory_maintenance(self):
         if not MEMORY_ENABLED or not self.agents:
@@ -9037,21 +9129,24 @@ class SimEngine:
             recents = [e for e in ms.recent(agent=agent["name"], limit=12) if e["kind"] != "summary"]
             if len(recents) >= 4:
                 joined = "; ".join(e["text"] for e in recents)
-                summary = self.d["lm_complete"](
-                    "You compress an agent's recent memories into ONE concise "
-                    "first-person sentence capturing what matters for their future "
-                    "decisions. Output only the sentence, no preamble.",
-                    f"Agent {agent['name']}'s recent memories: {joined}\nSummary:",
-                    max_tokens=80, temperature=0.4)
-                if summary:
-                    summary = summary.strip().strip('"').strip()[:200]
-                if summary:
-                    ms.store(agent["name"], summary, salience=0.9, kind="summary",
-                             frame_tick=self.frameTick, tier="longTerm")
-                    agent["memory"]["longTerm"].append(summary)
-                    while len(agent["memory"]["longTerm"]) > LONG_MEM_CAP:
-                        agent["memory"]["longTerm"].pop(0)
-                    self._push_activity(f"{agent['name']} reflected: {summary}")
+                if WIKI_MEMORY:
+                    self._run_wiki_memory_merge(agent, ms, joined)
+                else:
+                    summary = self.d["lm_complete"](
+                        "You compress an agent's recent memories into ONE concise "
+                        "first-person sentence capturing what matters for their future "
+                        "decisions. Output only the sentence, no preamble.",
+                        f"Agent {agent['name']}'s recent memories: {joined}\nSummary:",
+                        max_tokens=80, temperature=0.4)
+                    if summary:
+                        summary = summary.strip().strip('"').strip()[:200]
+                    if summary:
+                        ms.store(agent["name"], summary, salience=0.9, kind="summary",
+                                 frame_tick=self.frameTick, tier="longTerm")
+                        agent["memory"]["longTerm"].append(summary)
+                        while len(agent["memory"]["longTerm"]) > LONG_MEM_CAP:
+                            agent["memory"]["longTerm"].pop(0)
+                        self._push_activity(f"{agent['name']} reflected: {summary}")
             self.lastMemorySize = ms.size()
         except Exception:
             pass
@@ -11313,6 +11408,7 @@ class SimEngine:
                     a.setdefault("persona", "")
                     a.setdefault("moduleTick", 0)
                     a.setdefault("moduleReports", {})
+                    a.setdefault("memoryWiki", {})
                     a.setdefault("modules", {
                         "perception": True, "social": True,
                         "desire": True, "reflection": True,
@@ -11426,6 +11522,8 @@ class SimEngine:
             if ms is not None:
                 try:
                     ms.clear()
+                    print("[server] /control/reset cleared MemoryStore "
+                          "(in-memory + stable-path flush)")
                 except Exception:
                     pass
         # Replace the on-disk save so a reset truly starts fresh: clear the old
@@ -11591,6 +11689,7 @@ class SimEngine:
                         "LIBRARY_SCALING_ENABLED": LIBRARY_SCALING_ENABLED,
                         "TRANSIT_ENABLED": TRANSIT_ENABLED,
                         "ECONOMY_SINKS_ENABLED": ECONOMY_SINKS_ENABLED,
+                        "WIKI_MEMORY": WIKI_MEMORY,
                     },
                 },
             }

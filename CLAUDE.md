@@ -10,6 +10,8 @@ A server-authoritative AI village simulation: a Python engine runs the world hea
 
 **One orchestrator, many Sonnet 5 subagents.** The initiating model (any tier — Fable, Mythos, Opus, Sonnet) acts as the **orchestrator only**: plans, splits into phases/steps, dispatches, reviews. All implementation is delegated to subagents on **Sonnet 5 or lower** (`model: "sonnet"` on the Agent tool; lower tiers when sufficient) — use the `implementer` subagent type (`.claude/agents/implementer.md`, pinned to `model: sonnet`) for phase/step-level code changes. The orchestrator writes no implementation code itself except trivial one-line fixes.
 
+**Usage-limit mid-implementation rule (Claude only):** if a usage limit is hit while a phase/step is mid-implementation, **pause all implementation immediately** rather than continuing, retrying, or handing off to a different tier to push through. Do not start any new subagent dispatch until the limit clears and the in-flight change has been reviewed. This avoids corrupting a phase with a partial, unreviewed edit — resume only after confirming the last completed step's state (diff/smoke result) once work continues.
+
 ## Commands
 
 ```bash

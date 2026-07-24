@@ -23,5 +23,9 @@ simulation/state.db
 simulation/state.db-wal
 simulation/state.db-shm
 
+# Restart-stable semantic-recall memory index (Phase 1, TASKS_PENDING #1)
+simulation/memory_store.json
+simulation/memory_store.json.tmp
+
 # Manual state backups
 archive/

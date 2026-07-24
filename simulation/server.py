@@ -422,12 +422,34 @@ class MemoryStore:
 
     TIERS = ("working", "shortTerm", "longTerm")
 
-    def __init__(self, path):
+    def __init__(self, path, mirror_path=None):
         self.path = path
+        self.mirror_path = mirror_path
         self.entries = []
         self._next_id = 1
         self._since_persist = 0
         self._lock = threading.Lock()
+        self._load_locked_startup()
+
+    def _load_locked_startup(self):
+        """Load persisted entries from `self.path` on construction so the
+        store survives a server restart. Tolerates an absent file (fresh
+        start) and a corrupt/unparseable file (start empty rather than
+        crash the server) -- logged distinctly by the caller via the
+        return value."""
+        if not os.path.exists(self.path):
+            self._load_status = ("absent", 0)
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            rows = data.get("entries") if isinstance(data, dict) else None
+            self.import_entries(rows or [])
+            self._load_status = ("loaded", len(self.entries))
+        except (OSError, ValueError, TypeError, AttributeError):
+            self.entries = []
+            self._next_id = 1
+            self._load_status = ("corrupt", 0)
 
     @staticmethod
     def _tier_for(salience, kind):
@@ -595,19 +617,22 @@ class MemoryStore:
         return counts
 
     def _persist(self):
+        # self.path is the restart-stable store (simulation/memory_store.json)
+        # -- this IS read back on the next construction (see
+        # _load_locked_startup). self.mirror_path, if set, is a per-session
+        # copy in the log dir kept purely for human inspection and is never
+        # read back. Both omit the 128-float "vec" of each entry -- it's pure
+        # bloat on disk and recomputable from the text.
+        with self._lock:
+            entries_copy = [
+                {k: v for k, v in e.items() if k != "vec"}
+                for e in self.entries
+            ]
+        payload = {
+            "size": len(entries_copy),
+            "entries": entries_copy,
+        }
         try:
-            with self._lock:
-                # memory.json is a per-session inspection artifact that is never
-                # read back, so omit the 128-float "vec" of each entry — it's
-                # pure bloat on disk and recomputable from the text if needed.
-                payload = {
-                    "session_id": os.path.basename(os.path.dirname(self.path)),
-                    "size": len(self.entries),
-                    "entries": [
-                        {k: v for k, v in e.items() if k != "vec"}
-                        for e in self.entries
-                    ],
-                }
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False)
@@ -615,9 +640,33 @@ class MemoryStore:
         except OSError:
             # Persistence must never break the simulation.
             pass
+        if self.mirror_path:
+            try:
+                mirror_payload = dict(payload)
+                mirror_payload["session_id"] = os.path.basename(
+                    os.path.dirname(self.mirror_path))
+                tmp = self.mirror_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump(mirror_payload, fh, ensure_ascii=False)
+                os.replace(tmp, self.mirror_path)
+            except OSError:
+                # The mirror is a debugging convenience only -- never let a
+                # failure to write it affect the stable store.
+                pass
 
 
-memory_store = MemoryStore(os.path.join(session_logger.dir, "memory.json"))
+# MemoryStore is constructed against a restart-stable path (simulation/
+# memory_store.json, next to state.db) so semantic recall survives a server
+# restart instead of silently starting empty every time; the per-session
+# memory.json in the log dir is kept as a mirror for human inspection only
+# (see MemoryStore._persist).
+MEMORY_STORE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "memory_store.json")
+memory_store = MemoryStore(
+    MEMORY_STORE_PATH, mirror_path=os.path.join(session_logger.dir, "memory.json"))
+_load_status, _load_count = getattr(memory_store, "_load_status", ("absent", 0))
+print(f"[server] MemoryStore {_load_status} ({_load_count} entries) from {MEMORY_STORE_PATH}")
+session_logger.log_benchmark("memory_store_loaded", _load_count)
 
 # --- Blueprint validation constants ---
 GATHER_ZONES = {"farm", "forest", "village", "market", "beach", "cave", "ocean"}
@@ -1350,7 +1399,19 @@ What do you do next? Respond with only the JSON."""
 # Hard ceiling on the composed "Recent memory:" prompt line. Bug 1's fix
 # removes the current worst offenders (leaked scaffold text), but this cap
 # guards against any future bloat regardless of cause.
-MEMORY_PROMPT_CHAR_BUDGET = 600
+# Raised 600 -> 900 (plan Phase 4 / WIKI_MEMORY): when the flag is on,
+# _memory_for_prompt prepends up to three "wiki <section>: ..." lines
+# (each hard-capped at WIKI_SECTION_CHAR_CAP=300 chars in sim_engine.py),
+# alongside -- never instead of -- the existing longTerm/shortTerm/working
+# lines. At 600 the old budget, _cap_memory_text's oldest-first eviction
+# would drop the (now-prepended) wiki lines before touching anything the
+# flag-off path already showed, silently defeating the point of adding
+# them. 900 gives the wiki lines real headroom without letting one flag
+# blow the prompt-cost budget open-endedly (kept <= 900 per plan). This is
+# a shared cap: it applies in both flag states, but only changes observed
+# behavior when WIKI_MEMORY is True (flag-off callers never populate wiki
+# lines, so the wider ceiling is simply unused headroom for them).
+MEMORY_PROMPT_CHAR_BUDGET = 900
 
 
 def _cap_memory_text(lines, budget=MEMORY_PROMPT_CHAR_BUDGET):
@@ -3309,6 +3370,43 @@ def build_user_prompt(data, slim=False):
     )
 
 
+_last_routine_system_prompt = None
+_system_prompt_mismatch_warned = False
+
+
+def _check_system_prompt_stability(system_content):
+    """Log-once guard (Phase 2, TASKS_PENDING #2a): warn if the routine-turn
+    system message differs from the one seen on a prior routine turn this
+    session. LM Studio reuses KV cache by longest common prefix per slot, so
+    a system-prompt mutation mid-session would silently forfeit that reuse
+    for every subsequent call -- this makes it observable instead.
+
+    Fast path is an identity check (`is`): SYSTEM_PROMPT is a module global
+    that should only ever be assigned once (module load) or, under
+    TECH_TREE_ENABLED, rewritten once immediately after via .replace() before
+    any request is served -- never reassigned once serving starts. Identity
+    equality costs nothing per call. Only on an identity mismatch do we fall
+    back to a value comparison (and then a hash for the warning message),
+    so this never crashes and adds no per-call overhead in the expected
+    (stable) case."""
+    global _last_routine_system_prompt, _system_prompt_mismatch_warned
+    if _last_routine_system_prompt is None:
+        _last_routine_system_prompt = system_content
+        return
+    if system_content is _last_routine_system_prompt:
+        return
+    if system_content == _last_routine_system_prompt:
+        _last_routine_system_prompt = system_content
+        return
+    if not _system_prompt_mismatch_warned:
+        _system_prompt_mismatch_warned = True
+        old_sha = hashlib.sha256(_last_routine_system_prompt.encode()).hexdigest()[:12]
+        new_sha = hashlib.sha256(system_content.encode()).hexdigest()[:12]
+        print(f"[server] WARNING: system prompt changed mid-session (cache "
+              f"invalidated) old_sha256={old_sha} new_sha256={new_sha}")
+    _last_routine_system_prompt = system_content
+
+
 def build_decision_payload(data, self_prompt, response_format, slim=False):
     """Assemble the LM Studio chat-completion payload for a decision call.
     slim=True builds the reduced-context retry payload (see
@@ -3325,6 +3423,12 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
         system_content = INVENTION_SYSTEM_PROMPT
     else:
         system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
+        if not slim:
+            # Only the primary (non-retry) routine dispatch is checked: the
+            # slim retry deliberately swaps to SYSTEM_PROMPT_SLIM on overflow
+            # and is expected to forfeit cache reuse for that one call (see
+            # specs/03-cognition.md KV-cache prefix stability note).
+            _check_system_prompt_stability(system_content)
     # Persona goes at the TOP OF THE USER MESSAGE, not appended to the system
     # prompt: LM Studio reuses KV cache by longest common prefix per slot, so
     # per-agent text inside the system message forced full prompt
@@ -3665,6 +3769,20 @@ if _sim_engine.TECH_TREE_ENABLED:
         SYSTEM_PROMPT[:_SYSTEM_PROMPT_EXAMPLES_IDX]
         if _SYSTEM_PROMPT_EXAMPLES_IDX != -1 else SYSTEM_PROMPT
     )
+    # Phase 2 (TASKS_PENDING #2a): this is the only place SYSTEM_PROMPT is
+    # ever reassigned after its initial definition, and it only runs once at
+    # module import time (TECH_TREE_ENABLED is a hardcoded module constant,
+    # never toggled by a route) -- before any request is served. Log it so a
+    # soak run can see the rebuild happened exactly once, at startup, not
+    # mid-session.
+    print(f"[server] system prompt rebuilt (TECH_TREE_ENABLED) "
+          f"sha256={hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12]}")
+
+# Startup proof for soak logs (specs/03-cognition.md KV-cache prefix
+# stability): one line naming the final SYSTEM_PROMPT hash after any
+# TECH_TREE_ENABLED rebuild above, so a soak can grep this file's stdout and
+# confirm the prefix never moves again for the life of the process.
+print(f"[server] system prompt sha256={hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12]}")
 
 
 def _llm_decide(payload):

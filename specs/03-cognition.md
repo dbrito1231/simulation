@@ -164,16 +164,162 @@ slot — per-agent text inside the system message forced a full ~5k-token
 reprocess on every agent rotation; keeping the system prompt byte-identical
 across agents makes it a shared cached prefix instead.
 
+### KV-cache prefix stability (Phase 2, TASKS_PENDING #2a)
+
+The system message is designed to be byte-identical across every routine
+decision turn, for every agent, all session long, so LM Studio's
+longest-common-prefix KV-cache reuse always fires for that shared prefix
+(this is also why the persona line lives at the top of the *user* message,
+above — see the rationale note just above this one).
+
+- **Audit result:** every per-agent/per-tick/per-request value (name, role,
+  hunger, resources, nearby agents, timestamps, districts, etc.) is rendered
+  by `build_user_prompt`/`USER_PROMPT_TEMPLATE` into the *user* message only.
+  `build_decision_payload` (server.py:~3361) never concatenates request data
+  into `system_content`; `system_content` is always one of the four static
+  module-level string constants (`SYSTEM_PROMPT`, `SYSTEM_PROMPT_SLIM`,
+  `INVENTION_SYSTEM_PROMPT`, `SPRITE_UPGRADE_SYSTEM_PROMPT`).
+- **The one SYSTEM_PROMPT reassignment** (server.py:~3750, gated on
+  `TECH_TREE_ENABLED`) rewrites `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM` once via
+  `.replace()` to document the optional blueprint `"tier"` field.
+  `TECH_TREE_ENABLED` is a hardcoded module constant in sim_engine.py (never
+  flipped by a route or control endpoint), and this code runs at module
+  import time, before the Flask app serves any request — so the rewrite
+  cannot fire mid-session; whatever `SYSTEM_PROMPT` is after import is what
+  every routine turn for the rest of the process sees.
+- **Slim-retry exception (by design):** the context-overflow retry path
+  (`run_agent_decision`, `slim=True`) deliberately swaps `SYSTEM_PROMPT` for
+  `SYSTEM_PROMPT_SLIM` — a different, shorter prefix — and therefore forfeits
+  KV-cache reuse for that one retried call. This is expected, rare (only
+  fires after a context-overflow on the primary call), and acceptable; it is
+  not tracked by the mismatch guard below.
+- **Startup proof:** on boot (and again immediately if the `TECH_TREE_ENABLED`
+  rewrite fires), the server prints a `[server] system prompt sha256=<first
+  12 hex chars>` line so a soak's stdout/log can show the hash appears
+  exactly once (or, if rewritten, exactly twice, both before any traffic)
+  and never changes again for the life of the process.
+- **Mid-session mismatch guard:** `_check_system_prompt_stability()` (server.py,
+  just above `build_decision_payload`) runs only on the primary (non-slim)
+  routine-turn dispatch. Fast path is an `is` identity check against the
+  system string used on the previous routine turn (near-zero cost, since
+  `SYSTEM_PROMPT` is a stable module global); only on an identity mismatch
+  does it fall back to a value/hash comparison. If the content has actually
+  changed, it prints one `[server] WARNING: system prompt changed
+  mid-session (cache invalidated) old_sha256=... new_sha256=...` line
+  (log-once, never raises) so a regression that silently reintroduces a
+  per-call system rebuild is observable in soak logs instead of only showing
+  up as an unexplained latency regression.
+
 Measured prompt size: ~3,100-3,400 prompt tokens per routine decision call
 (docs/REFERENCE.md:40); invention-only prompts run larger due to the
 function-block schema and sprite few-shot example (worst case ~6,163 tokens
 measured, per the `HIGH_STAKES_MAX_TOKENS` comment, server.py:120-122).
 
-`MEMORY_PROMPT_CHAR_BUDGET = 600` (server.py:1219) caps the composed "Recent
-memory:" line; `compose_memory()` (server.py:1238-1271) merges the client's
-compacted memory slice with up to 4 salient entries retrieved from the
-in-process hashing-trick vector store (128-dim, `MEMORY_DIM`), dropping oldest
-lines first and hard-truncating if still over budget.
+`MEMORY_PROMPT_CHAR_BUDGET = 900` (server.py, raised from 600 — see
+[Wiki-style compounding memory](#wiki-memory) below) caps the composed
+"Recent memory:" line; `compose_memory()` (server.py:1238-1271) merges the
+client's compacted memory slice with up to 4 salient entries retrieved from
+the in-process hashing-trick vector store (128-dim, `MEMORY_DIM`), dropping
+oldest lines first and hard-truncating if still over budget.
+
+### MemoryStore persistence (restart-stable, Phase 1 TASKS_PENDING #1)
+
+`MemoryStore` (server.py:416) is constructed against `MEMORY_STORE_PATH =
+simulation/memory_store.json` (server.py, next to `state.db`'s own
+`os.path.dirname(os.path.abspath(__file__))` derivation) — a restart-stable
+path, not the per-session log directory. This matters because `agent
+["memory"]` tiers persist via `state.db` already, but the *semantic-recall
+embedding index* (`memory_store`) previously lived only in
+`simulation/logs/<timestamp>/memory.json`, so every server restart silently
+started the index empty even though agent-visible memory survived.
+
+- **Load-on-init.** `MemoryStore.__init__` calls `_load_locked_startup()`,
+  which reads `MEMORY_STORE_PATH` if present and rebuilds entries via
+  `import_entries()` (re-embedding each text with the same offline
+  hashing-trick `embed_text()` — no LM Studio call, safe at cold boot).
+  Absent file → starts empty (`_load_status = ("absent", 0)`). Corrupt/
+  unparseable file (bad JSON, wrong shape) → also starts empty but tagged
+  `("corrupt", 0)`, and never raises — persistence failures must not break
+  server startup.
+- **Startup observability.** One `[server]` line logs the load status,
+  entry count, and path (e.g. `[server] MemoryStore loaded (1200 entries)
+  from .../simulation/memory_store.json`), and `session_logger.log_benchmark
+  ("memory_store_loaded", entry_count)` is emitted once so a future
+  regression to empty-on-restart shows up in `benchmark.jsonl`, not just a
+  console line.
+- **Per-session inspection mirror.** `memory_store` is constructed with
+  `mirror_path=os.path.join(session_logger.dir, "memory.json")`. Every
+  `_persist()` (debounced by `MEMORY_PERSIST_EVERY`, and always flushed on
+  `clean()`) writes the stable path first, then best-effort mirrors the same
+  payload (entries minus the recomputable `vec` field) into the session
+  log dir's `memory.json` for human inspection. The mirror write is wrapped
+  in its own `try/except OSError` — a failed mirror write never affects the
+  stable store.
+- **Reset semantics.** `/control/reset` → `SimEngine.reset()` (sim_engine.py)
+  calls `memory_store.clear()`, which wipes in-memory entries AND flushes
+  the now-empty store to `MEMORY_STORE_PATH` (matching the existing
+  `_piano_module_cache` wipe-on-reset precedent) — a reset drops the whole
+  world, so a restart afterward must not resurrect pre-reset semantic
+  memories. `reset()` logs a `[server]` line confirming the clear.
+
+### Wiki-style compounding memory (`WIKI_MEMORY`, default False) {#wiki-memory}
+
+TASKS_PENDING item 3 / plan Phase 4. Goal: long-term memory that merges and
+reconciles instead of FIFO-dropping (Karpathy LLM-Wiki pattern), without
+adding any new LLM call site or timer — it upgrades what
+`_run_memory_maintenance`'s existing round-robin call already does.
+
+- **Structure.** `agent["memoryWiki"]` is a dict of three named sections —
+  `relationships`, `goals`, `lessons` — each hard-capped at
+  `WIKI_SECTION_CHAR_CAP = 300` chars (sim_engine.py, next to `LONG_MEM_CAP`).
+  Always present (`{}` initial shape, populated only when the flag is on) so
+  persistence via `state.db` is free — same pattern as `moduleReports`. See
+  [06-agents.md](06-agents.md#wiki-style-compounding-memory-wiki_memory-default-false)
+  for the agent data-shape entry.
+- **One-call budget, preserved.** `_run_memory_maintenance` still fires only
+  every `MEMORY_TICK_FRAMES = 1800` frames, one agent per pass, and still
+  makes exactly one `lm_complete` call per pass when the agent has ≥4 recent
+  non-summary memories. When `WIKI_MEMORY` is False, that call is byte-for-
+  byte the original summarize-and-append call (one-flag revert guarantee).
+  When True, `_run_wiki_memory_merge()` replaces it with a single merge call:
+  system prompt casts the model as the agent's memory keeper, given the
+  three current wiki sections plus the batch of recent raw memories, and
+  asks it to return updated sections that merge new facts in (dedup,
+  reconcile, drop nothing still relevant); `max_tokens=220`,
+  `temperature=0.4`, via `self.d["lm_complete"]` (MODEL_FAST) — same
+  caller-set budget shape as the flag-off call.
+- **Deterministic parse, no `json.loads`.** The prompt demands exactly three
+  labeled lines (`RELATIONSHIPS: ...`, `GOALS: ...`, `LESSONS: ...`) plus an
+  optional fourth (`CONTRADICTION: ...`, only when the model resolved a
+  conflict). Parsing is by line-prefix (case-insensitive match, original
+  case kept for content); a missing line keeps the prior section text
+  unchanged, extra/unrecognized lines are ignored.
+- **Lint = same prompt, zero extra calls.** The contradiction-resolution
+  instruction from the merge prompt doubles as the lint pass — no separate
+  call. When the response includes a `CONTRADICTION:` line, it is pushed to
+  `activity.jsonl` via `_push_activity(f"{agent['name']} reconciled a
+  memory: {note}")` — observable, no new call site.
+- **Poisoning guard reused.** Each parsed section is validated with the same
+  `is_scaffold_text` d-hook the flag-off longTerm-cleaning pass already uses;
+  a scaffold-flagged section is discarded and the prior section text is kept
+  instead. Every section (parsed or carried over) is hard-truncated at
+  `WIKI_SECTION_CHAR_CAP` before being written back.
+- **Semantic recall still fed, both modes.** The merged `lessons` section is
+  stored into the vector store as `kind="summary"` (mirroring the flag-off
+  path's own `ms.store(...)` call for its one-sentence summary), so semantic
+  recall keeps working whichever mode is active. The existing `longTerm`
+  list is untouched by the wiki path (it only grows via the flag-off branch).
+- **Prompt surface.** `_memory_for_prompt(agent)` prepends up to three
+  `"wiki <section>: ..."` lines (only for non-empty sections) ahead of the
+  existing last-3-longTerm + last-4-shortTerm + last-4-working slice —
+  additive, never a replacement, per the guiding principle that the LLM
+  never loses what it previously saw. `MEMORY_PROMPT_CHAR_BUDGET` was raised
+  600 → 900 (server.py) so the wiki lines have real headroom instead of
+  being the first thing `_cap_memory_text`'s oldest-first eviction drops
+  (wiki lines are prepended, i.e. logically "oldest" in list order).
+- **`/state` echo.** `WIKI_MEMORY` is echoed in `config.flags` alongside the
+  other cognition flags (sim_engine.py `_serialize_state`-adjacent state
+  payload build).
 
 ## Decision handling
 
