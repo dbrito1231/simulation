@@ -1357,7 +1357,7 @@ def _generated_agent_defs(count):
     ones. Deterministic in `count` (no randomness) so a given roster_size
     always yields the same generated roster, which every other system --
     roles, beliefs, relationships, think scheduling -- treats identically to
-    a hand-written def. Role/zone rotate across the seed's 12 non-elder
+    a hand-written def. Role/zone rotate across the seed's 11 non-elder
     roles.json roles (one generated agent per role before any role repeats),
     reusing the zone the matching hand-written def already spawns into, so
     generated agents spread across specialties instead of clustering into
@@ -7969,7 +7969,15 @@ class SimEngine:
     def _maybe_welcome_newcomer(self):
         """Tick-gated like the other _maybe_* backstops. When built housing
         raises the population cap above the current roster, the next unused
-        AGENT_DEFS entry moves in (at most one per gate interval). Newcomers
+        AGENT_DEFS entry moves in (at most one per gate interval). Once all 12
+        hand-written AGENT_DEFS are occupied, falls back to
+        _generated_agent_defs (the same deterministic pool used for a
+        roster_size > 12 cold-start) so this path can still reach
+        MAX_ROSTER_SIZE -- deliberately not _next_agent_slot's style (random
+        name/color), since this function has always been deterministic and
+        _generated_agent_defs is what the cold-start path already uses for
+        these exact slot indices, so a newcomer looks identical regardless of
+        whether the village started large or grew into this slot. Newcomers
         persist via state.db like any other agent."""
         if not STRUCTURE_EFFECTS_ENABLED:
             return
@@ -7977,6 +7985,9 @@ class SimEngine:
         if len(self._living_agents()) >= self._population_cap():
             return
         unused = next((d for d in AGENT_DEFS if d["name"] not in self.agent_names), None)
+        if not unused:
+            generated_pool = _generated_agent_defs(MAX_ROSTER_SIZE - len(AGENT_DEFS))
+            unused = next((d for d in generated_pool if d["name"] not in self.agent_names), None)
         if not unused:
             return
         newcomer = self._make_agents([unused])[0]

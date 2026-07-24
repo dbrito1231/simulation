@@ -54,7 +54,7 @@ MAX_ROSTER_SIZE]`.
   slots (indices 12..roster_size-1). Generation is deterministic: name and
   personality cycle through small fixed pools (`_GENERATED_AGENT_NAMES`,
   `_GENERATED_AGENT_PERSONALITIES`, 8 entries each — exactly covering
-  `MAX_ROSTER_SIZE - len(AGENT_DEFS)`), role rotates across the 12 non-elder
+  `MAX_ROSTER_SIZE - len(AGENT_DEFS)`), role rotates across the 11 non-elder
   seed roles (one generated agent per role before any repeats — no generated
   agent is ever seeded into the singular elder role), and starting zone is
   copied from the hand-written def sharing that role. Generated agents are

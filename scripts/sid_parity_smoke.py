@@ -893,6 +893,50 @@ def test_roster_headroom_generates_20():
           f"roles={sorted(roles_used)})")
 
 
+def test_newcomer_backstop_reaches_generated_slots():
+    """_maybe_welcome_newcomer must not silently stall at 12 agents once
+    every hand-written AGENT_DEFS name is taken. Regression for the gap left
+    by Phase 6 (docs/plan-sid-parity-gaps.md): MAX_ROSTER_SIZE/
+    _generated_agent_defs raised the cold-start ceiling to 20, but the
+    house-driven newcomer backstop still only ever drew from the 12
+    hand-written defs, so a village that never cold-started above 12 could
+    never grow into slots 12-19 via houses alone."""
+    engine = make_engine(len(se.AGENT_DEFS))
+    assert_true(len(engine.agents) == len(se.AGENT_DEFS),
+                f"expected a full hand-written roster, got {len(engine.agents)}")
+    hand_written = {d["name"] for d in se.AGENT_DEFS}
+    assert_true({a["name"] for a in engine.agents} == hand_written,
+                "cold start did not fill every hand-written AGENT_DEFS slot")
+
+    # Simulate house-driven cap growth past 12 without a cold-start reset --
+    # the exact scenario _maybe_welcome_newcomer must serve.
+    target = se.MAX_ROSTER_SIZE
+    engine.civilization["basePopulation"] = target
+    generated_pool_names = {d["name"] for d in se._generated_agent_defs(target - len(se.AGENT_DEFS))}
+
+    added = []
+    for _ in range(target - len(se.AGENT_DEFS)):
+        before = set(engine.agent_names)
+        engine._maybe_welcome_newcomer()
+        after = set(engine.agent_names)
+        new = after - before
+        assert_true(len(new) == 1, f"expected exactly one newcomer per call, got {new}")
+        added.append(next(iter(new)))
+
+    assert_true(len(engine.agents) == target,
+                f"newcomer backstop stalled at {len(engine.agents)} agents, expected {target}")
+    assert_true(set(added) == generated_pool_names,
+                f"newcomers {added} did not match the deterministic generated pool {generated_pool_names}")
+    assert_true(len(set(added)) == len(added), f"newcomer backstop produced duplicate names: {added}")
+
+    # Cap reached: one more call must no-op, not overflow past basePopulation.
+    before = set(engine.agent_names)
+    engine._maybe_welcome_newcomer()
+    assert_true(engine.agent_names == before,
+                "newcomer backstop added an agent past the population cap")
+    print(f"  OK newcomer backstop fills generated slots 12-{target - 1} once hand-written defs are exhausted")
+
+
 def _district_center(bounds):
     return {"x": (bounds["x1"] + bounds["x2"]) / 2, "y": (bounds["y1"] + bounds["y2"]) / 2}
 
@@ -1034,6 +1078,7 @@ def main():
     print("Sid-parity smoke (Phase 6 -- scale headroom)")
     test_roster_default_unchanged()
     test_roster_headroom_generates_20()
+    test_newcomer_backstop_reaches_generated_slots()
     test_district_bucket_matches_flat_scan()
     test_think_dispatch_staleness_priority()
     print("ALL PASS")

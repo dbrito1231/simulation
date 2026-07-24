@@ -81,7 +81,7 @@ clamps to `[1, MAX_ROSTER_SIZE]` and resolves the active def list:
   Generation is deterministic (no randomness): name and personality cycle
   through small fixed pools (`_GENERATED_AGENT_NAMES`,
   `_GENERATED_AGENT_PERSONALITIES`), and role/starting-district rotate across
-  the 12 non-elder `roles.json` seed roles (one generated agent per role
+  the 11 non-elder `roles.json` seed roles (one generated agent per role
   before any role repeats) — a generated agent's zone is copied from the
   hand-written def that shares its role, so it spawns in a district that
   actually supports that role. Generated agents are built by the same
@@ -91,6 +91,17 @@ clamps to `[1, MAX_ROSTER_SIZE]` and resolves the active def list:
   `civilization["basePopulation"]` reflects the full `roster_size` (clamped to
   `MAX_ROSTER_SIZE`, not `len(AGENT_DEFS)`), so the Structure-Effects house
   population cap (specs/08) computes correctly above 12 agents too.
+- `_maybe_welcome_newcomer` (sim_engine.py, the house-driven backstop in the
+  150-tick batch — see the gate table above) grows a running village that
+  never cold-started above 12 agents: it draws the next unused `AGENT_DEFS`
+  entry first, and once all 12 are occupied, falls back to the same
+  `_generated_agent_defs(MAX_ROSTER_SIZE - len(AGENT_DEFS))` pool the
+  `roster_size > len(AGENT_DEFS)` cold-start path uses, so this growth path
+  can also reach `MAX_ROSTER_SIZE` instead of silently stalling at 12. This
+  is deliberately the deterministic `_generated_agent_defs` pool, not
+  `_next_agent_slot`'s random `Villager{id}` style (used for births): a
+  newcomer at a given slot index looks identical whether the village started
+  large or grew into that slot via housing.
 
 ## Think scheduling
 
