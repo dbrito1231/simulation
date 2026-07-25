@@ -662,7 +662,9 @@ wall-clock age reaches the long fossilization backstop
 `MODULE_NOTE_MAX_AGE_S = 600`; a stale-but-correct quiet note is deliberately
 not refreshed merely because a decision occurs. Incapacitated agents are
 skipped when `MODULE_REFRESH_IDLE_SKIP` is true. Phase A does not add a
-night-wide throttle.
+night-wide throttle. The scheduler remains dark by default; its 45-second
+interval restores the existing GPU-rest window when the gate is off. Phase C's
+optional night backstop has not been attempted.
 
 The pulse orders dirty work before old work and retains the legacy
 perception/desire, social x2, reflection x3 cadence as priority weights. It

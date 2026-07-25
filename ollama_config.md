@@ -275,6 +275,19 @@ Studio-era session with 3,522 logged calls):
 | Live-soak `piano_module_drops` | ≤ ~9% | 8.0% (9 drops / 112 attempted) | **PASS** |
 | Live-soak zero undetected truncations | 0 unrecovered `context_overflow` | 0 `context_overflow` occurrences found in the session's `llm.jsonl` | **PASS** (vacuously — none occurred to test recovery on) |
 
+### Always-on PIANO Phase B gate (2026-07-25) — FAIL / rolled back
+
+| Measure | Target | Final 7 s re-soak | Verdict |
+|---|---|---|---|
+| Decision p50 regression | <= +15% vs. 7,423 ms baseline | 8,568 ms (**+15.4%**) | **FAIL** |
+| Median / worst note age | <=90 s / <=600 s | 94.1 s / 214.1 s | **FAIL** (median) |
+| Pulse work | healthy empty/near-empty share | avg 2; no empty values | unfavorable |
+| Refresh failures | <=~9% old-drop reference | 48 / 258 (**18.6%**) | **FAIL** |
+
+The second latency miss closes the gate: `ALWAYS_ON_MODULES` is **OFF** and
+`MODULE_PULSE_INTERVAL_S` is restored to its 45-second dark default. Phase C
+was not attempted.
+
 Caveat: the live-soak sample is small (36 decision calls, ~13 minutes) because
 Phase 4 measured against whatever window the current session had accumulated
 at run time, per the task's instruction to use "whatever window exists"

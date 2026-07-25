@@ -730,8 +730,8 @@ def test_piano_stagger_offline():
 
     engine.d["run_piano_module"] = stub
     # Force-enable for this unit check only.
-    old = se.PIANO_MODULES
-    se.PIANO_MODULES = True
+    old, old_always = se.PIANO_MODULES, se.ALWAYS_ON_MODULES
+    se.PIANO_MODULES, se.ALWAYS_ON_MODULES = True, False
     try:
         reports1, tick1, runs1 = engine._run_piano_modules(
             "Aria",
@@ -805,7 +805,7 @@ def test_piano_stagger_offline():
         print("  OK PIANO stagger (2 / 3 / 3 modules across ticks 1-3) "
               "+ cross-module last_reports visibility, age labels, TTL cutoff")
     finally:
-        se.PIANO_MODULES = old
+        se.PIANO_MODULES, se.ALWAYS_ON_MODULES = old, old_always
 
 
 def test_piano_cache_restore_roundtrip():
@@ -819,8 +819,8 @@ def test_piano_cache_restore_roundtrip():
         return f"{module} report for {agent_name}"
 
     engine.d["run_piano_module"] = stub
-    old_piano = se.PIANO_MODULES
-    se.PIANO_MODULES = True
+    old_piano, old_always = se.PIANO_MODULES, se.ALWAYS_ON_MODULES
+    se.PIANO_MODULES, se.ALWAYS_ON_MODULES = True, False
     old_db_path = se.DB_PATH
     tmpdir = tempfile.mkdtemp()
     tmp_db = str(Path(tmpdir) / "state_roundtrip.db")
@@ -876,7 +876,7 @@ def test_piano_cache_restore_roundtrip():
         print("  OK PIANO module cache rehydrates from state.db after restore "
               "and serves an off-tick fill on the first post-restore turn")
     finally:
-        se.PIANO_MODULES = old_piano
+        se.PIANO_MODULES, se.ALWAYS_ON_MODULES = old_piano, old_always
         se.DB_PATH = old_db_path
 
 

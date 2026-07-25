@@ -41,7 +41,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | `GOODS_ENABLED` | 900 | `_tick_goods` |
 | `GOODS_ENABLED` | 13500 (=`DAY_FRAMES`) | `_tick_shelter` |
 | `MEMES_ENABLED` | 90 | `_spread_beliefs_by_proximity` |
-| `ALWAYS_ON_MODULES` | `MODULE_PULSE_INTERVAL_S * TICKS_PER_SEC` (45 s) | `_pulse_piano_modules`: a bounded, non-blocking, event-gated PIANO refresh pulse |
+| `ALWAYS_ON_MODULES` | `MODULE_PULSE_INTERVAL_S * TICKS_PER_SEC` (45 s; dark default) | `_pulse_piano_modules`: a bounded, non-blocking, event-gated PIANO refresh pulse |
 | `BENCHMARKS_ENABLED` | 600, or frame 60 (`FIRST_BENCHMARK_FRAME`) | `_sample_benchmarks` |
 
 After the gated systems: every non-incapacitated agent moves (`_move_agent`);

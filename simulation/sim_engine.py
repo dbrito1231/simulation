@@ -647,6 +647,8 @@ PIANO_CROSS_CONTEXT_TTL = 6
 # Always-on PIANO is a pulse, not a continuously occupied GPU queue.  These
 # wall-clock knobs intentionally live beside the existing PIANO concurrency
 # settings because they govern the same sim-fast pool.
+# Dark-gated default. Phase B's contention gate did not pass, so retain the
+# original rest window; the optional Phase C night backstop is not attempted.
 MODULE_PULSE_INTERVAL_S = 45
 MODULE_PULSE_MAX_BATCH = 4
 MODULE_NOTE_MAX_AGE_S = 600
