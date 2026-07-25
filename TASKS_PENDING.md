@@ -178,3 +178,54 @@ cadence rather than adding a new one) or it'll worsen the module-drop-rate
 problem already being tracked from the 2026-07-23/24 sessions.
 
 Needs its own plan doc before implementation.
+
+## Ollama Phase 0 findings (2026-07-24)
+
+Probed on the installed Ollama 0.32.3 (`http://localhost:11434`), RTX 3060
+12 GB, per [docs/plan-ollama-migration.md](docs/plan-ollama-migration.md)
+Phase 0. All calls were live against throwaway `probe-*` models; `probe-smart`
+and `probe-fast` were left created (not loaded) for Phase 1 to pick up.
+
+| # | Check | Result |
+| --- | --- | --- |
+| 1 | GGUF import (`ollama create -f Modelfile` with `FROM <lmstudio-cache-path>`) | **Pass.** `probe-smart` (Qwen3.5-9B-Q4_K_M) created in 52.2s. `probe-fast` (Llama-3.2-3B FP16) created in 134.8s (full re-verify/re-hash of a larger, uncompressed file — no smaller Q4 llama-3.2-3b GGUF exists in the cache, see note below). |
+| 2 | `format` JSON schema (native `/api/chat`) | **Pass.** `format` as a full JSON-schema object is honored; `message.content` was valid JSON matching the schema in every trial. |
+| 3 | Sampling `options` (`temperature`, `top_p`, `top_k`, `min_p`, `num_predict`) | **Pass.** All five accepted with no error; output was sane and `num_predict` was respected. |
+| 4 | Thinking suppression (**CRITICAL GATE**) | **Pass, with an endpoint-specific caveat.** Native `/api/chat` + `think:false` fully suppresses reasoning: no `thinking` field, no `<think>` tags in `content`, `eval_count` dropped 1288→81 tokens, wall time 77s→4.8s. `think` unset on native `/api/chat` returns a **separate `thinking` field** (not inline in `content`) — content stays clean JSON either way, but the huge unset-case token/latency cost makes `think:false` mandatory. **OpenAI-compat `/v1/chat/completions` ignores `think:false` outright** — the `reasoning` field is populated and latency matches the unset case (19.5s) regardless of the parameter. Native `/api/chat` is therefore the only endpoint where thinking suppression actually works. |
+| 5 | Truncation semantics | **Contradicts the plan's assumption.** Ollama 0.32.3 does **not** silently truncate — it returns HTTP 400 `{"error":{"code":400,"message":"request (N tokens) exceeds the available context size (512 tokens)...","type":"exceed_context_size_error","n_prompt_tokens":N,"n_ctx":512}}`. Reproduced at two overrun sizes (4650/512 and ~720/512 tokens); a request just under the limit (360/512) succeeded normally with `prompt_eval_count` populated. This is actually a **cleaner** overflow signal than LM Studio's error-string sniffing — Phase 2 should catch this HTTP 400 + `exceed_context_size_error` type directly rather than building a chars/4 heuristic vs. `prompt_eval_count`. |
+| 6 | Modelfile `SYSTEM` apply/override semantics | **Pass, both directions confirmed.** No system message in the request → Modelfile `SYSTEM` ("...ZORPCONFIRM...") applied, `ZORPCONFIRM` appeared. Explicit system message in the request → it overrides the Modelfile `SYSTEM` entirely, `ARRCONFIRM` appeared and `ZORPCONFIRM` did not. |
+| 7 | Concurrency + dual residency | **Parallel serving confirmed even with no env vars set** (defaults): 3 concurrent `/api/chat` calls to `probe-smart` completed in 5.0s vs. a 2.9s single warm-request baseline (would be ~8.7s if serialized) — Ollama's default parallelism is already non-1. **Dual residency requires `OLLAMA_MAX_LOADED_MODELS≥2`** — with nothing set, loading `probe-fast` evicted `probe-smart` from `ollama ps` every time (single-model residency is the 0.32.3 default). No `OLLAMA_NUM_PARALLEL`/`OLLAMA_MAX_LOADED_MODELS` user or machine env vars were set prior to this probe (both `[Environment]::GetEnvironmentVariable` calls returned empty) — Phase 1 starts from a clean slate. |
+| 8 | Fast-model quality screen (8 real-shaped PIANO module prompts against `probe-fast`, `num_predict:60`, `temperature:0.5`) | **Mixed — 4/8 clean pass, 2/8 borderline (ungrounded but plausible invented detail), 2/8 fail.** Failures: a Perception-module call fabricated an unrelated "severe drought" not present in context, and another fabricated a cave "earthquake/collapse" — both ungrounded hallucinations a Cognitive Controller would ingest as fact. Two responses also leaked raw chat-template tokens into `content` (`<\|im_end\|>`, `<\|fim_end\|>` — **ChatML-style tokens, not Llama 3.2's native `<\|eot_id\|>`**), pointing to a mismatched/broken embedded chat template on this specific `beehive-lab/Llama-3.2-3B-Instruct-GGUF-FP16` file. Desire and Social module outputs were consistently good. |
+| 9 | VRAM snapshot | Idle baseline: 1191/12288 MiB used (10925 MiB free). `probe-smart` alone (Q4_K_M, ctx=4096 default, not yet the target 20480): 6479 MiB used, 5637 MiB free. `probe-fast` alone (FP16, ctx=4096): ~8121 MiB used, ~3992 MiB free — notably heavier than the ~2-2.5 GB budgeted in the plan for a "3-4B Q4" fast model, because this GGUF is **FP16, not Q4** (see note below). True dual-residency VRAM (both loaded simultaneously) was not measured — Phase 0 correctly left `OLLAMA_MAX_LOADED_MODELS` unset per its own scope; Phase 1 must re-run this measurement once the env var is set, since ~6.5 GB + ~8 GB would not fit in 12 GB as-is. |
+
+**Operational finding (not one of the 9, but load-bearing for Phase 2):**
+Ollama does **not** cancel server-side generation when the client aborts/times
+out a `stream:false` request. Three of my own timed-out PowerShell calls
+queued up server-side; a subsequent trivial one-word request then measured
+`total_duration: 366.5s` while its actual compute
+(`load_duration`+`prompt_eval_duration`+`eval_duration`) was ~0.38s — the
+rest was queue wait behind my own orphaned requests. Phase 2's retry/timeout
+logic must not fire a second request on a client-side timeout without also
+assuming the first one may still be consuming a GPU queue slot; naive
+retry-on-timeout would compound queue depth rather than recovering from it.
+
+**STOP conditions hit: none.** Thinking is suppressible (native endpoint);
+GGUF import works; SYSTEM semantics work as designed. The fast-model quality
+screen (test 8) did not hit the plan's stop-condition bar but is a genuine
+quality concern worth a Phase 1 note, and the truncation-semantics finding
+(test 5) means Phase 2 step 3 ("Truncation detection") should be rewritten
+against the actual HTTP-400 contract, not the "silent truncation" assumption
+in the plan text.
+
+**GGUF paths for Phase 1:**
+- `MODEL_SMART` source: `C:\Users\dbadmin\.lmstudio\models\lmstudio-community\Qwen3.5-9B-GGUF\Qwen3.5-9B-Q4_K_M.gguf` (5.24 GB; NOT the `unsloth\Qwen3.5-9B-MTP-GGUF` or any `mmproj-*` file in the same dirs — those are the draft/vision-projector variants, not the main text quant).
+- `MODEL_FAST` source: `C:\Users\dbadmin\.lmstudio\models\beehive-lab\Llama-3.2-3B-Instruct-GGUF-FP16\beehive-llama-3.2-3b-instruct-fp16.gguf` (5.99 GB). **Caveat:** this is the only `llama-3.2-3b-instruct` GGUF in the LM Studio cache and it is **FP16, not Q4** — roughly 2.4x the VRAM/compute of the Q4 quant the plan's VRAM budget assumed, and its chat template appears to leak ChatML stop tokens (finding #8). Phase 1 should weigh re-downloading a Q4_K_M quant of `llama-3.2-3b-instruct` from a mainstream repo (e.g. `bartowski` or `unsloth`, both already used elsewhere in this cache) against keeping this FP16 file — the plan's own fallback ladder ("smaller fast-model quant" under the VRAM section) already anticipates needing this.
+
+**Endpoint recommendation for Phase 2 cutover:** use **native `/api/chat`**,
+not the OpenAI-compat `/v1/chat/completions` endpoint. Native is the only one
+where `think:false` actually suppresses reasoning (finding #4) — OpenAI-compat
+silently ignores it, which would reintroduce the 57%-bad-response epidemic
+this migration exists to avoid. Native also gives a structured
+`exceed_context_size_error` (finding #5) that OpenAI-compat likely wraps
+differently (untested — out of scope once native was already established as
+the target).
