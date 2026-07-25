@@ -589,7 +589,7 @@
     <h1>AI Simulation World</h1>
     <div id="lmStatus">
       <span class="dot" id="statusDot"></span>
-      <span id="statusLabel">LM Studio: offline</span>
+      <span id="statusLabel">Ollama: offline</span>
     </div>
     <div id="sidebarBody">
     <section class="panel-section" id="timePanel">
@@ -1690,9 +1690,9 @@ function renderSidebar() {
   const lmStatus = world.lmStatus || "offline";
   const statusColor = lmStatus === "online" ? "#4CAF50"
     : lmStatus === "compute_error" ? "#FF9800" : "#F44336";
-  const label = lmStatus === "online" ? "LM Studio: online"
-    : lmStatus === "compute_error" ? "LM Studio: GPU memory error"
-    : (lmStatus === "disconnected" ? "Server: disconnected" : "LM Studio: offline");
+  const label = lmStatus === "online" ? "Ollama: online"
+    : lmStatus === "compute_error" ? "Ollama: GPU memory error"
+    : (lmStatus === "disconnected" ? "Server: disconnected" : "Ollama: offline");
   statusDot.style.background = lmStatus === "disconnected" ? "#9E9E9E" : statusColor;
   statusLabel.innerHTML = label + (lmStatus === "compute_error"
     ? '<span class="hint">Use a smaller model or Q4 quant</span>'

@@ -23,17 +23,19 @@ Canonical constants (model ids, timeouts, sampling, prompt sizing, retries,
 routing) live in [specs/03-cognition.md](../specs/03-cognition.md). Operational
 tips only:
 
-- **Model-id matching:** `MODEL_SMART`/`MODEL_FAST` (server.py:49-50) must
-  match an id LM Studio actually has loaded — check `GET /v1/models`. If a
-  routed id 404s, the server auto-falls-back to `"local-model"` for the rest
-  of the session (see specs/03's Retries section).
-- **`scripts/lms_load.py`** is the canonical CLI loader for the target LM
-  Studio config (model, context, parallel slots, flash attention) — run it
-  instead of clicking through the LM Studio GUI. `--check` reads back the
-  current config without applying anything.
+- **Model-id matching:** `MODEL_SMART`/`MODEL_FAST` (server.py) must match a
+  model id Ollama actually has created — check `ollama list` / `GET
+  /api/tags`. Unlike the former LM Studio runtime, Ollama has no generic
+  fallback alias; a missing routed id is treated as a setup failure (see
+  specs/03's Retries section).
+- **`scripts/ollama_setup.py`** is the canonical CLI loader for the target
+  Ollama config (env vars, `sim-smart`/`sim-fast` model creation, dual
+  residency verification) — run it instead of configuring Ollama by hand.
+  `--check` reads back the current config without applying anything. See
+  `ollama_config.md` for the full settings contract.
 - **PIANO/META roster advice:** `PIANO_MODULES`/`META_SYSTEM` default on in
-  sim_engine.py and fan out multiple LLM calls per think turn. For local LM
-  Studio setups, use a reduced roster and a correspondingly raised
+  sim_engine.py and fan out multiple LLM calls per think turn. For local
+  Ollama setups, use a reduced roster and a correspondingly raised
   context — reduce the roster via `{"agents": N}` in the JSON body of
   `POST /control/reset`, or the `SIM_AGENTS` env var at startup, not a URL
   query param. Details: [specs/03-cognition.md](../specs/03-cognition.md).

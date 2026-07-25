@@ -1,6 +1,8 @@
 # HOW TO RUN:
 # 1. pip install flask flask-cors requests
-# 2. Make sure LM Studio is running at localhost:1234 with a model loaded
+# 2. Make sure Ollama is running at localhost:11434 with sim-smart and
+#    sim-fast created/warm (uv run python scripts/ollama_setup.py --check to
+#    verify; uv run python scripts/ollama_setup.py to (re)apply)
 # 3. python server.py
 # 4. Open http://127.0.0.1:5001 in Chrome or Firefox
 #    (macOS AirPlay uses port 5000 and returns 403 — do not use 5000)
@@ -21,33 +23,122 @@ import requests
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
+# SYSTEM_PROMPT / SYSTEM_PROMPT_SLIM live in prompts.py (2026-07-24,
+# docs/plan-ollama-migration.md Phase 6) -- the single source of truth both
+# server.py and scripts/ollama_setup.py (--with-system) import from, so the
+# rulebook text is never duplicated. See prompts.py's module docstring for
+# why server.py itself can't be imported by the setup script directly
+# (module-level side effects: SessionLogger() below opens a new session
+# directory, and the live SimEngine is constructed further down).
+import prompts as _prompts
+SYSTEM_PROMPT = _prompts.SYSTEM_PROMPT
+SYSTEM_PROMPT_SLIM = _prompts.SYSTEM_PROMPT_SLIM
+
+# to_ollama_body (the OpenAI-shaped-payload -> Ollama /api/chat wire-format
+# conversion) lives in llm_wire.py (2026-07-24, docs/plan-ollama-migration.md
+# Phase 4) so scripts/llm_replay_bench.py can import the exact conversion
+# this module uses without importing server.py itself (see prompts.py's
+# module docstring above for why -- same import-time side-effect reasoning
+# applies here). Do not duplicate this mapping back into this module.
+import llm_wire as _llm_wire
+to_ollama_body = _llm_wire.to_ollama_body
+
 app = Flask(__name__)
 CORS(app)
 
-LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
+# Ollama migration (2026-07-24, docs/plan-ollama-migration.md Phase 2):
+# LM Studio is permanently unavailable. Native /api/chat is the only endpoint
+# that actually honors think:false (Phase 0 finding #4 -- the OpenAI-compat
+# /v1/chat/completions endpoint silently ignores it and would reintroduce the
+# thinking-leak epidemic), so this repo targets it exclusively. See
+# ollama_config.md for the full settings contract.
+OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 
-# Model routing: high-stakes turns (the elder's leadership/approval decisions,
-# and any villager turn taken while invention is REQUIRED, i.e. blueprint
-# authoring) go to MODEL_SMART; routine villager turns and background
-# cognition go to MODEL_FAST. Ids must match LM Studio's loaded-model ids
-# (GET /v1/models). If a routed id isn't available, run_agent_decision
-# degrades to "local-model" for the rest of the session (same pattern as the
-# response_format auto-degrade), so a single-model setup keeps working.
+# Model routing (Phase 3 revision, 2026-07-24, docs/plan-ollama-migration.md):
+# the two-model split is by WORKLOAD KIND, not by decision stakes. ALL
+# decision turns (routine and high-stakes alike -- every call built by
+# build_decision_payload / run_agent_decision) go to MODEL_SMART.
+# MODEL_FAST serves ONLY background cognition: PIANO modules
+# (run_piano_module), the memory summarizer/wiki merge, the meta system
+# (autobiography/persona), and belief-pitch scoring -- i.e. every direct
+# lm_complete() caller. is_high_stakes_turn/model_for_decision is UNCHANGED
+# as a predicate: it still gates thinking (THINKING_SAMPLING vs
+# NON_THINKING_SAMPLING), timeouts (THINKING_TIMEOUT_S vs DEFAULT_TIMEOUT_S),
+# and max_tokens (HIGH_STAKES_MAX_TOKENS) -- only the MODEL_FAST branch of
+# model_for_decision was removed so both branches resolve to MODEL_SMART for
+# decisions specifically.
 #
-# Both tiers currently resolve to gemma: the 2026-07-02 session showed
-# llama-3.2-3b picking move_to_district on 95% of 2,764 villager turns (the
-# ~3,100-token prompt is beyond a 3B) while ALSO running slower than gemma
-# (6.6s vs 4.6s avg -- its Q8 quant spilled to CPU next to gemma on a 12GB
-# card). Slot a real secondary back in here only if it's <=4GB on-GPU AND
-# demonstrably handles the decision prompt; otherwise one good model wins.
+# Rationale (superseding the original "routine decisions on MODEL_FAST"
+# design tried first): a live Phase 3 soak measured piano_module_drops
+# climbing to ~25-38% (vs the ~9% pre-migration reference) and module
+# latencies rising over the sample instead of falling, because routine
+# decisions and PIANO modules were both queueing for sim-fast's
+# OLLAMA_NUM_PARALLEL=3 slots -- decisions and background cognition were
+# contending for the same small model's capacity. Keeping ALL decisions on
+# sim-smart (which has its own, separate, uncontended slot pool) removes that
+# contention; sim-fast now serves only the background-cognition workload it
+# was sized for. Ids must be models created in Ollama (`ollama list` /
+# GET /api/tags) -- scripts/ollama_setup.py is the canonical loader that
+# creates/warms both. If a routed id isn't available, run_agent_decision
+# treats that as a setup failure (see looks_like_model_not_found_error) and
+# returns the offline fallback -- Ollama has no "local-model" alias to retry
+# with like LM Studio did, so there's no silent single-model degrade path
+# anymore.
+#
 # 2026-07-05 replay benchmark (100 logged prompts, docs/civilization-emergence-plan.md
 # Part 6): qwen3.5-9b vs gemma-4-e4b — equal JSON/action validity (100%), but
 # qwen halved move_to_district fixation (32% vs 65%), chose 9 distinct actions
 # vs 7, and authored 20/20 valid blueprints vs 19/20, at ~3s/decision more.
 # qwen emits via reasoning_content (empty content) — extract_decision_text
 # already handles that path.
-MODEL_SMART = "qwen/qwen3.5-9b"
-MODEL_FAST = "qwen/qwen3.5-9b"
+MODEL_SMART = "sim-smart"
+MODEL_FAST = "sim-fast"
+
+# Load-time rulebook (Phase 6, docs/plan-ollama-migration.md, shipped DARK --
+# TASKS_PENDING item 2b revived). MODEL_SMART_SYS is a SEPARATE Ollama model,
+# `sim-smart-sys`, generated by `scripts/ollama_setup.py --with-system` from a
+# Modelfile that bakes prompts.py's SYSTEM_PROMPT text in as a Modelfile
+# `SYSTEM` directive (never hand-copied -- prompts.py stays the one editable
+# source). Verified live (ollama_config.md "Modelfile SYSTEM semantics"): a
+# request WITHOUT a system message gets the baked SYSTEM applied; a request
+# WITH an explicit system message overrides it entirely (replace, not
+# concatenate). SYSTEM_PROMPT_AT_LOAD_TIME (below) is the flag that switches
+# routine decision turns from "send MODEL_SMART + explicit SYSTEM_PROMPT" to
+# "send MODEL_SMART_SYS + no system message" -- see build_decision_payload.
+MODEL_SMART_SYS = "sim-smart-sys"
+
+# DARK FLAG (2026-07-24, Phase 6): when True, routine decision turns (every
+# build_decision_payload call except sprite/invention-only and the
+# context-overflow slim retry) omit the system message and route to
+# MODEL_SMART_SYS instead of MODEL_SMART, relying on that model's baked
+# Modelfile SYSTEM directive for the rulebook. Slim-retry/invention/sprite
+# turns are UNCHANGED: they always send their own explicit system prompt
+# (SYSTEM_PROMPT_SLIM / INVENTION_SYSTEM_PROMPT / SPRITE_UPGRADE_SYSTEM_PROMPT
+# respectively -- each differs from the baked SYSTEM_PROMPT, and an explicit
+# system message overrides the baked one on either model) and stay on
+# MODEL_SMART for cache-locality (no reason to pay for a model switch when
+# the prompt is being sent explicitly anyway).
+#
+# Ships False. Do not flip without first: (1) running
+# `uv run python scripts/ollama_setup.py --with-system` to (re)generate and
+# `ollama create sim-smart-sys`, (2) an A/B soak comparing fallback rate
+# (bad_response + role_fallback) and action distribution against a
+# flag-off session of similar length -- the "model forgets a distant system
+# prompt" risk is the tripwire (see specs/03-cognition.md and
+# ollama_config.md "Load-time rulebook (dark)").
+SYSTEM_PROMPT_AT_LOAD_TIME = False
+
+# Startup assert (Phase 3, "permanent two-model MUST" per the migration
+# plan): implemented as a loud warning rather than a hard crash -- a config
+# regression here should degrade decision/module quality, not take the 24/7
+# sim server offline. If this ever prints, MODEL_FAST silently collapsed back
+# onto MODEL_SMART somewhere upstream of this module (env override, hotfix,
+# etc.) and the two-model split is no longer in effect.
+if MODEL_FAST == MODEL_SMART:
+    print("[server] WARNING: MODEL_FAST == MODEL_SMART -- two-model design "
+          "violated (see docs/plan-ollama-migration.md Phase 3). Continuing "
+          "to start rather than crashing the 24/7 server, but PIANO modules "
+          "and routine decisions are now sharing the smart model's queue.")
 
 # Thinking control (2026-07-11): routine villager turns run with reasoning
 # DISABLED -- the old '"thinking": {"type": "disabled"}' payload key was
@@ -61,6 +152,14 @@ MODEL_FAST = "qwen/qwen3.5-9b"
 # routing meaningful even while both tiers point at one model.
 # Replay bench (scripts/llm_replay_bench.py, 40 calls): thinking-leak
 # 100% -> 0%, JSON validity 100% -> 100%, action diversity unchanged.
+#
+# Ollama migration (2026-07-24): the LM Studio-specific "reasoning_effort"
+# knob above is history -- Ollama's native /api/chat has its own top-level
+# "think" boolean, verified live (Phase 0 finding #4) to actually suppress
+# reasoning output entirely (no separate `thinking` field, no <think> tags in
+# content). DISABLE_THINKING_ROUTINE now means "send think:false on routine
+# turns" (see to_ollama_body / build_decision_payload); the historical intent
+# (routine turns never spend budget on reasoning) is unchanged.
 DISABLE_THINKING_ROUTINE = True
 
 # Thinking on high-stakes turns is DISABLED (reverted 2026-07-14, Phase 3 --
@@ -91,7 +190,10 @@ THINKING_ENABLED_HIGH_STAKES = False
 # Qwen-recommended sampling pins (model card). Only temperature was sent
 # before; top_p/top_k/min_p silently followed whatever LM Studio preset was
 # active, which drifts across app updates and reloads. Temperatures stay the
-# behavior-tuned values below.
+# behavior-tuned values below. Under Ollama these route into the request's
+# "options" object (see to_ollama_body) rather than top-level payload keys;
+# the dict shape here is unchanged since it's just merged into the internal
+# payload before conversion.
 NON_THINKING_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0}
 THINKING_SAMPLING = {"top_p": 0.95, "top_k": 20}
 
@@ -129,7 +231,7 @@ HIGH_STAKES_MAX_TOKENS = 1600
 # in the 2026-07-07 session, well under the old flat 30s -- but invention-only
 # turns (bigger prompt: function-block schema, tier rules, sprite instructions
 # + few-shot example) measured median ~32s / max ~33.6s, so ~71% of them were
-# timing out, logged as "LM Studio offline", and silently falling back to a
+# timing out, logged as "llm offline", and silently falling back to a
 # non-propose action -- the actual reason invention councils kept dissolving
 # with zero proposals (12 dissolutions, only 2 successful proposals logged).
 # Invention turns are rare (a few per hour) so a generous timeout costs
@@ -242,7 +344,15 @@ def resolve_high_stakes(data):
 
 
 def model_for_decision(data):
-    return MODEL_SMART if is_high_stakes_turn(data) else MODEL_FAST
+    """Phase 3 revision: every decision turn -- routine or high-stakes --
+    routes to MODEL_SMART. is_high_stakes_turn(data) is still computed by
+    callers (build_decision_payload, run_agent_decision's timeout choice, the
+    slim retry) to select thinking/timeout/max_tokens, but no longer selects
+    the model id here. MODEL_FAST is reserved for background cognition
+    (PIANO modules, memory summarizer/wiki merge, meta system, belief pitch
+    -- every direct lm_complete() caller), never for decisions. See the
+    MODEL_SMART/MODEL_FAST comment block above for why."""
+    return MODEL_SMART
 
 
 class SessionLogger:
@@ -254,12 +364,12 @@ class SessionLogger:
         os.makedirs(self.dir, exist_ok=True)
         self.activity_path = os.path.join(self.dir, "activity.jsonl")
         self.conversation_path = os.path.join(self.dir, "conversation.jsonl")
-        self.lm_studio_path = os.path.join(self.dir, "lm_studio.jsonl")
+        self.llm_path = os.path.join(self.dir, "llm.jsonl")
         # benchmarks.jsonl (Phase 0/8): a dedicated metrics stream so Sid-like
         # features can be measured (specialization index, rule adherence,
         # meme adoption, memory-store size, module-activation timeline).
         self.benchmark_path = os.path.join(self.dir, "benchmarks.jsonl")
-        for path in [self.activity_path, self.conversation_path, self.lm_studio_path,
+        for path in [self.activity_path, self.conversation_path, self.llm_path,
                      self.benchmark_path]:
             open(path, "a", encoding="utf-8").close()
         self.log_conversation(
@@ -303,8 +413,8 @@ class SessionLogger:
         self._append(self.conversation_path, record)
 
     def log_lm_exchange(self, record):
-        record = {"type": "lm_studio", **record}
-        self._append(self.lm_studio_path, record)
+        record = {"type": "llm", **record}
+        self._append(self.llm_path, record)
 
     def log_benchmark(self, metric, value, frame_tick=None, detail=None):
         record = {
@@ -787,7 +897,7 @@ with open(_ROLES_PATH, encoding="utf-8") as _f:
 # role -> preferred project (string or list, mirroring the client).
 ROLE_PROJECT = {role: d["preferredProject"] for role, d in ROLES.items()}
 
-# --- Structured output (LM Studio response_format) ---
+# --- Structured output (Ollama `format`, via the internal response_format shape) ---
 # Constrain the model to emit a conforming JSON decision at decode time, which
 # largely eliminates the malformed-JSON fallback path. "json_schema" shapes every
 # field; "json_object" only guarantees syntactic validity; "off" disables it.
@@ -965,28 +1075,49 @@ DECISION_SCHEMA = {
     },
 }
 
-# Flipped off for the rest of the session if LM Studio rejects response_format.
+# Flipped off for the rest of the session if Ollama rejects the format/
+# json-schema field. Ollama's `format` param is stable (Phase 0 finding #2 --
+# a full JSON schema was honored in every trial), so this auto-degrade is a
+# safety net now rather than an expected path, but it stays in place.
 _structured_output_enabled = STRUCTURED_OUTPUT_MODE != "off"
 
-# Flipped off for the rest of the session if LM Studio doesn't know the routed
-# model ids (MODEL_SMART/MODEL_FAST) -- falls back to "local-model", which LM
-# Studio resolves to whatever single model is loaded.
+# Flipped off (and the setup-failure warning logged once) if Ollama doesn't
+# have a routed model id (MODEL_SMART/MODEL_FAST) created. Unlike LM Studio,
+# Ollama has no generic "local-model" alias to retry with -- a missing model
+# is a setup failure (see looks_like_model_not_found_error and its call site
+# in run_agent_decision), so this flag no longer gates a retry; it only
+# avoids repeat-logging the same warning every subsequent call.
 _model_routing_enabled = True
 
 
+def _ollama_error_parts(lm_body):
+    """Extract (message, type) from an Ollama /api/chat error body. Modern
+    Ollama (0.32.3, per Phase 0 finding #5) returns a structured
+    {"error": {"code":, "message":, "type":, ...}} object on HTTP 400s (e.g.
+    type "exceed_context_size_error"); tolerate a bare string too in case a
+    future/older build differs."""
+    err = lm_body.get("error") if isinstance(lm_body, dict) else None
+    if isinstance(err, dict):
+        return str(err.get("message") or err), err.get("type")
+    return str(err or ""), None
+
+
 def looks_like_model_not_found_error(http_status, lm_body):
-    """True when LM Studio rejected the request because the requested model id
-    isn't downloaded/loaded (as opposed to any other error)."""
-    text = ""
-    if isinstance(lm_body, dict):
-        text = str(lm_body.get("error") or "")
+    """True when Ollama rejected the request because the requested model id
+    isn't created/pulled (as opposed to any other error) -- a setup failure,
+    not a transient condition (see run_agent_decision's handling)."""
+    text, _ = _ollama_error_parts(lm_body) if isinstance(lm_body, dict) else ("", None)
     low = text.lower()
     return bool(low) and "model" in low and any(
         k in low for k in ("not found", "no model", "failed to load", "unknown model"))
 
 
 def build_response_format():
-    """The response_format payload field for the current mode, or None."""
+    """The internal response_format payload field for the current mode, or
+    None. Kept in this OpenAI-style shape (rather than Ollama's flatter
+    `format` field) so the rest of this module's payload-building code is
+    unchanged; to_ollama_body() extracts the actual JSON schema object out of
+    the "json_schema" nesting when converting to the wire request."""
     if not _structured_output_enabled:
         return None
     if STRUCTURED_OUTPUT_MODE == "json_schema":
@@ -1000,302 +1131,24 @@ def build_response_format():
 
 
 def looks_like_response_format_error(http_status, lm_body):
-    """True when LM Studio rejected the request specifically over response_format."""
-    text = ""
-    if isinstance(lm_body, dict):
-        text = str(lm_body.get("error") or lm_body)
+    """True when Ollama rejected the request specifically over the `format`
+    (JSON-schema) field. Rare in practice (see _structured_output_enabled's
+    comment) but the auto-degrade safety net stays in place regardless."""
+    text, _ = _ollama_error_parts(lm_body) if isinstance(lm_body, dict) else ("", None)
     if http_status == 400 or text:
         low = text.lower()
-        return any(k in low for k in ("response_format", "json_schema", "grammar", "schema"))
+        return any(k in low for k in ("response_format", "format", "json_schema", "grammar", "schema"))
     return False
 
-SYSTEM_PROMPT = """You are an autonomous agent in a pixel-art village simulation.
-Your shared goal: help the village grow into a civilization by gathering resources,
-contributing to build projects, and coordinating with others.
 
-RULES (follow exactly):
-MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to give that agent a specific job. The elder leads by keeping everyone busy. Idle agents are listed least-recently-tasked first; prefer the one marked "longest idle" unless a resource shortfall clearly calls for a different role — don't keep assigning work to the same one or two agents.
-1. NEVER use talk_to_nearby if Agents near you is "none".
-2. If talk_to_nearby, message and target MUST both be set to a nearby agent name.
-3. Prefer collect_resource, contribute_resources, start_project, build_structure,
-   upgrade_structure (when an existing facility is below max level), or move_to_district
-   over idle talk.
-4. Talk is for coordination (request resources, announce builds)—not small talk.
-5. The village has SEVERAL buildable districts at once (see Known districts) and can have up to a few concurrent
-   builds in progress. Any agent may start_project in a district that has no active build; set target_district to
-   steer which one (it defaults to your current district). contribute_resources and build_structure also accept an
-   optional target_district (defaults to your current district, or the district most in need of help).
-5b. If "Incoming messages" lists requests or directives addressed to you, act on them this turn (gather/contribute/heal/trade as asked, or reply with talk_to_nearby).
-5c. Use move_to_district with target set to a district id from Known districts (e.g. "farm_north", "village_east") to travel there. You'll automatically walk the road network to get there.
+# to_ollama_body is now imported from llm_wire.py -- see the import near the
+# top of this module (just below the SYSTEM_PROMPT/SYSTEM_PROMPT_SLIM import).
 
-ECOLOGY (when enabled):
-5d. Each district has local resource stocks that deplete when you gather and regrow over time. If Local stocks shows "depleted" or "low", gathering that resource here fails until stocks recover — use start_terraform (plant_grove restores forest wood/herbs; clear_field restores farm food; extend_beach restores fish and may claim new beach land) or move_to_district to another district.
-5e. start_terraform with target set to plant_grove, clear_field, or extend_beach begins a funded terraform project (same contribute/build flow as structures). Use build_structure when the terraform project is fully funded.
-
-BLUEPRINTS (inventing new structures):
-6. Any agent may use propose_blueprint to invent a new structure type. Include a
-   "blueprint" object (see schema below) with a required "function" block that
-   declares what the building DOES (produces/boosts/unlocks/houses). A proposal
-   whose effects duplicate an existing structure is still accepted (flagged
-   "duplicate of" for the elder to route to an upgrade, never a second
-   structure) — it is not rejected for that alone. Optionally bundle up to 3
-   new gatherable resources inside "new_resources". If your start_project was
-   just blocked by the invention gate, your very next turn is invention-only:
-   propose a blueprint that plausibly satisfies the build you were blocked on.
-7. Blueprint approval is two-stage and only the elder may take either step.
-   First use sage_review_blueprint (target = pending blueprint id,
-   sage_decision = "approve" or "deny") to check it against district stock
-   shortages, gather-zone availability, existing producers, and structure
-   distribution before committing. Only after that review is "approved" (or
-   skipped after a timeout when no elder was available) may approve_blueprint
-   or reject_blueprint be used on that id. approve_blueprint accepts an
-   optional "target_district" naming which district should host the project;
-   if the blueprint is flagged "duplicate of" an existing structure, approving
-   it upgrades that structure instead of creating a new one. The proposer
-   becomes the project's lead (reassigned automatically if unavailable).
-8. The elder should review Pending blueprints before starting a vanilla project
-   when proposals are waiting.
-8b. If Invention status is REQUIRED, every seed structure type is already built —
-   start_project on a seed type will be refused. Use propose_blueprint (or build/
-   contribute to an Approved custom build) instead.
-8c. STRUCTURE UPGRADES: if a structure type already exists below level 100, you MUST
-   use upgrade_structure on that structure (target = its id) instead of start_project
-   for the same type. Only build a second instance once every existing one is level 100.
-   Upgraded structures grow bigger visually and work better.
-9. Only propose resources that have a gather_zone (one of: farm, forest, village,
-   market, beach, cave, ocean) so villagers can collect them, or set gather_zone to
-   null for trade-only resources (these cannot be collected).
-10. To gather a custom resource, move to its gather_zone and use collect_resource with
-   target set to that resource id.
-11. Don't repeat a message you or another agent already said recently (see Recent
-   village conversations) — vary your wording each time you talk.
-11b. If a nearby agent's message mentions a resource you could help with, it may become
-   a Commitment on you. If Commitment is set, prioritize honoring it soon via
-   collect_resource, contribute_resources, or trade_resource for that resource —
-   this fulfills the promise and clears it.
-
-SURVIVAL:
-12. You have Hunger and Health. You auto-eat your own food when hungry, so keep food
-   on hand. If Hunger reaches 0 your Health drops; at 0 Health you collapse and cannot
-   act until revived. Use heal_agent (target a nearby hurt/collapsed villager; any role
-   may, healers heal more) to restore their health.
-
-CRAFTING (recipe tree):
-13. Some advanced builds need crafted goods. Use craft_item with target set to the item
-   id; you must be in the recipe's station zone and hold its inputs.
-14. Any agent may propose_recipe to invent a new crafted good (include a "recipe"
-   object). Only the elder may approve_recipe / reject_recipe a pending recipe by id.
-
-SAGE PRIORITY (absolute):
-15. The elder Sage's survival overrides everything. If Sage has collapsed or is
-   critically hurt, the healer and the single nearest villager revive the elder
-   (if the healer has also collapsed, revive her first — she is the key to saving
-   Sage — then heal Sage). Other agents continue their own work; only those
-   responders abandon their task for the elder.
-
-PATH 1 (when enabled):
-P1. Some resources need tools: stone needs wooden_pick, copper_ore needs stone_pick, iron_ore needs iron_pick (craft picks at workshop; smelt ores at kiln via craft_item after building kiln). No pick? dig_terrain digs stone from soil tool-free.
-P2. place_block/remove_block build 2D tiles in your district (wall/floor/door/fence). dig_terrain/plant_terrain mutate local terrain (dig yields stone; plant costs wood).
-P3. propose_treaty/vote_treaty govern inter-settlement trade pacts (reuse rule object with kind treaty).
-
-EMERGENT ROLES:
-16. Your role is not fixed. If "Incoming messages" or a NOTE says the village
-   lacks a gatherer for a needed resource and you have no gathering specialty,
-   use switch_role with new_role set to the needed role (e.g. farmer, gatherer,
-   miner, fisher) to fill the gap. Don't switch away from a role the village
-    still needs.
-16b. Any villager may propose_role for a profession the village lacks. Include a
-    "role" object with a unique lowercase slug, display name, one-line skill,
-    a specialty list using only Known resources, and a preferredProject using a
-    known project type. Only the elder may approve_role or reject_role with the
-    proposal slug as target. Approval makes the role immediately available to
-    switch_role; it does not alter the seed roles.json file.
-
-COLLECTIVE RULES (voting):
-17. Any agent may propose_rule to suggest a village-wide rule (include a "rule"
-   object). Others use vote_rule with target set to the rule id and "vote" set
-   to "yes" or "no". A rule that reaches a majority is enacted and enforced
-   mechanically (e.g. a resource tax on contributions funds a shared stockpile).
-   Use repeal_rule with target set to an enacted rule's id to start a repeal
-   vote; the same majority removes it. Kind "priority" (value = a resource id)
-   biases contribute_resources toward that resource while enacted. A custom
-   rule may have a safe structured effect: subject is exactly one resource,
-   role, district, or action; condition selects collect_resource,
-   contribute_resources, or craft_item plus optional resource/role/district
-   filters; modifier is only {"kind":"add","value":1..3}. It adds that
-   many units to matching real action output. To amend an active provision,
-   set supersedes to its rule id; the cited provision is replaced.
-
-COGNITIVE CONTROLLER:
-18. If "Module reports" are present, you are the Cognitive Controller: weigh the
-   Perception/Social/Desire/Reflection reports together and output the single
-   best decision. The reports advise you; they never replace the JSON output.
-
-UPKEEP & SEASONS (when repair_structure is available):
-19. Structures decay: below 30 condition they stop working; at 0 they collapse
-   into ruins. Use repair_structure (target a structure name/type/id, or null
-   for the most damaged one nearby). A repair costs 1 of the structure's main
-   material; rebuilding a ruin costs half its original materials. Materials you
-   hold are used first; the village stockpile covers any shortfall.
-20. Food spoils when the village holds more than its storage capacity — build
-   storage (granary, or a blueprint with a "stores" function). Winter stops
-   district stock regrowth: stockpile food before it. Craft a cart to carry more.
-
-MARKET, TRADE & PROPERTY (when a Market exists):
-21. If Prices is shown, trade_resource is a SALE, not a swap: target buys 1 unit
-   of your most abundant resource for gold at the listed price, adjusted by your
-   relationship with them (ally = discount, rival = surcharge, and you may refuse
-   a rival outright if they can't afford the surcharge). If Prices is not shown,
-   trade_resource stays a 1-for-1 barter swap.
-22. Build or repair_structure a house to claim it as your home (first-come). A
-   home shelters you every night automatically. If a NOTE says you're homeless,
-   prioritize claiming or building one.
-
-POPULATION & GOVERNANCE (when lifecycle is enabled):
-23. Villagers age and, rarely, pass away of old age -- including the elder. If a
-   NOTE says the village must choose a new elder, use vote_rule targeting the
-   candidate's rule id listed in the NOTE with "vote":"yes" (a majority wins).
-24. propose_rule also accepts kind "harvest_quota" (value = max gathers of one
-   resource per district per period, e.g. 3-8) and "rationing" (value = max
-   stockpile withdrawal while storage is low, e.g. 2-6) — vote on these the same
-   way as a resource_tax. If a NOTE says you hit a quota or ration limit, try a
-   different resource/district or wait for it to reset.
-26. When a villager dies permanently (not a survival collapse), they should be
-   laid to rest. If no Cemetery exists yet, use start_project with target
-   cemetery. Once one exists, use bury_agent (target the deceased's name, or
-   omit target to bury whoever is nearest) to lay them to rest there — you
-   must be close to the body first, so bury_agent will walk you there.
-
-KNOWLEDGE & CULTURE (when practiced skills are shown):
-25. Practicing gather/craft/build/heal raises that skill over time (shown in
-   "Your skill"), giving a small yield/output bonus. To teach a nearby agent,
-   talk_to_nearby with a message containing a word like "teach" or "train"
-   (optionally name the skill, e.g. "let me teach you to craft") — this
-   transfers some of your skill to them. A Library preserves a dead agent's
-   best skill so others can still study it there.
-26. BELIEFS: Any agent may use found_belief at any time to author one with a
-   short tenet and an affinity list
-   drawn from resource_tax, custom, priority. To persuade a nearby agent who
-   lacks one of your beliefs, use talk_to_nearby and include belief_pitch with
-   that belief id and a sincere short pitch. Trust and the listener's existing
-   beliefs affect adoption. Forest Stewardship (practical), Equal Share
-   (political), and Dreamwalkers (outlier) are authoring exemplars, not
-   preloaded beliefs; improve on or depart from them freely.
-
-Respond with ONLY valid JSON. No markdown, no explanation, no extra text.
-Do not use chain-of-thought or reasoning — output the JSON object immediately.
-The JSON must match this structure exactly:
-{
-  "action": "<one of the available_actions>",
-  "target": "<agent name, district id, project type, resource id, blueprint id, or null>",
-  "target_district": "<district id for start_project/contribute_resources/build_structure, or null to use your current district>",
-  "message": "<what you say if talking, or null>",
-  "new_role": "<a new role name if changing role, or null>",
-  "relationship_update": {"<agent_name>": "ally|neutral|rival"} or null,
-  "reasoning": "<one short sentence>",
-  "blueprint": <blueprint object for propose_blueprint, otherwise omit or null>,
-  "role": <role object for propose_role, otherwise omit or null>,
-  "belief": <belief object for found_belief, otherwise omit or null>,
-  "belief_pitch": <pitch object for talk_to_nearby, otherwise omit or null>
-}
-
-BLUEPRINT object schema (only for propose_blueprint):
-{
-  "id": "library",                       // ^[a-z][a-z0-9_]{1,24}$, not a seed/duplicate
-  "name": "Library",                     // 1-32 chars
-  "needs": {"wood": 4, "paper": 2},      // 1-8 entries, each amount 1-5
-  "new_resources": [                      // 0-3 items, bundled new resources
-    {"id": "paper", "name": "Paper", "gather_zone": "forest", "color": "#E8D5B7"}
-  ],
-  "visual_style": "house",               // house | farm_plot | workshop | wall | generic
-  "sprite": {                            // OPTIONAL pixel art: how YOUR invention looks on the map
-    "palette": ["#8B5A2B", "#D9C08C", "#4A6B3A"],   // 2-5 hex colors; a=1st, b=2nd, c=3rd...
-    "grid": ["...aaa...", "..aaaaa..", ".bbbbbbb.", ".bcbbbcb.", ".bbbbbbb."]
-  },                                     // 4-14 rows, each 4-14 chars of . (empty) or a-e
-  "function": {                          // REQUIRED: at least one effect
-    "produces": [{"resource":"herbs","amount":2,"every_ticks":600,"scope":"district"}],
-    "boosts": [{"kind":"gather","resources":["food"],"every_n":4,"bonus":1,"max_bonus":2,"scope":"district"}],
-    "unlocks": [{"kind":"craft","station":"workshop"}],
-    "houses": {"every_n": 3}
-    // optional: "shelter":{"capacity":1-4}, "light":{"scope":"district"}, "upkeep":{"resource":..,"amount":1-5}
-  }
-}
-
-RECIPE object schema (only for propose_recipe):
-{
-  "id": "rope",                          // ^[a-z][a-z0-9_]{1,24}$, not a duplicate
-  "name": "Rope",                        // 1-32 chars
-  "inputs": {"herbs": 2},                // 1-6 entries, each amount 1-5
-  "station": "workshop"                  // farm|forest|village|market|beach|cave, or null
-}
-
-RULE object schema (only for propose_rule):
-{
-  "id": "resource_tax",                  // ^[a-z][a-z0-9_]{1,24}$, not a duplicate
-  "name": "Resource Tax",                // 1-32 chars
-  "kind": "resource_tax",                // resource_tax | custom | priority | harvest_quota | rationing
-  "value": 1,                            // tax magnitude (0-3) for resource_tax; resource id string for priority; 1-20 for harvest_quota; 1+ for rationing
-  "description": "Contributors add 1 to the shared stockpile.",
-  "supersedes": null,                  // active rule id to amend, otherwise null/omit
-  "effect": {                          // custom only; omit for a prose-only custom rule
-    "subject": {"resource":"wood"},
-    "condition": {"action":"collect_resource"},
-    "modifier": {"kind":"add","value":1}
-  }
-}
-For vote_rule set "target" to the rule id and "vote" to "yes" or "no".
-For repeal_rule set "target" to an enacted rule's id (starts a repeal ballot).
-Succession ballots (kind "succession") are created automatically by the
-village when the elder dies -- never propose_rule one yourself; just vote_rule
-on the candidate ids a NOTE gives you.
-
-BELIEF object schema (only for found_belief):
-{
-  "id": "forest_steward",               // ^[a-z][a-z0-9_]{1,24}$, not a duplicate
-  "name": "Forest Stewardship",         // 1-32 chars
-  "tenet": "The forest thrives when we harvest with care.",
-  "affinity": ["priority"]              // nonempty subset of resource_tax | custom | priority
-}
-For a persuasion talk, include "belief_pitch":{"belief_id":"forest_steward","pitch":"..."}
-and set target/message normally. Only pitch a belief shown in Your beliefs.
-
-ROLE object schema (only for propose_role):
-{
-  "slug": "herbalist",                 // ^[a-z][a-z0-9_]{1,24}$, not a known/pending role
-  "name": "Herbalist",                 // 1-32 chars
-  "specialty": ["herbs"],              // 0-4 Known resource ids
-  "preferredProject": "farm_plot",     // known project type, or 1-4 such ids
-  "skill": "Gathers herbs for remedies." // one line, 1-160 chars
-}
-
-EXAMPLE (farmer, no one nearby):
-{"action":"collect_resource","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"I should gather food for the village."}
-
-EXAMPLE (builder, project needs wood):
-{"action":"contribute_resources","target":"wood","message":null,"new_role":null,"relationship_update":null,"reasoning":"Donating wood to the active build."}
-
-EXAMPLE (trader, Marco nearby):
-{"action":"talk_to_nearby","target":"Marco","message":"Could you spare any wood? I'll trade you food for it.","new_role":null,"relationship_update":null,"reasoning":"Coordinating trade for the build."}
-
-EXAMPLE (gatherer proposing a library + paper):
-{"action":"propose_blueprint","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"The village needs knowledge storage.","blueprint":{"id":"library","name":"Library","needs":{"wood":4,"paper":2},"new_resources":[{"id":"paper","name":"Paper","gather_zone":"forest","color":"#E8D5B7"}],"visual_style":"house","function":{"produces":[{"resource":"paper","amount":1,"every_ticks":900,"scope":"village"}]}}}
-
-EXAMPLE (elder sage-reviewing a pending blueprint's geography/resources):
-{"action":"sage_review_blueprint","target":"library","sage_decision":"approve","message":null,"new_role":null,"relationship_update":null,"reasoning":"Forest district has spare paper gather capacity and no existing knowledge structure."}
-
-EXAMPLE (elder approving a pending blueprint after sage review):
-{"action":"approve_blueprint","target":"library","target_district":"forest","message":"Approved. Gather paper from the forest.","new_role":null,"relationship_update":null,"reasoning":"A worthy addition to the village."}"""
-
-# Reduced-context variant for the context-overflow retry (see
-# run_agent_decision): drops the worked EXAMPLE blocks, which are the bulk of
-# SYSTEM_PROMPT's size, while keeping the rules and the JSON schema so output
-# is still shaped. Sliced by marker rather than a hardcoded example count so
-# this stays correct if examples are added/removed.
-_SYSTEM_PROMPT_EXAMPLES_IDX = SYSTEM_PROMPT.find("\nEXAMPLE (")
-SYSTEM_PROMPT_SLIM = (
-    SYSTEM_PROMPT[:_SYSTEM_PROMPT_EXAMPLES_IDX]
-    if _SYSTEM_PROMPT_EXAMPLES_IDX != -1 else SYSTEM_PROMPT
-)
+# SYSTEM_PROMPT / SYSTEM_PROMPT_SLIM moved to prompts.py (2026-07-24,
+# docs/plan-ollama-migration.md Phase 6) so scripts/ollama_setup.py can
+# import the exact rulebook text without importing server.py itself (see
+# prompts.py's module docstring for why). Imported near the top of this
+# module -- see the `import prompts as _prompts` block above.
 
 # Dedicated, minimal system prompt for invention-only turns (see
 # build_invention_prompt / _maybe_invention_backstop). SYSTEM_PROMPT/SLIM carry
@@ -2736,15 +2589,17 @@ MODULE_PROMPTS = {
 PIANO_MODULE_TIMEOUT_S = 15
 
 
-def run_piano_module(module, agent_name, context, frame_tick=None):
+def run_piano_module(module, agent_name, context, frame_tick=None, timeout_s=None):
     """In-process PIANO module runner (Sid-parity Phase 5/1).
 
     Dispatched onto SimEngine.piano_workers -- a small pool bounded
     independently of MAX_CONCURRENT_LLM (the decision pool), so a module
     backlog can never starve agent decisions. Always MODEL_FAST, always a
-    hard PIANO_MODULE_TIMEOUT_S timeout. Returns a one-sentence report
+    hard PIANO_MODULE_TIMEOUT_S timeout by default. Always-on refreshes may
+    supply their separately-gated timeout. Returns a one-sentence report
     string, or None on failure/timeout (dropped, not retried).
     """
+    timeout_s = PIANO_MODULE_TIMEOUT_S if timeout_s is None else timeout_s
     sysp = MODULE_PROMPTS.get(module)
     if not sysp:
         return None
@@ -2753,7 +2608,7 @@ def run_piano_module(module, agent_name, context, frame_tick=None):
             sysp,
             f"Agent {agent_name} context: {context}",
             max_tokens=60, temperature=0.5,
-            timeout=PIANO_MODULE_TIMEOUT_S, raise_timeout=True,
+            timeout=timeout_s, raise_timeout=True,
         )
         if text:
             text = text.strip().strip('"').strip()[:200]
@@ -2768,7 +2623,7 @@ def run_piano_module(module, agent_name, context, frame_tick=None):
             "frame_tick": frame_tick,
             "module": module,
             "error": "piano_module_timeout",
-            "timeout_s": PIANO_MODULE_TIMEOUT_S,
+            "timeout_s": timeout_s,
         })
         return None
     except Exception:
@@ -2780,7 +2635,7 @@ def run_belief_pitch(speaker_name, listener_name, belief, pitch, relationship,
     """Score one explicit persuasion pitch outside SimEngine's lock.
 
     Returns a bounded quality float or None, allowing the engine to use its
-    deterministic offline quality/roll when LM Studio is unavailable. The
+    deterministic offline quality/roll when the LLM is unavailable. The
     engine owns the session cap and only calls this from an already-bounded
     cognition request.
     """
@@ -2967,19 +2822,33 @@ def strip_code_fences(text):
     return cleaned.strip()
 
 
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+
+
 def lm_message_text(message):
-    """Return model output text; reasoning models may leave content empty."""
+    """Return the model's output text from an Ollama /api/chat message.
+
+    Ollama's native endpoint with think:false fully suppresses reasoning --
+    no separate `thinking` field, no <think> tags in content (Phase 0 finding
+    #4) -- so unlike LM Studio there is no reasoning_content fallback channel
+    to check anymore (that was purely an LM Studio quirk). As defense in
+    depth, if a <think>...</think> block ever leaks into content anyway (a
+    contract violation -- would mean `think` wasn't actually sent False, or a
+    future Ollama version changed behavior), strip it rather than feed
+    chain-of-thought into the decision JSON parser."""
     if not isinstance(message, dict):
         return ""
     content = (message.get("content") or "").strip()
-    if content:
-        return content
-    return (message.get("reasoning_content") or "").strip()
+    if content and _THINK_TAG_RE.search(content):
+        stripped = _THINK_TAG_RE.sub("", content).strip()
+        if stripped:
+            content = stripped
+    return content
 
 
 def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
                 timeout=30, raise_timeout=False):
-    """Plain-text LM Studio completion for the background cognition loops
+    """Plain-text Ollama completion for the background cognition loops
     (Summarizer, meta system, PIANO modules / Cognitive Controller). Returns the
     text or None on any failure so every caller can degrade gracefully.
 
@@ -2990,27 +2859,29 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
     wants to log/count timeouts distinctly (run_piano_module) can -- every
     other caller keeps the original swallow-and-return-None behavior."""
     payload = {
-        # Background cognition is routine work -- always the fast model.
-        "model": MODEL_FAST if _model_routing_enabled else "local-model",
+        # Background cognition is routine work -- always the fast model. (No
+        # LM-Studio-style "local-model" alias to fall back to in Ollama -- a
+        # missing model id is a setup failure, handled where the call sites
+        # actually see the error, not here.)
+        "model": MODEL_FAST,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "stream": False,
         **NON_THINKING_SAMPLING,
     }
     if DISABLE_THINKING_ROUTINE:
-        # See the constant's comment: reasoning_effort is the field this
-        # LM Studio build honors. All lm_complete callers are low-stakes.
-        payload["reasoning_effort"] = "none"
+        # See DISABLE_THINKING_ROUTINE's comment: Ollama's native "think"
+        # boolean is the knob (LM Studio's "reasoning_effort" is history).
+        # All lm_complete callers are low-stakes/routine.
+        payload["think"] = False
     try:
-        resp = requests.post(LM_STUDIO_URL, json=payload, timeout=timeout)
+        resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=timeout)
         body = resp.json()
-        choice = body["choices"][0]
-        message = choice["message"]
-        finish_reason = choice.get("finish_reason")
+        message = body["message"]
+        done_reason = body.get("done_reason")
     except requests.exceptions.Timeout:
         if raise_timeout:
             raise
@@ -3020,25 +2891,20 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
         return None
     if not isinstance(message, dict):
         return None
-    content = (message.get("content") or "").strip()
-    if content:
-        text = content
-        if is_scaffold_text(text):
-            # A reasoning-class model sometimes echoes the instruction as a
-            # preamble ("Input: Parents' names...") even in `content` with
-            # thinking disabled -- if a real answer follows on a later line,
-            # extract_plain_answer's last-line rule recovers it; otherwise
-            # this still rejects and the caller falls back deterministically.
-            text = extract_plain_answer(text)
-    else:
-        text = extract_plain_answer((message.get("reasoning_content") or "").strip())
+    text = lm_message_text(message)
+    if text and is_scaffold_text(text):
+        # A reasoning-class model sometimes echoes the instruction as a
+        # preamble ("Input: Parents' names...") even in `content` with
+        # thinking disabled -- if a real answer follows on a later line,
+        # extract_plain_answer's last-line rule recovers it; otherwise
+        # this still rejects and the caller falls back deterministically.
+        text = extract_plain_answer(text)
     if not text or is_scaffold_text(text):
         return None
-    if finish_reason == "length" and text.rstrip("'\" ")[-1:] not in ".!?":
-        # max_tokens cut generation off before a full sentence -- this model
-        # keeps "thinking" past the token budget even with thinking
-        # disabled, so what's left is a mid-thought fragment (e.g. "Output"
-        # or "Invent one brief personality trait"), not a real answer.
+    if done_reason == "length" and text.rstrip("'\" ")[-1:] not in ".!?":
+        # max_tokens (options.num_predict) cut generation off before a full
+        # sentence -- what's left is a mid-thought fragment (e.g. "Output" or
+        # "Invent one brief personality trait"), not a real answer.
         return None
     return text
 
@@ -3377,7 +3243,7 @@ _system_prompt_mismatch_warned = False
 def _check_system_prompt_stability(system_content):
     """Log-once guard (Phase 2, TASKS_PENDING #2a): warn if the routine-turn
     system message differs from the one seen on a prior routine turn this
-    session. LM Studio reuses KV cache by longest common prefix per slot, so
+    session. Ollama (llama.cpp-based, same as LM Studio) reuses KV cache by longest common prefix per slot, so
     a system-prompt mutation mid-session would silently forfeit that reuse
     for every subsequent call -- this makes it observable instead.
 
@@ -3388,7 +3254,14 @@ def _check_system_prompt_stability(system_content):
     equality costs nothing per call. Only on an identity mismatch do we fall
     back to a value comparison (and then a hash for the warning message),
     so this never crashes and adds no per-call overhead in the expected
-    (stable) case."""
+    (stable) case.
+
+    Not called at all when SYSTEM_PROMPT_AT_LOAD_TIME is True and the turn is
+    the omitted-system-message case (see build_decision_payload) -- omitting
+    the message on purpose is not a "changed prefix", it is a different,
+    intentional call shape, so routing it through this guard would fire a
+    spurious mismatch warning against the last turn that DID send a system
+    message (e.g. a slim retry or an invention turn in between)."""
     global _last_routine_system_prompt, _system_prompt_mismatch_warned
     if _last_routine_system_prompt is None:
         _last_routine_system_prompt = system_content
@@ -3408,15 +3281,27 @@ def _check_system_prompt_stability(system_content):
 
 
 def build_decision_payload(data, self_prompt, response_format, slim=False):
-    """Assemble the LM Studio chat-completion payload for a decision call.
-    slim=True builds the reduced-context retry payload (see
+    """Assemble the internal chat-completion-shaped payload for a decision
+    call (converted to Ollama's /api/chat wire body by to_ollama_body() at
+    the actual POST site). slim=True builds the reduced-context retry payload (see
     run_agent_decision): SYSTEM_PROMPT_SLIM instead of SYSTEM_PROMPT (drops
     the worked EXAMPLE blocks) plus the slim user prompt. The rules and JSON
     schema are kept either way so response_format still shapes the output.
     invention_only turns always use INVENTION_SYSTEM_PROMPT instead (the
     ~20-rule village rulebook is irrelevant to authoring a blueprint and
     slim/full made almost no size difference for these calls -- see its
-    docstring), regardless of the slim flag."""
+    docstring), regardless of the slim flag.
+
+    SYSTEM_PROMPT_AT_LOAD_TIME (Phase 6, dark by default): when True, the
+    primary (non-slim) routine/high-stakes dispatch -- i.e. everything that
+    isn't sprite_design_only, invention_only, or the slim retry -- omits the
+    system message entirely and routes to MODEL_SMART_SYS, relying on that
+    model's baked Modelfile SYSTEM directive (generated from this exact
+    SYSTEM_PROMPT text by `scripts/ollama_setup.py --with-system`) instead of
+    sending it every call. Sprite/invention turns and the slim retry are
+    unaffected -- they always send their own explicit system message and stay
+    on MODEL_SMART (see the flag's definition for the full rationale)."""
+    omit_system_prompt = False
     if data.get("sprite_design_only"):
         system_content = SPRITE_UPGRADE_SYSTEM_PROMPT
     elif data.get("invention_only"):
@@ -3424,13 +3309,22 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     else:
         system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
         if not slim:
-            # Only the primary (non-retry) routine dispatch is checked: the
-            # slim retry deliberately swaps to SYSTEM_PROMPT_SLIM on overflow
-            # and is expected to forfeit cache reuse for that one call (see
-            # specs/03-cognition.md KV-cache prefix stability note).
-            _check_system_prompt_stability(system_content)
+            if SYSTEM_PROMPT_AT_LOAD_TIME:
+                # The baked Modelfile SYSTEM directive applies instead (see
+                # MODEL_SMART_SYS's definition) -- omitting the message here
+                # is the intended, non-spurious case, so the stability guard
+                # below (designed to catch an *unintended* mid-session prompt
+                # mutation) must not run against it.
+                omit_system_prompt = True
+            else:
+                # Only the primary (non-retry) routine dispatch is checked: the
+                # slim retry deliberately swaps to SYSTEM_PROMPT_SLIM on overflow
+                # and is expected to forfeit cache reuse for that one call (see
+                # specs/03-cognition.md KV-cache prefix stability note).
+                _check_system_prompt_stability(system_content)
     # Persona goes at the TOP OF THE USER MESSAGE, not appended to the system
-    # prompt: LM Studio reuses KV cache by longest common prefix per slot, so
+    # prompt: Ollama (llama.cpp-based, same as LM Studio) reuses KV cache by
+    # longest common prefix per slot, so
     # per-agent text inside the system message forced full prompt
     # reprocessing (~5k tokens) on every agent rotation. With the system
     # prompt byte-identical across agents it becomes a shared cached prefix.
@@ -3453,24 +3347,24 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
             temperature = INVENTION_TEMPERATURE
     elif thinking_active:
         # Phase 2: high-stakes turns with thinking re-enabled need extra
-        # budget for reasoning_content on top of the decision JSON.
+        # budget for reasoning output on top of the decision JSON.
         max_tokens = HIGH_STAKES_MAX_TOKENS
+    messages = [] if omit_system_prompt else [{"role": "system", "content": system_content}]
+    messages.append({"role": "user", "content": user_content})
     payload = {
-        "model": model_for_decision(data) if _model_routing_enabled else "local-model",
-        "messages": [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": user_content},
-        ],
+        "model": MODEL_SMART_SYS if omit_system_prompt else model_for_decision(data),
+        "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "stream": False,
     }
     if thinking_active:
         payload.update(THINKING_SAMPLING)
+        # thinking_active turns intentionally omit "think" -- see
+        # to_ollama_body's docstring: omitted means the model may think.
     else:
         payload.update(NON_THINKING_SAMPLING)
         if DISABLE_THINKING_ROUTINE:
-            payload["reasoning_effort"] = "none"
+            payload["think"] = False
         if ROUTINE_PRESENCE_PENALTY:
             payload["presence_penalty"] = ROUTINE_PRESENCE_PENALTY
     if response_format is not None:
@@ -3478,10 +3372,18 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     return payload
 
 
-def is_context_overflow_error(err_text):
-    """True for LM Studio's per-slot context-window error, e.g.
-    {"error": "Context size has been exceeded."}."""
-    return "context size has been exceeded" in (err_text or "").lower()
+def is_context_overflow_error(err_text, err_type=None):
+    """True for Ollama's context-overflow signal (docs/ollama_config.md
+    'Overflow / truncation contract', Phase 0 finding #5): HTTP 400 with
+    error.type == "exceed_context_size_error" is the structured, preferred
+    signal; a message mentioning both "context" and "exceed" is the fallback
+    for any future Ollama build that changes the type string. This replaces
+    LM Studio's "context size has been exceeded" string-sniff -- Ollama does
+    NOT silently truncate (confirmed live), it errors instead."""
+    if err_type == "exceed_context_size_error":
+        return True
+    low = (err_text or "").lower()
+    return "context" in low and "exceed" in low
 
 
 def score_belief_pitch_decision(decision, data):
@@ -3522,7 +3424,7 @@ def score_belief_pitch_decision(decision, data):
 
 
 def run_agent_decision(data):
-    """Build the prompt, call LM Studio, and return a validated decision dict.
+    """Build the prompt, call Ollama, and return a validated decision dict.
 
     Shared by the HTTP /agent/think endpoint and the server-authoritative
     SimEngine's think worker. Returns a plain dict (already normalized) — on any
@@ -3588,13 +3490,19 @@ def run_agent_decision(data):
 
         global _structured_output_enabled, _model_routing_enabled
 
+        # Ollama does not cancel server-side generation when a client
+        # aborts/times out a stream:false request (Phase 0 operational
+        # finding, ollama_config.md) -- an orphaned timed-out request keeps
+        # consuming a queue slot. Do not add a retry-on-timeout loop here;
+        # every requests.exceptions.RequestException path below (including
+        # Timeout) returns immediately instead of firing a second request.
         start = datetime.now()
         try:
-            resp = requests.post(LM_STUDIO_URL, json=payload, timeout=request_timeout)
+            resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
         except requests.exceptions.RequestException:
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            log_lm(latency_ms, error="LM Studio offline")
-            return {"error": "LM Studio offline", "action": "rest"}
+            log_lm(latency_ms, error="llm offline")
+            return {"error": "llm offline", "action": "rest"}
 
         latency_ms = int((datetime.now() - start).total_seconds() * 1000)
         http_status = resp.status_code
@@ -3604,23 +3512,25 @@ def run_agent_decision(data):
         except ValueError:
             lm_body = None
 
-        # Auto-degrade: if LM Studio rejected response_format (model doesn't
-        # support structured output), disable it for the session and retry once
-        # so this turn still succeeds. Prevents a regression to all-fallback.
+        # Auto-degrade: if Ollama rejected the `format` (JSON-schema) field,
+        # disable structured output for the session and retry once so this
+        # turn still succeeds. Ollama's format param is stable (Phase 0
+        # finding #2) so this is expected to fire rarely, but the safety net
+        # stays in place.
         if ("response_format" in payload and _structured_output_enabled
                 and looks_like_response_format_error(http_status, lm_body)):
-            print("[server] LM Studio rejected response_format; disabling "
+            print("[server] Ollama rejected the format/json-schema field; disabling "
                   "structured output for this session and retrying without it.")
             _structured_output_enabled = False
             payload.pop("response_format", None)
             response_format = None
             start = datetime.now()
             try:
-                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=request_timeout)
+                resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
             except requests.exceptions.RequestException:
                 latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-                log_lm(latency_ms, error="LM Studio offline")
-                return {"error": "LM Studio offline", "action": "rest"}
+                log_lm(latency_ms, error="llm offline")
+                return {"error": "llm offline", "action": "rest"}
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -3628,29 +3538,18 @@ def run_agent_decision(data):
             except ValueError:
                 lm_body = None
 
-        # Auto-degrade: if the routed model id isn't loaded in LM Studio,
-        # disable per-role routing for the session and retry once with the
-        # generic "local-model" id, so a single-model setup keeps working.
-        if (_model_routing_enabled
-                and looks_like_model_not_found_error(http_status, lm_body)):
-            print(f"[server] LM Studio doesn't know model {payload.get('model')!r}; "
-                  f"disabling per-role model routing for this session and retrying "
-                  f"with 'local-model'.")
-            _model_routing_enabled = False
-            payload["model"] = "local-model"
-            start = datetime.now()
-            try:
-                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=request_timeout)
-            except requests.exceptions.RequestException:
-                latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-                log_lm(latency_ms, error="LM Studio offline")
-                return {"error": "LM Studio offline", "action": "rest"}
-            latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            http_status = resp.status_code
-            try:
-                lm_body = resp.json()
-            except ValueError:
-                lm_body = None
+        # A missing routed model id is a setup failure, not a transient
+        # condition -- Ollama has no LM-Studio-style "local-model" alias to
+        # fall back to. Log once per session and return the offline fallback
+        # rather than retrying (see scripts/ollama_setup.py).
+        if looks_like_model_not_found_error(http_status, lm_body):
+            if _model_routing_enabled:
+                print(f"[server] Ollama doesn't have model {payload.get('model')!r} "
+                      f"created/loaded -- this is a setup failure. Run "
+                      f"`uv run python scripts/ollama_setup.py` then restart the server.")
+                _model_routing_enabled = False
+            log_lm(latency_ms, response=lm_body, http_status=http_status, error="model_not_found")
+            return {"error": "llm offline", "action": "rest"}
 
         if lm_body is None:
             return bad_response_fallback(latency_ms, http_status=http_status)
@@ -3658,14 +3557,14 @@ def run_agent_decision(data):
         # error_kind tags the whole call for logging once at the end (below),
         # even if the context-overflow retry ultimately recovers a decision --
         # this is what makes context_overflow measurable/distinguishable in
-        # lm_studio.jsonl per the plan, without double-logging each attempt.
+        # llm.jsonl per the plan, without double-logging each attempt.
         error_kind = None
         if isinstance(lm_body, dict) and lm_body.get("error"):
-            err = str(lm_body.get("error"))
-            if "compute error" in err.lower():
+            err_text, err_type = _ollama_error_parts(lm_body)
+            if "compute error" in err_text.lower():
                 log_lm(latency_ms, response=lm_body, http_status=http_status, error="compute_error")
                 return {"error": "compute_error", "action": "rest"}
-            if not is_context_overflow_error(err):
+            if not is_context_overflow_error(err_text, err_type):
                 return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
 
             # Retry ONCE with a slimmed-down payload: no memory line, no
@@ -3678,11 +3577,11 @@ def run_agent_decision(data):
             payload = slim_payload
             retry_start = datetime.now()
             try:
-                resp = requests.post(LM_STUDIO_URL, json=slim_payload, timeout=request_timeout)
+                resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(slim_payload), timeout=request_timeout)
             except requests.exceptions.RequestException:
                 latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
                 log_lm(latency_ms, error=error_kind)
-                return {"error": "LM Studio offline", "action": "rest"}
+                return {"error": "llm offline", "action": "rest"}
             latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -3696,10 +3595,18 @@ def run_agent_decision(data):
                 return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status, error=error_kind)
 
         try:
-            message = lm_body["choices"][0]["message"]
-        except (TypeError, KeyError, IndexError):
+            message = lm_body["message"]
+        except (TypeError, KeyError):
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
                                           error=error_kind or "bad_response")
+        if isinstance(message, dict):
+            # No reasoning_content channel exists in Ollama's response shape
+            # (that was purely an LM Studio quirk) -- keep the key present as
+            # an empty string in the logged response for log-shape
+            # compatibility with any downstream tooling that still reads it
+            # (e.g. scripts/llm_replay_bench.py's thinking-leak analysis,
+            # ported to the new shape in Phase 4).
+            message.setdefault("reasoning_content", "")
 
         raw_text = lm_message_text(message)
         decision = extract_json_decision(raw_text)
@@ -3759,30 +3666,11 @@ if _sim_engine.TECH_TREE_ENABLED:
     DECISION_SCHEMA["properties"]["blueprint"]["properties"]["tier"] = {
         "type": ["integer", "null"],
     }
-    SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
-        '  "visual_style": "house",               // house | farm_plot | workshop | wall | generic\n',
-        '  "tier": 1,                             // OPTIONAL tech tier (1-3, default 1); tier N>1 needs a tier-N station built\n'
-        '  "visual_style": "house",               // house | farm_plot | workshop | wall | generic\n',
-    )
-    _SYSTEM_PROMPT_EXAMPLES_IDX = SYSTEM_PROMPT.find("\nEXAMPLE (")
-    SYSTEM_PROMPT_SLIM = (
-        SYSTEM_PROMPT[:_SYSTEM_PROMPT_EXAMPLES_IDX]
-        if _SYSTEM_PROMPT_EXAMPLES_IDX != -1 else SYSTEM_PROMPT
-    )
-    # Phase 2 (TASKS_PENDING #2a): this is the only place SYSTEM_PROMPT is
-    # ever reassigned after its initial definition, and it only runs once at
-    # module import time (TECH_TREE_ENABLED is a hardcoded module constant,
-    # never toggled by a route) -- before any request is served. Log it so a
-    # soak run can see the rebuild happened exactly once, at startup, not
-    # mid-session.
-    print(f"[server] system prompt rebuilt (TECH_TREE_ENABLED) "
-          f"sha256={hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12]}")
-
-# Startup proof for soak logs (specs/03-cognition.md KV-cache prefix
-# stability): one line naming the final SYSTEM_PROMPT hash after any
-# TECH_TREE_ENABLED rebuild above, so a soak can grep this file's stdout and
-# confirm the prefix never moves again for the life of the process.
-print(f"[server] system prompt sha256={hashlib.sha256(SYSTEM_PROMPT.encode()).hexdigest()[:12]}")
+    # The corresponding SYSTEM_PROMPT/SYSTEM_PROMPT_SLIM rewrite (documenting
+    # the optional "tier" field) now lives in prompts.py, applied at that
+    # module's import time (which happens before this point, near the top of
+    # this file) -- see prompts.py for the rewrite + its own startup sha256
+    # print. Nothing to do here except the DECISION_SCHEMA amendments above.
 
 
 def _llm_decide(payload):
@@ -3835,7 +3723,7 @@ else:
 
 @app.route("/council-llm-log")
 def council_llm_log():
-    """Return slim LM Studio decision records for a council frame window.
+    """Return slim decision records (llm.jsonl) for a council frame window.
 
     Only blueprint-pitch and verdict turns are included — routine gather/talk
     decisions from the same agents during the council window are omitted."""
@@ -3846,7 +3734,7 @@ def council_llm_log():
         return jsonify({"entries": [], "error": "invalid frame range"}), 400
     agents_raw = request.args.get("agents") or ""
     agent_set = {a.strip() for a in agents_raw.split(",") if a.strip()}
-    path = session_logger.lm_studio_path
+    path = session_logger.llm_path
     if not os.path.isfile(path):
         return jsonify({"entries": []})
     entries = []
@@ -3860,7 +3748,7 @@ def council_llm_log():
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if rec.get("type") != "lm_studio":
+                if rec.get("type") != "llm":
                     continue
                 ft = rec.get("frame_tick")
                 if ft is None or ft < start_frame or ft > end_frame:
@@ -3966,7 +3854,7 @@ if __name__ == "__main__":
     # http://<host-ip>:5001. On Windows, allow inbound TCP 5001 through the
     # firewall (or accept the first-run prompt). threaded=True lets the request
     # handlers run concurrently alongside the (forthcoming) SimEngine thread.
-    # NOTE: this exposes the server — including the LM Studio proxy — to the whole
+    # NOTE: this exposes the server — including the Ollama proxy — to the whole
     # local network. Intended for a trusted home LAN, not a hostile network.
     HOST = os.environ.get("SIM_HOST", "0.0.0.0")
     PORT = int(os.environ.get("SIM_PORT", "5001"))

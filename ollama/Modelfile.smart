@@ -1,0 +1,54 @@
+# Modelfile.smart -- sim-smart (MODEL_SMART)
+#
+# Provenance: FROM the Qwen3.5-9B-Q4_K_M GGUF already cached on disk by the
+# now-retired LM Studio install (see docs/plan-ollama-migration.md Phase 0/1
+# and the "Ollama Phase 0 findings (2026-07-24)" section of TASKS_PENDING.md).
+# Reusing this file instead of a registry pull saved a ~5.2 GB download and
+# was verified to import cleanly (`ollama create probe-smart -f ...` in
+# 52.2s, Phase 0 finding #1/#6).
+#
+# num_ctx 20480: successor to the former LM Studio runtime's context budget
+# (20000, parallel 3, ~6666 tokens/slot) -- see ollama_config.md for the
+# current budget table and VRAM gate numbers.
+#
+# GGUF dependency note (Phase 5 verification, 2026-07-24): `ollama create`
+# COPIES the FROM path's bytes into Ollama's own blob store
+# (%USERPROFILE%\.ollama\models\blobs\sha256-<hash>) at create time -- verified
+# live via `ollama show sim-smart --modelfile`, which resolves FROM to a blob
+# path, not the .lmstudio path below. So `sim-smart` does NOT depend on
+# %USERPROFILE%\.lmstudio\ at runtime once created; the .lmstudio cache is
+# only needed if `ollama create` is ever RE-RUN with this exact FROM line
+# (e.g. after `ollama rm sim-smart`). If the .lmstudio cache has been deleted
+# by then, pull the same weights from the registry instead (uncomment):
+#   ollama pull hf.co/lmstudio-community/Qwen3.5-9B-GGUF:Q4_K_M
+# and change FROM below to that reference before `ollama create`.
+#
+# Sampling params mirror simulation/server.py's NON_THINKING_SAMPLING dict
+# (top_p 0.8, top_k 20, min_p 0) plus the routine-decision default
+# temperature (0.4, see lm_agent_decision_payload in server.py). These are
+# defaults only -- server.py still sends per-request `options` on every
+# call and those override the Modelfile PARAMETER values; baking them in
+# here just keeps ad-hoc/manual `ollama run sim-smart` sessions and the
+# fast-model quality screen behaving the same way the sim does.
+#
+# NO SYSTEM directive here -- Phase 6 of the migration plan adds `SYSTEM
+# <SYSTEM_PROMPT text>` (generated from server.py, never hand-copied) once
+# the load-time-rulebook feature is gated and enabled. Until then every
+# request supplies its own system message exactly as the LM Studio-era code
+# did, and Ollama's Modelfile SYSTEM/no-SYSTEM semantics guarantee that is
+# safe (Phase 0 finding #6: an explicit request-time system message always
+# overrides -- there is nothing to accidentally shadow yet, and there is
+# nothing baked in to shadow it with).
+#
+# Canonical applier: scripts/ollama_setup.py (`ollama create sim-smart -f
+# ollama/Modelfile.smart`, idempotent, safe to re-run). Do not `ollama
+# create` this by hand outside that script -- it also handles env vars,
+# service restart, and warm-up/residency verification.
+
+FROM C:\Users\dbadmin\.lmstudio\models\lmstudio-community\Qwen3.5-9B-GGUF\Qwen3.5-9B-Q4_K_M.gguf
+
+PARAMETER num_ctx 20480
+PARAMETER temperature 0.4
+PARAMETER top_p 0.8
+PARAMETER top_k 20
+PARAMETER min_p 0

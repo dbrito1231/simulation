@@ -180,6 +180,10 @@ MEMORY_ENABLED = True
 WIKI_MEMORY = True
 AGENT_MESSAGING = True
 PIANO_MODULES = True
+# Gated scheduler for the PIANO whiteboard.  Kept dark until Phase B's
+# contention soak proves it is safe; false preserves the existing per-think
+# fan-out path exactly.
+ALWAYS_ON_MODULES = False
 META_SYSTEM = True
 EMERGENT_ROLES = True
 RULES_ENABLED = True
@@ -604,8 +608,11 @@ RULE_KINDS = {"resource_tax", "custom", "priority"}
 CUSTOM_RULE_ACTIONS = {"collect_resource", "contribute_resources", "craft_item"}
 CUSTOM_RULE_MODIFIER_MAX = 3
 
-# Must match LM Studio's loaded parallel slots (scripts/lms_load.py loads
-# context 20000 / parallel 3 -- per-slot budget ~6666 tokens). Raised 2->3 on
+# Must match Ollama's OLLAMA_NUM_PARALLEL (3, set by scripts/ollama_setup.py;
+# see ollama_config.md -- per-model num_ctx, not a shared per-slot budget,
+# under Ollama). History below predates the Ollama migration (2026-07-24) and
+# refers to the former LM Studio runtime's old context 20000 / parallel 3
+# setup (scripts/lms_load.py, removed in the migration's Phase 5). Raised 2->3 on
 # 2026-07-11 for +50% think throughput, then dropped 3->2 on 2026-07-14
 # (Phase 2, see .claude/plans/only-create-the-plan-linear-iverson.md) to give
 # high-stakes thinking turns (needing ~950-1,300 completion tokens on top of a
@@ -618,9 +625,12 @@ MAX_CONCURRENT_LLM = 3
 # Sid-parity Phase 1: PIANO module calls (perception/social/desire/reflection)
 # get their own small pool, bounded independently of MAX_CONCURRENT_LLM, so a
 # module backlog can never starve the decision path -- see
-# SimEngine.piano_workers / _run_piano_modules. Context budget for LM Studio
-# must now cover MAX_CONCURRENT_LLM + PIANO_CONCURRENT_LLM = 5 parallel slots
-# (specs/03-cognition.md).
+# SimEngine.piano_workers / _run_piano_modules. Under Ollama, sim-smart and
+# sim-fast each have their own num_ctx (20480 / 4096) rather than a shared
+# per-slot token budget; OLLAMA_NUM_PARALLEL=3 must still cover
+# MAX_CONCURRENT_LLM (decision calls) and PIANO_CONCURRENT_LLM (module calls)
+# running concurrently against their respective model (specs/03-cognition.md,
+# ollama_config.md).
 PIANO_CONCURRENT_LLM = 2
 # Off-tick module reports (e.g. social/reflection on a tick they don't fire)
 # are served from the last real report instead of an empty slot, as long as
@@ -634,6 +644,16 @@ PIANO_MODULE_CACHE_TTL = 2
 # for a peer module even though it's too stale to stand in as that module's
 # own fresh output. Keep these two TTLs as separate constants.
 PIANO_CROSS_CONTEXT_TTL = 6
+# Always-on PIANO is a pulse, not a continuously occupied GPU queue.  These
+# wall-clock knobs intentionally live beside the existing PIANO concurrency
+# settings because they govern the same sim-fast pool.
+# Dark-gated default. Phase B's contention gate did not pass, so retain the
+# original rest window; the optional Phase C night backstop is not attempted.
+MODULE_PULSE_INTERVAL_S = 45
+MODULE_PULSE_MAX_BATCH = 2
+MODULE_NOTE_MAX_AGE_S = 600
+MODULE_REFRESH_IDLE_SKIP = True
+MODULE_REFRESH_TIMEOUT_S = 60
 # Wait budget for a dispatched module future -- strictly above server.py's
 # PIANO_MODULE_TIMEOUT_S (15s) HTTP timeout so that timeout, not this one,
 # is what fires and gets logged/counted as a drop in the normal case.
@@ -1575,6 +1595,13 @@ class SimEngine:
         self._piano_module_cache = {}
         self._piano_module_drops = 0     # timeouts/failures this session
         self._piano_latency_ms = {}      # module -> [sum_ms, count] this period
+        # Always-on scheduler state is deliberately inert while its gate is
+        # off.  Individual agent fields are only introduced under that gate,
+        # retaining the old serialized/runtime shape by default.
+        self._piano_refresh_inflight = set()
+        self._module_pulse_work = []
+        self._module_refresh_failures = 0
+        self._module_note_ages = []
         self._meta_agent_index = 0
         self.ROAD_PATH_CACHE = {}   # (nodeA, nodeB) -> [node ids]; see _recompute_road_paths
         self._reset_world(roster_size)
@@ -1655,6 +1682,8 @@ class SimEngine:
                 "lastShelterNote": None, "lastSpokeFrame": 0,
                 "persona": "", "idleFrames": 0, "moduleTick": 0,
                 "moduleReports": {},
+                **({"contextDirty": True, "contextDirtySince": time.time()}
+                   if ALWAYS_ON_MODULES else {}),
                 "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
                 # Phase E: home structure id (None = homeless) + refusal nudges.
                 "homeStructureId": None, "lastTradeRejection": None,
@@ -2219,8 +2248,11 @@ class SimEngine:
             agent["x"] += (dx / dist) * step
             agent["y"] += (dy / dist) * step
             agent["idleFrames"] = 0
+        prior_district = agent.get("currentDistrict")
         agent["currentZone"] = get_zone(self.civilization["districts"], agent["x"], agent["y"])
         agent["currentDistrict"] = get_district(self.civilization["districts"], agent["x"], agent["y"])
+        if agent.get("currentDistrict") != prior_district:
+            self._mark_context_dirty(agent)
 
     # --- survival ---
     def _first_edible(self, agent):
@@ -2259,6 +2291,7 @@ class SimEngine:
             # resurrect it -- "{name} recovered" on someone already dead,
             # who then resumes moving/thinking/voting with a stale role.
             return
+        old_hunger, old_health = agent["hunger"], agent["health"]
         edible = self._first_edible(agent) if agent["hunger"] < EAT_THRESHOLD else None
         if edible:
             agent["resources"][edible] -= 1
@@ -2284,6 +2317,10 @@ class SimEngine:
                 self._push_activity(f"{agent['name']} collapsed from starvation")
                 if CULTURE_ENABLED:
                     self._drift_personality(agent, "wary of hunger since a collapse")
+        thresholds = (EAT_THRESHOLD, 0)
+        if any((old_hunger > t) != (agent["hunger"] > t) for t in thresholds) \
+                or any((old_health > t) != (agent["health"] > t) for t in (60, SAGE_CRITICAL_HEALTH, 0)):
+            self._mark_context_dirty(agent)
 
     def _neediest_nearby(self, agent):
         nearby = [self._find_agent(n) for n in self._get_nearby_agents(agent)]
@@ -3586,6 +3623,7 @@ class SimEngine:
             note = " -- district stocks will not regrow until spring" if season == "winter" else ""
             self._push_activity(f"The season turns: {season} begins{note}")
             self._log_benchmark("season_turn", SEASONS.index(season), {"season": season})
+            self._mark_all_context_dirty()
         self._tick_spoilage()
         self._tick_structure_decay()
         self._maybe_disaster()
@@ -7576,6 +7614,7 @@ class SimEngine:
                 continue
             r["inbox"].append({"from": from_name, "text": text,
                                "kind": kind or "message", "frame": self.frameTick})
+            self._mark_context_dirty(r)
             while len(r["inbox"]) > INBOX_CAP:
                 r["inbox"].pop(0)
 
@@ -8979,6 +9018,22 @@ class SimEngine:
             self._log_benchmark("piano_module_latency", latency,
                                 {"period_ticks": BENCHMARK_TICK_FRAMES})
             self._log_benchmark("piano_module_drops", self._piano_module_drops)
+        if ALWAYS_ON_MODULES:
+            ages = self._module_note_ages
+            note_age = {"avg_s": round(sum(ages) / len(ages), 1) if ages else 0.0,
+                        "max_s": round(max(ages), 1) if ages else 0.0,
+                        "count": len(ages)}
+            pulse_work = list(self._module_pulse_work)
+            self.lastBenchmarks["module_note_age"] = note_age
+            self.lastBenchmarks["module_pulse_work"] = pulse_work
+            self.lastBenchmarks["module_refresh_failures"] = self._module_refresh_failures
+            self._log_benchmark("module_note_age", note_age,
+                                {"period_ticks": BENCHMARK_TICK_FRAMES})
+            self._log_benchmark("module_pulse_work", pulse_work,
+                                {"period_ticks": BENCHMARK_TICK_FRAMES})
+            self._log_benchmark("module_refresh_failures", self._module_refresh_failures)
+            self._module_note_ages = []
+            self._module_pulse_work = []
         self._log_benchmark("memory_store_size", self.lastMemorySize)
         if STRUCTURE_EFFECTS_ENABLED:
             fired = self._effect_period_fired
@@ -9760,6 +9815,16 @@ class SimEngine:
             agent["relationships"].update(ru)
 
         self._push_activity(summary)
+        # A successful action can change the actor's material context, role,
+        # or beliefs.  Village-wide project/rule events can change every
+        # agent's desire/reflection, so make all notes eligible then.
+        if action != "rest":
+            self._mark_context_dirty(agent)
+        if action in {"start_project", "build_structure", "contribute_resources",
+                      "propose_rule", "vote_rule", "repeal_rule", "switch_role",
+                      "found_belief", "propose_blueprint", "approve_blueprint",
+                      "reject_blueprint", "sage_review_blueprint"}:
+            self._mark_all_context_dirty()
         return summary
 
     def _resolve_talk_target(self, agent, decision):
@@ -10616,6 +10681,132 @@ class SimEngine:
         ]
         return "; ".join(str(p) for p in parts if p)
 
+    def _mark_context_dirty(self, agent):
+        """Make one agent eligible for the next always-on PIANO pulse."""
+        if ALWAYS_ON_MODULES:
+            agent["contextDirty"] = True
+            agent["contextDirtySince"] = time.time()
+
+    def _mark_all_context_dirty(self):
+        if ALWAYS_ON_MODULES:
+            for agent in self.agents:
+                self._mark_context_dirty(agent)
+
+    def _always_on_reports(self, agent_name, modules):
+        """Read-only whiteboard assembly for a decision turn (no futures)."""
+        now = time.time()
+        enabled = modules or {}
+        cache = self._piano_module_cache.get(agent_name, {})
+        reports = []
+        ages = []
+        for module in ("perception", "social", "desire", "reflection"):
+            if not enabled.get(module, True):
+                continue
+            note = cache.get(module) or {}
+            text = note.get("text")
+            wall_ts = note.get("wall_ts")
+            if not text or not isinstance(wall_ts, (int, float)):
+                continue
+            age = max(0, now - wall_ts)
+            # Ancient advice is worse than no advice; retries remain dirty.
+            if age > MODULE_NOTE_MAX_AGE_S * 2:
+                continue
+            ages.append(age)
+            reports.append(f"{module} ({int(age)}s ago): {text}")
+        if ages:
+            self._module_note_ages.extend(ages)
+        return " | ".join(reports) if reports else "none"
+
+    def _always_on_module_done(self, agent_name, module, dirty_since, text, started):
+        """Store one background refresh after reacquiring the engine lock."""
+        with self.lock:
+            self._piano_refresh_inflight.discard((agent_name, module))
+            latency_ms = (time.time() - started) * 1000.0
+            totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
+            totals[0] += latency_ms
+            totals[1] += 1
+            agent = self._find_agent(agent_name)
+            if not agent:
+                return
+            if not text:
+                self._module_refresh_failures += 1
+                return
+            now = time.time()
+            cache = self._piano_module_cache.setdefault(agent_name, {})
+            cache[module] = {"tick": int(agent.get("moduleTick") or 0),
+                             "text": text, "wall_ts": now}
+            agent["moduleReports"] = {m: dict(v) for m, v in cache.items()}
+            enabled = agent.get("modules") or {}
+            due = [m for m in ("perception", "social", "desire", "reflection")
+                   if enabled.get(m, True)]
+            # Do not clear a newer dirty event that arrived while this work ran.
+            if agent.get("contextDirty") and agent.get("contextDirtySince", 0) <= dirty_since:
+                if all((cache.get(m) or {}).get("wall_ts", 0) >= dirty_since for m in due):
+                    agent["contextDirty"] = False
+
+    def _run_always_on_module(self, runner, agent_name, module, context, dirty_since):
+        started = time.time()
+        try:
+            text = runner(module, agent_name, context, frame_tick=self.frameTick,
+                          timeout_s=MODULE_REFRESH_TIMEOUT_S)
+        except Exception:
+            text = None
+        self._always_on_module_done(agent_name, module, dirty_since, text, started)
+
+    def _pulse_piano_modules(self):
+        """Dispatch one bounded, event-gated PIANO refresh pulse under lock."""
+        if not ALWAYS_ON_MODULES or not PIANO_MODULES:
+            return
+        runner = self.d.get("run_piano_module")
+        if not runner:
+            return
+        now = time.time()
+        due = []
+        for agent in self.agents:
+            # Phase A skips only agents who cannot act.  A night-wide cadence
+            # change is deliberately reserved for the optional Phase C
+            # backstop, not smuggled into this gate.
+            if MODULE_REFRESH_IDLE_SKIP and agent.get("incapacitated"):
+                continue
+            dirty = bool(agent.get("contextDirty"))
+            dirty_since = agent.get("contextDirtySince") or now
+            for priority, module in enumerate(("perception", "desire", "social", "reflection")):
+                if not (agent.get("modules") or {}).get(module, True):
+                    continue
+                note = (self._piano_module_cache.get(agent["name"], {}) or {}).get(module) or {}
+                age = now - note.get("wall_ts", 0)
+                # A dirty generation needs one successful report from every
+                # enabled module. Completed modules from that same generation
+                # must not jump back ahead of social/reflection on the next
+                # bounded pulse; failures retain their old wall_ts and retry.
+                dirty_due = dirty and note.get("wall_ts", 0) < dirty_since
+                if (dirty_due or age >= MODULE_NOTE_MAX_AGE_S) and (agent["name"], module) not in self._piano_refresh_inflight:
+                    # Dirty agents first; then oldest notes.  Priority retains
+                    # the legacy 1/1/2/3 cadence preference as a tie-breaker.
+                    due.append((0 if dirty else 1, -age, priority, agent, module, dirty_since))
+        due.sort(key=lambda item: item[:3])
+        free = max(0, PIANO_CONCURRENT_LLM - len(self._piano_refresh_inflight))
+        selected = due[:min(MODULE_PULSE_MAX_BATCH, free)]
+        self._module_pulse_work.append(len(selected))
+        for _, _, _, agent, module, dirty_since in selected:
+            payload = {"resources": dict(agent.get("resources") or {}),
+                       "active_project": self._active_projects_brief(),
+                       "behavior_nudge": agent.get("behaviorNudge")}
+            context = self._piano_module_context(agent, payload)
+            cache = self._piano_module_cache.get(agent["name"], {})
+            recent = []
+            for mod_name, note in cache.items():
+                age = now - note.get("wall_ts", 0)
+                if note.get("text") and age <= MODULE_NOTE_MAX_AGE_S:
+                    recent.append((age, mod_name, note["text"]))
+            if recent:
+                recent.sort()
+                context += "; last_reports=" + " | ".join(
+                    f"{mod_name}({int(age)}s ago): {text}" for age, mod_name, text in recent)
+            self._piano_refresh_inflight.add((agent["name"], module))
+            self.piano_workers.submit(self._run_always_on_module, runner, agent["name"],
+                                      module, context, dirty_since)
+
     def _run_piano_modules(self, agent_name, modules, module_tick, context):
         """Sid-parity Phase 1/5: run staggered PIANO modules on the dedicated
         piano_workers pool (never the decision pool), so a module backlog can
@@ -10627,6 +10818,8 @@ class SimEngine:
         runner = self.d.get("run_piano_module")
         if not runner or not PIANO_MODULES:
             return "none", module_tick, 0
+        if ALWAYS_ON_MODULES:
+            return self._always_on_reports(agent_name, modules), module_tick, 0
         tick = (module_tick or 0) + 1
         modules = modules or {
             "perception": True, "social": True, "desire": True, "reflection": True,
@@ -10790,7 +10983,7 @@ class SimEngine:
                         and agent["name"] in self._sage_responders(em):
                     self._rush_to_heal(agent, em)
                     return
-                if not decision or decision.get("error") == "LM Studio offline":
+                if not decision or decision.get("error") == "llm offline":
                     self.lmStatus = "offline"
                     self._apply_rule_based_fallback(agent)
                 elif decision.get("error") == "compute_error":
@@ -10983,6 +11176,12 @@ class SimEngine:
             for a in self.agents:
                 if not a["incapacitated"]:
                     self._move_agent(a, MOVE_SCALE)
+
+            # The dark-gated whiteboard scheduler runs on the world clock,
+            # never from a decision worker. An empty due-list only appends a
+            # zero-work observation and submits no GPU inference.
+            if ALWAYS_ON_MODULES and ft % int(MODULE_PULSE_INTERVAL_S * TICKS_PER_SEC) == 0:
+                self._pulse_piano_modules()
 
             em_target = self._sage_emergency()
             responders = self._sage_responders(em_target) if em_target else None
@@ -11518,6 +11717,10 @@ class SimEngine:
             self._piano_module_cache = {}
             self._piano_module_drops = 0
             self._piano_latency_ms = {}
+            self._piano_refresh_inflight = set()
+            self._module_pulse_work = []
+            self._module_refresh_failures = 0
+            self._module_note_ages = []
             ms = self.d.get("memory_store")
             if ms is not None:
                 try:

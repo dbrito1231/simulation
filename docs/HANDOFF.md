@@ -4,6 +4,12 @@
 > **only** the Cursor conversation that implemented
 > `docs/path-1-minecraft-like-world-plan.md` — verify load-bearing facts
 > against the live repo and `/state` before acting.
+>
+> **Runtime note (2026-07-24):** everything below reflects the LM Studio
+> runtime in use at the time. LM Studio has since been permanently retired
+> and replaced by Ollama (`docs/plan-ollama-migration.md`); do not treat any
+> LM Studio reference below as describing the current runtime — see
+> `ollama_config.md` for the live configuration.
 
 ---
 
@@ -203,8 +209,11 @@ budget on `reasoning_content` before ever emitting the decision JSON.
   emitted the same direct JSON, just via `reasoning_content` instead of
   `content`. Reverted to the Phase 1 fix as the final state:
   `THINKING_ENABLED_HIGH_STAKES = False` and `parallel = 3` /
-  `MAX_CONCURRENT_LLM = 3` restored for max routine-turn throughput. See
-  `lms_config.md` ("Thinking on high-stakes turns") for the full history.
+  `MAX_CONCURRENT_LLM = 3` restored for max routine-turn throughput. This was
+  under the former LM Studio runtime, since replaced by Ollama
+  (`docs/plan-ollama-migration.md`); the full history is carried forward in
+  `ollama_config.md`'s "Thinking-epidemic history" section (`lms_config.md`,
+  the original record, was removed in the migration's Phase 5).
 
 ---
 

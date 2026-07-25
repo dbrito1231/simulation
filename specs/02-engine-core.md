@@ -41,6 +41,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | `GOODS_ENABLED` | 900 | `_tick_goods` |
 | `GOODS_ENABLED` | 13500 (=`DAY_FRAMES`) | `_tick_shelter` |
 | `MEMES_ENABLED` | 90 | `_spread_beliefs_by_proximity` |
+| `ALWAYS_ON_MODULES` | `MODULE_PULSE_INTERVAL_S * TICKS_PER_SEC` (45 s; dark default) | `_pulse_piano_modules`: a bounded, non-blocking, event-gated PIANO refresh pulse |
 | `BENCHMARKS_ENABLED` | 600, or frame 60 (`FIRST_BENCHMARK_FRAME`) | `_sample_benchmarks` |
 
 After the gated systems: every non-incapacitated agent moves (`_move_agent`);
@@ -48,6 +49,13 @@ After the gated systems: every non-incapacitated agent moves (`_move_agent`);
 decrement; and, for each non-incapacitated agent not currently a designated
 emergency responder, either a reorg task steps, a goal steps, or the agent's
 `thinkTimer` reaches 0 and `_schedule_think` is attempted.
+
+When `ALWAYS_ON_MODULES` is enabled, district arrival marks that agent's module
+context dirty; inbox delivery and hunger/health threshold crossings do the
+same. Action application marks its actor dirty, and project/build/rule/role/
+belief events plus season turns mark the affected village context dirty. The
+pulse submits only up to the free PIANO-pool slots and never joins a module
+future while holding the tick lock.
 
 ## Time model
 

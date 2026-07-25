@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -729,8 +730,8 @@ def test_piano_stagger_offline():
 
     engine.d["run_piano_module"] = stub
     # Force-enable for this unit check only.
-    old = se.PIANO_MODULES
-    se.PIANO_MODULES = True
+    old, old_always = se.PIANO_MODULES, se.ALWAYS_ON_MODULES
+    se.PIANO_MODULES, se.ALWAYS_ON_MODULES = True, False
     try:
         reports1, tick1, runs1 = engine._run_piano_modules(
             "Aria",
@@ -804,7 +805,7 @@ def test_piano_stagger_offline():
         print("  OK PIANO stagger (2 / 3 / 3 modules across ticks 1-3) "
               "+ cross-module last_reports visibility, age labels, TTL cutoff")
     finally:
-        se.PIANO_MODULES = old
+        se.PIANO_MODULES, se.ALWAYS_ON_MODULES = old, old_always
 
 
 def test_piano_cache_restore_roundtrip():
@@ -818,8 +819,8 @@ def test_piano_cache_restore_roundtrip():
         return f"{module} report for {agent_name}"
 
     engine.d["run_piano_module"] = stub
-    old_piano = se.PIANO_MODULES
-    se.PIANO_MODULES = True
+    old_piano, old_always = se.PIANO_MODULES, se.ALWAYS_ON_MODULES
+    se.PIANO_MODULES, se.ALWAYS_ON_MODULES = True, False
     old_db_path = se.DB_PATH
     tmpdir = tempfile.mkdtemp()
     tmp_db = str(Path(tmpdir) / "state_roundtrip.db")
@@ -875,8 +876,92 @@ def test_piano_cache_restore_roundtrip():
         print("  OK PIANO module cache rehydrates from state.db after restore "
               "and serves an off-tick fill on the first post-restore turn")
     finally:
-        se.PIANO_MODULES = old_piano
+        se.PIANO_MODULES, se.ALWAYS_ON_MODULES = old_piano, old_always
         se.DB_PATH = old_db_path
+
+
+def test_always_on_piano_pulse():
+    """Phase A: the gated scheduler does no clean work and decisions only read."""
+    engine = make_engine(4)
+    calls = []
+
+    def stub(module, agent_name, context, frame_tick=None, timeout_s=None):
+        calls.append((module, agent_name, timeout_s))
+        return f"{module} note"
+
+    old_always, old_piano = se.ALWAYS_ON_MODULES, se.PIANO_MODULES
+    se.ALWAYS_ON_MODULES, se.PIANO_MODULES = True, True
+    try:
+        engine.d["run_piano_module"] = stub
+        now = time.time()
+        # A clean, fresh roster must make a true zero-dispatch pulse.
+        for agent in engine.agents:
+            agent["contextDirty"] = False
+            agent["contextDirtySince"] = now
+            engine._piano_module_cache[agent["name"]] = {
+                m: {"tick": 0, "text": "fresh", "wall_ts": now}
+                for m in ("perception", "social", "desire", "reflection")}
+        engine._pulse_piano_modules()
+        assert_true(not calls and engine._module_pulse_work[-1] == 0,
+                    (calls, engine._module_pulse_work))
+
+        # One dirty subject is selected, bounded by free PIANO slots, and
+        # completion writes persistent wall-clock reports then clears dirty.
+        agent = engine.agents[0]
+        agent["contextDirty"] = True
+        agent["contextDirtySince"] = time.time()
+        for note in engine._piano_module_cache[agent["name"]].values():
+            note["wall_ts"] = agent["contextDirtySince"] - 1
+        engine._pulse_piano_modules()
+        deadline = time.time() + 2
+        while engine._piano_refresh_inflight and time.time() < deadline:
+            time.sleep(.01)
+        assert_true(0 < len(calls) <= min(se.MODULE_PULSE_MAX_BATCH, se.PIANO_CONCURRENT_LLM), calls)
+        assert_true(all(timeout_s == se.MODULE_REFRESH_TIMEOUT_S
+                        for _, _, timeout_s in calls), calls)
+        assert_true(agent["contextDirty"], "batch cap should leave remaining modules due")
+        # A pulse may refresh fewer than the remaining modules (batch=1 in
+        # the Attempt-2 re-soak), so drain bounded pulses until this dirty
+        # generation has every enabled report instead of assuming batch=2.
+        for _ in range(4):
+            if not agent["contextDirty"]:
+                break
+            engine._pulse_piano_modules()
+            deadline = time.time() + 2
+            while engine._piano_refresh_inflight and time.time() < deadline:
+                time.sleep(.01)
+        assert_true(not agent["contextDirty"], agent)
+        report, tick, runs = engine._run_piano_modules(agent["name"], agent["modules"], 7, "unused")
+        assert_true(tick == 7 and runs == 0 and "s ago):" in report, (report, tick, runs))
+
+        # A failed refresh preserves its prior note and remains eligible.
+        agent["contextDirty"] = True
+        agent["contextDirtySince"] = time.time()
+        old_note = dict(engine._piano_module_cache[agent["name"]]["perception"])
+        engine.d["run_piano_module"] = lambda *args, **kwargs: None
+        engine._piano_module_cache[agent["name"]].pop("desire")
+        engine._pulse_piano_modules()
+        deadline = time.time() + 2
+        while engine._piano_refresh_inflight and time.time() < deadline:
+            time.sleep(.01)
+        assert_true(agent["contextDirty"], "failed refresh incorrectly cleared dirty")
+        assert_true(engine._piano_module_cache[agent["name"]]["perception"] == old_note,
+                    "failed refresh replaced prior note")
+        # The server runner keeps 15s for legacy fan-out and accepts the
+        # explicit 60s always-on override without changing its default.
+        import server  # noqa: E402
+        timeouts, old_complete = [], server.lm_complete
+        server.lm_complete = lambda *args, **kwargs: timeouts.append(kwargs["timeout"]) or "ok"
+        try:
+            server.run_piano_module("perception", "Aria", "ctx")
+            server.run_piano_module("perception", "Aria", "ctx",
+                                    timeout_s=se.MODULE_REFRESH_TIMEOUT_S)
+        finally:
+            server.lm_complete = old_complete
+        assert_true(timeouts == [server.PIANO_MODULE_TIMEOUT_S, se.MODULE_REFRESH_TIMEOUT_S], timeouts)
+        print("  OK always-on PIANO pulse is gated, bounded, uses 60s refreshes, and preserves 15s fan-out")
+    finally:
+        se.ALWAYS_ON_MODULES, se.PIANO_MODULES = old_always, old_piano
 
 
 def test_library_scaling_and_lessons():
@@ -1374,6 +1459,7 @@ def main():
     test_role_fallback_switch()
     test_piano_stagger_offline()
     test_piano_cache_restore_roundtrip()
+    test_always_on_piano_pulse()
     test_library_scaling_and_lessons()
     test_civic_era_requires_both_light_and_transit()
 

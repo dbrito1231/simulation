@@ -1,6 +1,6 @@
 """Deterministic smoke harness for Path 1 (Minecraft-like world depth).
 
-No LM Studio required. Run:
+No LLM runtime (Ollama) required. Run:
 
     uv run python scripts/path1_smoke.py
 """

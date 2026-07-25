@@ -1,0 +1,41 @@
+# Modelfile.fast -- sim-fast (MODEL_FAST)
+#
+# Provenance: FROM the registry-pulled `llama3.2:3b` (Q4_K_M, ~2 GB), NOT
+# the LM Studio-cached beehive-lab FP16 GGUF. Phase 0 rejected that cached
+# file (see "Ollama Phase 0 findings (2026-07-24)" in TASKS_PENDING.md,
+# finding #8/#9): it is FP16 (~2.4x the VRAM/compute of a Q4 quant, ~8 GB
+# resident alone) and its embedded chat template leaks raw ChatML stop
+# tokens (`<|im_end|>`, `<|fim_end|>`) into `content` on some prompts --
+# unacceptable for the PIANO module / summarizer / meta-system outputs this
+# tier serves. `ollama pull llama3.2:3b` gets Meta's own quant with a clean,
+# matching Llama 3.2 template instead. `FROM llama3.2:3b` in a Modelfile
+# layers on that already-pulled registry model (verified working in
+# Ollama 0.32.3) rather than re-downloading blobs.
+#
+# num_ctx 4096: this tier serves one-sentence/one-number PIANO module,
+# summarizer/wiki-merge, and meta-system prompts (~1k tokens per Phase 0's
+# plan estimate) -- see ollama_config.md for the budget table.
+#
+# Sampling params mirror simulation/server.py's NON_THINKING_SAMPLING dict
+# (top_p 0.8, top_k 20, min_p 0) plus the lm_complete() default temperature
+# (0.5, the background-cognition entry point that always routes to
+# MODEL_FAST). Same caveat as Modelfile.smart: server.py sends its own
+# per-request `options` which win over these; this just keeps standalone/
+# manual invocations consistent.
+#
+# NO SYSTEM directive -- see Modelfile.smart's note; Phase 6 territory only,
+# and only applies to sim-smart per the migration plan (the load-time
+# rulebook is the elder/decision system prompt, not the module prompts this
+# tier serves).
+#
+# Canonical applier: scripts/ollama_setup.py (`ollama create sim-fast -f
+# ollama/Modelfile.fast`, idempotent). The script also `ollama pull
+# llama3.2:3b` first if the base model is missing.
+
+FROM llama3.2:3b
+
+PARAMETER num_ctx 4096
+PARAMETER temperature 0.5
+PARAMETER top_p 0.8
+PARAMETER top_k 20
+PARAMETER min_p 0
