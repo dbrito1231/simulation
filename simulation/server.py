@@ -1,6 +1,8 @@
 # HOW TO RUN:
 # 1. pip install flask flask-cors requests
-# 2. Make sure LM Studio is running at localhost:1234 with a model loaded
+# 2. Make sure Ollama is running at localhost:11434 with sim-smart and
+#    sim-fast created/warm (uv run python scripts/ollama_setup.py --check to
+#    verify; uv run python scripts/ollama_setup.py to (re)apply)
 # 3. python server.py
 # 4. Open http://127.0.0.1:5001 in Chrome or Firefox
 #    (macOS AirPlay uses port 5000 and returns 403 — do not use 5000)
@@ -24,15 +26,26 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
+# Ollama migration (2026-07-24, docs/plan-ollama-migration.md Phase 2):
+# LM Studio is permanently unavailable. Native /api/chat is the only endpoint
+# that actually honors think:false (Phase 0 finding #4 -- the OpenAI-compat
+# /v1/chat/completions endpoint silently ignores it and would reintroduce the
+# thinking-leak epidemic), so this repo targets it exclusively. See
+# ollama_config.md for the full settings contract.
+OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
 
 # Model routing: high-stakes turns (the elder's leadership/approval decisions,
 # and any villager turn taken while invention is REQUIRED, i.e. blueprint
 # authoring) go to MODEL_SMART; routine villager turns and background
-# cognition go to MODEL_FAST. Ids must match LM Studio's loaded-model ids
-# (GET /v1/models). If a routed id isn't available, run_agent_decision
-# degrades to "local-model" for the rest of the session (same pattern as the
-# response_format auto-degrade), so a single-model setup keeps working.
+# cognition go to MODEL_FAST. Ids must be models created in Ollama (`ollama
+# list` / GET /api/tags) -- scripts/ollama_setup.py is the canonical loader
+# that creates/warms both. Both constants point at sim-smart for this single-
+# model cutover phase; Phase 3 flips MODEL_FAST to sim-fast (a distinct
+# ~3B model) once the two-model split is validated live, per the plan. If a
+# routed id isn't available, run_agent_decision treats that as a setup
+# failure (see looks_like_model_not_found_error) and returns the offline
+# fallback -- Ollama has no "local-model" alias to retry with like LM Studio
+# did, so there's no silent single-model degrade path anymore.
 #
 # Both tiers currently resolve to gemma: the 2026-07-02 session showed
 # llama-3.2-3b picking move_to_district on 95% of 2,764 villager turns (the
@@ -46,8 +59,8 @@ LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 # vs 7, and authored 20/20 valid blueprints vs 19/20, at ~3s/decision more.
 # qwen emits via reasoning_content (empty content) — extract_decision_text
 # already handles that path.
-MODEL_SMART = "qwen/qwen3.5-9b"
-MODEL_FAST = "qwen/qwen3.5-9b"
+MODEL_SMART = "sim-smart"
+MODEL_FAST = "sim-smart"  # Phase 3 flips this to "sim-fast"; see comment above.
 
 # Thinking control (2026-07-11): routine villager turns run with reasoning
 # DISABLED -- the old '"thinking": {"type": "disabled"}' payload key was
@@ -61,6 +74,14 @@ MODEL_FAST = "qwen/qwen3.5-9b"
 # routing meaningful even while both tiers point at one model.
 # Replay bench (scripts/llm_replay_bench.py, 40 calls): thinking-leak
 # 100% -> 0%, JSON validity 100% -> 100%, action diversity unchanged.
+#
+# Ollama migration (2026-07-24): the LM Studio-specific "reasoning_effort"
+# knob above is history -- Ollama's native /api/chat has its own top-level
+# "think" boolean, verified live (Phase 0 finding #4) to actually suppress
+# reasoning output entirely (no separate `thinking` field, no <think> tags in
+# content). DISABLE_THINKING_ROUTINE now means "send think:false on routine
+# turns" (see to_ollama_body / build_decision_payload); the historical intent
+# (routine turns never spend budget on reasoning) is unchanged.
 DISABLE_THINKING_ROUTINE = True
 
 # Thinking on high-stakes turns is DISABLED (reverted 2026-07-14, Phase 3 --
@@ -91,7 +112,10 @@ THINKING_ENABLED_HIGH_STAKES = False
 # Qwen-recommended sampling pins (model card). Only temperature was sent
 # before; top_p/top_k/min_p silently followed whatever LM Studio preset was
 # active, which drifts across app updates and reloads. Temperatures stay the
-# behavior-tuned values below.
+# behavior-tuned values below. Under Ollama these route into the request's
+# "options" object (see to_ollama_body) rather than top-level payload keys;
+# the dict shape here is unchanged since it's just merged into the internal
+# payload before conversion.
 NON_THINKING_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0}
 THINKING_SAMPLING = {"top_p": 0.95, "top_k": 20}
 
@@ -129,7 +153,7 @@ HIGH_STAKES_MAX_TOKENS = 1600
 # in the 2026-07-07 session, well under the old flat 30s -- but invention-only
 # turns (bigger prompt: function-block schema, tier rules, sprite instructions
 # + few-shot example) measured median ~32s / max ~33.6s, so ~71% of them were
-# timing out, logged as "LM Studio offline", and silently falling back to a
+# timing out, logged as "llm offline", and silently falling back to a
 # non-propose action -- the actual reason invention councils kept dissolving
 # with zero proposals (12 dissolutions, only 2 successful proposals logged).
 # Invention turns are rare (a few per hour) so a generous timeout costs
@@ -787,7 +811,7 @@ with open(_ROLES_PATH, encoding="utf-8") as _f:
 # role -> preferred project (string or list, mirroring the client).
 ROLE_PROJECT = {role: d["preferredProject"] for role, d in ROLES.items()}
 
-# --- Structured output (LM Studio response_format) ---
+# --- Structured output (Ollama `format`, via the internal response_format shape) ---
 # Constrain the model to emit a conforming JSON decision at decode time, which
 # largely eliminates the malformed-JSON fallback path. "json_schema" shapes every
 # field; "json_object" only guarantees syntactic validity; "off" disables it.
@@ -965,28 +989,49 @@ DECISION_SCHEMA = {
     },
 }
 
-# Flipped off for the rest of the session if LM Studio rejects response_format.
+# Flipped off for the rest of the session if Ollama rejects the format/
+# json-schema field. Ollama's `format` param is stable (Phase 0 finding #2 --
+# a full JSON schema was honored in every trial), so this auto-degrade is a
+# safety net now rather than an expected path, but it stays in place.
 _structured_output_enabled = STRUCTURED_OUTPUT_MODE != "off"
 
-# Flipped off for the rest of the session if LM Studio doesn't know the routed
-# model ids (MODEL_SMART/MODEL_FAST) -- falls back to "local-model", which LM
-# Studio resolves to whatever single model is loaded.
+# Flipped off (and the setup-failure warning logged once) if Ollama doesn't
+# have a routed model id (MODEL_SMART/MODEL_FAST) created. Unlike LM Studio,
+# Ollama has no generic "local-model" alias to retry with -- a missing model
+# is a setup failure (see looks_like_model_not_found_error and its call site
+# in run_agent_decision), so this flag no longer gates a retry; it only
+# avoids repeat-logging the same warning every subsequent call.
 _model_routing_enabled = True
 
 
+def _ollama_error_parts(lm_body):
+    """Extract (message, type) from an Ollama /api/chat error body. Modern
+    Ollama (0.32.3, per Phase 0 finding #5) returns a structured
+    {"error": {"code":, "message":, "type":, ...}} object on HTTP 400s (e.g.
+    type "exceed_context_size_error"); tolerate a bare string too in case a
+    future/older build differs."""
+    err = lm_body.get("error") if isinstance(lm_body, dict) else None
+    if isinstance(err, dict):
+        return str(err.get("message") or err), err.get("type")
+    return str(err or ""), None
+
+
 def looks_like_model_not_found_error(http_status, lm_body):
-    """True when LM Studio rejected the request because the requested model id
-    isn't downloaded/loaded (as opposed to any other error)."""
-    text = ""
-    if isinstance(lm_body, dict):
-        text = str(lm_body.get("error") or "")
+    """True when Ollama rejected the request because the requested model id
+    isn't created/pulled (as opposed to any other error) -- a setup failure,
+    not a transient condition (see run_agent_decision's handling)."""
+    text, _ = _ollama_error_parts(lm_body) if isinstance(lm_body, dict) else ("", None)
     low = text.lower()
     return bool(low) and "model" in low and any(
         k in low for k in ("not found", "no model", "failed to load", "unknown model"))
 
 
 def build_response_format():
-    """The response_format payload field for the current mode, or None."""
+    """The internal response_format payload field for the current mode, or
+    None. Kept in this OpenAI-style shape (rather than Ollama's flatter
+    `format` field) so the rest of this module's payload-building code is
+    unchanged; to_ollama_body() extracts the actual JSON schema object out of
+    the "json_schema" nesting when converting to the wire request."""
     if not _structured_output_enabled:
         return None
     if STRUCTURED_OUTPUT_MODE == "json_schema":
@@ -1000,14 +1045,56 @@ def build_response_format():
 
 
 def looks_like_response_format_error(http_status, lm_body):
-    """True when LM Studio rejected the request specifically over response_format."""
-    text = ""
-    if isinstance(lm_body, dict):
-        text = str(lm_body.get("error") or lm_body)
+    """True when Ollama rejected the request specifically over the `format`
+    (JSON-schema) field. Rare in practice (see _structured_output_enabled's
+    comment) but the auto-degrade safety net stays in place regardless."""
+    text, _ = _ollama_error_parts(lm_body) if isinstance(lm_body, dict) else ("", None)
     if http_status == 400 or text:
         low = text.lower()
-        return any(k in low for k in ("response_format", "json_schema", "grammar", "schema"))
+        return any(k in low for k in ("response_format", "format", "json_schema", "grammar", "schema"))
     return False
+
+
+def to_ollama_body(payload):
+    """Convert the internal OpenAI-chat-completions-shaped payload this
+    module builds (model, messages, max_tokens, temperature, sampling keys,
+    an optional response_format, an optional boolean `think`) into an Ollama
+    native /api/chat request body:
+      - messages: pass through unchanged.
+      - max_tokens -> options.num_predict.
+      - temperature/top_p/top_k/min_p/presence_penalty -> options.*.
+      - response_format (json_schema nesting, see build_response_format) ->
+        format: the extracted schema object; json_object -> format: "json".
+      - think: passed through as-is under its own Ollama-native name (False
+        suppresses reasoning entirely -- Phase 0 finding #4 -- callers set it
+        by putting payload["think"] = False; omitting the key lets the model
+        think, matching Ollama's own default semantics, so no translation is
+        needed for this one field)."""
+    options = {}
+    for key in ("temperature", "top_p", "top_k", "min_p", "presence_penalty"):
+        if key in payload:
+            options[key] = payload[key]
+    if "max_tokens" in payload:
+        options["num_predict"] = payload["max_tokens"]
+    body = {
+        "model": payload["model"],
+        "messages": payload["messages"],
+        "stream": False,
+        "options": options,
+    }
+    if "think" in payload:
+        body["think"] = payload["think"]
+    response_format = payload.get("response_format")
+    if response_format:
+        schema = None
+        if isinstance(response_format, dict):
+            if response_format.get("type") == "json_schema":
+                schema = (response_format.get("json_schema") or {}).get("schema")
+            elif response_format.get("type") == "json_object":
+                schema = "json"
+        if schema:
+            body["format"] = schema
+    return body
 
 SYSTEM_PROMPT = """You are an autonomous agent in a pixel-art village simulation.
 Your shared goal: help the village grow into a civilization by gathering resources,
@@ -2780,7 +2867,7 @@ def run_belief_pitch(speaker_name, listener_name, belief, pitch, relationship,
     """Score one explicit persuasion pitch outside SimEngine's lock.
 
     Returns a bounded quality float or None, allowing the engine to use its
-    deterministic offline quality/roll when LM Studio is unavailable. The
+    deterministic offline quality/roll when the LLM is unavailable. The
     engine owns the session cap and only calls this from an already-bounded
     cognition request.
     """
@@ -2967,19 +3054,33 @@ def strip_code_fences(text):
     return cleaned.strip()
 
 
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+
+
 def lm_message_text(message):
-    """Return model output text; reasoning models may leave content empty."""
+    """Return the model's output text from an Ollama /api/chat message.
+
+    Ollama's native endpoint with think:false fully suppresses reasoning --
+    no separate `thinking` field, no <think> tags in content (Phase 0 finding
+    #4) -- so unlike LM Studio there is no reasoning_content fallback channel
+    to check anymore (that was purely an LM Studio quirk). As defense in
+    depth, if a <think>...</think> block ever leaks into content anyway (a
+    contract violation -- would mean `think` wasn't actually sent False, or a
+    future Ollama version changed behavior), strip it rather than feed
+    chain-of-thought into the decision JSON parser."""
     if not isinstance(message, dict):
         return ""
     content = (message.get("content") or "").strip()
-    if content:
-        return content
-    return (message.get("reasoning_content") or "").strip()
+    if content and _THINK_TAG_RE.search(content):
+        stripped = _THINK_TAG_RE.sub("", content).strip()
+        if stripped:
+            content = stripped
+    return content
 
 
 def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
                 timeout=30, raise_timeout=False):
-    """Plain-text LM Studio completion for the background cognition loops
+    """Plain-text Ollama completion for the background cognition loops
     (Summarizer, meta system, PIANO modules / Cognitive Controller). Returns the
     text or None on any failure so every caller can degrade gracefully.
 
@@ -2990,27 +3091,29 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
     wants to log/count timeouts distinctly (run_piano_module) can -- every
     other caller keeps the original swallow-and-return-None behavior."""
     payload = {
-        # Background cognition is routine work -- always the fast model.
-        "model": MODEL_FAST if _model_routing_enabled else "local-model",
+        # Background cognition is routine work -- always the fast model. (No
+        # LM-Studio-style "local-model" alias to fall back to in Ollama -- a
+        # missing model id is a setup failure, handled where the call sites
+        # actually see the error, not here.)
+        "model": MODEL_FAST,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "stream": False,
         **NON_THINKING_SAMPLING,
     }
     if DISABLE_THINKING_ROUTINE:
-        # See the constant's comment: reasoning_effort is the field this
-        # LM Studio build honors. All lm_complete callers are low-stakes.
-        payload["reasoning_effort"] = "none"
+        # See DISABLE_THINKING_ROUTINE's comment: Ollama's native "think"
+        # boolean is the knob (LM Studio's "reasoning_effort" is history).
+        # All lm_complete callers are low-stakes/routine.
+        payload["think"] = False
     try:
-        resp = requests.post(LM_STUDIO_URL, json=payload, timeout=timeout)
+        resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=timeout)
         body = resp.json()
-        choice = body["choices"][0]
-        message = choice["message"]
-        finish_reason = choice.get("finish_reason")
+        message = body["message"]
+        done_reason = body.get("done_reason")
     except requests.exceptions.Timeout:
         if raise_timeout:
             raise
@@ -3020,25 +3123,20 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
         return None
     if not isinstance(message, dict):
         return None
-    content = (message.get("content") or "").strip()
-    if content:
-        text = content
-        if is_scaffold_text(text):
-            # A reasoning-class model sometimes echoes the instruction as a
-            # preamble ("Input: Parents' names...") even in `content` with
-            # thinking disabled -- if a real answer follows on a later line,
-            # extract_plain_answer's last-line rule recovers it; otherwise
-            # this still rejects and the caller falls back deterministically.
-            text = extract_plain_answer(text)
-    else:
-        text = extract_plain_answer((message.get("reasoning_content") or "").strip())
+    text = lm_message_text(message)
+    if text and is_scaffold_text(text):
+        # A reasoning-class model sometimes echoes the instruction as a
+        # preamble ("Input: Parents' names...") even in `content` with
+        # thinking disabled -- if a real answer follows on a later line,
+        # extract_plain_answer's last-line rule recovers it; otherwise
+        # this still rejects and the caller falls back deterministically.
+        text = extract_plain_answer(text)
     if not text or is_scaffold_text(text):
         return None
-    if finish_reason == "length" and text.rstrip("'\" ")[-1:] not in ".!?":
-        # max_tokens cut generation off before a full sentence -- this model
-        # keeps "thinking" past the token budget even with thinking
-        # disabled, so what's left is a mid-thought fragment (e.g. "Output"
-        # or "Invent one brief personality trait"), not a real answer.
+    if done_reason == "length" and text.rstrip("'\" ")[-1:] not in ".!?":
+        # max_tokens (options.num_predict) cut generation off before a full
+        # sentence -- what's left is a mid-thought fragment (e.g. "Output" or
+        # "Invent one brief personality trait"), not a real answer.
         return None
     return text
 
@@ -3377,7 +3475,7 @@ _system_prompt_mismatch_warned = False
 def _check_system_prompt_stability(system_content):
     """Log-once guard (Phase 2, TASKS_PENDING #2a): warn if the routine-turn
     system message differs from the one seen on a prior routine turn this
-    session. LM Studio reuses KV cache by longest common prefix per slot, so
+    session. Ollama (llama.cpp-based, same as LM Studio) reuses KV cache by longest common prefix per slot, so
     a system-prompt mutation mid-session would silently forfeit that reuse
     for every subsequent call -- this makes it observable instead.
 
@@ -3408,8 +3506,9 @@ def _check_system_prompt_stability(system_content):
 
 
 def build_decision_payload(data, self_prompt, response_format, slim=False):
-    """Assemble the LM Studio chat-completion payload for a decision call.
-    slim=True builds the reduced-context retry payload (see
+    """Assemble the internal chat-completion-shaped payload for a decision
+    call (converted to Ollama's /api/chat wire body by to_ollama_body() at
+    the actual POST site). slim=True builds the reduced-context retry payload (see
     run_agent_decision): SYSTEM_PROMPT_SLIM instead of SYSTEM_PROMPT (drops
     the worked EXAMPLE blocks) plus the slim user prompt. The rules and JSON
     schema are kept either way so response_format still shapes the output.
@@ -3430,7 +3529,8 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
             # specs/03-cognition.md KV-cache prefix stability note).
             _check_system_prompt_stability(system_content)
     # Persona goes at the TOP OF THE USER MESSAGE, not appended to the system
-    # prompt: LM Studio reuses KV cache by longest common prefix per slot, so
+    # prompt: Ollama (llama.cpp-based, same as LM Studio) reuses KV cache by
+    # longest common prefix per slot, so
     # per-agent text inside the system message forced full prompt
     # reprocessing (~5k tokens) on every agent rotation. With the system
     # prompt byte-identical across agents it becomes a shared cached prefix.
@@ -3453,24 +3553,25 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
             temperature = INVENTION_TEMPERATURE
     elif thinking_active:
         # Phase 2: high-stakes turns with thinking re-enabled need extra
-        # budget for reasoning_content on top of the decision JSON.
+        # budget for reasoning output on top of the decision JSON.
         max_tokens = HIGH_STAKES_MAX_TOKENS
     payload = {
-        "model": model_for_decision(data) if _model_routing_enabled else "local-model",
+        "model": model_for_decision(data),
         "messages": [
             {"role": "system", "content": system_content},
             {"role": "user", "content": user_content},
         ],
         "max_tokens": max_tokens,
         "temperature": temperature,
-        "stream": False,
     }
     if thinking_active:
         payload.update(THINKING_SAMPLING)
+        # thinking_active turns intentionally omit "think" -- see
+        # to_ollama_body's docstring: omitted means the model may think.
     else:
         payload.update(NON_THINKING_SAMPLING)
         if DISABLE_THINKING_ROUTINE:
-            payload["reasoning_effort"] = "none"
+            payload["think"] = False
         if ROUTINE_PRESENCE_PENALTY:
             payload["presence_penalty"] = ROUTINE_PRESENCE_PENALTY
     if response_format is not None:
@@ -3478,10 +3579,18 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     return payload
 
 
-def is_context_overflow_error(err_text):
-    """True for LM Studio's per-slot context-window error, e.g.
-    {"error": "Context size has been exceeded."}."""
-    return "context size has been exceeded" in (err_text or "").lower()
+def is_context_overflow_error(err_text, err_type=None):
+    """True for Ollama's context-overflow signal (docs/ollama_config.md
+    'Overflow / truncation contract', Phase 0 finding #5): HTTP 400 with
+    error.type == "exceed_context_size_error" is the structured, preferred
+    signal; a message mentioning both "context" and "exceed" is the fallback
+    for any future Ollama build that changes the type string. This replaces
+    LM Studio's "context size has been exceeded" string-sniff -- Ollama does
+    NOT silently truncate (confirmed live), it errors instead."""
+    if err_type == "exceed_context_size_error":
+        return True
+    low = (err_text or "").lower()
+    return "context" in low and "exceed" in low
 
 
 def score_belief_pitch_decision(decision, data):
@@ -3522,7 +3631,7 @@ def score_belief_pitch_decision(decision, data):
 
 
 def run_agent_decision(data):
-    """Build the prompt, call LM Studio, and return a validated decision dict.
+    """Build the prompt, call Ollama, and return a validated decision dict.
 
     Shared by the HTTP /agent/think endpoint and the server-authoritative
     SimEngine's think worker. Returns a plain dict (already normalized) — on any
@@ -3588,13 +3697,19 @@ def run_agent_decision(data):
 
         global _structured_output_enabled, _model_routing_enabled
 
+        # Ollama does not cancel server-side generation when a client
+        # aborts/times out a stream:false request (Phase 0 operational
+        # finding, ollama_config.md) -- an orphaned timed-out request keeps
+        # consuming a queue slot. Do not add a retry-on-timeout loop here;
+        # every requests.exceptions.RequestException path below (including
+        # Timeout) returns immediately instead of firing a second request.
         start = datetime.now()
         try:
-            resp = requests.post(LM_STUDIO_URL, json=payload, timeout=request_timeout)
+            resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
         except requests.exceptions.RequestException:
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            log_lm(latency_ms, error="LM Studio offline")
-            return {"error": "LM Studio offline", "action": "rest"}
+            log_lm(latency_ms, error="llm offline")
+            return {"error": "llm offline", "action": "rest"}
 
         latency_ms = int((datetime.now() - start).total_seconds() * 1000)
         http_status = resp.status_code
@@ -3604,23 +3719,25 @@ def run_agent_decision(data):
         except ValueError:
             lm_body = None
 
-        # Auto-degrade: if LM Studio rejected response_format (model doesn't
-        # support structured output), disable it for the session and retry once
-        # so this turn still succeeds. Prevents a regression to all-fallback.
+        # Auto-degrade: if Ollama rejected the `format` (JSON-schema) field,
+        # disable structured output for the session and retry once so this
+        # turn still succeeds. Ollama's format param is stable (Phase 0
+        # finding #2) so this is expected to fire rarely, but the safety net
+        # stays in place.
         if ("response_format" in payload and _structured_output_enabled
                 and looks_like_response_format_error(http_status, lm_body)):
-            print("[server] LM Studio rejected response_format; disabling "
+            print("[server] Ollama rejected the format/json-schema field; disabling "
                   "structured output for this session and retrying without it.")
             _structured_output_enabled = False
             payload.pop("response_format", None)
             response_format = None
             start = datetime.now()
             try:
-                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=request_timeout)
+                resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
             except requests.exceptions.RequestException:
                 latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-                log_lm(latency_ms, error="LM Studio offline")
-                return {"error": "LM Studio offline", "action": "rest"}
+                log_lm(latency_ms, error="llm offline")
+                return {"error": "llm offline", "action": "rest"}
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -3628,29 +3745,18 @@ def run_agent_decision(data):
             except ValueError:
                 lm_body = None
 
-        # Auto-degrade: if the routed model id isn't loaded in LM Studio,
-        # disable per-role routing for the session and retry once with the
-        # generic "local-model" id, so a single-model setup keeps working.
-        if (_model_routing_enabled
-                and looks_like_model_not_found_error(http_status, lm_body)):
-            print(f"[server] LM Studio doesn't know model {payload.get('model')!r}; "
-                  f"disabling per-role model routing for this session and retrying "
-                  f"with 'local-model'.")
-            _model_routing_enabled = False
-            payload["model"] = "local-model"
-            start = datetime.now()
-            try:
-                resp = requests.post(LM_STUDIO_URL, json=payload, timeout=request_timeout)
-            except requests.exceptions.RequestException:
-                latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-                log_lm(latency_ms, error="LM Studio offline")
-                return {"error": "LM Studio offline", "action": "rest"}
-            latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            http_status = resp.status_code
-            try:
-                lm_body = resp.json()
-            except ValueError:
-                lm_body = None
+        # A missing routed model id is a setup failure, not a transient
+        # condition -- Ollama has no LM-Studio-style "local-model" alias to
+        # fall back to. Log once per session and return the offline fallback
+        # rather than retrying (see scripts/ollama_setup.py).
+        if looks_like_model_not_found_error(http_status, lm_body):
+            if _model_routing_enabled:
+                print(f"[server] Ollama doesn't have model {payload.get('model')!r} "
+                      f"created/loaded -- this is a setup failure. Run "
+                      f"`uv run python scripts/ollama_setup.py` then restart the server.")
+                _model_routing_enabled = False
+            log_lm(latency_ms, response=lm_body, http_status=http_status, error="model_not_found")
+            return {"error": "llm offline", "action": "rest"}
 
         if lm_body is None:
             return bad_response_fallback(latency_ms, http_status=http_status)
@@ -3661,11 +3767,11 @@ def run_agent_decision(data):
         # lm_studio.jsonl per the plan, without double-logging each attempt.
         error_kind = None
         if isinstance(lm_body, dict) and lm_body.get("error"):
-            err = str(lm_body.get("error"))
-            if "compute error" in err.lower():
+            err_text, err_type = _ollama_error_parts(lm_body)
+            if "compute error" in err_text.lower():
                 log_lm(latency_ms, response=lm_body, http_status=http_status, error="compute_error")
                 return {"error": "compute_error", "action": "rest"}
-            if not is_context_overflow_error(err):
+            if not is_context_overflow_error(err_text, err_type):
                 return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status)
 
             # Retry ONCE with a slimmed-down payload: no memory line, no
@@ -3678,11 +3784,11 @@ def run_agent_decision(data):
             payload = slim_payload
             retry_start = datetime.now()
             try:
-                resp = requests.post(LM_STUDIO_URL, json=slim_payload, timeout=request_timeout)
+                resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(slim_payload), timeout=request_timeout)
             except requests.exceptions.RequestException:
                 latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
                 log_lm(latency_ms, error=error_kind)
-                return {"error": "LM Studio offline", "action": "rest"}
+                return {"error": "llm offline", "action": "rest"}
             latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -3696,10 +3802,18 @@ def run_agent_decision(data):
                 return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status, error=error_kind)
 
         try:
-            message = lm_body["choices"][0]["message"]
-        except (TypeError, KeyError, IndexError):
+            message = lm_body["message"]
+        except (TypeError, KeyError):
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
                                           error=error_kind or "bad_response")
+        if isinstance(message, dict):
+            # No reasoning_content channel exists in Ollama's response shape
+            # (that was purely an LM Studio quirk) -- keep the key present as
+            # an empty string in the logged response for log-shape
+            # compatibility with any downstream tooling that still reads it
+            # (e.g. scripts/llm_replay_bench.py's thinking-leak analysis,
+            # ported to the new shape in Phase 4).
+            message.setdefault("reasoning_content", "")
 
         raw_text = lm_message_text(message)
         decision = extract_json_decision(raw_text)
@@ -3835,7 +3949,8 @@ else:
 
 @app.route("/council-llm-log")
 def council_llm_log():
-    """Return slim LM Studio decision records for a council frame window.
+    """Return slim decision records (lm_studio.jsonl, filename kept -- see
+    Phase 5) for a council frame window.
 
     Only blueprint-pitch and verdict turns are included — routine gather/talk
     decisions from the same agents during the council window are omitted."""
@@ -3966,7 +4081,7 @@ if __name__ == "__main__":
     # http://<host-ip>:5001. On Windows, allow inbound TCP 5001 through the
     # firewall (or accept the first-run prompt). threaded=True lets the request
     # handlers run concurrently alongside the (forthcoming) SimEngine thread.
-    # NOTE: this exposes the server — including the LM Studio proxy — to the whole
+    # NOTE: this exposes the server — including the Ollama proxy — to the whole
     # local network. Intended for a trusted home LAN, not a hostile network.
     HOST = os.environ.get("SIM_HOST", "0.0.0.0")
     PORT = int(os.environ.get("SIM_PORT", "5001"))

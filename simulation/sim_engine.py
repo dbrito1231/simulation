@@ -604,8 +604,11 @@ RULE_KINDS = {"resource_tax", "custom", "priority"}
 CUSTOM_RULE_ACTIONS = {"collect_resource", "contribute_resources", "craft_item"}
 CUSTOM_RULE_MODIFIER_MAX = 3
 
-# Must match LM Studio's loaded parallel slots (scripts/lms_load.py loads
-# context 20000 / parallel 3 -- per-slot budget ~6666 tokens). Raised 2->3 on
+# Must match Ollama's OLLAMA_NUM_PARALLEL (3, set by scripts/ollama_setup.py;
+# see ollama_config.md -- per-model num_ctx, not a shared per-slot budget,
+# under Ollama). History below predates the Ollama migration (2026-07-24) and
+# refers to LM Studio's old context 20000 / parallel 3 setup (scripts/
+# lms_load.py, slated for removal in the migration's Phase 5). Raised 2->3 on
 # 2026-07-11 for +50% think throughput, then dropped 3->2 on 2026-07-14
 # (Phase 2, see .claude/plans/only-create-the-plan-linear-iverson.md) to give
 # high-stakes thinking turns (needing ~950-1,300 completion tokens on top of a
@@ -618,9 +621,12 @@ MAX_CONCURRENT_LLM = 3
 # Sid-parity Phase 1: PIANO module calls (perception/social/desire/reflection)
 # get their own small pool, bounded independently of MAX_CONCURRENT_LLM, so a
 # module backlog can never starve the decision path -- see
-# SimEngine.piano_workers / _run_piano_modules. Context budget for LM Studio
-# must now cover MAX_CONCURRENT_LLM + PIANO_CONCURRENT_LLM = 5 parallel slots
-# (specs/03-cognition.md).
+# SimEngine.piano_workers / _run_piano_modules. Under Ollama, sim-smart and
+# sim-fast each have their own num_ctx (20480 / 4096) rather than a shared
+# per-slot token budget; OLLAMA_NUM_PARALLEL=3 must still cover
+# MAX_CONCURRENT_LLM (decision calls) and PIANO_CONCURRENT_LLM (module calls)
+# running concurrently against their respective model (specs/03-cognition.md,
+# ollama_config.md).
 PIANO_CONCURRENT_LLM = 2
 # Off-tick module reports (e.g. social/reflection on a tick they don't fire)
 # are served from the last real report instead of an empty slot, as long as
@@ -10790,7 +10796,7 @@ class SimEngine:
                         and agent["name"] in self._sage_responders(em):
                     self._rush_to_heal(agent, em)
                     return
-                if not decision or decision.get("error") == "LM Studio offline":
+                if not decision or decision.get("error") == "llm offline":
                     self.lmStatus = "offline"
                     self._apply_rule_based_fallback(agent)
                 elif decision.get("error") == "compute_error":
