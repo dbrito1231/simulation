@@ -1,4 +1,4 @@
-"""Deterministic blueprint validation/recovery checks (no LM Studio)."""
+"""Deterministic blueprint validation/recovery checks (no LLM runtime required)."""
 from __future__ import annotations
 
 import re

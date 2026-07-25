@@ -14,26 +14,67 @@ that front this pipeline), [specs/07-actions.md](07-actions.md) (the action
 catalog — not repeated here).
 
 > **Migration note (2026-07-24):** the sim's LLM runtime has cut over from LM
-> Studio to Ollama (`docs/plan-ollama-migration.md` Phase 2). LM Studio is
+> Studio to Ollama (`docs/plan-ollama-migration.md` Phases 2-3). LM Studio is
 > permanently unavailable. See [ollama_config.md](../ollama_config.md) for
 > the full settings/contract reference (required env vars, VRAM gate,
 > restore procedure). This spec documents what `simulation/server.py`
-> actually sends as of Phase 2: native `POST http://localhost:11434/api/chat`
-> (`OLLAMA_CHAT_URL`), `stream:false`. `MODEL_SMART` and `MODEL_FAST` both
-> currently resolve to `"sim-smart"` (single-model cutover); Phase 3 flips
-> `MODEL_FAST` to `"sim-fast"` and adds a startup assert that the two differ.
-> Historical LM Studio numbers/behavior remain in comments and
-> `lms_config.md` for context but no longer describe the running system.
+> actually sends as of the Phase 3 revision: native
+> `POST http://localhost:11434/api/chat` (`OLLAMA_CHAT_URL`), `stream:false`.
+> `MODEL_SMART = "sim-smart"` (qwen3.5 9B, `num_ctx=20480`) and
+> `MODEL_FAST = "sim-fast"` (`llama3.2:3b`, `num_ctx=4096`) are genuinely
+> distinct models split **by workload kind, not by decision stakes**: ALL
+> decision turns (routine and high-stakes) route to `MODEL_SMART`;
+> `MODEL_FAST` serves only background cognition (PIANO modules, memory
+> summarizer/wiki merge, meta system, belief pitch — every direct
+> `lm_complete()` caller). This supersedes an initial Phase 3 attempt that
+> also routed routine decisions to `sim-fast`: a live soak measured
+> `piano_module_drops` climbing to ~25-38% (vs. the ~9% pre-migration
+> reference) and module latencies rising instead of falling, because routine
+> decisions and PIANO modules were contending for `sim-fast`'s
+> `OLLAMA_NUM_PARALLEL=3` slots. Keeping decisions entirely on `sim-smart`
+> (a separate, uncontended slot pool) removes that contention. Both models
+> are created via `scripts/ollama_setup.py` and kept resident with
+> `OLLAMA_KEEP_ALIVE=-1`. A module-init check in server.py prints a loud
+> `[server] WARNING: MODEL_FAST == MODEL_SMART` if the two constants ever
+> collapse back to the same value (env override, hotfix, etc.) — implemented
+> as a **warning, not a hard assert/crash**: the plan called for a startup
+> assert enforcing the "permanent two-model MUST", but a hard crash on a
+> config regression would strand the 24/7 sim server with no rollback runtime
+> (LM Studio is gone). The warning fires once at import time and the server
+> continues to start; decisions and background cognition would silently
+> share the smart model's queue until the regression is fixed. Historical LM
+> Studio numbers/behavior remain in comments and `ollama_config.md`'s
+> "Thinking-epidemic history" section (the original record, `lms_config.md`,
+> was removed in the migration's Phase 5) for context but no longer describe
+> the running system.
 
 ## Ollama call settings
 
 | Call type | System prompt | Model | max_tokens (→ options.num_predict) | temperature | timeout | sampling |
 |---|---|---|---|---|---|---|
-| Routine decision | `SYSTEM_PROMPT` (or `SYSTEM_PROMPT_SLIM` on retry) | `MODEL_FAST` | 512 | 0.4 | `DEFAULT_TIMEOUT_S`=30s | `NON_THINKING_SAMPLING` + `think:false` |
-| High-stakes decision (elder / `invention_status` REQUIRED / rate-limited emergency,election,treaty_vote) | `SYSTEM_PROMPT`/slim | `MODEL_SMART` | 512 (1600 only if thinking re-enabled, currently dead code) | 0.4 | `THINKING_TIMEOUT_S`=75s | `THINKING_SAMPLING` if `THINKING_ENABLED_HIGH_STAKES` (omits `think`, i.e. thinking on), else same as routine |
+| Routine decision | `SYSTEM_PROMPT` (or `SYSTEM_PROMPT_SLIM` on retry) | `MODEL_SMART` (`sim-smart`, qwen3.5 9B) | 512 | 0.4 | `DEFAULT_TIMEOUT_S`=30s | `NON_THINKING_SAMPLING` + `think:false` |
+| High-stakes decision (elder / `invention_status` REQUIRED / rate-limited emergency,election,treaty_vote) | `SYSTEM_PROMPT`/slim | `MODEL_SMART` (`sim-smart`, qwen3.5 9B) | 512 (1600 only if thinking re-enabled, currently dead code) | 0.4 | `THINKING_TIMEOUT_S`=75s | `THINKING_SAMPLING` if `THINKING_ENABLED_HIGH_STAKES` (omits `think`, i.e. thinking on), else same as routine |
 | Invention-only turn | `INVENTION_SYSTEM_PROMPT` | `MODEL_SMART` (sprite/invention always high-stakes) | `INVENTION_MAX_TOKENS`=1024 | `INVENTION_TEMPERATURE`=0.6 | 75s | as above |
 | Sprite-design turn | `SPRITE_UPGRADE_SYSTEM_PROMPT` | `MODEL_SMART` | 768 | 0.3 | 75s | as above |
-| Background `lm_complete` (memory summarizer, PIANO modules, meta system) | caller-supplied one-off prompt | `MODEL_FAST` always | caller-set (80/60/100/40 per call site) | caller-set (0.4-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
+| Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/60/80/100/220 per call site) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`), 15s for PIANO modules (`PIANO_MODULE_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
+
+Note the Routine-decision and High-stakes-decision rows both resolve to
+`MODEL_SMART` now — they're kept as separate table rows because
+`is_high_stakes_turn` still fully determines timeout, max_tokens, and
+thinking/sampling for each, independent of the (now-constant) model choice.
+
+Phase 3 input-size sanity check (all against `sim-fast`'s `num_ctx=4096`):
+the largest background call is the wiki-memory merge
+(`sim_engine.py:_run_wiki_memory_merge`, `max_tokens=220`) — its prompt is 3
+wiki sections (`WIKI_SECTION_CHAR_CAP=300` chars each, ~225 tokens) plus up to
+12 recent memories (each capped at 280 chars on store, ~840 tokens) plus a
+~180-token system prompt, roughly 1,250 input tokens. The meta/autobiography
+call (`run_meta_update`, `max_tokens=100`) joins up to 14 memories
+(~980 tokens) plus report fields and a ~150-token system prompt, roughly
+1,150 input tokens; the follow-up persona call adds the ~300-char
+autobiography, still under 1,500 input tokens. All are well under half of
+4096, so no truncation risk and no input capping was added — this is a
+documented finding, not a code change.
 
 `to_ollama_body(payload)` (server.py, next to `build_response_format`) is the
 single conversion point every call site routes through: it takes the
@@ -47,17 +88,24 @@ body — `messages` pass through; `max_tokens` → `options.num_predict`;
 `think` passes through under its own Ollama-native name if present (omitted
 = let the model think).
 
-`MODEL_SMART` and `MODEL_FAST` both currently resolve to `"sim-smart"`
-(server.py) — kept as two separate constants (not a single model string)
-because `is_high_stakes_turn()` is a real predicate used for routing *and*
-timeout/thinking selection, not just a model-id compare; Phase 3 makes the
-distinction load-bearing by pointing `MODEL_FAST` at `"sim-fast"`. Fallback:
-Ollama has no LM-Studio-style `"local-model"` alias to retry with — if
-`looks_like_model_not_found_error` fires, that is treated as a **setup
-failure**: the server logs a `[server]` line pointing at `uv run python
-scripts/ollama_setup.py`, disables `_model_routing_enabled` (session-wide,
-to avoid repeat-logging), and returns `{"error": "llm offline", "action":
-"rest"}` immediately — no retry (see Retries).
+`MODEL_SMART = "sim-smart"` and `MODEL_FAST = "sim-fast"` (server.py).
+`model_for_decision(data)` always returns `MODEL_SMART` — decisions never
+route to `sim-fast`, regardless of `is_high_stakes_turn(data)`.
+`is_high_stakes_turn()` remains a real, actively-used predicate: it still
+selects timeout (`THINKING_TIMEOUT_S` vs `DEFAULT_TIMEOUT_S`), max_tokens
+(`HIGH_STAKES_MAX_TOKENS`), and sampling/thinking (`THINKING_SAMPLING` vs
+`NON_THINKING_SAMPLING`) — only its role in picking the model id was removed.
+`MODEL_FAST` is reserved for background cognition only (PIANO modules, the
+memory summarizer/wiki merge, the meta system, belief-pitch scoring — every
+direct `lm_complete()` caller); see Concurrency & context sizing for why
+(decision/background contention on `sim-fast`'s slot pool measured in the
+first Phase 3 attempt). Fallback: Ollama has no LM-Studio-style
+`"local-model"` alias to retry with — if `looks_like_model_not_found_error`
+fires, that is treated as a **setup failure**: the server logs a `[server]`
+line pointing at `uv run python scripts/ollama_setup.py`, disables
+`_model_routing_enabled` (session-wide, to avoid repeat-logging), and returns
+`{"error": "llm offline", "action": "rest"}` immediately — no retry (see
+Retries).
 
 `NON_THINKING_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0}`;
 `THINKING_SAMPLING = {"top_p": 0.95, "top_k": 20}` (server.py) — Qwen
@@ -125,7 +173,24 @@ expected path.
 
 ## Prompt construction
 
-`SYSTEM_PROMPT` (server.py:885-1111, ~20 numbered rule groups): talk-gating,
+`SYSTEM_PROMPT` and `SYSTEM_PROMPT_SLIM` live in `simulation/prompts.py`
+(moved out of server.py 2026-07-24, docs/plan-ollama-migration.md Phase 6) —
+the single source of truth both `server.py` (`import prompts as _prompts`,
+aliased at module scope so every existing `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM`
+reference below is unchanged) and `scripts/ollama_setup.py --with-system`
+import from, so the rulebook text is never duplicated. `prompts.py` also owns
+the one `TECH_TREE_ENABLED`-gated rewrite (documents the optional blueprint
+`"tier"` field) and the two `[server] system prompt sha256=...` startup-proof
+prints — both now fire at `prompts.py`'s import time (which server.py triggers
+near the top of its own module, before Flask is constructed), not at the
+bottom of server.py where they used to live. `prompts.py` is importable on its
+own (it only imports `sim_engine.py` for the `TECH_TREE_ENABLED` flag, which
+has no import-time side effects) without importing `server.py` — `server.py`
+has module-level side effects on import (opens a new session log directory,
+constructs the live `SimEngine`) that make it unsafe for a setup script to
+import.
+
+`SYSTEM_PROMPT` (~20 numbered rule groups): talk-gating,
 build-project/district steering, ecology/terraform, blueprints (two-stage Sage
 review then approve/reject), survival (hunger/health/heal), crafting/recipes,
 Sage-priority-absolute emergency response, Path 1 (tools/blocks/treaties),
@@ -244,15 +309,67 @@ above — see the rationale note just above this one).
   and never changes again for the life of the process.
 - **Mid-session mismatch guard:** `_check_system_prompt_stability()` (server.py,
   just above `build_decision_payload`) runs only on the primary (non-slim)
-  routine-turn dispatch. Fast path is an `is` identity check against the
-  system string used on the previous routine turn (near-zero cost, since
-  `SYSTEM_PROMPT` is a stable module global); only on an identity mismatch
-  does it fall back to a value/hash comparison. If the content has actually
-  changed, it prints one `[server] WARNING: system prompt changed
+  routine-turn dispatch, and only when `SYSTEM_PROMPT_AT_LOAD_TIME` is False
+  (see below) — an intentionally *omitted* system message is not a "changed
+  prefix" and must not trip this guard. Fast path is an `is` identity check
+  against the system string used on the previous routine turn (near-zero
+  cost, since `SYSTEM_PROMPT` is a stable module global); only on an identity
+  mismatch does it fall back to a value/hash comparison. If the content has
+  actually changed, it prints one `[server] WARNING: system prompt changed
   mid-session (cache invalidated) old_sha256=... new_sha256=...` line
   (log-once, never raises) so a regression that silently reintroduces a
   per-call system rebuild is observable in soak logs instead of only showing
   up as an unexplained latency regression.
+
+### Load-time rulebook (`SYSTEM_PROMPT_AT_LOAD_TIME`, default False, dark) {#load-time-rulebook}
+
+Phase 6 of `docs/plan-ollama-migration.md` (TASKS_PENDING item 2b revived —
+LM Studio could never set a default system prompt at load time, see that
+item's history; Ollama's Modelfile `SYSTEM` directive is the mechanism that
+was missing). Ships **dark** (flag False) — machinery is in place but
+inactive pending an A/B soak.
+
+- **The flag** (`server.py`, near `MODEL_SMART`/`MODEL_FAST`): when True, the
+  primary (non-slim) dispatch of every routine/high-stakes decision turn that
+  is not `sprite_design_only` or `invention_only` — i.e. the same "else"
+  branch of `build_decision_payload` that already used `SYSTEM_PROMPT`/
+  `SYSTEM_PROMPT_SLIM` — omits the system message from `messages` entirely
+  and routes to `MODEL_SMART_SYS` (`"sim-smart-sys"`) instead of
+  `MODEL_SMART`. The slim-retry path (`slim=True`), `invention_only`, and
+  `sprite_design_only` turns are **unaffected**: they always send their own
+  explicit system message (`SYSTEM_PROMPT_SLIM` / `INVENTION_SYSTEM_PROMPT` /
+  `SPRITE_UPGRADE_SYSTEM_PROMPT` respectively) and stay on `MODEL_SMART` for
+  cache-locality — their prompts differ from the baked `SYSTEM_PROMPT`, and
+  Ollama's verified semantics (an explicit request-time system message always
+  *replaces*, never concatenates with, a Modelfile `SYSTEM` directive — see
+  `ollama_config.md` "Modelfile SYSTEM semantics") make them correct either
+  way, so there's no correctness reason to route them to `sim-smart-sys`.
+- **`sim-smart-sys`**: a Modelfile-generated Ollama model, SEPARATE from
+  `sim-smart` (same base GGUF/`num_ctx`/sampling params as
+  `ollama/Modelfile.smart`, plus a `SYSTEM """..."""` block). Generated —
+  never hand-copied — by `uv run python scripts/ollama_setup.py
+  --with-system`, which imports `simulation/prompts.py`'s `SYSTEM_PROMPT`
+  (the canonical text stays in `prompts.py`; the Modelfile is a build
+  artifact) and writes `ollama/Modelfile.smart.system` (git-ignored-style
+  generated file, DO-NOT-EDIT header, regenerate after any `SYSTEM_PROMPT`
+  change) before running `ollama create sim-smart-sys -f
+  ollama/Modelfile.smart.system`. Creating/updating `sim-smart-sys` never
+  touches the live `sim-smart`/`sim-fast` models (distinct name, safe to run
+  while the sim server is up — verified live 2026-07-24: `/api/ps` showed
+  `sim-smart`/`sim-fast` `size_vram`/`expires_at` unchanged across the
+  `--with-system` run).
+- **Gate before flipping** (same bar TASKS_PENDING item 2b originally
+  specified): an A/B soak comparing decision fallback rate (`bad_response` +
+  `role_fallback`) and action distribution against a flag-off session of
+  similar length. The tripwire is "the model forgets a distant/baked system
+  prompt under a long user message" — a real risk for small local models that
+  was never actually tested here (LM Studio could not reach this experiment
+  at all; see TASKS_PENDING item 2b's history). Flip procedure:
+  `ollama_config.md` "Load-time rulebook (dark)".
+- **Payoff if the gate passes:** ~3k tokens off every routine decision turn
+  (the rulebook is baked in instead of resent), the `context_overflow` class
+  should largely disappear, and per-turn prompt processing drops by roughly
+  half.
 
 Measured prompt size: ~3,100-3,400 prompt tokens per routine decision call
 (docs/REFERENCE.md:40); invention-only prompts run larger due to the
@@ -463,14 +580,17 @@ three highest preserved skill records and two newest chronicle entries, with a
 
 ## Routing
 
-`model_for_decision(data)` = `MODEL_SMART` if `is_high_stakes_turn(data)` else
-`MODEL_FAST` (server.py). No fallback id — see Retries for what happens if
-the routed id isn't created in Ollama.
+`model_for_decision(data)` = `MODEL_SMART` unconditionally (server.py) —
+every decision turn, routine or high-stakes, routes to `sim-smart`.
+`is_high_stakes_turn(data)` is still computed and still fully controls
+timeout/max_tokens/thinking-sampling selection (see the Ollama call settings
+table); it no longer affects which model id is used. No fallback id — see
+Retries for what happens if the routed id isn't created in Ollama.
 `_base_high_stakes(data)` (server.py, unbudgeted): `sprite_design_only`,
 `invention_only`, `role=="elder"`, or `invention_status` starting with
 `"REQUIRED"`. `HIGH_STAKES_ENABLED_REASONS = {"emergency", "election",
 "treaty_vote"}` (server.py:160) — extra reasons that ALSO route to
-`MODEL_SMART`/`THINKING_TIMEOUT_S`, gated by a rolling-window limiter:
+`THINKING_TIMEOUT_S`/thinking-on, gated by a rolling-window limiter:
 `EXTRA_THINKING_PER_WINDOW=4` per `EXTRA_THINKING_WINDOW_S=60` seconds
 (server.py:168-185), thread-safe via `_extra_thinking_lock`. Deliberately
 excluded from the enabled-reasons set: `elder_blueprint_review` (redundant —
@@ -511,7 +631,7 @@ path, not experimental. Module calls run on their own pool,
 never dispatches into `self._executor`. Every module call routes to
 `MODEL_FAST` with a hard, non-blocking `PIANO_MODULE_TIMEOUT_S = 15s` timeout
 (server.py `run_piano_module`); a timeout is dropped, never retried (per the
-orphan caveat in Retries), logged to `lm_studio.jsonl` with `"error":
+orphan caveat in Retries), logged to `llm.jsonl` with `"error":
 "piano_module_timeout"`, and counted in the
 `piano_module_drops` benchmark. Reports are cached per `(agent, module)` with
 a `PIANO_MODULE_CACHE_TTL = 2` module-tick TTL so the perception/social/desire/

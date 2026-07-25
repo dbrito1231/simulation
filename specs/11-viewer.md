@@ -33,7 +33,7 @@ world state beyond a cached palette/season key.
   (index.html:2182-2190). **Offline behavior**: the last good frame stays on
   screen and the sidebar status dot goes gray (`#9E9E9E`, index.html:1660)
   with the hint "Showing last frame; retrying /state…"
-  (index.html:1663-1664) — distinct from `lmStatus: "offline"` (LM Studio
+  (index.html:1663-1664) — distinct from `lmStatus: "offline"` (Ollama
   unreachable, Flask up) and `"compute_error"` (GPU memory error), each with
   its own dot color/label (index.html:1654-1665).
 - `DISTRICTS_POLL_MS = 3000` (index.html:1069) drives `pollDistricts()`

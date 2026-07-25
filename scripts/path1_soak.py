@@ -1,8 +1,8 @@
 """SA-9 Path 1 soak verifier — live soak orchestration + log audit.
 
 Runs the 2-hour mini-soak from docs/archive/path-1-minecraft-like-world-plan.md and
-fills audit rows 6–10. No LM Studio required for ``prompt-check`` or ``audit``
-of an existing session; live ``run`` needs the server (LM Studio optional but
+fills audit rows 6–10. No Ollama required for ``prompt-check`` or ``audit``
+of an existing session; live ``run`` needs the server (Ollama optional but
 recommended for check 8).
 
 Usage:
@@ -120,7 +120,7 @@ def estimate_prompt_tokens(payload: dict[str, Any]) -> int:
 
 
 def prompt_tokens_from_lm_record(rec: dict[str, Any]) -> int | None:
-    """Prefer LM Studio usage.prompt_tokens when logged."""
+    """Prefer the logged usage.prompt_tokens when present."""
     resp = rec.get("response")
     if isinstance(resp, dict):
         usage = resp.get("usage") or {}
@@ -228,8 +228,11 @@ def audit_logs(log_dir: Path, duration_s: float = 0.0) -> AuditReport:
     lm_errors = 0
     error_kinds: dict[str, int] = {}
     token_samples: list[int] = []
-    for rec in _stream_jsonl(log_dir / "lm_studio.jsonl"):
-        if rec.get("type") != "lm_studio" and "agent_name" not in rec:
+    llm_log = log_dir / "llm.jsonl"
+    if not llm_log.is_file():
+        llm_log = log_dir / "lm_studio.jsonl"  # fallback: pre-rename sessions
+    for rec in _stream_jsonl(llm_log):
+        if rec.get("type") not in ("llm", "lm_studio") and "agent_name" not in rec:
             continue
         lm_total += 1
         if rec.get("error"):
@@ -297,7 +300,7 @@ def audit_logs(log_dir: Path, duration_s: float = 0.0) -> AuditReport:
         ))
     elif duration_s > 300:
         report.rows.append(AuditRow(8, "LLM errors <5%", None,
-                                    "no lm_studio.jsonl entries — LM Studio offline or no think turns"))
+                                    "no llm.jsonl entries — Ollama offline or no think turns"))
     else:
         report.rows.append(AuditRow(8, "LLM errors <5%", None, "soak too short / no LM calls yet"))
 
@@ -330,7 +333,7 @@ def audit_logs(log_dir: Path, duration_s: float = 0.0) -> AuditReport:
     else:
         report.rows.append(AuditRow(9, "No 3h deadlock", None, "no craft/build activity logged yet"))
 
-    # --- Check 10: Prompt ≤5800 tokens (from lm_studio samples) ---
+    # --- Check 10: Prompt ≤5800 tokens (from llm.jsonl samples) ---
     if token_samples:
         mx = max(token_samples)
         avg = sum(token_samples) / len(token_samples)

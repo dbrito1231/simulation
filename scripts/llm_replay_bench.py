@@ -1,8 +1,14 @@
 """Replay-benchmark logged LLM decision calls against LM Studio.
 
-Replays requests recorded in a session's lm_studio.jsonl so payload/config
-changes get a before/after number instead of ad-hoc eyeballing (the 2026-07-05
-qwen-vs-gemma comparison in server.py:41-46 had no repeatable harness).
+NOTE (2026-07-24): this script still targets the former LM Studio runtime's
+OpenAI-compat endpoint. Porting it to Ollama's native /api/chat endpoint is
+docs/plan-ollama-migration.md Phase 4 work, not yet done -- it currently only
+replays sessions logged before the Ollama cutover.
+
+Replays requests recorded in a session's llm.jsonl (falls back to the
+pre-rename lm_studio.jsonl for old sessions) so payload/config changes get a
+before/after number instead of ad-hoc eyeballing (the 2026-07-05 qwen-vs-gemma
+comparison in server.py:41-46 had no repeatable harness).
 
 Modes:
   --as-logged   resend each logged request payload verbatim (baseline)
@@ -43,15 +49,27 @@ LOGS_DIR = os.path.join(BASE_DIR, "simulation", "logs")
 LM_URL = "http://localhost:1234/v1/chat/completions"
 LM_MODELS_URL = "http://localhost:1234/v1/models"
 
-# Qwen-recommended sampling pins (see lms_config.md / Qwen model card).
+# Qwen-recommended sampling pins (see ollama_config.md / Qwen model card;
+# historical rationale carried from the former LM Studio runtime's
+# lms_config.md, now removed).
 NON_THINKING_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0}
 THINKING_SAMPLING = {"top_p": 0.95, "top_k": 20}
+
+
+def _llm_log_path(session_dir):
+    """llm.jsonl is the current stream name (Phase 5); lm_studio.jsonl is the
+    fallback for replaying OLD sessions logged before the rename."""
+    path = os.path.join(session_dir, "llm.jsonl")
+    if os.path.isfile(path):
+        return path
+    return os.path.join(session_dir, "lm_studio.jsonl")
 
 
 def latest_session_dir():
     dirs = [d for d in os.listdir(LOGS_DIR)
             if os.path.isdir(os.path.join(LOGS_DIR, d))
-            and os.path.isfile(os.path.join(LOGS_DIR, d, "lm_studio.jsonl"))]
+            and (os.path.isfile(os.path.join(LOGS_DIR, d, "llm.jsonl"))
+                 or os.path.isfile(os.path.join(LOGS_DIR, d, "lm_studio.jsonl")))]
     if not dirs:
         return None
     return os.path.join(LOGS_DIR, sorted(dirs)[-1])
@@ -60,7 +78,7 @@ def latest_session_dir():
 def load_entries(session_dir, n):
     """Logged decision calls with a full request payload, oldest first."""
     entries = []
-    path = os.path.join(session_dir, "lm_studio.jsonl")
+    path = _llm_log_path(session_dir)
     with open(path, encoding="utf-8") as f:
         for line in f:
             try:

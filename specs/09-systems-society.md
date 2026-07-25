@@ -229,7 +229,7 @@ There is no periodic proximity-conversion roll. The retained
 mixed-belief pairs are exposed in think payloads so the holder can use
 `talk_to_nearby`. A talk can carry a `belief_pitch` object identifying one
 belief and its pitch text. `_maybe_spread_beliefs` evaluates that pitch through
-`run_belief_pitch` when LM Studio is available. The resulting `quality`, the
+`run_belief_pitch` when Ollama is available. The resulting `quality`, the
 speaker/listener relationship, and the listener's current beliefs determine
 the conversion chance. Both the scorer and engine require the target to be in
 the existing 80px nearby-talk radius; ordinary distant `talk_to_nearby` still

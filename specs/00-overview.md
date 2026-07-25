@@ -1,7 +1,7 @@
 # SPEC 00 — Overview
 
 GitServ is a real-time, browser-viewed, server-authoritative simulation of an AI
-village: a local LLM (LM Studio) acts as the decision-making "brain" for 8–12
+village: a local LLM (Ollama) acts as the decision-making "brain" for 8–12
 autonomous pixel-art agents who move, talk, trade, gather, build, and govern
 themselves. It is a proof-of-concept of the LLM-as-brain loop, inspired by
 Project Sid, not a game or a research-grade sim.
@@ -35,7 +35,7 @@ deep mechanics.
 | `simulation/roles.json` | Single source of truth for role definitions |
 | `simulation/logs/<timestamp>/` | Per-run JSONL logs (gitignored) |
 | `specs/` | This spec set — canonical, rebuild-from-scratch documentation |
-| `scripts/` | Deterministic smoke/soak tools (no LM Studio needed for most) |
+| `scripts/` | Deterministic smoke/soak tools (no Ollama needed for most) |
 | `docs/` | CLAUDE.md companion docs: REFERENCE.md, HANDOFF.md, active plans, archive |
 
 ## Running it
@@ -46,7 +46,7 @@ uv run python simulation/server.py   # http://127.0.0.1:5001
 ```
 
 Full run/restart recipe (including the required titled-window restart convention and
-the LM Studio dependency): [CLAUDE.md](../CLAUDE.md#commands).
+the Ollama dependency): [CLAUDE.md](../CLAUDE.md#commands).
 
 ## Spec index
 

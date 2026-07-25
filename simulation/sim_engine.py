@@ -607,8 +607,8 @@ CUSTOM_RULE_MODIFIER_MAX = 3
 # Must match Ollama's OLLAMA_NUM_PARALLEL (3, set by scripts/ollama_setup.py;
 # see ollama_config.md -- per-model num_ctx, not a shared per-slot budget,
 # under Ollama). History below predates the Ollama migration (2026-07-24) and
-# refers to LM Studio's old context 20000 / parallel 3 setup (scripts/
-# lms_load.py, slated for removal in the migration's Phase 5). Raised 2->3 on
+# refers to the former LM Studio runtime's old context 20000 / parallel 3
+# setup (scripts/lms_load.py, removed in the migration's Phase 5). Raised 2->3 on
 # 2026-07-11 for +50% think throughput, then dropped 3->2 on 2026-07-14
 # (Phase 2, see .claude/plans/only-create-the-plan-linear-iverson.md) to give
 # high-stakes thinking turns (needing ~950-1,300 completion tokens on top of a

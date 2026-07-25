@@ -8,7 +8,7 @@ Inspired by the multi-agent civilization research in Project Sid, kept intention
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- [LM Studio](https://lmstudio.ai/) running locally with a model loaded
+- [Ollama](https://ollama.com/) running locally with the `sim-smart`/`sim-fast` models created (`uv run python scripts/ollama_setup.py`)
 
 ## Setup
 
@@ -26,19 +26,22 @@ pip install flask flask-cors requests
 
 ## Run
 
-1. Start LM Studio and load a model. The server expects the OpenAI-compatible API at `http://localhost:1234`.
+1. Start Ollama and run the setup script, which creates/warms the `sim-smart`/`sim-fast` models and sets the required env vars. The server targets native `http://localhost:11434/api/chat`.
+
+   ```bash
+   uv run python scripts/ollama_setup.py
+   ```
 
    > **Context length vs. parallel slots:** the engine queues up to `MAX_CONCURRENT_LLM`
    > (3, `simulation/sim_engine.py`) think requests at once, and each request's prompt is
-   > ~3,100 tokens. LM Studio divides its configured context length across its
-   > parallel slots, so if `context length ÷ parallel slots` is smaller than that,
-   > you'll see `"Context size has been exceeded"` errors under load (the app
-   > recovers gracefully with a slimmed-prompt retry, but agents can still lose a
-   > turn). Set LM Studio's context length to at least `3400 × parallel slots`, and
-   > make sure LM Studio's parallel-slot/concurrency setting is at least 3 — or run
-   > `uv run python scripts/lms_load.py` to apply the canonical target config
-   > directly. If you can't raise the context length, lower `MAX_CONCURRENT_LLM` in
-   > `simulation/sim_engine.py` instead. Full detail: [specs/03-cognition.md](specs/03-cognition.md).
+   > ~3,100 tokens. Ollama divides `num_ctx` across `OLLAMA_NUM_PARALLEL` slots, so if
+   > `num_ctx ÷ parallel` is smaller than that, requests risk the `exceed_context_size_error`
+   > overflow response under load (the app recovers gracefully with a slimmed-prompt retry,
+   > but agents can still lose a turn). `ollama/Modelfile.smart` ships `num_ctx 20480` at
+   > `OLLAMA_NUM_PARALLEL=3` (~6,827 tokens/slot) — `scripts/ollama_setup.py` applies this
+   > canonical target config directly. If you can't raise `num_ctx`, lower
+   > `MAX_CONCURRENT_LLM` in `simulation/sim_engine.py` instead. Full detail:
+   > [specs/03-cognition.md](specs/03-cognition.md).
 
 2. Start the simulation server:
 
@@ -57,7 +60,7 @@ Each server run writes session logs under `simulation/logs/` (gitignored).
 | Path | Purpose |
 |------|---------|
 | `simulation/sim_engine.py` | The engine — all world state, 30/s tick loop, `apply_decision`, persistence |
-| `simulation/server.py` | Flask API, prompt building, LM Studio integration, decision validation |
+| `simulation/server.py` | Flask API, prompt building, Ollama integration, decision validation |
 | `simulation/index.html` | Browser client and render loop |
 | `simulation/sprites.js` | Pixel-art drawing helpers |
 | `simulation/roles.json` | Single source of truth for role definitions |

@@ -7,9 +7,21 @@
 # was verified to import cleanly (`ollama create probe-smart -f ...` in
 # 52.2s, Phase 0 finding #1/#6).
 #
-# num_ctx 20480: successor to lms_config.md's LM Studio context budget
+# num_ctx 20480: successor to the former LM Studio runtime's context budget
 # (20000, parallel 3, ~6666 tokens/slot) -- see ollama_config.md for the
 # current budget table and VRAM gate numbers.
+#
+# GGUF dependency note (Phase 5 verification, 2026-07-24): `ollama create`
+# COPIES the FROM path's bytes into Ollama's own blob store
+# (%USERPROFILE%\.ollama\models\blobs\sha256-<hash>) at create time -- verified
+# live via `ollama show sim-smart --modelfile`, which resolves FROM to a blob
+# path, not the .lmstudio path below. So `sim-smart` does NOT depend on
+# %USERPROFILE%\.lmstudio\ at runtime once created; the .lmstudio cache is
+# only needed if `ollama create` is ever RE-RUN with this exact FROM line
+# (e.g. after `ollama rm sim-smart`). If the .lmstudio cache has been deleted
+# by then, pull the same weights from the registry instead (uncomment):
+#   ollama pull hf.co/lmstudio-community/Qwen3.5-9B-GGUF:Q4_K_M
+# and change FROM below to that reference before `ollama create`.
 #
 # Sampling params mirror simulation/server.py's NON_THINKING_SAMPLING dict
 # (top_p 0.8, top_k 20, min_p 0) plus the routine-decision default

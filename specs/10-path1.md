@@ -201,5 +201,5 @@ acceptance criteria) is preserved, marked historical, at
 [docs/archive/path-1-minecraft-like-world-plan.md](../docs/archive/path-1-minecraft-like-world-plan.md)
 and `.cursor/path-1-integration-contract.json` — this spec is the current
 behavior; the archived plan is not load-bearing for rebuilding the system.
-Deterministic smoke (no LM Studio needed):
+Deterministic smoke (no Ollama needed):
 `uv run python scripts/path1_smoke.py`.

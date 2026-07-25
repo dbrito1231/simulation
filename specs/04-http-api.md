@@ -30,7 +30,7 @@ route-registration mechanism is used).
 | `/meta/update` | POST | Build an autobiography + persona directive (experimental, off by default) | `{agent, report, frame_tick?}` | `{ok, autobiography, persona}` |
 | `/memory/clean` | POST | Dedupe/trim the memory store | `{frame_tick?}` | `{ok, removed, size}` |
 | `/agent/think` | POST | **Legacy** — calls `run_agent_decision()` directly | full think-payload dict (see specs/03) | validated decision dict |
-| `/council-llm-log` | GET | Slim decision records (`lm_studio.jsonl`, filename kept — Phase 5 of `docs/plan-ollama-migration.md` renames it) for a council frame window (blueprint pitches/verdicts only) | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
+| `/council-llm-log` | GET | Slim decision records (`llm.jsonl`) for a council frame window (blueprint pitches/verdicts only) | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
 | `/state` | GET | Full world snapshot for the thin viewer | — | `engine.snapshot()` — see key inventory below |
 | `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected) | — | `{districts: [...], roadNodes: {...}, roadEdges: [...]}` |
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
@@ -106,4 +106,4 @@ never break the simulation or the browser's fetch. `/memory/*` and
 false}` (HTTP 200) instead of a bare 204 on failure, so callers can branch on
 `ok` without a thrown exception ever reaching them. See
 [specs/12-ops.md](12-ops.md) for the JSONL file formats these write to
-(`activity.jsonl`, `conversation.jsonl`, `lm_studio.jsonl`, `benchmarks.jsonl`).
+(`activity.jsonl`, `conversation.jsonl`, `llm.jsonl`, `benchmarks.jsonl`).

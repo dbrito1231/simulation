@@ -28,6 +28,16 @@ it, then polls /api/version until the server is back before touching models.
 Usage:
   uv run python scripts/ollama_setup.py           # apply full target state
   uv run python scripts/ollama_setup.py --check   # readback only, no changes
+  uv run python scripts/ollama_setup.py --with-system
+      # Phase 6 (docs/plan-ollama-migration.md, dark by default -- see
+      # SYSTEM_PROMPT_AT_LOAD_TIME in simulation/server.py). Generates
+      # ollama/Modelfile.smart.system (copy of Modelfile.smart + a SYSTEM
+      # block baking in simulation/prompts.py's SYSTEM_PROMPT text, the
+      # single source of truth) and runs `ollama create sim-smart-sys -f
+      # <generated>` -- a SEPARATE model name from sim-smart, so the live
+      # sim-smart the sim server uses is untouched. Does not set env vars,
+      # restart Ollama, or touch sim-smart/sim-fast; safe to run any time,
+      # including while the sim server is live on sim-smart/sim-fast.
 """
 
 import argparse
@@ -40,11 +50,14 @@ import requests
 
 BASE = "http://localhost:11434"
 REPO_ROOT = __import__("pathlib").Path(__file__).resolve().parent.parent
+SIMULATION_DIR = REPO_ROOT / "simulation"
 MODELFILE_SMART = REPO_ROOT / "ollama" / "Modelfile.smart"
 MODELFILE_FAST = REPO_ROOT / "ollama" / "Modelfile.fast"
+MODELFILE_SMART_SYS = REPO_ROOT / "ollama" / "Modelfile.smart.system"
 
 SIM_SMART = "sim-smart"
 SIM_FAST = "sim-fast"
+SIM_SMART_SYS = "sim-smart-sys"
 FAST_BASE_MODEL = "llama3.2:3b"
 
 ENV_VARS = {
@@ -267,12 +280,99 @@ def apply():
     return 0
 
 
+def _load_system_prompt():
+    """Import simulation/prompts.py's SYSTEM_PROMPT -- the single source of
+    truth (specs/03-cognition.md) -- without importing simulation/server.py.
+    server.py has module-level side effects on import (SessionLogger() opens
+    a new simulation/logs/<timestamp>/ session directory, and the live
+    SimEngine is constructed against state.db further down the module), so
+    importing it from this setup script would create stray session
+    directories / touch persisted state just by importing it -- unacceptable
+    for a script that must be safe to run at any time. prompts.py has no such
+    side effects: it only imports sim_engine.py (for the TECH_TREE_ENABLED
+    flag), which itself does not touch state.db or start threads at import
+    time (verified by reading sim_engine.py top to bottom -- SimEngine's
+    state.db reads and thread starts only happen inside explicitly-called
+    methods, never at module scope). Prints two informational
+    "[server] system prompt sha256=..." lines as a side effect of importing
+    prompts.py (its own startup-proof logging) -- harmless, matches what
+    server.py's own startup prints."""
+    sys.path.insert(0, str(SIMULATION_DIR))
+    import prompts as _prompts  # noqa: E402
+    return _prompts.SYSTEM_PROMPT
+
+
+def generate_system_modelfile():
+    """Write ollama/Modelfile.smart.system: a copy of Modelfile.smart plus a
+    `SYSTEM \"\"\"...\"\"\"` block baking in the exact SYSTEM_PROMPT text from
+    simulation/prompts.py, and a DO-NOT-EDIT header. Never hand-edit the
+    generated file -- re-run this function (via --with-system) after any
+    SYSTEM_PROMPT change in prompts.py."""
+    print("-- generating ollama/Modelfile.smart.system --")
+    system_prompt = _load_system_prompt()
+    if '"""' in system_prompt:
+        print("  ERROR: SYSTEM_PROMPT contains a literal triple-quote, which "
+              "would break the generated Modelfile's SYSTEM \"\"\"...\"\"\" "
+              "block. Aborting generation -- fix prompts.py first.")
+        return False
+    base_text = MODELFILE_SMART.read_text(encoding="utf-8")
+    header = (
+        "# ============================================================\n"
+        "# GENERATED FILE -- DO NOT EDIT BY HAND.\n"
+        "# Produced by `uv run python scripts/ollama_setup.py --with-system`\n"
+        "# from ollama/Modelfile.smart + simulation/prompts.py's SYSTEM_PROMPT\n"
+        "# (the single source of truth -- edit the rulebook there, then\n"
+        "# re-run --with-system to regenerate this file and re-bake the\n"
+        "# sim-smart-sys model). See docs/plan-ollama-migration.md Phase 6\n"
+        "# and ollama_config.md \"Load-time rulebook (dark)\".\n"
+        "# ============================================================\n\n"
+    )
+    system_block = (
+        "\n# Baked rulebook (Phase 6, load-time system prompt) -- applies\n"
+        "# ONLY when a request omits a system message (Ollama Modelfile SYSTEM\n"
+        "# semantics, verified live: ollama_config.md \"Modelfile SYSTEM\n"
+        "# semantics\"). An explicit request-time system message always\n"
+        "# overrides this, never concatenates with it.\n"
+        f'SYSTEM """{system_prompt}"""\n'
+    )
+    generated = header + base_text + system_block
+    MODELFILE_SMART_SYS.parent.mkdir(parents=True, exist_ok=True)
+    MODELFILE_SMART_SYS.write_text(generated, encoding="utf-8")
+    print(f"  wrote {MODELFILE_SMART_SYS} ({len(generated)} chars, "
+          f"SYSTEM_PROMPT {len(system_prompt)} chars)")
+    return True
+
+
+def create_system_model():
+    """`ollama create sim-smart-sys -f ollama/Modelfile.smart.system`.
+    SEPARATE model name from sim-smart -- creating/updating it never touches
+    the live sim-smart/sim-fast models the sim server has resident, so this
+    is safe to run while the sim server is up."""
+    if not generate_system_modelfile():
+        return False
+    print(f"-- creating/updating {SIM_SMART_SYS} (idempotent) --")
+    rc, _ = sh([OLLAMA_CLI_EXE, "create", SIM_SMART_SYS, "-f", str(MODELFILE_SMART_SYS)],
+               timeout=600)
+    if rc != 0:
+        print(f"  ERROR: creation of {SIM_SMART_SYS} failed.")
+        return False
+    print(f"  OK: {SIM_SMART_SYS} created.")
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true", help="readback only, no changes")
+    ap.add_argument("--with-system", action="store_true",
+                     help="generate ollama/Modelfile.smart.system from "
+                          "simulation/prompts.py's SYSTEM_PROMPT and `ollama "
+                          "create sim-smart-sys` from it (Phase 6, dark). "
+                          "Does not touch sim-smart/sim-fast or env vars.")
     args = ap.parse_args()
     if args.check:
         return check()
+    if args.with_system:
+        return 0 if create_system_model() else 1
     return apply()
 
 

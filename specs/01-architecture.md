@@ -16,7 +16,7 @@ for the action catalog.
   (`self.lock`). It runs a fixed-timestep daemon thread and dispatches LLM "think"
   jobs to a bounded worker pool.
 - `simulation/server.py` is the Flask app plus the cognition layer: it builds
-  prompts, calls LM Studio, validates the response, and hands a decision back to the
+  prompts, calls Ollama, validates the response, and hands a decision back to the
   engine.
 - `simulation/index.html` + `simulation/sprites.js` poll `GET /state` (~10 Hz) and
   render; closing the browser tab does not stop the simulation.
@@ -30,7 +30,7 @@ The engine mutates state only under `self.lock`; the full world is persisted to
    `_schedule_think` submits a job to the executor (sim_engine.py:9362).
 2. `_build_think_payload(agent)` (sim_engine.py:8527) snapshots the agent's
    context **under the lock**, then releases the lock before the network call.
-3. `run_agent_decision(payload)` (server.py:2978) prompts LM Studio and extracts
+3. `run_agent_decision(payload)` (server.py:2978) prompts Ollama and extracts
    JSON.
 4. `normalize_decision` (server.py:2025) + `role_fallback_action` (server.py:1890)
    reject invalid actions and substitute a safe fallback.
@@ -64,7 +64,7 @@ locations, or the engine and the LLM-facing schema will silently diverge:
 | Location | File | What it defines |
 |---|---|---|
 | `DECISION_ACTIONS` | server.py:752 | The canonical action name list |
-| `DECISION_SCHEMA` | server.py:780 | JSON-schema structured-output shape sent to LM Studio |
+| `DECISION_SCHEMA` | server.py:780 | JSON-schema structured-output shape sent to Ollama |
 | `SYSTEM_PROMPT` | server.py:885 | Prose description of each action for the model |
 | `apply_decision` | sim_engine.py:7885 | Server-side effect when an action is chosen |
 | `available_actions` (payload) | sim_engine.py:9143 | Flag-filtered action list actually offered to an agent this think |
