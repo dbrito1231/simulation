@@ -13,6 +13,20 @@ scheduling, Sage emergency), [specs/04-http-api.md](04-http-api.md) (routes
 that front this pipeline), [specs/07-actions.md](07-actions.md) (the action
 catalog — not repeated here).
 
+> **Migration note (2026-07-24):** the sim's LLM runtime is migrating from
+> LM Studio to Ollama (`docs/plan-ollama-migration.md`). Phase 1 provisioned
+> Ollama-side config (`ollama/Modelfile.smart`, `ollama/Modelfile.fast`,
+> `scripts/ollama_setup.py`) and its own settings/contract doc,
+> [ollama_config.md](../ollama_config.md) — read that for current context
+> budgets, endpoint choice (native `/api/chat`), thinking-suppression
+> contract, and the overflow-detection contract (HTTP 400
+> `exceed_context_size_error`, not silent truncation). The LM Studio call
+> settings below are still what `simulation/server.py` actually sends as of
+> this writing (Phase 2 has not cut over yet) — they will be rewritten
+> in-place once Phase 2/5 land; until then this section and
+> `ollama_config.md` describe two different, non-overlapping points in time
+> and both are accurate for their own scope.
+
 ## LM Studio call settings
 
 | Call type | System prompt | Model | max_tokens | temperature | timeout | sampling |
