@@ -76,8 +76,17 @@ autobiography, still under 1,500 input tokens. All are well under half of
 4096, so no truncation risk and no input capping was added — this is a
 documented finding, not a code change.
 
-`to_ollama_body(payload)` (server.py, next to `build_response_format`) is the
-single conversion point every call site routes through: it takes the
+`to_ollama_body(payload)` lives in `simulation/llm_wire.py` (moved out of
+`server.py`, docs/plan-ollama-migration.md Phase 4, so
+`scripts/llm_replay_bench.py` can import the exact conversion `server.py`
+uses without importing `server.py` itself — that module has import-time side
+effects, see `simulation/prompts.py`'s docstring). `server.py` imports it
+(`import llm_wire as _llm_wire; to_ollama_body = _llm_wire.to_ollama_body`)
+right after the `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM` import near the top of
+the module, and every call site (next to `build_response_format`, and both
+`run_agent_decision`/`lm_complete`'s POST sites) still refers to it as
+`to_ollama_body`. It is the single conversion point every call site routes
+through: it takes the
 internal OpenAI-chat-completions-shaped payload this module builds (model,
 messages, max_tokens, temperature, sampling keys, an optional
 `response_format`, an optional boolean `think`) and produces the Ollama wire

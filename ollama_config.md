@@ -249,16 +249,41 @@ unset.
 
 Reference numbers from the former LM Studio runtime (2026-07-11, RTX 3060
 12 GB; full history in git — the runtime-specific config file this table
-came from, `lms_config.md`, was deleted in Phase 5) remain the baseline
-until Phase 4 ports `scripts/llm_replay_bench.py` to the Ollama endpoint and
-re-measures:
+came from, `lms_config.md`, was deleted in Phase 5) are the baseline Phase 4
+measured against, using `scripts/llm_replay_bench.py` ported to Ollama's
+native `/api/chat` endpoint (`--patched`, replaying 40 logged decision calls
+from `simulation/logs/2026-07-23T23-55-58/lm_studio.jsonl`, an LM
+Studio-era session with 3,522 logged calls):
 
-| Run | median | thinking leak | JSON valid | notes |
-|---|---|---|---|---|
-| LM Studio patched @ 13000/2 | 12.1s | 0% | 100% | historical baseline (former LM Studio runtime, now removed) |
-| LM Studio patched @ 20000/3, FA, 3 workers | 17.7s | 0% | 100% | historical baseline, 3-way concurrent — this is the reference Phase 4's +15% threshold is measured against |
-| Ollama replay bench (Phase 4) | _pending_ | _pending_ | _pending_ | fill in once `llm_replay_bench.py` is ported |
-| Ollama 45-min live soak (Phase 4) | _pending_ | _pending_ | _pending_ | fallback rate / `piano_module_drops` / truncation-detection audit |
+| Run | median | p90 | thinking leak | JSON valid | notes |
+|---|---|---|---|---|---|
+| LM Studio patched @ 13000/2 | 12.1s | — | 0% | 100% | historical baseline (former LM Studio runtime, now removed), sequential/low-parallel reference |
+| LM Studio patched @ 20000/3, FA, 3 workers | 17.7s | — | 0% | 100% | historical baseline, 3-way concurrent — this is the reference Phase 4's +15% threshold is measured against |
+| Ollama replay bench, `--patched`, workers=1 (sequential) | 5.03s | 6.12s | 0% | 100% | 40 calls, 0 errors; compare against the 12.1s sequential-ish reference |
+| Ollama replay bench, `--patched`, workers=3 (concurrent) | **9.65s** | 10.87s | 0% | 100% | 40 calls, 0 errors; compare against the 17.7s 3-way-concurrent reference — **45.5% faster**, well inside the +15% (≤20.4s) threshold |
+| Ollama replay bench, `--as-logged`, workers=3 | 8.95s | 10.67s | 0% | 100% | 40 calls, 0 errors; sanity check replaying the logged `reasoning_effort` marker as `think:false` 1:1 instead of the current-production transform — consistent with the `--patched` number |
+| Ollama 45-min live soak (Phase 4) | p50 6.20s | p90 8.25s | n/a (no `<think>` leaks observed) | n/a (0/36 decision errors) | measured against the CURRENT live session at the time of the Phase 4 run (`simulation/logs/2026-07-24T21-31-59/llm.jsonl`), which had only been running ~13 min (36 decision calls) — "whatever window exists" per the Phase 4 task; decision error/fallback count 0/36 (0%); `piano_module_drops` cumulative 9 vs. 103 successful module runs across the session's benchmark periods = **8.0%** (reference ~9%); zero `context_overflow` occurrences in the session's `llm.jsonl` (grep clean) |
+
+### Phase 4 threshold verdicts
+
+| Threshold | Target | Measured | Verdict |
+|---|---|---|---|
+| Replay p50 within +15% of the 17.7s 3-way-concurrent reference | ≤ 20.4s | 9.65s (workers=3, `--patched`) | **PASS** (45.5% faster than reference) |
+| Replay JSON-valid rate | 100% | 100% (all three replay runs, 40/40 each) | **PASS** |
+| Replay thinking leak | 0% | 0% (all three replay runs) | **PASS** |
+| Live-soak decision fallback rate (`bad_response`+`role_fallback`) not worse than pre-migration (~0 reference) | ≈0 | 0/36 (0%) | **PASS** (small sample — session had only run ~13 min at measurement time) |
+| Live-soak `piano_module_drops` | ≤ ~9% | 8.0% (9 drops / 112 attempted) | **PASS** |
+| Live-soak zero undetected truncations | 0 unrecovered `context_overflow` | 0 `context_overflow` occurrences found in the session's `llm.jsonl` | **PASS** (vacuously — none occurred to test recovery on) |
+
+Caveat: the live-soak sample is small (36 decision calls, ~13 minutes) because
+Phase 4 measured against whatever window the current session had accumulated
+at run time, per the task's instruction to use "whatever window exists"
+rather than waiting out a full 45-minute soak inline. The numbers are
+internally consistent with the rest of this document's larger live
+observations (e.g. the VRAM gate's burst test, the thinking-control
+contract's live latency figures) and comfortably clear every threshold, but a
+longer continuous soak would give a tighter confidence interval on the
+fallback-rate and drop-rate figures specifically.
 
 ## Related sim knobs (not Ollama)
 

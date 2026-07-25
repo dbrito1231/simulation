@@ -34,6 +34,15 @@ import prompts as _prompts
 SYSTEM_PROMPT = _prompts.SYSTEM_PROMPT
 SYSTEM_PROMPT_SLIM = _prompts.SYSTEM_PROMPT_SLIM
 
+# to_ollama_body (the OpenAI-shaped-payload -> Ollama /api/chat wire-format
+# conversion) lives in llm_wire.py (2026-07-24, docs/plan-ollama-migration.md
+# Phase 4) so scripts/llm_replay_bench.py can import the exact conversion
+# this module uses without importing server.py itself (see prompts.py's
+# module docstring above for why -- same import-time side-effect reasoning
+# applies here). Do not duplicate this mapping back into this module.
+import llm_wire as _llm_wire
+to_ollama_body = _llm_wire.to_ollama_body
+
 app = Flask(__name__)
 CORS(app)
 
@@ -1132,46 +1141,8 @@ def looks_like_response_format_error(http_status, lm_body):
     return False
 
 
-def to_ollama_body(payload):
-    """Convert the internal OpenAI-chat-completions-shaped payload this
-    module builds (model, messages, max_tokens, temperature, sampling keys,
-    an optional response_format, an optional boolean `think`) into an Ollama
-    native /api/chat request body:
-      - messages: pass through unchanged.
-      - max_tokens -> options.num_predict.
-      - temperature/top_p/top_k/min_p/presence_penalty -> options.*.
-      - response_format (json_schema nesting, see build_response_format) ->
-        format: the extracted schema object; json_object -> format: "json".
-      - think: passed through as-is under its own Ollama-native name (False
-        suppresses reasoning entirely -- Phase 0 finding #4 -- callers set it
-        by putting payload["think"] = False; omitting the key lets the model
-        think, matching Ollama's own default semantics, so no translation is
-        needed for this one field)."""
-    options = {}
-    for key in ("temperature", "top_p", "top_k", "min_p", "presence_penalty"):
-        if key in payload:
-            options[key] = payload[key]
-    if "max_tokens" in payload:
-        options["num_predict"] = payload["max_tokens"]
-    body = {
-        "model": payload["model"],
-        "messages": payload["messages"],
-        "stream": False,
-        "options": options,
-    }
-    if "think" in payload:
-        body["think"] = payload["think"]
-    response_format = payload.get("response_format")
-    if response_format:
-        schema = None
-        if isinstance(response_format, dict):
-            if response_format.get("type") == "json_schema":
-                schema = (response_format.get("json_schema") or {}).get("schema")
-            elif response_format.get("type") == "json_object":
-                schema = "json"
-        if schema:
-            body["format"] = schema
-    return body
+# to_ollama_body is now imported from llm_wire.py -- see the import near the
+# top of this module (just below the SYSTEM_PROMPT/SYSTEM_PROMPT_SLIM import).
 
 # SYSTEM_PROMPT / SYSTEM_PROMPT_SLIM moved to prompts.py (2026-07-24,
 # docs/plan-ollama-migration.md Phase 6) so scripts/ollama_setup.py can
