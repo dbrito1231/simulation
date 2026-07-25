@@ -651,6 +651,35 @@ a fresh, same-tick report renders as the bare `module: text` form, while an
 off-tick fill served from cache renders as `module (N turns ago): text` so
 the Cognitive Controller can discount stale advice.
 
+### Gated always-on PIANO (`ALWAYS_ON_MODULES`, default False)
+
+`ALWAYS_ON_MODULES` is a dark, one-flag-revert scheduler change. When false,
+the per-decision PIANO fan-out above is unchanged. When true,
+`MODULE_PULSE_INTERVAL_S = 45` wakes the tick loop, builds a due-list, and
+returns without submitting work if it is empty. A note is due only when its
+agent's `contextDirty` flag is set by a meaningful context event, or its
+wall-clock age reaches the long fossilization backstop
+`MODULE_NOTE_MAX_AGE_S = 600`; a stale-but-correct quiet note is deliberately
+not refreshed merely because a decision occurs. Incapacitated agents are
+skipped when `MODULE_REFRESH_IDLE_SKIP` is true. Phase A does not add a
+night-wide throttle.
+
+The pulse orders dirty work before old work and retains the legacy
+perception/desire, social x2, reflection x3 cadence as priority weights. It
+submits at most `MODULE_PULSE_MAX_BATCH = 4` and the currently free
+`PIANO_CONCURRENT_LLM` slots to `piano_workers`; completions re-acquire the
+engine lock and write `{tick, text, wall_ts}` into both the hot cache and the
+persistent `agent["moduleReports"]` mirror. Failures preserve the old note and
+leave the agent dirty for the next pulse.
+
+In this mode `_run_piano_modules` is decision-path assembly only: it launches
+no futures and labels cached reports with wall-clock age, for example
+`social (73s ago): ...`. Notes older than twice `MODULE_NOTE_MAX_AGE_S` are
+omitted. Benchmark periods log `module_note_age` (average/max of read notes),
+`module_pulse_work` (the per-pulse dispatch counts, including zero-work
+pulses), and `module_refresh_failures`, alongside existing
+`piano_module_latency`.
+
 **Working memory survives save/restore.** `_piano_module_cache` is
 engine-memory, but after every think the post-think callback (still holding
 `self.lock`, right after it sets `agent["moduleTick"]`) mirrors that agent's

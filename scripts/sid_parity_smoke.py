@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -879,6 +880,70 @@ def test_piano_cache_restore_roundtrip():
         se.DB_PATH = old_db_path
 
 
+def test_always_on_piano_pulse():
+    """Phase A: the gated scheduler does no clean work and decisions only read."""
+    engine = make_engine(4)
+    calls = []
+
+    def stub(module, agent_name, context, frame_tick=None):
+        calls.append((module, agent_name))
+        return f"{module} note"
+
+    old_always, old_piano = se.ALWAYS_ON_MODULES, se.PIANO_MODULES
+    se.ALWAYS_ON_MODULES, se.PIANO_MODULES = True, True
+    try:
+        engine.d["run_piano_module"] = stub
+        now = time.time()
+        # A clean, fresh roster must make a true zero-dispatch pulse.
+        for agent in engine.agents:
+            agent["contextDirty"] = False
+            agent["contextDirtySince"] = now
+            engine._piano_module_cache[agent["name"]] = {
+                m: {"tick": 0, "text": "fresh", "wall_ts": now}
+                for m in ("perception", "social", "desire", "reflection")}
+        engine._pulse_piano_modules()
+        assert_true(not calls and engine._module_pulse_work[-1] == 0,
+                    (calls, engine._module_pulse_work))
+
+        # One dirty subject is selected, bounded by free PIANO slots, and
+        # completion writes persistent wall-clock reports then clears dirty.
+        agent = engine.agents[0]
+        agent["contextDirty"] = True
+        agent["contextDirtySince"] = time.time()
+        for note in engine._piano_module_cache[agent["name"]].values():
+            note["wall_ts"] = agent["contextDirtySince"] - 1
+        engine._pulse_piano_modules()
+        deadline = time.time() + 2
+        while engine._piano_refresh_inflight and time.time() < deadline:
+            time.sleep(.01)
+        assert_true(0 < len(calls) <= min(se.MODULE_PULSE_MAX_BATCH, se.PIANO_CONCURRENT_LLM), calls)
+        assert_true(agent["contextDirty"], "batch cap should leave remaining modules due")
+        engine._pulse_piano_modules()
+        deadline = time.time() + 2
+        while engine._piano_refresh_inflight and time.time() < deadline:
+            time.sleep(.01)
+        assert_true(not agent["contextDirty"], agent)
+        report, tick, runs = engine._run_piano_modules(agent["name"], agent["modules"], 7, "unused")
+        assert_true(tick == 7 and runs == 0 and "s ago):" in report, (report, tick, runs))
+
+        # A failed refresh preserves its prior note and remains eligible.
+        agent["contextDirty"] = True
+        agent["contextDirtySince"] = time.time()
+        old_note = dict(engine._piano_module_cache[agent["name"]]["perception"])
+        engine.d["run_piano_module"] = lambda *args, **kwargs: None
+        engine._piano_module_cache[agent["name"]].pop("desire")
+        engine._pulse_piano_modules()
+        deadline = time.time() + 2
+        while engine._piano_refresh_inflight and time.time() < deadline:
+            time.sleep(.01)
+        assert_true(agent["contextDirty"], "failed refresh incorrectly cleared dirty")
+        assert_true(engine._piano_module_cache[agent["name"]]["perception"] == old_note,
+                    "failed refresh replaced prior note")
+        print("  OK always-on PIANO pulse is gated, bounded, nonblocking, and retries failures")
+    finally:
+        se.ALWAYS_ON_MODULES, se.PIANO_MODULES = old_always, old_piano
+
+
 def test_library_scaling_and_lessons():
     engine = make_engine(4)
     c = engine.civilization
@@ -1374,6 +1439,7 @@ def main():
     test_role_fallback_switch()
     test_piano_stagger_offline()
     test_piano_cache_restore_roundtrip()
+    test_always_on_piano_pulse()
     test_library_scaling_and_lessons()
     test_civic_era_requires_both_light_and_transit()
 
