@@ -56,7 +56,7 @@ catalog — not repeated here).
 | High-stakes decision (elder / `invention_status` REQUIRED / rate-limited emergency,election,treaty_vote) | `SYSTEM_PROMPT`/slim | `MODEL_SMART` (`sim-smart`, qwen3.5 9B) | 512 (1600 only if thinking re-enabled, currently dead code) | 0.4 | `THINKING_TIMEOUT_S`=75s | `THINKING_SAMPLING` if `THINKING_ENABLED_HIGH_STAKES` (omits `think`, i.e. thinking on), else same as routine |
 | Invention-only turn | `INVENTION_SYSTEM_PROMPT` | `MODEL_SMART` (sprite/invention always high-stakes) | `INVENTION_MAX_TOKENS`=1024 | `INVENTION_TEMPERATURE`=0.6 | 75s | as above |
 | Sprite-design turn | `SPRITE_UPGRADE_SYSTEM_PROMPT` | `MODEL_SMART` | 768 | 0.3 | 75s | as above |
-| Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/60/80/100/220 per call site) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`), 15s for PIANO modules (`PIANO_MODULE_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
+| Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/60/80/100/220 per call site) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`); PIANO fan-out 15s (`PIANO_MODULE_TIMEOUT_S`), always-on refresh 60s (`MODULE_REFRESH_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
 
 Note the Routine-decision and High-stakes-decision rows both resolve to
 `MODEL_SMART` now — they're kept as separate table rows because
@@ -668,11 +668,16 @@ optional night backstop has not been attempted.
 
 The pulse orders dirty work before old work and retains the legacy
 perception/desire, social x2, reflection x3 cadence as priority weights. It
-submits at most `MODULE_PULSE_MAX_BATCH = 4` and the currently free
-`PIANO_CONCURRENT_LLM` slots to `piano_workers`; completions re-acquire the
-engine lock and write `{tick, text, wall_ts}` into both the hot cache and the
-persistent `agent["moduleReports"]` mirror. Failures preserve the old note and
-leave the agent dirty for the next pulse.
+submits at most `MODULE_PULSE_MAX_BATCH = 2` and the currently free
+`PIANO_CONCURRENT_LLM` slots to `piano_workers`; only these always-on refresh
+calls pass `MODULE_REFRESH_TIMEOUT_S = 60` to `run_piano_module`. The legacy
+per-decision fan-out retains its 15-second HTTP / 18-second future-wait
+behavior. Completions re-acquire the engine lock and write `{tick, text,
+wall_ts}` into both the hot cache and the persistent `agent["moduleReports"]`
+mirror. Failures preserve the old note and leave the agent dirty for the next
+pulse. The Attempt-2 freshness target is median note age <=120 seconds;
+decision p50 remains the latency tiebreak after freshness and refresh-failure
+rate are acceptable.
 
 In this mode `_run_piano_modules` is decision-path assembly only: it launches
 no futures and labels cached reports with wall-clock age, for example

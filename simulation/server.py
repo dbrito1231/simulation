@@ -2589,15 +2589,17 @@ MODULE_PROMPTS = {
 PIANO_MODULE_TIMEOUT_S = 15
 
 
-def run_piano_module(module, agent_name, context, frame_tick=None):
+def run_piano_module(module, agent_name, context, frame_tick=None, timeout_s=None):
     """In-process PIANO module runner (Sid-parity Phase 5/1).
 
     Dispatched onto SimEngine.piano_workers -- a small pool bounded
     independently of MAX_CONCURRENT_LLM (the decision pool), so a module
     backlog can never starve agent decisions. Always MODEL_FAST, always a
-    hard PIANO_MODULE_TIMEOUT_S timeout. Returns a one-sentence report
+    hard PIANO_MODULE_TIMEOUT_S timeout by default. Always-on refreshes may
+    supply their separately-gated timeout. Returns a one-sentence report
     string, or None on failure/timeout (dropped, not retried).
     """
+    timeout_s = PIANO_MODULE_TIMEOUT_S if timeout_s is None else timeout_s
     sysp = MODULE_PROMPTS.get(module)
     if not sysp:
         return None
@@ -2606,7 +2608,7 @@ def run_piano_module(module, agent_name, context, frame_tick=None):
             sysp,
             f"Agent {agent_name} context: {context}",
             max_tokens=60, temperature=0.5,
-            timeout=PIANO_MODULE_TIMEOUT_S, raise_timeout=True,
+            timeout=timeout_s, raise_timeout=True,
         )
         if text:
             text = text.strip().strip('"').strip()[:200]
@@ -2621,7 +2623,7 @@ def run_piano_module(module, agent_name, context, frame_tick=None):
             "frame_tick": frame_tick,
             "module": module,
             "error": "piano_module_timeout",
-            "timeout_s": PIANO_MODULE_TIMEOUT_S,
+            "timeout_s": timeout_s,
         })
         return None
     except Exception:

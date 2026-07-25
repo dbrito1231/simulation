@@ -650,9 +650,10 @@ PIANO_CROSS_CONTEXT_TTL = 6
 # Dark-gated default. Phase B's contention gate did not pass, so retain the
 # original rest window; the optional Phase C night backstop is not attempted.
 MODULE_PULSE_INTERVAL_S = 45
-MODULE_PULSE_MAX_BATCH = 4
+MODULE_PULSE_MAX_BATCH = 2
 MODULE_NOTE_MAX_AGE_S = 600
 MODULE_REFRESH_IDLE_SKIP = True
+MODULE_REFRESH_TIMEOUT_S = 60
 # Wait budget for a dispatched module future -- strictly above server.py's
 # PIANO_MODULE_TIMEOUT_S (15s) HTTP timeout so that timeout, not this one,
 # is what fires and gets logged/counted as a drop in the normal case.
@@ -10746,7 +10747,8 @@ class SimEngine:
     def _run_always_on_module(self, runner, agent_name, module, context, dirty_since):
         started = time.time()
         try:
-            text = runner(module, agent_name, context, frame_tick=self.frameTick)
+            text = runner(module, agent_name, context, frame_tick=self.frameTick,
+                          timeout_s=MODULE_REFRESH_TIMEOUT_S)
         except Exception:
             text = None
         self._always_on_module_done(agent_name, module, dirty_since, text, started)

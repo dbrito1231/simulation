@@ -885,8 +885,8 @@ def test_always_on_piano_pulse():
     engine = make_engine(4)
     calls = []
 
-    def stub(module, agent_name, context, frame_tick=None):
-        calls.append((module, agent_name))
+    def stub(module, agent_name, context, frame_tick=None, timeout_s=None):
+        calls.append((module, agent_name, timeout_s))
         return f"{module} note"
 
     old_always, old_piano = se.ALWAYS_ON_MODULES, se.PIANO_MODULES
@@ -917,6 +917,8 @@ def test_always_on_piano_pulse():
         while engine._piano_refresh_inflight and time.time() < deadline:
             time.sleep(.01)
         assert_true(0 < len(calls) <= min(se.MODULE_PULSE_MAX_BATCH, se.PIANO_CONCURRENT_LLM), calls)
+        assert_true(all(timeout_s == se.MODULE_REFRESH_TIMEOUT_S
+                        for _, _, timeout_s in calls), calls)
         assert_true(agent["contextDirty"], "batch cap should leave remaining modules due")
         engine._pulse_piano_modules()
         deadline = time.time() + 2
@@ -939,7 +941,19 @@ def test_always_on_piano_pulse():
         assert_true(agent["contextDirty"], "failed refresh incorrectly cleared dirty")
         assert_true(engine._piano_module_cache[agent["name"]]["perception"] == old_note,
                     "failed refresh replaced prior note")
-        print("  OK always-on PIANO pulse is gated, bounded, nonblocking, and retries failures")
+        # The server runner keeps 15s for legacy fan-out and accepts the
+        # explicit 60s always-on override without changing its default.
+        import server  # noqa: E402
+        timeouts, old_complete = [], server.lm_complete
+        server.lm_complete = lambda *args, **kwargs: timeouts.append(kwargs["timeout"]) or "ok"
+        try:
+            server.run_piano_module("perception", "Aria", "ctx")
+            server.run_piano_module("perception", "Aria", "ctx",
+                                    timeout_s=se.MODULE_REFRESH_TIMEOUT_S)
+        finally:
+            server.lm_complete = old_complete
+        assert_true(timeouts == [server.PIANO_MODULE_TIMEOUT_S, se.MODULE_REFRESH_TIMEOUT_S], timeouts)
+        print("  OK always-on PIANO pulse is gated, bounded, uses 60s refreshes, and preserves 15s fan-out")
     finally:
         se.ALWAYS_ON_MODULES, se.PIANO_MODULES = old_always, old_piano
 
