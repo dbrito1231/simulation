@@ -288,6 +288,23 @@ The second latency miss closes the gate: `ALWAYS_ON_MODULES` is **OFF** and
 `MODULE_PULSE_INTERVAL_S` is restored to its 45-second dark default. Phase C
 was not attempted.
 
+### Always-on PIANO Phase B gate attempt 2 — first treatment / one retune pending
+
+| Run | Duration | Decisions | p50 / p90 | Errors / fallbacks | Module result |
+|---|---:|---:|---:|---:|---|
+| Control | 2700.9 s | 470 | 7,479 / 10,457 ms | 0 / 0 | `piano_module_drops` 117 / 1,325 (**8.83%**) |
+| Treatment, 45 s pulse / batch 2 | 2700.5 s | 778 | 8,805 / 11,229 ms | 0 / 0 | `module_refresh_failures` 6 / 78 (**7.69%**) |
+
+Treatment p50 is **+17.73%** over control, missing the +15% latency gate.
+Its note-age median/max is **576.8 / 667.8 s**, missing the Attempt-2 median
+freshness target (<=120 s) and exceeding the 600 s fossilization backstop at
+the observed maximum. All 39 pulses dispatched 2 refreshes (average 2;
+zero-work pulses 0), and sampled decision prompt reports were `none`.
+Refresh-failure rate passed the ~9% reference, and decision errors/fallbacks
+remained zero, but those do not offset the latency/freshness misses. The one
+allowed retune is `MODULE_PULSE_MAX_BATCH = 1` with the 45-second interval
+unchanged; re-soak before any further decision.
+
 Caveat: the live-soak sample is small (36 decision calls, ~13 minutes) because
 Phase 4 measured against whatever window the current session had accumulated
 at run time, per the task's instruction to use "whatever window exists"
@@ -297,6 +314,37 @@ observations (e.g. the VRAM gate's burst test, the thinking-control
 contract's live latency figures) and comfortably clear every threshold, but a
 longer continuous soak would give a tighter confidence interval on the
 fallback-rate and drop-rate figures specifically.
+
+### Always-on PIANO Phase B gate attempt 2 — second treatment (batch 1 re-soak) / FINAL VERDICT
+
+| Run | Duration | Decisions | p50 / p90 | Errors / fallbacks | Module result |
+|---|---:|---:|---:|---:|---|
+| Control (attempt 2) | 2700.9 s | 470 | 7,479 / 10,457 ms | 0 / 0 | `piano_module_drops` 117 / 1,325 (8.83%) |
+| Treatment, 45 s pulse / batch 1 re-soak | 2700.8 s | 813 | 8,487 / 10,898 ms | 0 / 0 | `module_refresh_failures` 3 / 39 (7.69%) |
+
+Treatment p50 is **+13.47%** over the attempt-2 control (8,487 ms vs. the
++15%/8,600.85 ms gate) — **latency PASSED**. Note-age median/max is **619.0 /
+793.6 s**, failing both the <=120 s median freshness gate and the <=600 s
+fossilization backstop (**FAIL**). All 39 pulses dispatched exactly 1 refresh
+(`module_pulse_work` uniformly 1; zero-work pulses = 0), so the GPU-rest
+signal also failed to appear (**FAIL**). Refresh-failure rate 3/39 = 7.69%,
+within the ~9% reference (pass), and decision errors/fallbacks stayed at 0/0.
+
+**FINAL VERDICT: gate FAILED after two treatment soaks.** Batch 2 (first
+treatment) missed latency (+17.73%); batch 1 (this re-soak) fixes latency but
+starves refresh throughput (one refresh per 45 s pulse cannot keep ~32 notes
+fresh, producing 10-17-minute-stale notes) — missing both the median-freshness
+and zero-work-pulse gates. No value of `MODULE_PULSE_MAX_BATCH` satisfies
+latency and freshness simultaneously on this hardware: this is a single-GPU
+throughput-vs-contention squeeze, not a mistuned constant. Per the retry
+recipe, this is the second and last treatment — no third tuning attempt.
+Rolled back: `ALWAYS_ON_MODULES = False`, `MODULE_PULSE_MAX_BATCH` restored to
+2 (`MODULE_REFRESH_TIMEOUT_S = 60` and `MODULE_PULSE_INTERVAL_S = 45` are left
+in place as inert attempt-2-start values, documenting the machinery while the
+flag is dark). The always-on scheduler code remains intact and untouched
+behind the flag. This feature is architecturally sound and stays dark;
+revisit only with a second GPU or a materially faster/smaller `sim-fast`
+model.
 
 ## Related sim knobs (not Ollama)
 

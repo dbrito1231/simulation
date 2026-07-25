@@ -920,10 +920,16 @@ def test_always_on_piano_pulse():
         assert_true(all(timeout_s == se.MODULE_REFRESH_TIMEOUT_S
                         for _, _, timeout_s in calls), calls)
         assert_true(agent["contextDirty"], "batch cap should leave remaining modules due")
-        engine._pulse_piano_modules()
-        deadline = time.time() + 2
-        while engine._piano_refresh_inflight and time.time() < deadline:
-            time.sleep(.01)
+        # A pulse may refresh fewer than the remaining modules (batch=1 in
+        # the Attempt-2 re-soak), so drain bounded pulses until this dirty
+        # generation has every enabled report instead of assuming batch=2.
+        for _ in range(4):
+            if not agent["contextDirty"]:
+                break
+            engine._pulse_piano_modules()
+            deadline = time.time() + 2
+            while engine._piano_refresh_inflight and time.time() < deadline:
+                time.sleep(.01)
         assert_true(not agent["contextDirty"], agent)
         report, tick, runs = engine._run_piano_modules(agent["name"], agent["modules"], 7, "unused")
         assert_true(tick == 7 and runs == 0 and "s ago):" in report, (report, tick, runs))

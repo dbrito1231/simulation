@@ -233,3 +233,34 @@ this migration exists to avoid. Native also gives a structured
 `exceed_context_size_error` (finding #5) that OpenAI-compat likely wraps
 differently (untested — out of scope once native was already established as
 the target).
+
+## 4. Always-on PIANO whiteboard — Phase B retry (attempt 2)
+
+**STATUS: CLOSED/FAILED (2026-07-25).** Both attempt-2 treatment soaks missed
+the gate (batch 2: latency +17.73%; batch 1 re-soak: freshness median 619.0s,
+zero-work pulses 0) — rolled back to `ALWAYS_ON_MODULES = False`, batch 2;
+feature stays dark pending a second GPU or a smaller/faster fast model. Full
+numbers in `ollama_config.md`'s "FINAL VERDICT" subsection. History below
+preserved as-is.
+
+Attempt 1 (2026-07-25) FAILED its GPU-contention gate and was correctly
+rolled back — `ALWAYS_ON_MODULES = False`, Phase A machinery intact and
+smoke-covered on branch `codex/always-on-modules`. Full record:
+`ollama_config.md` ("Always-on PIANO Phase B gate — FAIL / rolled back").
+
+But it was not a clean falsification: the re-soak tuned the wrong lever
+(shortened the pulse interval 45s→7s to chase a freshness miss, saturating
+the pool), and the actual bottleneck signature — 18.6% refresh failures,
+notes stale even at 7s pulses — points at the 15s module HTTP timeout, an
+artifact of the old blocking design that no longer serves a purpose when
+nothing waits on a refresh. That lever was never tried.
+
+Retry recipe (full detail in
+[docs/plan-always-on-modules.md](docs/plan-always-on-modules.md) "Phase B
+attempt 1 ... retry recipe"): separate `MODULE_REFRESH_TIMEOUT_S = 60` for
+pulse refreshes (blocking path keeps 15s), `MODULE_PULSE_MAX_BATCH = 2`,
+interval stays 45s (binding tiebreak: the latency gate always wins — never
+shorten the interval for freshness), freshness target relaxed to ≤120s
+median, both soaks recorded in full. If refresh failures stay >9% even at
+60s, record the second-GPU/smaller-model verdict and stop — no third tuning
+attempt.

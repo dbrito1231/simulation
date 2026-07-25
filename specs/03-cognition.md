@@ -675,9 +675,23 @@ per-decision fan-out retains its 15-second HTTP / 18-second future-wait
 behavior. Completions re-acquire the engine lock and write `{tick, text,
 wall_ts}` into both the hot cache and the persistent `agent["moduleReports"]`
 mirror. Failures preserve the old note and leave the agent dirty for the next
-pulse. The Attempt-2 freshness target is median note age <=120 seconds;
-decision p50 remains the latency tiebreak after freshness and refresh-failure
-rate are acceptable.
+pulse. The Attempt-2 freshness target was median note age <=120 seconds, with
+decision p50 as the latency tiebreak after freshness and refresh-failure rate
+are acceptable.
+
+**Phase B gate outcome: FAILED, machinery stays dark.** Attempt 2's first
+treatment soak (batch 2) missed both latency (+17.73%) and freshness gates.
+Its permitted retune, batch 1, passed latency on re-soak (+13.47%, within
++15%) but failed freshness (median note age 619.0s, all 39 pulses dispatching
+exactly 1 refresh with zero empty pulses) — one refresh per 45-second pulse
+cannot keep the full note set fresh. No `MODULE_PULSE_MAX_BATCH` value
+satisfies both gates simultaneously on the single-GPU reference hardware
+(contention favors latency at low batch, throughput favors freshness at
+higher batch). Per the two-soak stop rule, `ALWAYS_ON_MODULES` is rolled back
+to `False` and `MODULE_PULSE_MAX_BATCH` restored to its Phase A default of 2;
+full numbers are recorded in `ollama_config.md`. The scheduler code above
+remains intact and exercised by the deterministic smoke, dark until a second
+GPU or a materially faster/smaller fast model is available to retry.
 
 In this mode `_run_piano_modules` is decision-path assembly only: it launches
 no futures and labels cached reports with wall-clock age, for example
