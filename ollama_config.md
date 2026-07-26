@@ -562,6 +562,113 @@ bug fix) independent of the specific CPU-offload question, and do no harm at
 2-model dual residency (verified: `sim-smart`+`sim-fast` resident and stable
 after every restart in this session).
 
+## PIANO module-quality screen baseline (2026-07-25)
+
+`scripts/module_quality_screen.py` is the committed, repeatable screen for
+the shipping PIANO module layer.  It parses the literal `MODULE_PROMPTS` from
+`simulation/server.py` without importing the server (so a screen does not
+create a log session or touch `state.db`), and uses 16 fixed synthetic
+contexts (four each for Perception, Social, Desire, and Reflection).  Each
+context explicitly supplies the acting agent, role, resources, nearby named
+agents/messages, and a recent memory; its narrow factual contradiction checks
+make the grounding verdict inspectable rather than an LLM judgment.
+
+Baseline command and production request settings:
+
+```powershell
+uv run python scripts/module_quality_screen.py --model sim-fast --workers 3
+```
+
+The request body matches `run_piano_module` as it stood at this baseline:
+`max_tokens=60`, temperature `0.5`, `top_p=0.8`, `top_k=20`, `min_p=0`,
+`think:false`, and a 15-second timeout.  The harness defaults to the live
+PIANO pool's two concurrent calls; this one baseline used three concurrent
+requests (the configured Ollama parallel capacity) solely to complete all
+48 calls within the local command window.  It does not change a request's
+sampling or token settings.  The fixed contexts and temperature still make
+this a deterministic-ish screen, not a claim of bit-for-bit reproducibility.
+
+The screen runs every case three times and scores the **modal exact outcome**
+per case.  Truncation is exclusive: an output ending due to the 60-token
+limit is recorded as `truncated`, never as a grounding defect.
+
+| Category | Modal cases (of 16) | Baseline rate |
+| --- | ---: | ---: |
+| grounded-wrong | 1 | 6.3% |
+| self-coordination | 0 | 0.0% |
+| invented-entity | 0 | 0.0% |
+| truncated | 0 | 0.0% |
+| clean | 15 | 93.8% |
+
+The modal table is the Phase 0 comparison baseline.  For visibility into
+sampling variance, the underlying 48 trials had 4 grounded-wrong matches, 0
+self-coordination matches, 0 invented-entity matches, 0 truncations, and 44
+clean outcomes.  Full response text, matched checks, and payload settings can
+be retained on a future run with `--json-out <path>` and inspected with
+`--show-responses`.
+
+## PIANO module-quality screen Phase 1 prompt/token gate (2026-07-26)
+
+Phase 1 makes the module caller say `You ARE {agent_name}. Context: ...`,
+adds the context-only agents/resources/numbers guardrail to all four module
+prompts, and tells Social never to coordinate with, message, or request from
+itself. The screen now reads `PIANO_MODULE_MAX_TOKENS` from `server.py` so its
+default exactly matches production; `--max-tokens` is an intentional
+controlled comparison override. Sampling, model, endpoint, timeout, cases,
+and three-trial modal scoring remained the Phase 0 settings.
+
+Commands run:
+
+```powershell
+# Recorded Phase 0 baseline (before prompt/framing change)
+uv run python scripts/module_quality_screen.py --model sim-fast --workers 3
+
+# Guarded Phase 1 prompt at each candidate output budget
+uv run python scripts/module_quality_screen.py --model sim-fast --workers 3 --max-tokens 60
+uv run python scripts/module_quality_screen.py --model sim-fast --workers 3 --max-tokens 90
+```
+
+| Variant | grounded-wrong | self-coordination | invented-entity | truncated | clean |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Phase 0 recorded baseline: old framing/prompts, 60 | 1 | 0 | 0 | 0 | 15 |
+| Phase 1 guarded framing/prompts, 60 override | 3 | 0 | 0 | 0 | 13 |
+| Phase 1 guarded framing/prompts, 90 override | 0 | 0 | 0 | 0 | 16 |
+
+**Gate decision: SHIP 90.** The 60-token candidate made grounded-wrong and
+clean worse, so it was rejected. The 90-token candidate reduces the recorded
+Phase 0 defect total (grounded-wrong 1→0), raises clean 15→16, and makes no
+scored category worse. `PIANO_MODULE_MAX_TOKENS = 90` is therefore the
+shipping production setting. A fresh unmodified-code 60-token control run on
+2026-07-26 also happened to score 0/0/0/0/16; fixed contexts with temperature
+0.5 are deterministic-ish rather than bit-for-bit deterministic, which is why
+the committed recorded Phase 0 modal table remains the gate baseline.
+
+## Smaller `sim-fast` quality screen (2026-07-25) — NO-GO
+
+Phase 0 used 12 prompts: each of the four real `MODULE_PROMPTS` system texts
+from `simulation/server.py`, paired with three realistic synthetic contexts.
+All candidates used the server module sampling settings: temperature 0.5,
+`top_p` 0.8, `top_k` 20, `min_p` 0, and `num_predict` 60.
+
+This was a **manual qualitative review**, not a scored benchmark. The
+case-level defects retained from the 12-case side-by-side are below;
+`module-N` identifies the real module prompt and its synthetic context.
+
+| Model | Exact failed cases | Screening category |
+| --- | --- | --- |
+| `sim-fast` / `llama3.2:3b` baseline | `social-1` reversed Toma's wood request; `perception-2` reached the 60-token limit; `social-2` reached the limit and incorrectly requested extra stone; `social-3` invented Kael; `reflection-3` invented a 25% metric | Grounding and clean/coherent-format defects; imperfect, but materially more grounded overall |
+| `llama3.2:1b` | `perception-1` reached the 60-token limit on a repeat; `social-1` recommended coordinating with Mara herself; `desire-1` proposed a bridge with 3 wheat/1 wood; `desire-2` proposed a bridge with 5 wood/1 stone; `reflection-2` invented a wood-5/stone-8 stockpile target; `social-3` invented Kaito | Coherent single-sentence/clean failure for truncation; multiple grounding failures and self-coordination |
+| `smollm2:1.7b` | `perception-1` reached the 60-token limit; `social-1` self-coordinated Mara and asked Toma for wood despite his request; `desire-1` combined harvest and bridge goals; `reflection-1` changed Toma's two wood to two logs; `desire-2` said to construct the bridge before Nia delivered the needed wood; `social-3` invented Rael | Coherent single-sentence/clean failure for truncation; grounding, self-coordination, and multi-goal failures |
+
+**Verdict: STOP / NO-GO.** Both candidates failed qualitative review due to
+multiple material factual and formatting regressions. The plan's relative
+pass-count threshold could not be established with confidence because the
+baseline itself has defects and is a poor numeric comparator. `sim-fast`
+therefore remains unchanged and the always-on retry stays hardware-blocked.
+Do not change `ollama/Modelfile.fast`, setup, specifications, or
+`ALWAYS_ON_MODULES` from this plan. Phases 1–3 are not authorized; a second
+GPU is the remaining stated lever.
+
 ## Related sim knobs (not Ollama)
 
 These live in code; Phase 2 has landed, so they now target Ollama:

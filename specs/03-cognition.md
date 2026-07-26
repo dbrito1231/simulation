@@ -56,7 +56,7 @@ catalog — not repeated here).
 | High-stakes decision (elder / `invention_status` REQUIRED / rate-limited emergency,election,treaty_vote) | `SYSTEM_PROMPT`/slim | `MODEL_SMART` (`sim-smart`, qwen3.5 9B) | 512 (1600 only if thinking re-enabled, currently dead code) | 0.4 | `THINKING_TIMEOUT_S`=75s | `THINKING_SAMPLING` if `THINKING_ENABLED_HIGH_STAKES` (omits `think`, i.e. thinking on), else same as routine |
 | Invention-only turn | `INVENTION_SYSTEM_PROMPT` | `MODEL_SMART` (sprite/invention always high-stakes) | `INVENTION_MAX_TOKENS`=1024 | `INVENTION_TEMPERATURE`=0.6 | 75s | as above |
 | Sprite-design turn | `SPRITE_UPGRADE_SYSTEM_PROMPT` | `MODEL_SMART` | 768 | 0.3 | 75s | as above |
-| Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/60/80/100/220 per call site) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`); PIANO fan-out 15s (`PIANO_MODULE_TIMEOUT_S`), always-on refresh 60s (`MODULE_REFRESH_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
+| Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/80/90/100/220 per call site; PIANO=`PIANO_MODULE_MAX_TOKENS`=90) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`); PIANO fan-out 15s (`PIANO_MODULE_TIMEOUT_S`), always-on refresh 60s (`MODULE_REFRESH_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
 
 Note the Routine-decision and High-stakes-decision rows both resolve to
 `MODEL_SMART` now — they're kept as separate table rows because
@@ -650,6 +650,21 @@ report instead of an empty one. That decision-payload fill is age-labeled —
 a fresh, same-tick report renders as the bare `module: text` form, while an
 off-tick fill served from cache renders as `module (N turns ago): text` so
 the Cognitive Controller can discount stale advice.
+
+**Module prompt contract (Phase 1).** `run_piano_module` leads its user
+message with `You ARE {agent_name}. Context: {context}` so the report's acting
+agent is explicit rather than merely embedded in context. Each of the four
+static `MODULE_PROMPTS` requires references only to agents, resources, and
+numbers present in that context and prohibits inventing a name, quantity, or
+statistic. The Social module additionally must never suggest coordinating
+with, messaging, or requesting from that same agent. These reports remain
+advisory input to the Cognitive Controller; this contract does not alter
+decision actions or validation. `PIANO_MODULE_MAX_TOKENS = 90` is the
+production one-sentence output budget (raised from 60 after the repeatable
+module-quality screen's guarded 90-token variant reduced the recorded Phase 0
+grounded-wrong modal count 1→0 with no category regression). The screen reads
+that constant directly from `server.py`; its `--max-tokens 60` override
+preserves the Phase 0 budget for controlled comparisons.
 
 ### Gated always-on PIANO (`ALWAYS_ON_MODULES`, default False)
 
