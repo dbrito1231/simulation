@@ -707,8 +707,17 @@
 <body>
 <div id="wrap">
   <aside id="convPanel">
-    <h1>Activity &amp; Chat</h1>
-    <section class="panel-section" id="conversationLog">
+    <h1>Agents &amp; Activity</h1>
+    <section class="panel-section">
+      <div class="agents-panel-head">
+        <h2>Agents <span id="livingAgentCount" class="civ-label"></span></h2>
+        <button id="deadAgentsBtn" type="button" hidden>Deceased (0)</button>
+      </div>
+      <div id="agentRollup"></div>
+      <ul id="agentList"></ul>
+      <div id="agentDetail"></div>
+    </section>
+    <section class="panel-section" id="conversationLog" style="display:none">
       <h2>Conversations</h2>
       <ul id="convList"></ul>
     </section>
@@ -792,15 +801,6 @@
         <span class="civ-label">Pending:</span>
         <div id="civPending"></div>
       </div>
-    </section>
-    <section class="panel-section">
-      <div class="agents-panel-head">
-        <h2>Agents <span id="livingAgentCount" class="civ-label"></span></h2>
-        <button id="deadAgentsBtn" type="button" hidden>Deceased (0)</button>
-      </div>
-      <div id="agentRollup"></div>
-      <ul id="agentList"></ul>
-      <div id="agentDetail"></div>
     </section>
     </div>
   </aside>
@@ -1024,6 +1024,11 @@ let ECOLOGY_ENABLED = true;
 let PIANO_MODULES = false;
 let META_SYSTEM = false;
 let PATH1_ENABLED = false;
+
+// --- Viewer-only display toggles (client-side, not server flags). Flipping
+// either to true fully restores that section with no other edits. ---
+const SHOW_CONVERSATIONS = false;
+const SHOW_SETTLEMENTS = false;
 
 // =====================================================================
 // World snapshot. Everything the renderer reads comes from here. Seeded with a
@@ -2210,7 +2215,11 @@ function renderSidebar() {
     }
 
     renderCouncil(civ);
-    renderSettlements(civ);
+    if (SHOW_SETTLEMENTS) {
+      renderSettlements(civ);
+    } else {
+      settlementsSectionEl.style.display = "none";
+    }
 
     const pendingBp = civ.pendingBlueprints || [];
     if (pendingBp.length > 0) {
@@ -2228,20 +2237,22 @@ function renderSidebar() {
   // --- Activity & Chat panel (change-detected separately, higher churn) ---
   const conversation = world.conversation || [];
   const activity = world.activity || [];
-  const logKey = JSON.stringify([conversation, activity]);
+  const logKey = JSON.stringify(SHOW_CONVERSATIONS ? [conversation, activity] : [activity]);
   if (logKey !== lastLogKey) {
     lastLogKey = logKey;
-    const convScroll = convListEl.scrollTop;
-    convListEl.innerHTML = conversation.map((c) => {
-      const kindLabel = c.kind && c.kind !== "speech"
-        ? `<span class="kind">[${escapeHtml(c.kind)}]</span> `
-        : "";
-      const msg = c.message
-        ? `<span class="msg">${escapeHtml(c.message)}</span>`
-        : (c.outcome ? `<span class="msg muted">(${escapeHtml(c.outcome)})</span>` : "");
-      return `<li>${kindLabel}<span class="from">${escapeHtml(c.from)}</span> <span class="arrow">→</span> <span class="to">${escapeHtml(c.to)}</span>${msg ? ": " + msg : ""}</li>`;
-    }).join("");
-    convListEl.scrollTop = convScroll;
+    if (SHOW_CONVERSATIONS) {
+      const convScroll = convListEl.scrollTop;
+      convListEl.innerHTML = conversation.map((c) => {
+        const kindLabel = c.kind && c.kind !== "speech"
+          ? `<span class="kind">[${escapeHtml(c.kind)}]</span> `
+          : "";
+        const msg = c.message
+          ? `<span class="msg">${escapeHtml(c.message)}</span>`
+          : (c.outcome ? `<span class="msg muted">(${escapeHtml(c.outcome)})</span>` : "");
+        return `<li>${kindLabel}<span class="from">${escapeHtml(c.from)}</span> <span class="arrow">→</span> <span class="to">${escapeHtml(c.to)}</span>${msg ? ": " + msg : ""}</li>`;
+      }).join("");
+      convListEl.scrollTop = convScroll;
+    }
 
     actListEl.innerHTML = activity.map((line) =>
       `<li>${escapeHtml(line)}</li>`

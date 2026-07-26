@@ -84,12 +84,20 @@ world state beyond a cached palette/season key.
   (index.html:2070+) draws a scaled-down world plus a viewport rectangle
   from scroll position/`zoomLevel` (index.html:2092-2100); clicking it
   recenters the main view (index.html:2114-2115).
-- **Sidebar panel** (`#sidebar`, index.html:588+), via `renderSidebar()`
-  (index.html:1645+): Time (EST clock, uptime, calendar string), LM
-  Studio/server status dot+label, Civilization (era/level, structures,
-  active builds, resources), Agents, Council, Conversations/Activity
-  (`#convPanel`, index.html:552-577), and a conditionally-shown Settlements
-  section (index.html:562-568, hidden until diplomacy data arrives).
+- **Two side panels**, both filled by `renderSidebar()`:
+  - **Left panel** (`#convPanel`), titled "Agents & Activity": the **Agents**
+    section (rollup header, living-agent list with vitals/crisis sort, and the
+    selected-agent detail panel), then **Activity**, then a **Council** section
+    (shown when council data exists). A **Conversations** section
+    (`#conversationLog`) and a **Settlements** section (`#settlementsSection`)
+    also live here but are **hidden by default** behind the client-side viewer
+    toggles `SHOW_CONVERSATIONS` / `SHOW_SETTLEMENTS` (index.html ~1028, both
+    `false`). These are viewer-only display flags, not server `config.flags`;
+    flip either to `true` to restore its section. The underlying `world.conversation`
+    and `civ.settlements` data still arrives in `/state` regardless.
+  - **Right panel** (`#sidebar`): the "AI Simulation World" title, LM/server
+    status dot+label, **Time** (EST clock, uptime, calendar string), and
+    **Civilization** (era/level, structures, active builds, resources).
 - **`ACTION_LABELS`** (index.html:1357-1390) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
   `humanizeAction(agent)` (index.html:1391-1398) special-cases
