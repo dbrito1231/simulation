@@ -2563,21 +2563,30 @@ MODULE_PROMPTS = {
                   "sentence, state the key facts of the current situation and "
                   "any immediate threat or opportunity. If last_reports are "
                   "present, build on or correct them rather than repeating "
-                  "them. Output only the sentence.",
+                  "them. Reference only agents, resources, and numbers that "
+                  "appear in the context; never invent a name, quantity, or "
+                  "statistic. Output only the sentence.",
     "social": "You are the Social module of a village agent. In ONE sentence, "
               "suggest who to coordinate with and what to say or request, based "
               "on nearby agents, relationships, and incoming messages. If "
               "last_reports are present, build on or correct them rather than "
-              "repeating them. Output only the sentence.",
+              "repeating them. Never suggest coordinating with, messaging, or "
+              "requesting from yourself. Reference only agents, resources, and "
+              "numbers that appear in the context; never invent a name, quantity, "
+              "or statistic. Output only the sentence.",
     "desire": "You are the Desire/Goal module of a village agent. In ONE "
               "sentence, name the single most useful goal right now given the "
               "village's needs and this agent's role and resources. If "
               "last_reports are present, build on or correct them rather than "
-              "repeating them. Output only the sentence.",
+              "repeating them. Reference only agents, resources, and numbers "
+              "that appear in the context; never invent a name, quantity, or "
+              "statistic. Output only the sentence.",
     "reflection": "You are the Reflection module of a village agent. In ONE "
                   "sentence, note one lesson or pattern from the agent's "
                   "memories worth applying now. If last_reports are present, "
                   "build on or correct them rather than repeating them. "
+                  "Reference only agents, resources, and numbers that appear in "
+                  "the context; never invent a name, quantity, or statistic. "
                   "Output only the sentence.",
 }
 
@@ -2587,6 +2596,7 @@ MODULE_PROMPTS = {
 # with a hard, non-blocking timeout -- a slow module is dropped, never
 # retried, so it can't stall the decision turn that consumes its report.
 PIANO_MODULE_TIMEOUT_S = 15
+PIANO_MODULE_MAX_TOKENS = 90
 
 
 def run_piano_module(module, agent_name, context, frame_tick=None, timeout_s=None):
@@ -2606,8 +2616,8 @@ def run_piano_module(module, agent_name, context, frame_tick=None, timeout_s=Non
     try:
         text = lm_complete(
             sysp,
-            f"Agent {agent_name} context: {context}",
-            max_tokens=60, temperature=0.5,
+            f"You ARE {agent_name}. Context: {context}",
+            max_tokens=PIANO_MODULE_MAX_TOKENS, temperature=0.5,
             timeout=timeout_s, raise_timeout=True,
         )
         if text:

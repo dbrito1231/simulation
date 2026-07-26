@@ -2,9 +2,11 @@
 
 The screen intentionally parses ``MODULE_PROMPTS`` from ``simulation/server.py``
 instead of importing that module: importing the server opens a log session and
-constructs a live engine.  The requests below mirror ``run_piano_module`` /
-``lm_complete`` at the time this screen was added (sim-fast, 60 output tokens,
-temperature 0.5, non-thinking sampling, think:false, 15 second timeout).
+constructs a live engine. The requests below mirror ``run_piano_module`` /
+``lm_complete`` at the time they run: the production token budget is extracted
+from ``server.py``; ``--max-tokens`` supplies a controlled comparison override.
+The remaining settings are sim-fast, temperature 0.5, non-thinking sampling,
+think:false, and a 15 second timeout.
 
 Each synthetic case has explicit, inspectable checks.  This is a screen, not a
 semantic judge: ``grounded-wrong`` means a contradicted claim or number matched
@@ -41,7 +43,6 @@ from llm_wire import to_ollama_body  # noqa: E402 -- path is configured above.
 SCREEN_VERSION = "2026-07-25-v1"
 DEFAULT_MODEL = "sim-fast"
 DEFAULT_URL = "http://localhost:11434/api/chat"
-MODULE_MAX_TOKENS = 60
 MODULE_TEMPERATURE = 0.5
 MODULE_TIMEOUT_S = 15
 PIANO_CONCURRENT_LLM = 2
@@ -208,26 +209,44 @@ def load_module_prompts(server_path: Path = SERVER_PATH) -> dict[str, str]:
     raise ValueError(f"MODULE_PROMPTS assignment was not found in {server_path}")
 
 
-def build_payload(prompt: str, case: ScreenCase, model: str) -> dict[str, Any]:
+def load_production_module_max_tokens(server_path: Path = SERVER_PATH) -> int:
+    """Read the server's PIANO token budget without importing its side effects."""
+
+    tree = ast.parse(server_path.read_text(encoding="utf-8"), filename=str(server_path))
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == "PIANO_MODULE_MAX_TOKENS"
+                   for target in node.targets):
+            continue
+        value = ast.literal_eval(node.value)
+        if isinstance(value, int) and value > 0:
+            return value
+        raise ValueError("PIANO_MODULE_MAX_TOKENS must be a positive integer")
+    raise ValueError("PIANO_MODULE_MAX_TOKENS assignment was not found in server.py")
+
+
+def build_payload(prompt: str, case: ScreenCase, model: str, max_tokens: int) -> dict[str, Any]:
     """Mirror server.py's lm_complete payload for a PIANO module call."""
 
     return {
         "model": model,
         "messages": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": f"Agent {case.agent} context: {case.context}"},
+            {"role": "user", "content": f"You ARE {case.agent}. Context: {case.context}"},
         ],
-        "max_tokens": MODULE_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "temperature": MODULE_TEMPERATURE,
         **NON_THINKING_SAMPLING,
         "think": False,
     }
 
 
-def call_ollama(prompt: str, case: ScreenCase, model: str, url: str, timeout: float) -> dict[str, Any]:
+def call_ollama(prompt: str, case: ScreenCase, model: str, url: str, timeout: float,
+                max_tokens: int) -> dict[str, Any]:
     """Run one real native-Ollama call and retain fields needed for scoring."""
 
-    payload = build_payload(prompt, case, model)
+    payload = build_payload(prompt, case, model, max_tokens)
     try:
         response = requests.post(url, json=to_ollama_body(payload), timeout=timeout)
         response.raise_for_status()
@@ -246,7 +265,7 @@ def call_ollama(prompt: str, case: ScreenCase, model: str, url: str, timeout: fl
         return {"error": f"{type(exc).__name__}: {exc}", "payload": payload}
 
 
-def score_response(case: ScreenCase, result: dict[str, Any]) -> dict[str, Any]:
+def score_response(case: ScreenCase, result: dict[str, Any], max_tokens: int) -> dict[str, Any]:
     """Return an inspectable, exclusive truncation-first outcome for one trial."""
 
     if result.get("error"):
@@ -255,9 +274,9 @@ def score_response(case: ScreenCase, result: dict[str, Any]) -> dict[str, Any]:
     text = str(result["text"])
     lowered = text.lower()
     details: list[str] = []
-    truncated = result.get("done_reason") == "length" or result.get("eval_count") == MODULE_MAX_TOKENS
+    truncated = result.get("done_reason") == "length" or result.get("eval_count") == max_tokens
     if truncated:
-        reason = "done_reason=length" if result.get("done_reason") == "length" else "eval_count=60"
+        reason = "done_reason=length" if result.get("done_reason") == "length" else f"eval_count={max_tokens}"
         return {"outcome": "truncated", "categories": ["truncated"], "details": [reason]}
 
     categories: list[str] = []
@@ -327,12 +346,14 @@ def print_table(rows: list[list[str]], headers: list[str]) -> None:
 
 def run_screen(args: argparse.Namespace) -> int:
     prompts = load_module_prompts()
+    production_max_tokens = load_production_module_max_tokens()
+    max_tokens = args.max_tokens if args.max_tokens is not None else production_max_tokens
     selected_cases = CASES
     if args.dry_run:
         print(f"Module quality screen {SCREEN_VERSION}: source and {len(CASES)} fixed cases are valid.")
         print("Modules: " + ", ".join(prompts))
         print("Production payload: " + json.dumps({
-            "model": args.model, "max_tokens": MODULE_MAX_TOKENS,
+            "model": args.model, "max_tokens": max_tokens,
             "temperature": MODULE_TEMPERATURE, **NON_THINKING_SAMPLING, "think": False,
             "timeout_s": args.timeout,
         }, sort_keys=True))
@@ -340,7 +361,8 @@ def run_screen(args: argparse.Namespace) -> int:
 
     print(f"Module quality screen {SCREEN_VERSION} — {len(selected_cases)} fixed cases × {args.trials} trials")
     print(f"Model={args.model}; endpoint={args.url}; timeout={args.timeout:g}s; "
-          f"max_tokens={MODULE_MAX_TOKENS}; temperature={MODULE_TEMPERATURE}; "
+          f"max_tokens={max_tokens} ({'override' if args.max_tokens is not None else 'production'}); "
+          f"temperature={MODULE_TEMPERATURE}; "
           f"top_p=0.8; top_k=20; min_p=0; think=false; concurrent_calls={args.workers}")
 
     # The live engine runs PIANO work in a two-slot pool.  Retaining that
@@ -349,14 +371,14 @@ def run_screen(args: argparse.Namespace) -> int:
     task_order = [(case, trial_index) for case in selected_cases for trial_index in range(1, args.trials + 1)]
     with ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix="module-quality") as executor:
         futures = [
-            executor.submit(call_ollama, prompts[case.module], case, args.model, args.url, args.timeout)
+            executor.submit(call_ollama, prompts[case.module], case, args.model, args.url, args.timeout, max_tokens)
             for case, _trial_index in task_order
         ]
         trial_results = [future.result() for future in futures]
     results_by_case: dict[str, list[dict[str, Any]]] = {case.case_id: [] for case in selected_cases}
     for (case, trial_index), result in zip(task_order, trial_results):
         results_by_case[case.case_id].append({
-            "trial": trial_index, "response": result, "score": score_response(case, result),
+            "trial": trial_index, "response": result, "score": score_response(case, result, max_tokens),
         })
 
     scored_cases: list[dict[str, Any]] = []
@@ -403,7 +425,8 @@ def run_screen(args: argparse.Namespace) -> int:
         "settings": {
             "model": args.model, "url": args.url, "trials": args.trials, "timeout_s": args.timeout,
             "concurrent_calls": args.workers,
-            "max_tokens": MODULE_MAX_TOKENS, "temperature": MODULE_TEMPERATURE,
+            "max_tokens": max_tokens, "production_max_tokens": production_max_tokens,
+            "temperature": MODULE_TEMPERATURE,
             "sampling": NON_THINKING_SAMPLING, "think": False,
         },
         "prompts": prompts,
@@ -428,6 +451,8 @@ def parse_args() -> argparse.Namespace:
                         help=f"Per-request timeout in seconds (default: {MODULE_TIMEOUT_S})")
     parser.add_argument("--workers", type=int, default=PIANO_CONCURRENT_LLM,
                         help=f"Concurrent calls; production PIANO pool size is {PIANO_CONCURRENT_LLM} (default)")
+    parser.add_argument("--max-tokens", type=int,
+                        help="Override the token budget extracted from server.py for a controlled screen")
     parser.add_argument("--json-out", type=Path, help="Write the full reproducible report to this JSON file")
     parser.add_argument("--show-responses", action="store_true", help="Print each trial text and matched check")
     parser.add_argument("--dry-run", action="store_true", help="Validate source extraction and settings without Ollama")
@@ -438,6 +463,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--timeout must be positive")
     if args.workers < 1:
         parser.error("--workers must be at least 1")
+    if args.max_tokens is not None and args.max_tokens < 1:
+        parser.error("--max-tokens must be positive")
     return args
 
 

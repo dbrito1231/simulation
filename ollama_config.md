@@ -607,6 +607,42 @@ clean outcomes.  Full response text, matched checks, and payload settings can
 be retained on a future run with `--json-out <path>` and inspected with
 `--show-responses`.
 
+## PIANO module-quality screen Phase 1 prompt/token gate (2026-07-26)
+
+Phase 1 makes the module caller say `You ARE {agent_name}. Context: ...`,
+adds the context-only agents/resources/numbers guardrail to all four module
+prompts, and tells Social never to coordinate with, message, or request from
+itself. The screen now reads `PIANO_MODULE_MAX_TOKENS` from `server.py` so its
+default exactly matches production; `--max-tokens` is an intentional
+controlled comparison override. Sampling, model, endpoint, timeout, cases,
+and three-trial modal scoring remained the Phase 0 settings.
+
+Commands run:
+
+```powershell
+# Recorded Phase 0 baseline (before prompt/framing change)
+uv run python scripts/module_quality_screen.py --model sim-fast --workers 3
+
+# Guarded Phase 1 prompt at each candidate output budget
+uv run python scripts/module_quality_screen.py --model sim-fast --workers 3 --max-tokens 60
+uv run python scripts/module_quality_screen.py --model sim-fast --workers 3 --max-tokens 90
+```
+
+| Variant | grounded-wrong | self-coordination | invented-entity | truncated | clean |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Phase 0 recorded baseline: old framing/prompts, 60 | 1 | 0 | 0 | 0 | 15 |
+| Phase 1 guarded framing/prompts, 60 override | 3 | 0 | 0 | 0 | 13 |
+| Phase 1 guarded framing/prompts, 90 override | 0 | 0 | 0 | 0 | 16 |
+
+**Gate decision: SHIP 90.** The 60-token candidate made grounded-wrong and
+clean worse, so it was rejected. The 90-token candidate reduces the recorded
+Phase 0 defect total (grounded-wrong 1→0), raises clean 15→16, and makes no
+scored category worse. `PIANO_MODULE_MAX_TOKENS = 90` is therefore the
+shipping production setting. A fresh unmodified-code 60-token control run on
+2026-07-26 also happened to score 0/0/0/0/16; fixed contexts with temperature
+0.5 are deterministic-ish rather than bit-for-bit deterministic, which is why
+the committed recorded Phase 0 modal table remains the gate baseline.
+
 ## Smaller `sim-fast` quality screen (2026-07-25) — NO-GO
 
 Phase 0 used 12 prompts: each of the four real `MODULE_PROMPTS` system texts
