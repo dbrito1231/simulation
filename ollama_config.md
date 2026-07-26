@@ -562,6 +562,51 @@ bug fix) independent of the specific CPU-offload question, and do no harm at
 2-model dual residency (verified: `sim-smart`+`sim-fast` resident and stable
 after every restart in this session).
 
+## PIANO module-quality screen baseline (2026-07-25)
+
+`scripts/module_quality_screen.py` is the committed, repeatable screen for
+the shipping PIANO module layer.  It parses the literal `MODULE_PROMPTS` from
+`simulation/server.py` without importing the server (so a screen does not
+create a log session or touch `state.db`), and uses 16 fixed synthetic
+contexts (four each for Perception, Social, Desire, and Reflection).  Each
+context explicitly supplies the acting agent, role, resources, nearby named
+agents/messages, and a recent memory; its narrow factual contradiction checks
+make the grounding verdict inspectable rather than an LLM judgment.
+
+Baseline command and production request settings:
+
+```powershell
+uv run python scripts/module_quality_screen.py --model sim-fast --workers 3
+```
+
+The request body matches `run_piano_module` as it stood at this baseline:
+`max_tokens=60`, temperature `0.5`, `top_p=0.8`, `top_k=20`, `min_p=0`,
+`think:false`, and a 15-second timeout.  The harness defaults to the live
+PIANO pool's two concurrent calls; this one baseline used three concurrent
+requests (the configured Ollama parallel capacity) solely to complete all
+48 calls within the local command window.  It does not change a request's
+sampling or token settings.  The fixed contexts and temperature still make
+this a deterministic-ish screen, not a claim of bit-for-bit reproducibility.
+
+The screen runs every case three times and scores the **modal exact outcome**
+per case.  Truncation is exclusive: an output ending due to the 60-token
+limit is recorded as `truncated`, never as a grounding defect.
+
+| Category | Modal cases (of 16) | Baseline rate |
+| --- | ---: | ---: |
+| grounded-wrong | 1 | 6.3% |
+| self-coordination | 0 | 0.0% |
+| invented-entity | 0 | 0.0% |
+| truncated | 0 | 0.0% |
+| clean | 15 | 93.8% |
+
+The modal table is the Phase 0 comparison baseline.  For visibility into
+sampling variance, the underlying 48 trials had 4 grounded-wrong matches, 0
+self-coordination matches, 0 invented-entity matches, 0 truncations, and 44
+clean outcomes.  Full response text, matched checks, and payload settings can
+be retained on a future run with `--json-out <path>` and inspected with
+`--show-responses`.
+
 ## Smaller `sim-fast` quality screen (2026-07-25) — NO-GO
 
 Phase 0 used 12 prompts: each of the four real `MODULE_PROMPTS` system texts
