@@ -10,9 +10,12 @@ script's responsibilities were scoped.
 
 Target state (see ollama/Modelfile.smart, ollama/Modelfile.fast,
 ollama_config.md):
-  - User env vars: OLLAMA_NUM_PARALLEL=3, OLLAMA_MAX_LOADED_MODELS=2,
+  - User env vars: OLLAMA_NUM_PARALLEL=3, OLLAMA_MAX_LOADED_MODELS=3,
     OLLAMA_FLASH_ATTENTION=1, OLLAMA_KEEP_ALIVE=-1 (both models resident
-    24/7, matching the sim's always-on server).
+    24/7, matching the sim's always-on server; raised from 2 to 3
+    2026-07-25 to allow a 3rd model -- e.g. a CPU-offload probe model --
+    to coexist without evicting sim-smart/sim-fast, see ollama_config.md
+    "CPU-offload probe (2026-07-25, corrected retry)").
   - Two named models: sim-smart (Qwen3.5-9B-Q4_K_M, num_ctx 20480),
     sim-fast (llama3.2:3b, num_ctx 4096).
   - Both models warm (loaded into VRAM) and visible in `ollama ps` /
@@ -62,7 +65,7 @@ FAST_BASE_MODEL = "llama3.2:3b"
 
 ENV_VARS = {
     "OLLAMA_NUM_PARALLEL": "3",
-    "OLLAMA_MAX_LOADED_MODELS": "2",
+    "OLLAMA_MAX_LOADED_MODELS": "3",
     "OLLAMA_FLASH_ATTENTION": "1",
     "OLLAMA_KEEP_ALIVE": "-1",
 }
@@ -161,7 +164,26 @@ def set_env_vars():
 def restart_ollama():
     """Kill any running Ollama app/server processes and relaunch the app so
     the freshly-setx'd env vars are picked up. Falls back to `ollama serve`
-    if the app executable isn't found (e.g. a service-only install)."""
+    if the app executable isn't found (e.g. a service-only install).
+
+    IMPORTANT (found 2026-07-25, corrected-retry probe): `setx` only writes
+    the new value to HKCU\\Environment -- it does NOT update this already-
+    running Python process's own `os.environ`, and a plain
+    `subprocess.Popen([...])` with no `env=` argument inherits the CHILD's
+    environment from the CURRENT process's (stale, pre-setx) block, not a
+    fresh registry read. Windows only re-reads HKCU\\Environment into a new
+    process's env block when the *parent* is Explorer (e.g. a genuinely new
+    top-level window) -- a child spawned from an already-running script
+    never sees the setx'd value no matter how long it waits. Verified live:
+    after this function ran once with the old (env=None) code path, `ollama
+    ps` showed the relaunched server still enforcing a 2-model cap even
+    though `[Environment]::GetEnvironmentVariable(...,'User')` and a brand
+    new `cmd.exe` both read the correct new value -- the running Ollama
+    process itself had the stale env baked in from launch. Fix: explicitly
+    merge ENV_VARS onto a copy of this process's environment and pass it via
+    `env=` to Popen, so the relaunched Ollama process is guaranteed to see
+    the current target values regardless of registry-propagation timing to
+    other, unrelated processes."""
     print("-- restarting Ollama so env vars take effect --")
     # Detect what's running before killing anything.
     rc, out = sh(["powershell", "-NoProfile", "-Command",
@@ -175,14 +197,17 @@ def restart_ollama():
     time.sleep(2)
 
     import os as _os
+    child_env = dict(_os.environ)
+    child_env.update(ENV_VARS)
     if _os.path.exists(OLLAMA_APP_EXE):
-        print(f"  relaunching {OLLAMA_APP_EXE}")
-        subprocess.Popen([OLLAMA_APP_EXE], shell=False,
+        print(f"  relaunching {OLLAMA_APP_EXE} (explicit env: {ENV_VARS})")
+        subprocess.Popen([OLLAMA_APP_EXE], shell=False, env=child_env,
                          creationflags=subprocess.DETACHED_PROCESS
                          if hasattr(subprocess, "DETACHED_PROCESS") else 0)
     else:
-        print("  ollama app.exe not found -- falling back to `ollama serve`")
-        subprocess.Popen([OLLAMA_CLI_EXE, "serve"], shell=False,
+        print("  ollama app.exe not found -- falling back to `ollama serve` "
+              f"(explicit env: {ENV_VARS})")
+        subprocess.Popen([OLLAMA_CLI_EXE, "serve"], shell=False, env=child_env,
                          creationflags=subprocess.DETACHED_PROCESS
                          if hasattr(subprocess, "DETACHED_PROCESS") else 0)
 

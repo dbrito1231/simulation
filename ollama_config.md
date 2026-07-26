@@ -346,7 +346,27 @@ behind the flag. This feature is architecturally sound and stays dark;
 revisit only with a second GPU or a materially faster/smaller `sim-fast`
 model.
 
-## CPU-offload probe (2026-07-25) — BLOCKED, NO-GO
+## CPU-offload probe (2026-07-25) — BLOCKED, NO-GO — SUPERSEDED
+
+**SUPERSEDED (2026-07-25).** The diagnosis and verdict below were wrong: no
+`OLLAMA_*` env var was actually "unset" on this box at the time of this
+probe — `OLLAMA_MAX_LOADED_MODELS=2` (this repo's own Phase 1 config, set by
+`scripts/ollama_setup.py`) WAS present in `HKCU:\Environment`, confirmed by
+direct registry readback. The prior agent's shell simply didn't have it in
+its inherited process environment when it checked, so it wrongly concluded
+Ollama's untouched *default* cap (1) was in effect and that CPU/GPU models
+share one slot-accounting pool as an inherent Ollama limitation. The real
+mechanism: with the cap set to 2, loading a 3rd model (`probe-fast-cpu`,
+CPU-pinned or not) evicted one of the two already-resident models exactly as
+`OLLAMA_MAX_LOADED_MODELS=2` is documented to do — this was our own
+configured cap doing its job, not a CPU/GPU pool-sharing limitation. The
+factual observations below (num_gpu 0 works, CPU residency confirmed via
+`ollama ps`/`size_vram: 0`, `sim-fast` was evicted) are correct and
+preserved as-is; only the "why" and the NO-GO verdict are corrected. See the
+new dated subsection below, "CPU-offload probe (2026-07-25, corrected retry)
+— raised MAX_LOADED_MODELS to 3", for the re-run that raises the cap to
+cover 3 truly-concurrent models and continues from where this attempt
+stopped.
 
 Probed per `docs/plan-cpu-offload-probe.md`: whether pinning a throwaway
 `sim-fast`-equivalent model (`llama3.2:3b`, `PARAMETER num_gpu 0`, plus a
@@ -369,19 +389,31 @@ GPU models for VRAM was the failure mode this probe was designed to avoid).
 A follow-up direct call to `sim-fast` succeeded (it reloads on demand,
 ~246 ms `load_duration` for this small model) but did **not** restore it to
 the resident set — the very next `/api/ps` still showed only `probe-fast-cpu`
-+ `sim-smart`. No `OLLAMA_MAX_LOADED_MODELS` (or other `OLLAMA_*`) env var is
-set on this box, so Ollama's default loaded-model cap is in effect; it
-appears to count CPU-resident and GPU-resident models against the same slot
-budget rather than treating CPU offload as "free" relative to VRAM pressure.
++ `sim-smart`.
 
-This is exactly the plan's stated timebox condition ("CPU inference evicts
-the GPU models") — per the plan, the correct response is to stop and report
-rather than improvise around it (e.g. by chasing `OLLAMA_MAX_LOADED_MODELS`
-tuning, which the plan explicitly kept out of scope: "Ollama env vars...
-stay untouched"). Steps 2-4 (thread-cap variant, throughput measurement,
-10-minute tick-integrity soak) were not run — there is nothing to measure
-once the premise (decoupled compute pools that don't contend for a shared
-resident-model slot) is falsified.
+**Corrected diagnosis (was wrong at the time):** the prior write-up here
+claimed "No `OLLAMA_MAX_LOADED_MODELS` (or other `OLLAMA_*`) env var is set
+on this box" and concluded Ollama's *default* loaded-model cap (1) was in
+effect, i.e. that CPU-resident and GPU-resident models count against the
+same slot budget as an inherent Ollama behavior. That claim was checked
+against the wrong environment: `HKCU:\Environment` was never actually read
+directly during this attempt (the prior agent's shell simply lacked the
+inherited env var, which is not the same as it being unset system-wide). A
+direct registry read (`Get-ItemProperty HKCU:\Environment`, fresh process)
+confirms `OLLAMA_MAX_LOADED_MODELS=2` WAS set the whole time — this repo's
+own Phase 1 config from `scripts/ollama_setup.py`. With the cap at 2, a 3rd
+model request (the CPU-pinned `probe-fast-cpu`) evicting one of the two
+already-resident models (`sim-fast`) is exactly what `OLLAMA_MAX_LOADED_MODELS=2`
+is documented to do — nothing here demonstrated that CPU and GPU models
+share a pool as some special inherent limitation; it was our own configured
+cap of 2 being hit by a 3rd model, regardless of that 3rd model's compute
+target. This does NOT retroactively validate the plan's "stop, don't chase
+`OLLAMA_MAX_LOADED_MODELS` tuning" instinct being followed here — following
+the plan's stated timebox was the right call given the (mis-)diagnosis
+available at the time, but the diagnosis itself was wrong, so the resulting
+NO-GO verdict below does not stand. Steps 2-4 (thread-cap variant,
+throughput measurement, 10-minute tick-integrity soak) were not run in this
+attempt — see the corrected-retry subsection below for their completion.
 
 Cleanup performed: `ollama rm probe-fast-cpu probe-fast-cpu8`; scratch
 Modelfiles deleted from the agent scratchpad (never written under `ollama/`);
@@ -390,19 +422,145 @@ resident together again via `/api/ps`; confirmed the live sim server
 untouched throughout (`GET /state` 200 before, during, and after; no control
 routes called).
 
-**Verdict: NO-GO for CPU-offload as the third retry option, on this specific
-Ollama 0.32.3 install/box.** The mechanism this plan bet on — CPU inference
-as a separate compute pool from the GPU decision path — does not hold here
-because Ollama's loaded-model slot accounting evicts a GPU-resident model to
-make room for a CPU-resident one, reintroducing the exact contention (now as
-reload-latency spikes on `sim-fast`, which background cognition depends on)
-the probe was meant to eliminate. This does not by itself rule out CPU
-offload on a different Ollama version/config (e.g. one with `OLLAMA_MAX_LOADED_MODELS`
+**Verdict (original, this attempt): NO-GO for CPU-offload as the third retry
+option, on this specific Ollama 0.32.3 install/box — SUPERSEDED, see below.**
+The mechanism this plan bet on — CPU inference as a separate compute pool
+from the GPU decision path — does not hold here because Ollama's
+loaded-model slot accounting evicts a GPU-resident model to make room for a
+CPU-resident one, reintroducing the exact contention (now as reload-latency
+spikes on `sim-fast`, which background cognition depends on) the probe was
+meant to eliminate. This does not by itself rule out CPU offload on a
+different Ollama version/config (e.g. one with `OLLAMA_MAX_LOADED_MODELS`
 raised), but that tuning is out of this probe's scope and was left untouched
 per the plan's constraints. The always-on Phase B retry options remain: a
 second GPU, or a materially faster/smaller `sim-fast` model — unchanged from
 the existing verdict above, now with this CPU-offload avenue closed on
 evidence rather than assumption.
+
+**This verdict is SUPERSEDED (2026-07-25).** The specific claim that "no
+`OLLAMA_MAX_LOADED_MODELS` env var is set" was wrong — it was set to 2 by
+this repo's own `scripts/ollama_setup.py`, and that IS part of why a 3rd
+model evicted one of the two GPU-resident ones. But raising the cap to 3 and
+confirming it genuinely active on the live process did **not** fix the
+eviction — confirmed via a fresh, isolated retry below, the actual root
+cause is VRAM headroom exhaustion (sim-smart+sim-fast alone leave only
+~225–1,400 MiB free of 12,288 MiB), not the loaded-models count ceiling.
+See "CPU-offload probe (2026-07-25, corrected retry) — raised
+MAX_LOADED_MODELS to 3" below for the corrected diagnosis and the final,
+still-NO-GO result.
+
+## CPU-offload probe (2026-07-25, corrected retry) — raised MAX_LOADED_MODELS to 3
+
+Continuation of the corrected-record note above, per
+`docs/plan-cpu-offload-probe.md` steps 1–6 (steps proving `num_gpu 0` works
+and CPU residency reports correctly were not redone — already proven in the
+first attempt). Orchestrator-directed correction: a direct `HKCU:\Environment`
+registry read confirmed `OLLAMA_MAX_LOADED_MODELS=2` (this repo's own Phase 1
+config, `scripts/ollama_setup.py`) WAS set the whole time during the first
+attempt — the eviction of `sim-fast` when a 3rd model loaded was that cap
+being hit, not an "unset env var / Ollama default cap" as the first
+write-up claimed.
+
+### Step 1 — raise the cap, and a real bug found along the way
+
+`scripts/ollama_setup.py`'s `ENV_VARS["OLLAMA_MAX_LOADED_MODELS"]` changed
+`"2"` → `"3"` (plus docstring/comment updates at the top of the file). First
+run of `uv run python scripts/ollama_setup.py` completed successfully and
+`--check`/a fresh registry read confirmed `OLLAMA_MAX_LOADED_MODELS=3` — but
+loading a 3rd model (`probe-fast-cpu`, see below) still evicted `sim-fast`
+exactly as before. Root cause: `setx` writes the new value to
+`HKCU\Environment` but does **not** update the already-running Python
+process's own `os.environ`, and `restart_ollama()`'s
+`subprocess.Popen([OLLAMA_APP_EXE])` had no `env=` argument, so the
+relaunched Ollama process **inherited the stale (pre-setx) environment
+block** from the still-running setup script, not a fresh registry read.
+(Windows only re-reads `HKCU\Environment` into a new process's env when the
+parent is Explorer/a shell launched via `ShellExecute`, e.g. PowerShell's
+`Start-Process` — a child `Popen`'d directly from an already-running script
+does not get this refresh.) **Fix applied** (in scope — a correctness bug in
+the exact restart path this task's Step 1 depends on):
+`restart_ollama()` now builds `child_env = dict(os.environ); child_env.update(ENV_VARS)`
+and passes `env=child_env` to both `Popen` call sites, guaranteeing the
+relaunched process sees the target values regardless of registry-propagation
+timing. Re-ran `scripts/ollama_setup.py`; confirmed via new Ollama process
+PIDs (`ollama` 29344→42924, `ollama app` 38600→43848 across the two runs)
+that this was a genuinely fresh process, `/api/ps` showed sim-smart/sim-fast
+dual-resident, and `GET /state` on the live sim server returned 200
+throughout (sim server process itself was never restarted).
+
+### Step 2 — the actual structural blocker: VRAM headroom, not model count
+
+Created `probe-fast-cpu` (copy of `ollama/Modelfile.fast` + `PARAMETER num_gpu 0`,
+scratch Modelfile in the agent scratchpad, not under `ollama/`). To rule out
+any remaining doubt about whether `OLLAMA_MAX_LOADED_MODELS=3` was actually
+reaching the live process, ran an isolated control: killed all Ollama
+processes, launched `ollama serve` directly from this shell with
+`OLLAMA_MAX_LOADED_MODELS=3` (and the other three vars) explicitly exported
+inline — no dependency on `setx`/registry timing at all. Warmed sim-smart and
+sim-fast (both resident, confirmed via `/api/ps`), then warmed
+`probe-fast-cpu`: **`sim-fast` was evicted again** — `/api/ps` showed only
+`probe-fast-cpu` (100% CPU, `size_vram: 0`) + `sim-smart`. Reloading
+`sim-fast` immediately after then evicted `probe-fast-cpu` in turn — i.e. the
+live server alternates between exactly 2 resident models no matter which
+pair, even with a verified-active `OLLAMA_MAX_LOADED_MODELS=3` on the exact
+process serving the request. `nvidia-smi` during this window: sim-smart +
+sim-fast alone leave only **225–1,428 MiB free of 12,288 MiB total** (matches
+the VRAM gate table earlier in this file: "Both resident, idle: 11,899 MiB"
+used, ~389 MiB free) — Ollama's scheduler appears to require some minimum
+VRAM staging/compute-buffer headroom to keep a 3rd model resident even when
+that model's weights are fully CPU-offloaded (`num_gpu 0`), and this box does
+not have that headroom once both required models (`sim-smart`, `sim-fast`)
+are loaded. This is a genuinely different root cause than the first attempt's
+(wrong) "no env var set" diagnosis, but it converges on the same practical
+outcome: a 3rd model cannot stay resident alongside `sim-smart`+`sim-fast` on
+this specific box.
+
+Per `docs/plan-cpu-offload-probe.md`'s own timebox condition and this task's
+explicit constraint ("If anything else structurally blocks... stop and
+report — don't improvise further tuning"), stopped here. Steps 2 (thread-cap
+variant), 3 (throughput measurement), and 4 (10-minute tick-integrity soak)
+were **not run** — there is no value in measuring throughput for a
+configuration that cannot stay resident under real concurrent load in the
+first place, and chasing further VRAM tuning (e.g. `OLLAMA_KV_CACHE_TYPE=q8_0`,
+lowering `sim-smart`'s `num_ctx`) is out of this probe's scope per the plan's
+constraints ("do not touch `ollama/Modelfile.*`").
+
+### Cleanup and verification
+
+`ollama rm probe-fast-cpu` (no `probe-fast-cpu8` was ever created — the
+thread-cap variant was never reached); both scratch Modelfiles deleted from
+the agent scratchpad. Killed the manually-launched isolated `ollama serve`
+process and restarted Ollama via the canonical `scripts/ollama_setup.py` to
+restore the normal app-managed process; confirmed `sim-smart`/`sim-fast`
+dual residency and `GET /state` 200 on the live sim server afterward.
+`git status` shows only `ollama_config.md`, `TASKS_PENDING.md`, and
+`scripts/ollama_setup.py` modified — no `simulation/` source files or
+`ollama/Modelfile.*` touched.
+
+### Verdict: NO-GO (confirmed, corrected root cause)
+
+**NO-GO for CPU-offload as the always-on Phase B retry option, on this
+specific box (i7-12700KF, 32 GB RAM, RTX 3060 12 GB, Ollama 0.32.3).** The
+original NO-GO verdict's *reasoning* was wrong (an env var that was actually
+set was reported as unset) and has been corrected above, but the *practical
+conclusion stands*: a 3rd model cannot be kept resident alongside
+`sim-smart`+`sim-fast` on this hardware, now confirmed to be a VRAM-headroom
+constraint (only ~225–1,400 MiB free with both required models loaded, not
+enough for any 3rd model's minimum footprint) rather than a
+`OLLAMA_MAX_LOADED_MODELS` misconfiguration — raising the cap to 3 (verified
+genuinely active on the live process via an isolated, registry-independent
+test) did not change the outcome. This closes the loaded-models-count
+avenue specifically; it does not test whether freeing VRAM first (e.g. a
+smaller `sim-smart` quant, reduced `num_ctx`, or `OLLAMA_KV_CACHE_TYPE=q8_0`)
+would create enough headroom for a 3rd resident model, but that tuning is
+out of this probe's scope. The always-on Phase B retry options remain
+unchanged: a second GPU, or a materially faster/smaller `sim-fast` model.
+`OLLAMA_MAX_LOADED_MODELS=3` and the `restart_ollama()` env-propagation fix
+are kept as the new shipped baseline regardless of this NO-GO — they are
+correct, general-purpose fixes (a real config bump plus a real restart-path
+bug fix) independent of the specific CPU-offload question, and do no harm at
+2-model dual residency (verified: `sim-smart`+`sim-fast` resident and stable
+after every restart in this session).
 
 ## Related sim knobs (not Ollama)
 

@@ -240,14 +240,33 @@ the target).
 the gate (batch 2: latency +17.73%; batch 1 re-soak: freshness median 619.0s,
 zero-work pulses 0) — rolled back to `ALWAYS_ON_MODULES = False`, batch 2;
 feature stays dark pending a second GPU or a smaller/faster fast model.
-CPU-offload was probed as a possible third option (2026-07-25) and came back
-**NO-GO**: pinning a CPU-only throwaway model evicted `sim-fast` from Ollama's
-resident-model set (confirmed via `/api/ps`), reintroducing contention as
-reload latency on the same GPU-dependent model instead of eliminating it —
-blocker hit before any throughput/tick measurement was possible. Full numbers
-in `ollama_config.md`'s "CPU-offload probe (2026-07-25) — BLOCKED, NO-GO"
-section. Full numbers for the earlier gate in `ollama_config.md`'s "FINAL
-VERDICT" subsection. History below preserved as-is.
+CPU-offload was probed as a possible third option (2026-07-25); the first
+attempt's **NO-GO** verdict was based on a wrong diagnosis (it read the
+eviction of `sim-fast` when a CPU-pinned throwaway model loaded as an
+inherent Ollama CPU/GPU pool-sharing limitation) — corrected: a direct
+`HKCU:\Environment` registry read confirmed `OLLAMA_MAX_LOADED_MODELS=2`
+(from `scripts/ollama_setup.py`) WAS set the whole time and hitting its cap
+was part of the eviction. Raised to 3 (also fixed a real bug found along the
+way: `scripts/ollama_setup.py`'s Ollama restart used a plain
+`subprocess.Popen` with no `env=`, so a freshly-`setx`'d value never reached
+the relaunched process — fixed by passing an explicit merged env). Re-ran
+the probe with the cap verified genuinely active (including an isolated,
+registry-independent control test) — **NO-GO is CONFIRMED, but for a
+different root cause**: VRAM headroom, not the loaded-models count. With
+`sim-smart`+`sim-fast` resident, only ~225–1,428 MiB of 12,288 MiB VRAM is
+free, not enough for any 3rd model's minimum footprint (even a fully
+`num_gpu 0` CPU-offloaded one) — a 3rd model still evicted one of the two
+required models every time. Steps 2–4 of the plan (thread-cap variant,
+throughput measurement, 10-minute tick-integrity soak) were never reached —
+correctly out of scope once residency itself fails. `OLLAMA_MAX_LOADED_MODELS=3`
+and the restart-path env-propagation fix are kept as the new baseline
+regardless (general correctness fixes, harmless at 2-model residency). Full
+numbers: `ollama_config.md`'s "CPU-offload probe (2026-07-25) — BLOCKED,
+NO-GO — SUPERSEDED" (corrected diagnosis) and "CPU-offload probe (2026-07-25,
+corrected retry) — raised MAX_LOADED_MODELS to 3" (the completed re-run and
+final verdict) sections. Full numbers for the earlier always-on gate in
+`ollama_config.md`'s "FINAL VERDICT" subsection. History below preserved
+as-is.
 
 Attempt 1 (2026-07-25) FAILED its GPU-contention gate and was correctly
 rolled back — `ALWAYS_ON_MODULES = False`, Phase A machinery intact and
