@@ -535,6 +535,50 @@
   #councilHistory li:hover { color: #ccc; }
   #councilMeta.council-clickable { cursor: pointer; }
   #councilMeta.council-clickable:hover { color: #aaa; }
+  /* Daily Council Assembly is a separate, live projection.  It deliberately
+     has its own canvas: the map's world coordinates are not reused as viewer
+     layout state. */
+  #councilAssemblyModal {
+    display: none; position: fixed; inset: 0; z-index: 110;
+    background: rgba(0, 0, 0, 0.68); align-items: center; justify-content: center;
+    padding: 18px; box-sizing: border-box;
+  }
+  #councilAssemblyModal.open { display: flex; }
+  #councilAssemblyDialog {
+    width: min(1180px, 100%); height: min(850px, calc(100vh - 36px));
+    background: #14141c; color: #d8d5c9; border: 1px solid #735c32;
+    border-radius: 10px; box-shadow: 0 16px 52px rgba(0,0,0,.55);
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  #councilAssemblyDialog header { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid #3d3424; }
+  #councilAssemblyDialog h3 { margin:0; color:#ffe4a1; font-size:16px; flex:1; }
+  #councilAssemblyPhase { color:#a99b7b; font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+  #councilAssemblyCloseBtn, #councilAssemblyReopenBtn { padding:5px 10px; font:12px sans-serif; background:#352f29; color:#fff; border:1px solid #806941; border-radius:4px; cursor:pointer; }
+  #councilAssemblyCloseBtn:hover, #councilAssemblyReopenBtn:hover { background:#4a4033; }
+  #councilAssemblyBody { display:grid; grid-template-columns:minmax(0, 1.35fr) minmax(300px, .65fr); min-height:0; flex:1 1 auto; overflow:hidden; }
+  #councilTableWrap { min-width:0; min-height:0; padding:14px; display:flex; align-items:center; justify-content:center; overflow:hidden; background:radial-gradient(circle at center, #30261c, #1a191b 68%); }
+  /* Keep the whole ring visible: the table consumes available viewport height
+     before it consumes its preferred 760px size.  Tall viewports still get
+     the readable 640px+ target; short ones scale the canvas instead. */
+  #councilAssemblyCanvas { width:min(100%, 760px, calc(100vh - 116px)); height:auto; aspect-ratio:1; min-width:0; image-rendering:pixelated; image-rendering:crisp-edges; }
+  #councilAssemblyInfo { min-height:0; padding:14px; overflow-y:auto; border-left:1px solid #3d3424; font-size:12px; line-height:1.45; }
+  .assembly-section { margin-bottom:16px; }
+  .assembly-section h4 { margin:0 0 6px; color:#d6bc78; font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  #councilAssemblyAgenda { margin:0; padding-left:18px; color:#c9c5bb; }
+  #councilAssemblyAgenda li { margin-bottom:4px; }
+  #councilAssemblyTranscript { max-height:280px; overflow-y:auto; border:1px solid #302b29; border-radius:5px; background:#101015; }
+  .assembly-entry { padding:7px 8px; border-bottom:1px solid #28252a; }
+  .assembly-entry:last-child { border-bottom:0; }
+  .assembly-who { color:#8ed2ed; font-weight:600; }
+  .assembly-feeling { color:#d8a9d8; font-style:italic; }
+  #councilAssemblyTally { display:grid; grid-template-columns:repeat(3, 1fr); gap:5px; }
+  .assembly-vote { padding:5px; border-radius:4px; background:#202026; text-align:center; }
+  .assembly-vote.yes { border:1px solid #447b4b; color:#aee6b5; }
+  .assembly-vote.no { border:1px solid #864949; color:#efb0b0; }
+  .assembly-vote.abstain { border:1px solid #665f50; color:#d4c9a8; }
+  #councilAssemblyVerdict { padding:9px; border:1px solid #b99446; border-radius:5px; background:#302718; color:#ffe4a1; }
+  #councilAssemblyReopenBtn { display:none; position:fixed; right:18px; bottom:18px; z-index:109; box-shadow:0 4px 18px rgba(0,0,0,.45); }
+  #councilAssemblyReopenBtn.visible { display:block; }
   @media (max-width: 900px) {
     #wrap { flex-direction: column; height: auto; padding: 0; }
     #world { height: auto; max-height: 70vh; width: 100%; }
@@ -544,6 +588,9 @@
        so the desktop right:380px offset (sized to dodge #sidebar's column)
        no longer applies -- fall back to the viewport corner. */
     #minimap { right: auto; left: 18px; }
+    #councilAssemblyBody { grid-template-columns:1fr; }
+    #councilAssemblyInfo { border-left:0; border-top:1px solid #3d3424; }
+    #councilAssemblyCanvas { min-width:0; }
   }
 </style>
 </head>
@@ -665,6 +712,25 @@
   </div>
 </div>
 <div id="worldLoading">Loading world map…</div>
+<div id="councilAssemblyModal" role="dialog" aria-labelledby="councilAssemblyTitle" aria-modal="true">
+  <div id="councilAssemblyDialog">
+    <header>
+      <h3 id="councilAssemblyTitle">Daily Council Assembly</h3>
+      <span id="councilAssemblyPhase"></span>
+      <button id="councilAssemblyCloseBtn" type="button">Close</button>
+    </header>
+    <div id="councilAssemblyBody">
+      <div id="councilTableWrap"><canvas id="councilAssemblyCanvas" width="760" height="760" aria-label="Council seating table"></canvas></div>
+      <div id="councilAssemblyInfo">
+        <section class="assembly-section"><h4>Agenda</h4><ul id="councilAssemblyAgenda"></ul></section>
+        <section class="assembly-section" id="councilAssemblyBallotSection"><h4>Ballot</h4><div id="councilAssemblyTally"></div></section>
+        <section class="assembly-section" id="councilAssemblyVerdictSection"><h4 id="councilAssemblyVerdictHeading">Elder ruling</h4><div id="councilAssemblyVerdict"></div></section>
+        <section class="assembly-section"><h4>Live discussion</h4><div id="councilAssemblyTranscript"></div></section>
+      </div>
+    </div>
+  </div>
+</div>
+<button id="councilAssemblyReopenBtn" type="button">Re-open Daily Council</button>
 <script src="roles.js"></script>
 <script src="sprites.js"></script>
 <script>
@@ -1422,6 +1488,9 @@ const ACTION_LABELS = {
   plant_terrain: "planting terrain",
   propose_treaty: "proposing a treaty",
   vote_treaty: "voting on a treaty",
+  council_speak: "speaking at council",
+  council_propose: "proposing at council",
+  council_vote: "voting at council",
   rest: "resting"
 };
 function humanizeAction(agent) {
@@ -1886,6 +1955,151 @@ const councilTranscriptBodyEl = document.getElementById("councilTranscriptBody")
 const councilTranscriptTitleEl = document.getElementById("councilTranscriptTitle");
 const councilTranscriptCloseBtn = document.getElementById("councilTranscriptCloseBtn");
 
+// Daily Council is intentionally a read-only view of the serialized session.
+// The only local state below is modal preference, so closing it never changes
+// the simulation and a session cannot force the observer to keep it open.
+const councilAssemblyModal = document.getElementById("councilAssemblyModal");
+const councilAssemblyCanvas = document.getElementById("councilAssemblyCanvas");
+const councilAssemblyCtx = councilAssemblyCanvas.getContext("2d");
+const councilAssemblyPhaseEl = document.getElementById("councilAssemblyPhase");
+const councilAssemblyAgendaEl = document.getElementById("councilAssemblyAgenda");
+const councilAssemblyTallyEl = document.getElementById("councilAssemblyTally");
+const councilAssemblyTranscriptEl = document.getElementById("councilAssemblyTranscript");
+const councilAssemblyBallotSectionEl = document.getElementById("councilAssemblyBallotSection");
+const councilAssemblyVerdictSectionEl = document.getElementById("councilAssemblyVerdictSection");
+const councilAssemblyVerdictHeadingEl = document.getElementById("councilAssemblyVerdictHeading");
+const councilAssemblyVerdictEl = document.getElementById("councilAssemblyVerdict");
+const councilAssemblyCloseBtn = document.getElementById("councilAssemblyCloseBtn");
+const councilAssemblyReopenBtn = document.getElementById("councilAssemblyReopenBtn");
+let councilAssemblyDismissedId = null;
+let councilAssemblyAutoOpenedId = null;
+
+function dailyCouncilId(council) {
+  return council ? `${council.day ?? "?"}:${council.frame ?? "?"}` : null;
+}
+
+function isDailyCouncilLive(council) {
+  return !!(council && council.phase && council.phase !== "adjourned");
+}
+
+function closeCouncilAssembly(manual = true) {
+  const council = getCiv().dailyCouncil;
+  if (manual && council) councilAssemblyDismissedId = dailyCouncilId(council);
+  councilAssemblyModal.classList.remove("open");
+  if (isDailyCouncilLive(council)) councilAssemblyReopenBtn.classList.add("visible");
+}
+
+function openCouncilAssembly() {
+  const council = getCiv().dailyCouncil;
+  if (!isDailyCouncilLive(council)) return;
+  councilAssemblyDismissedId = null;
+  councilAssemblyAutoOpenedId = dailyCouncilId(council);
+  councilAssemblyModal.classList.add("open");
+  councilAssemblyReopenBtn.classList.remove("visible");
+  renderDailyCouncil(council);
+}
+
+function dailyCouncilTranscriptEntry(entry) {
+  const who = entry.who || entry.proposer || entry.elder || "Council";
+  const text = entry.text || entry.message || entry.title || entry.outcome || entry.type || "event";
+  const feeling = entry.feeling ? ` <span class="assembly-feeling">feeling: ${escapeHtml(entry.feeling)}</span>` : "";
+  return `<div class="assembly-entry"><span class="assembly-who">${escapeHtml(who)}</span>: ${escapeHtml(text)}${feeling}</div>`;
+}
+
+function renderDailyCouncil(council) {
+  const live = isDailyCouncilLive(council);
+  if (!live) {
+    councilAssemblyModal.classList.remove("open");
+    councilAssemblyReopenBtn.classList.remove("visible");
+    return;
+  }
+  const id = dailyCouncilId(council);
+  if (councilAssemblyAutoOpenedId !== id && councilAssemblyDismissedId !== id) {
+    councilAssemblyAutoOpenedId = id;
+    councilAssemblyModal.classList.add("open");
+  }
+  councilAssemblyReopenBtn.classList.toggle("visible", !councilAssemblyModal.classList.contains("open"));
+  councilAssemblyPhaseEl.textContent = `${council.phase || "convening"} · day ${council.day ?? "?"}`;
+  const agenda = council.agenda || [];
+  councilAssemblyAgendaEl.innerHTML = agenda.length
+    ? agenda.map((item) => `<li><strong>${escapeHtml(item.topic || "Topic")}</strong>${item.detail ? ` — ${escapeHtml(item.detail)}` : ""}</li>`).join("")
+    : "<li>No agenda published yet.</li>";
+
+  const ballot = council.ballot;
+  councilAssemblyBallotSectionEl.style.display = ballot ? "block" : "none";
+  if (ballot) {
+    const votes = ballot.votes || {};
+    const attendees = council.attendees || [];
+    if (ballot.kind === "succession") {
+      const candidates = ballot.candidates || [];
+      const totals = Object.fromEntries(candidates.map((name) => [name, 0]));
+      let abstain = 0;
+      attendees.forEach((name) => {
+        const vote = votes[name];
+        if (vote in totals) totals[vote] += 1;
+        else if (vote === "abstain") abstain += 1;
+      });
+      councilAssemblyTallyEl.innerHTML =
+        `<div class="assembly-entry"><strong>${escapeHtml(ballot.title || "Choose the next elder")}</strong></div>` +
+        candidates.map((name) => `<div class="assembly-vote yes">${escapeHtml(name)} ${totals[name]}</div>`).join("") +
+        `<div class="assembly-vote abstain">Abstain ${abstain}</div>` +
+        attendees.map((name) => {
+          const vote = votes[name] || "pending";
+          return `<div class="assembly-vote ${vote === "pending" ? "abstain" : "yes"}">${escapeHtml(name)}: ${escapeHtml(vote)}</div>`;
+        }).join("");
+    } else {
+      const totals = { yes: 0, no: 0, abstain: 0 };
+      attendees.forEach((name) => { const vote = votes[name]; if (vote in totals) totals[vote] += 1; });
+      councilAssemblyTallyEl.innerHTML =
+        `<div class="assembly-vote yes">Yes ${totals.yes}</div><div class="assembly-vote no">No ${totals.no}</div><div class="assembly-vote abstain">Abstain ${totals.abstain}</div>` +
+        attendees.map((name) => {
+          const vote = votes[name] || "pending";
+          return `<div class="assembly-vote ${vote === "pending" ? "abstain" : vote}">${escapeHtml(name)}: ${escapeHtml(vote)}</div>`;
+        }).join("");
+    }
+  }
+  const verdict = council.verdict;
+  councilAssemblyVerdictSectionEl.style.display = verdict ? "block" : "none";
+  if (verdict) {
+    const succession = ballot && ballot.kind === "succession";
+    councilAssemblyVerdictHeadingEl.textContent = succession ? "Village verdict" : "Elder ruling";
+    const ruling = verdict.outcome || verdict.elderRuling || verdict.winner ||
+      (succession ? "Village verdict pending" : "Elder ruling pending");
+    councilAssemblyVerdictEl.textContent = ruling;
+  }
+  const transcript = council.transcript || [];
+  councilAssemblyTranscriptEl.innerHTML = transcript.length
+    ? transcript.map(dailyCouncilTranscriptEntry).join("")
+    : '<div class="assembly-entry">The council is gathering.</div>';
+}
+
+function drawCouncilAssemblyTable(council, frameTick) {
+  if (!councilAssemblyModal.classList.contains("open") || !isDailyCouncilLive(council)) return;
+  const ctx = councilAssemblyCtx, size = councilAssemblyCanvas.width, center = size / 2;
+  const seats = [...(council.seats || [])].sort((a, b) => (a.seatIndex || 0) - (b.seatIndex || 0));
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = "#201b19"; ctx.fillRect(0, 0, size, size);
+  const radius = Math.max(220, Math.min(285, 215 + seats.length * 6));
+  ctx.fillStyle = "#4a2815"; ctx.beginPath(); ctx.arc(center, center, radius * .67, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#bd7b3f"; ctx.lineWidth = 10; ctx.beginPath(); ctx.arc(center, center, radius * .67, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = "#d3a65f"; ctx.font = "bold 16px system-ui"; ctx.textAlign = "center"; ctx.fillText("DAILY COUNCIL", center, center - 4);
+  ctx.fillStyle = "#f1d69b"; ctx.font = "12px system-ui"; ctx.fillText(`${seats.length} seated · ${council.phase}`, center, center + 18);
+  const agentsByName = new Map(getAgents().map((agent) => [agent.name, agent]));
+  seats.forEach((seat, index) => {
+    // seatIndex and isHead come from the engine; this only maps that serialized
+    // ring order into the modal's pixel space.
+    const angle = -Math.PI / 2 + ((seat.seatIndex ?? index) / Math.max(seats.length, 1)) * Math.PI * 2;
+    const x = center + Math.cos(angle) * radius, y = center + Math.sin(angle) * radius;
+    ctx.fillStyle = seat.isHead ? "#e7bd56" : "#795335";
+    ctx.beginPath(); ctx.arc(x, y + 7, seat.isHead ? 31 : 25, 0, Math.PI * 2); ctx.fill();
+    const agent = agentsByName.get(seat.name) || { name: seat.name, role: seat.role || "villager", color: "#BDBDBD" };
+    const seated = { ...agent, x, y: y + 10, targetX: x, targetY: y + 10 };
+    drawAgentSprite(ctx, seated, frameTick);
+    ctx.fillStyle = seat.isHead ? "#ffe4a1" : "#e9e3d4"; ctx.font = seat.isHead ? "bold 13px system-ui" : "12px system-ui";
+    ctx.textAlign = "center"; ctx.fillText(`${seat.isHead ? "★ " : ""}${seat.name}`, x, y + 48);
+  });
+}
+
 function councilAgentNames(record) {
   const names = [...(record.proposers || [])];
   const elder = getAgents().find((a) => a.role === "elder" && !a.deceased);
@@ -2091,6 +2305,16 @@ document.addEventListener("keydown", (event) => {
     closeCouncilTranscript();
   }
 });
+councilAssemblyCloseBtn.addEventListener("click", () => closeCouncilAssembly(true));
+councilAssemblyReopenBtn.addEventListener("click", openCouncilAssembly);
+councilAssemblyModal.addEventListener("click", (event) => {
+  if (event.target === councilAssemblyModal) closeCouncilAssembly(true);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && councilAssemblyModal.classList.contains("open")) {
+    closeCouncilAssembly(true);
+  }
+});
 
 // =====================================================================
 // Minimap (Phase 6, optional polish) -- a small fixed-position canvas showing
@@ -2218,6 +2442,7 @@ async function pollState() {
       scheduleTerrainCacheBuild();
     }
     applyFlags(snapshot.config && snapshot.config.flags);
+    renderDailyCouncil((snapshot.civilization || {}).dailyCouncil);
     syncPauseButton();
     if (terrainCanvas) hideWorldLoading();
   } catch (err) {
@@ -2346,6 +2571,7 @@ function tick() {
   drawLightGlows(world.calendar);
 
   renderSidebar();
+  drawCouncilAssemblyTable((world.civilization || {}).dailyCouncil, renderFrame);
   renderMinimap();
   requestAnimationFrame(tick);
 }

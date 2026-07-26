@@ -1,4 +1,146 @@
-# HANDOFF — Path 1 sprint session (2026-07-11)
+# HANDOFF — Daily Council integration (2026-07-26)
+
+> This top section is the current resume snapshot. The prior Path 1 handoff is
+> retained below as historical context.
+
+## 0. Current machine-readable snapshot
+
+```json
+{
+  "snapshot_generated_utc": "2026-07-26T06:34:06Z",
+  "conversation_scope": "Daily Council Assembly Phases 0-5 implementation, integration regression, and retention soak",
+  "repo_root": "C:\\Users\\dbadmin\\Desktop\\GitServ\\simulation",
+  "git": {
+    "branch": "main",
+    "baseline_head": "5387d83",
+    "baseline_subject": "Merge branch 'codex/module-quality' into main",
+    "working_tree": "uncommitted Daily Council implementation; do not stage/commit as part of Phase 4"
+  },
+  "daily_council": {
+    "status": "FULLY_IMPLEMENTED_THROUGH_PHASE_5",
+    "default_enabled": true,
+    "action_count": 42,
+    "new_actions": [
+      "council_speak",
+      "council_propose",
+      "council_vote"
+    ],
+    "cadence": "one meeting at each DAY_FRAMES boundary when eligible",
+    "eligibility": "at least 2 living agents plus a living, non-incapacitated elder",
+    "attendance": "all living non-incapacitated agents; collapsed living agents excused",
+    "death_semantics": "dead agents remain in self.agents and are excluded by non-null deathFrame",
+    "voting": "whole-village quorum normally; exact yes/no ties use the seated elder's personal yes/no vote (default no if absent/abstaining); non-tied sub-quorum results reject; elder ratifies",
+    "records": "verbatim council_transcript rows plus bounded councilDigests and councilLog",
+    "viewer": "responsive auto-opening assembly modal with 760x760 logical canvas, full seat ring, agenda, transcript, tally, and verdict",
+    "flag_off": "no Daily Council convene/actions offered/actions accepted; legacy invention-council behavior retained"
+  },
+  "state_db_impact": {
+    "state_version": 2,
+    "migration": "additive CREATE TABLE IF NOT EXISTS; no version bump",
+    "new_table": "council_transcript(rowid_pk, meeting_id, who, type, text, feeling, frame_tick, ts)",
+    "write_shape": "authoritative in-RAM list, atomically delete/reinsert on save like memory",
+    "retention": "newest 30 distinct meeting_id values",
+    "civ_keys": [
+      "dailyCouncil",
+      "councilDigests"
+    ]
+  },
+  "verification": {
+    "command": "uv run python scripts/daily_council_regression.py",
+    "result": "PASS (6/6 cells, 3.307 s total)",
+    "matrix": {
+      "flag_on": {
+        "daily_council_smoke.py": "PASS (0.195 s)",
+        "sid_parity_smoke.py": "PASS (0.594 s)",
+        "path1_smoke.py": "PASS (0.875 s)"
+      },
+      "flag_off": {
+        "daily_council_smoke.py": "PASS (0.123 s)",
+        "sid_parity_smoke.py": "PASS (0.599 s)",
+        "path1_smoke.py": "PASS (0.921 s)"
+      }
+    },
+    "artifact": "scripts/out/daily_council_regression.json",
+    "isolation": "fresh subprocess and temporary state.db per cell; source files and real simulation/state.db untouched",
+    "py_compile": "PASS: sim_engine.py, server.py, prompts.py, daily council smoke/regression/state probe/soak",
+    "soak": {
+      "command": "uv run python scripts/daily_council_soak.py",
+      "result": "PASS (35/35 meetings, 0 anomalies, 0.613 s)",
+      "artifact": "scripts/out/daily_council_soak_20260726T063406Z.json",
+      "retention": "30 distinct meeting IDs retained exactly (6-35); 990 rows expected/actual; rows plateaued from meetings 30-35",
+      "sqlite_growth": "114688 bytes after meeting 1; 294912 bytes at meeting 30; unchanged at 294912 through meeting 35",
+      "caps_and_safety": "digest/log caps, phase order, attendee/head integrity, TTL/wedge checks, no stuck session, guarded source hashes, and real state.db fingerprint all passed",
+      "ollama": "disabled for the deterministic required soak; --ollama is available with deterministic action fallback"
+    }
+  },
+  "runtime_assumptions": {
+    "decision_model": "sim-smart (Qwen3.5 9B); every decision and council turn",
+    "background_model": "sim-fast (llama3.2:3b); PIANO/memory/meta background cognition only",
+    "smart_num_ctx": 20480,
+    "fast_num_ctx": 4096,
+    "decision_concurrency": 3,
+    "piano_concurrency": 2,
+    "ollama_parallel": 3,
+    "regression_requires_ollama": false,
+    "implementation_assignments": "historical GPT-5.6 sol/terra assignments remain recorded in docs/plan-daily-council.md per explicit user direction"
+  },
+  "remaining": []
+}
+```
+
+## 1. Daily Council behavior
+
+`DAILY_COUNCIL_ENABLED = True` schedules a whole-village assembly at the
+in-world day boundary. Convening requires at least two living villagers and a
+living, non-incapacitated elder. Every other living, non-incapacitated villager
+is seated; collapsed villagers are excused. Dead villagers are retained in the
+engine roster for lifecycle/history rendering but excluded by `deathFrame`.
+
+The engine advances convening → discussion → proposal → voting → verdict →
+adjourned with phase/session TTLs. Three council-only actions replace ordinary
+think turns. A ballot normally needs a strict majority of the complete
+non-excused living attendance. An exact yes/no tie is the defined exception:
+the seated elder's personal yes/no vote breaks it (default no if absent or
+abstaining), and a rule tie uses a synthetic ratification vote through the
+existing enactment path. Non-tied sub-quorum results reject. The elder announces
+and ratifies the result. When the flag is off, no assembly convenes,
+the actions are neither offered nor accepted, and the legacy reactive invention
+council remains active.
+
+The viewer is read-only. Its modal auto-opens for a live session, can be
+dismissed/re-opened, and draws the engine-authored seating ring on a 760×760
+logical canvas that scales down to fit short/narrow viewports.
+
+## 2. Persistence and verification
+
+The existing `STATE_VERSION = 2` remains valid. SQLite DDL additively creates
+`council_transcript`; old saves restore with `dailyCouncil = None` and
+`councilDigests = []`. Raw transcript rows are retained for 30 meeting ids and
+never enter prompts. Compact digests are capped at five and at most two enter a
+think payload.
+
+Resume checks:
+
+```powershell
+uv run python scripts/daily_council_regression.py
+uv run python scripts/daily_council_soak.py
+uv run python -m py_compile simulation/sim_engine.py simulation/server.py simulation/prompts.py scripts/daily_council_smoke.py scripts/daily_council_regression.py scripts/daily_council_state_probe.py scripts/daily_council_soak.py
+```
+
+Phase 4 regression passed all six on/off cells in 3.307 seconds. Exact per-cell
+results and captured output tails are in
+`scripts/out/daily_council_regression.json`.
+
+Phase 5's deterministic no-Ollama soak passed 35/35 meetings in 0.613 seconds
+with zero anomalies. The transcript table retained exactly meeting IDs 6–35
+(990 rows), and both row count and the 294,912-byte SQLite file size plateaued
+from meeting 30 through meeting 35. Full per-day lifecycle, tally/ruling, cap,
+TTL/wedge, integrity, isolation, and growth evidence is in
+`scripts/out/daily_council_soak_20260726T063406Z.json`.
+
+---
+
+## Historical handoff — Path 1 sprint session (2026-07-11)
 
 > Read this file FIRST when resuming work from this session. It documents
 > **only** the Cursor conversation that implemented

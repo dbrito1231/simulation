@@ -33,6 +33,7 @@ from flask_cors import CORS
 import prompts as _prompts
 SYSTEM_PROMPT = _prompts.SYSTEM_PROMPT
 SYSTEM_PROMPT_SLIM = _prompts.SYSTEM_PROMPT_SLIM
+COUNCIL_SYSTEM_PROMPT = _prompts.COUNCIL_SYSTEM_PROMPT
 
 # to_ollama_body (the OpenAI-shaped-payload -> Ollama /api/chat wire-format
 # conversion) lives in llm_wire.py (2026-07-24, docs/plan-ollama-migration.md
@@ -293,6 +294,9 @@ def _base_high_stakes(data):
     if data.get("sprite_design_only"):
         return True
     if data.get("invention_only"):
+        return True
+    if data.get("council_turn") and (data.get("daily_council") or {}).get("phase") == "verdict" \
+            and (data.get("role") or "").lower() == "elder":
         return True
     if (data.get("role") or "").lower() == "elder":
         return True
@@ -937,6 +941,8 @@ DECISION_ACTIONS = [
     # Path 1: composable tiles, terrain mutation, diplomacy treaties.
     "place_block", "remove_block", "dig_terrain", "plant_terrain",
     "propose_treaty", "vote_treaty",
+    # Daily Council Assembly. Offered only to a seated attendee in-session.
+    "council_speak", "council_propose", "council_vote",
 ]
 
 # Loose shape only; validate_blueprint() stays the authority on blueprint detail.
@@ -952,6 +958,11 @@ DECISION_SCHEMA = {
         "target": {"type": ["string", "null"]},
         "target_district": {"type": ["string", "null"]},
         "message": {"type": ["string", "null"]},
+        "feeling": {"type": ["string", "null"]},
+        "topic": {"type": ["string", "null"]},
+        "kind": {"type": ["string", "null"], "enum": ["rule", "blueprint", "idea", None]},
+        "title": {"type": ["string", "null"]},
+        "detail": {"type": ["string", "null"]},
         "new_role": {"type": ["string", "null"]},
         "relationship_update": {
             "type": ["object", "null"],
@@ -1064,6 +1075,7 @@ DECISION_SCHEMA = {
             },
         },
         "vote": {"type": ["string", "null"]},
+        "candidate": {"type": ["string", "null"]},
         "sage_decision": {"type": ["string", "null"], "enum": ["approve", "deny", None]},
         "sprite": {
             "type": ["object", "null"],
@@ -1222,7 +1234,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-{season_line}{prices_line}{chronicle_line}{library_lessons_line}{path1_lines}{level_line}Structures built: {structures_built}
+{season_line}{prices_line}{chronicle_line}{council_digest_line}{library_lessons_line}{path1_lines}{level_line}Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
@@ -2064,6 +2076,46 @@ def validate_role(role, known_resource_ids, known_role_ids, pending_role_slugs,
 def role_fallback_action(role, agent_data):
     """Return a role-appropriate fallback decision when talk is invalid."""
     role = (role or "").lower()
+    council = agent_data.get("daily_council") or {}
+    if agent_data.get("council_turn") and agent_data.get("council_seated"):
+        phase = council.get("phase")
+        agenda = council.get("agenda") or []
+        topic = next((a.get("topic") for a in agenda if isinstance(a, dict)), "world_status")
+        if phase == "discussion":
+            ballot = council.get("ballot") or {}
+            succession = ballot.get("kind") == "succession"
+            candidates = ", ".join(ballot.get("candidates") or [])
+            return {
+                "action": "council_speak",
+                "message": (
+                    f"We should compare {candidates} by judgment, care, and service."
+                    if succession else
+                    "We should protect essentials while making steady progress."
+                ),
+                "feeling": "hopeful",
+                "topic": "leadership_vacancy" if succession else topic,
+                "reasoning": "Offering a practical council opinion.",
+            }
+        if phase == "proposal":
+            return {
+                "action": "council_propose", "kind": "idea",
+                "title": "Steady village priorities",
+                "detail": "Protect food and health while completing the most-stalled shared project.",
+                "reasoning": "Offering a safe advisory proposal.",
+            }
+        if phase == "voting":
+            return {
+                "action": "council_vote", "vote": "abstain",
+                "reasoning": "Recording a neutral ballot rather than inventing a position.",
+            }
+        if phase == "verdict" and role == "elder":
+            verdict = council.get("verdict") or {}
+            return {
+                "action": "council_speak",
+                "message": f"The council ratifies: {verdict.get('outcome') or 'the recorded result'}.",
+                "feeling": "resolute", "topic": "verdict",
+                "reasoning": "Announcing the council's recorded ruling.",
+            }
     active_project = agent_data.get("active_project")
     has_project = active_project and active_project not in ("none", "null", None, "")
     role_projects = agent_data.get("role_project_map")
@@ -2218,6 +2270,85 @@ def normalize_decision(decision, agent_data):
     nearby_raw = agent_data.get("nearby_agents")
     nearby_names = parse_nearby_names(nearby_raw)
     nearby_empty = len(nearby_names) == 0
+    council_actions = {"council_speak", "council_propose", "council_vote"}
+    council = agent_data.get("daily_council") or {}
+    council_turn = bool(agent_data.get("council_turn") and agent_data.get("council_seated"))
+    if action in council_actions or council_turn:
+        fallback = role_fallback_action(agent_data.get("role"), agent_data)
+        phase = council.get("phase")
+        if not council_turn or action not in council_actions:
+            fallback["reasoning"] = (
+                fallback.get("reasoning", "") + " (invalid council session/action)"
+            ).strip()
+            fallback["council_rejection_note"] = "not a seated active council turn"
+            return fallback
+        if action == "council_speak":
+            elder_verdict = phase == "verdict" and (
+                agent_data.get("role") or ""
+            ).lower() == "elder"
+            if phase != "discussion" and not elder_verdict:
+                fallback["council_rejection_note"] = "council_speak is not valid in this phase"
+                return fallback
+            message = decision.get("message")
+            feeling = decision.get("feeling")
+            topic = decision.get("topic")
+            if not isinstance(message, str) or not message.strip():
+                fallback["council_rejection_note"] = "council_speak requires a message"
+                return fallback
+            decision["message"] = message.strip()[:500]
+            decision["feeling"] = str(feeling or "thoughtful").strip()[:80]
+            decision["topic"] = str(topic or "world_status").strip()[:80]
+            return decision
+        if action == "council_vote":
+            ballot = council.get("ballot") or {}
+            if ballot.get("kind") == "succession":
+                candidate = decision.get("candidate")
+                valid_vote = (
+                    decision.get("vote") == "abstain"
+                    or candidate in (ballot.get("candidates") or [])
+                )
+            else:
+                valid_vote = decision.get("vote") in ("yes", "no", "abstain")
+            if phase != "voting" or not valid_vote:
+                fallback["council_rejection_note"] = "council_vote requires an open voting phase"
+                return fallback
+            return decision
+        if phase != "proposal":
+            fallback["council_rejection_note"] = "council_propose requires the proposal phase"
+            return fallback
+        kind = decision.get("kind")
+        if kind == "idea":
+            title, detail = decision.get("title"), decision.get("detail")
+            if not isinstance(title, str) or not title.strip() or not isinstance(detail, str) \
+                    or not detail.strip():
+                fallback["council_rejection_note"] = "idea proposals require title and detail"
+                return fallback
+            decision["title"] = title.strip()[:120]
+            decision["detail"] = detail.strip()[:500]
+            return decision
+        if kind == "rule":
+            rule = decision.get("rule")
+            if not isinstance(rule, dict):
+                fallback["council_rejection_note"] = "rule proposal has an invalid shape"
+                return fallback
+            return decision
+        if kind == "blueprint":
+            known_ids = agent_data.get("known_resource_ids") or []
+            ok, reason = validate_blueprint(
+                decision.get("blueprint"), known_ids,
+                agent_data.get("pending_blueprint_ids") or [],
+                agent_data.get("approved_blueprint_ids") or [],
+                agent_data.get("custom_resource_count", 0),
+                agent_data.get("rejected_blueprint_ids") or [],
+                agent_data.get("known_effect_vectors"),
+                village_tier=agent_data.get("village_tech_tier"),
+            )
+            if not ok:
+                fallback["council_rejection_note"] = f"invalid council blueprint: {reason}"
+                return fallback
+            return decision
+        fallback["council_rejection_note"] = "council proposal kind must be rule, blueprint, or idea"
+        return fallback
 
     if action == "start_terraform":
         inferred, reason = _infer_terraform_decision(decision, agent_data)
@@ -3173,6 +3304,10 @@ def build_user_prompt(data, slim=False):
     # entry) so flag-off / empty-chronicle prompts stay byte-identical.
     chronicle_line_raw = data.get("chronicle_line")
     chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
+    council_digest_raw = data.get("council_digest_line")
+    council_digest_line = (
+        f"Recent council: {council_digest_raw}\n" if council_digest_raw else ""
+    )
     lessons_raw = data.get("library_lessons")
     library_lessons_line = f"Library lessons: {lessons_raw}\n" if lessons_raw else ""
     path1_parts = []
@@ -3236,6 +3371,7 @@ def build_user_prompt(data, slim=False):
         season_line=season_line,
         prices_line=prices_line,
         chronicle_line=chronicle_line,
+        council_digest_line=council_digest_line,
         library_lessons_line=library_lessons_line,
         path1_lines=path1_lines,
         recent_conversations="none" if slim else data.get("recent_conversations", "none"),
@@ -3316,6 +3452,8 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
         system_content = SPRITE_UPGRADE_SYSTEM_PROMPT
     elif data.get("invention_only"):
         system_content = INVENTION_SYSTEM_PROMPT
+    elif data.get("council_turn"):
+        system_content = COUNCIL_SYSTEM_PROMPT
     else:
         system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
         if not slim:
@@ -3338,7 +3476,10 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     # per-agent text inside the system message forced full prompt
     # reprocessing (~5k tokens) on every agent rotation. With the system
     # prompt byte-identical across agents it becomes a shared cached prefix.
-    user_content = build_user_prompt(data, slim=slim)
+    user_content = (
+        _prompts.build_council_user_prompt(data)
+        if data.get("council_turn") else build_user_prompt(data, slim=slim)
+    )
     if self_prompt:
         user_content = (f"YOUR PERSONA (act in character): {self_prompt}\n\n"
                         + user_content)

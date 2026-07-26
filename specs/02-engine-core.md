@@ -30,6 +30,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | (unconditional) | 150 | a fixed batch: `_maybe_feed_starving`, `_maybe_repair_critical`, `_maybe_abandon_stalled_projects`, `_maybe_relocate_stuck_project`, `_maybe_reorganize_structures`, `_maybe_force_contribution`, `_maybe_start_idle_district_project`, `_maybe_build_funded_project`, `_maybe_start_approved_custom`, `_maybe_retire_blueprint`, `_maybe_amnesty_rejected_blueprints`, `_maybe_retire_custom_resource`, `_maybe_invention_backstop`, `_maybe_found_district`, `_maybe_welcome_newcomer` |
 | within the 150-batch, `SAGE_REVIEW_ENABLED` | 150 | `_maybe_skip_sage_review`, `_maybe_amnesty_denied_sage_reviews` |
 | within the 150-batch, `TECH_TREE_ENABLED` | 150 | `_maybe_era_transition`, `_maybe_dissolve_council` |
+| `DAILY_COUNCIL_ENABLED` | day boundary (`frameTick % DAY_FRAMES == 0`) and deterministic phase gate | `_maybe_convene_daily_council`, `_maybe_advance_daily_council` |
 | within the 150-batch, `CULTURE_ENABLED` | 150 | `_maybe_study_at_library` |
 | within the 150-batch, `CEMETERY_ENABLED` | 150 | `_maybe_handle_burials` |
 | within the 150-batch, `ECONOMY_ENABLED` | 150 | `_maybe_mint_coin`, `_maybe_fund_project_coin` |
@@ -68,6 +69,13 @@ future while holding the tick lock.
 - `SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}`
   (sim_engine.py:526): ecology regrowth is doubled in spring and fully halted in
   winter (`_tick_ecology_regrow`, applied only when `ECOLOGY_ENABLED`).
+- A scheduled Daily Council may convene once at the deterministic day boundary
+  when `DAILY_COUNCIL_ENABLED` is on. A leaderless lifecycle succession is the
+  bounded emergency exception and convenes on the next
+  `RULES_TICK_FRAMES` recovery pass. The persisted, tick-gated phase machine is
+  specified in [09-systems-society.md](09-systems-society.md). It never adds a
+  worker-pool slot: a council speaking/voting turn replaces the selected agent's
+  ordinary think turn.
 - `_calendar()` (sim_engine.py:2765) is a pure function of `frameTick`: returns
   `year`, `season`, `dayOfSeason`, `daysPerSeason`, `isNight`, `dayFraction` — all
   derived, nothing persisted separately.
@@ -207,7 +215,7 @@ state.db`), replacing the earlier monolithic `state.json` file. `_serialize_stat
 (sim_engine.py:9531) still builds the save payload under the lock, with the
 same shape as before: top-level keys `version` (`STATE_VERSION = 2`,
 sim_engine.py:31), `frameTick`, `savedAt` (UTC ISO timestamp), `roster_size`,
-`civilization`, `agents`, `memory` (sets are serialized as sorted arrays,
+`civilization`, `agents`, `memory`, `council_transcript` (sets are serialized as sorted arrays,
 `isThinking` is dropped, memory rows are vec-stripped for storage and
 re-embedded on import).
 
@@ -217,11 +225,15 @@ four tables: `meta(key, value)` (one row each for `version`, `frameTick`,
 `savedAt`, `roster_size`); `civ(key, value)` (one row per top-level
 `civilization` key, value JSON-encoded); `agents(name PK, ord, data)` (one row
 per agent, `data` JSON-encoded, `ord` preserving roster order on load); and
-`memory(rowid_pk, id, agent, text, salience, kind, tier, frame_tick, ts)`.
+`memory(rowid_pk, id, agent, text, salience, kind, tier, frame_tick, ts)`; and
+`council_transcript(rowid_pk, meeting_id, who, type, text, feeling, frame_tick,
+ts)`. The latter is the full human/audit record for Daily Council events, not
+prompt context.
 
 `_write_state_db(path, payload)` performs a full rewrite on every save: it
-upserts `meta`, then deletes and re-inserts all `civ`/`agents`/`memory` rows,
-all inside a single transaction, followed by a `wal_checkpoint`. `save_state()`
+upserts `meta`, then deletes and re-inserts all `civ`/`agents`/`memory`/
+`council_transcript` rows, all inside a single transaction, followed by a
+`wal_checkpoint`. `save_state()`
 serializes the payload under the lock, then writes it outside the lock via a
 per-call connection (`_write_state_db`) and never raises — the single-
 transaction commit gives crash safety without the old tmp-file-plus-rename
@@ -240,5 +252,15 @@ saves) has been removed. The `setdefault`/flag-gated backfill chain for
 everything added since v2 (basePopulation, effect/reorg/role-switch state,
 rule diversity tracking, spoilage nudges, etc.) still runs on every restore,
 for forward-compat with DBs saved under older feature-flag sets.
+
+Daily Council transcript persistence deliberately mirrors `memory`: the engine
+owns an authoritative in-RAM `council_transcript_rows` list; appending a live
+transcript event appends its durable row immediately; serialization exports the
+whole list; and DB save deletes then re-inserts the whole table atomically.
+Restore rehydrates that list. At adjourn, after rows for the meeting are
+appended, retention keeps only the newest
+`DAILY_COUNCIL_TRANSCRIPT_RETENTION_MEETINGS = 30` distinct `meeting_id` values.
+This audit table is never folded into an LLM prompt; the bounded digest in the
+`civ` blob is the prompt-facing record (see [03](03-cognition.md)).
 `clear_state()` deletes `state.db` along with its `state.db-wal` and
 `state.db-shm` sidecar files for a cold start.

@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS agents (name TEXT PRIMARY KEY, ord INTEGER NOT NULL, 
 CREATE TABLE IF NOT EXISTS memory (
     rowid_pk INTEGER PRIMARY KEY, id INTEGER, agent TEXT NOT NULL, text TEXT NOT NULL,
     salience REAL, kind TEXT, tier TEXT, frame_tick INTEGER, ts REAL);
+CREATE TABLE IF NOT EXISTS council_transcript (
+    rowid_pk INTEGER PRIMARY KEY, meeting_id INTEGER, who TEXT, type TEXT, text TEXT,
+    feeling TEXT, frame_tick INTEGER, ts TEXT);
 """
 
 
@@ -66,6 +69,7 @@ def _write_state_db(path, payload):
         civ = payload.get("civilization") or {}
         agents = payload.get("agents") or []
         memory = payload.get("memory") or []
+        council_transcript = payload.get("council_transcript") or []
         with conn:
             conn.execute(
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
@@ -101,6 +105,15 @@ def _write_state_db(path, payload):
                 [(m.get("id"), m.get("agent"), m.get("text"), m.get("salience"),
                   m.get("kind"), m.get("tier"), m.get("frame_tick"), m.get("ts"))
                  for m in memory],
+            )
+            conn.execute("DELETE FROM council_transcript")
+            conn.executemany(
+                "INSERT INTO council_transcript "
+                "(meeting_id, who, type, text, feeling, frame_tick, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(r.get("meeting_id"), r.get("who"), r.get("type"), r.get("text"),
+                  r.get("feeling"), r.get("frame_tick"), r.get("ts"))
+                 for r in council_transcript],
             )
         try:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -150,6 +163,17 @@ def _read_state_db(path):
                 "SELECT id, agent, text, salience, kind, tier, frame_tick, ts FROM memory"
             ).fetchall()
         ]
+        council_transcript = [
+            {
+                "meeting_id": row[0], "who": row[1], "type": row[2],
+                "text": row[3], "feeling": row[4], "frame_tick": row[5],
+                "ts": row[6],
+            }
+            for row in conn.execute(
+                "SELECT meeting_id, who, type, text, feeling, frame_tick, ts "
+                "FROM council_transcript ORDER BY rowid_pk"
+            ).fetchall()
+        ]
         return {
             "version": version,
             "frameTick": frame_tick,
@@ -158,6 +182,7 @@ def _read_state_db(path):
             "civilization": civilization,
             "agents": agents,
             "memory": memory,
+            "council_transcript": council_transcript,
         }
     except Exception:
         return None
@@ -753,6 +778,9 @@ SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}
 # flag off: no tier fields, no gates, no era/council prompt lines -- prompts
 # are byte-identical to Phase C.
 TECH_TREE_ENABLED = True
+# Scheduled, whole-village deliberation. The legacy invention council remains
+# available behind this one-flag rollback.
+DAILY_COUNCIL_ENABLED = True
 MAX_TECH_TIER = 3
 # Two-stage blueprint approval: the elder must sage_review_blueprint (a
 # geography/resource sanity pass) before approve_blueprint/reject_blueprint is
@@ -769,6 +797,13 @@ WAGON_SPEED_MULT = 1.4
 # volume). Never fans out when fewer than 2 villagers are idle.
 INVENTION_COUNCIL_SIZE = 3
 COUNCIL_LOG_CAP = 12                      # persisted debate records (viewer panel)
+DAILY_COUNCIL_MIN_LIVING = 2
+DAILY_COUNCIL_DISCUSSION_ROUNDS = 2
+DAILY_COUNCIL_PHASE_TTL_FRAMES = STALL_THRESHOLD * 8
+DAILY_COUNCIL_SESSION_TTL_FRAMES = STALL_THRESHOLD * 30
+DAILY_COUNCIL_LOG_CAP = 12
+DAILY_COUNCIL_DIGEST_CAP = 5
+DAILY_COUNCIL_TRANSCRIPT_RETENTION_MEETINGS = 30
 # A council with no verdict dissolves after this many frames (STALL_THRESHOLD=600
 # frames = 20s at 30fps, so x20 = ~6.7 min). Sized for THINKING_TIMEOUT_S=75s
 # per member (server.py) queued behind MAX_CONCURRENT_LLM=2 workers, plus the
@@ -918,6 +953,7 @@ LIBRARY_STUDY_WEIGHT_CAP = 5         # study-gain upgrade-weight cap (knowledge-
 # legible past without growing the prompt unboundedly.
 CHRONICLE_CAP = 20
 CHRONICLE_PROMPT_ENTRIES = 3         # how many recent entries to fold into the prompt line
+COUNCIL_DIGEST_PROMPT_ENTRIES = 2    # newest compact Daily Council records per think payload
 # Memes: mutation is capped and event-driven -- at most one lm_complete call
 # per mutation ATTEMPT (itself gated to a low probability on ordinary
 # proximity spread), and a hard per-session ceiling so a long soak can never
@@ -1583,6 +1619,9 @@ class SimEngine:
         # never compete with decision calls for MAX_CONCURRENT_LLM slots.
         self.piano_workers = ThreadPoolExecutor(max_workers=PIANO_CONCURRENT_LLM)
         self._inflight = set()      # agent names with a think job in flight
+        # Full Daily Council audit trail. This authoritative list mirrors the
+        # MemoryStore export list and is rewritten atomically on every save.
+        self.council_transcript_rows = []
         self.RECIPES = {}
         self.roster_size = roster_size
         self._effect_period_fired = 0
@@ -1672,6 +1711,7 @@ class SimEngine:
                 "consecutiveIdleMoves": 0, "hunger": 80, "health": 100,
                 "incapacitated": False, "goal": None, "actionCounts": {},
                 "commitment": None, "inventionTurn": False, "inventionRetryUsed": False,
+                "councilTurn": False,
                 "inventionBuildContext": None,
                 "spriteDesignTurn": None,
                 "lastBlueprintRejection": None, "lastGatherRejection": None,
@@ -1820,6 +1860,8 @@ class SimEngine:
             "eraIndex": 0,
             "councilActive": None,
             "councilLog": [],
+            "dailyCouncil": None,
+            "councilDigests": [],
             # Phase F (LIFECYCLE_ENABLED): population lifecycle + governance.
             "lastBirthFrame": 0,
             "lastDeathActivityFrame": 0,
@@ -1862,6 +1904,7 @@ class SimEngine:
         self._module_period_runs = 0
         self._last_effect_benchmark_fired = 0
         self._meta_agent_index = 0
+        self.council_transcript_rows = []
         self._spoiled_period = 0     # Phase C: spoilage counter per benchmark period
         self._last_season = None     # Phase C: season-turn activity logging
         if ECOLOGY_ENABLED:
@@ -2232,6 +2275,10 @@ class SimEngine:
                 nxt = waypoints.pop(0)
                 agent["targetX"] = nxt["x"]
                 agent["targetY"] = nxt["y"]
+                agent["idleFrames"] = 0
+            elif DAILY_COUNCIL_ENABLED and agent.get("councilTurn"):
+                # A seated councillor remains at the persisted seat instead of
+                # triggering the ordinary 60-frame idle-wander behavior.
                 agent["idleFrames"] = 0
             else:
                 agent["idleFrames"] = agent.get("idleFrames", 0) + 1
@@ -6605,21 +6652,170 @@ class SimEngine:
             return
 
     # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
+    def _succession_candidates(self):
+        """Deterministic pool of agents who can safely take office now."""
+        candidates = self._eligible_adults()
+        if candidates:
+            return candidates
+        # A village made entirely of young survivors still needs leadership,
+        # but an incapacitated survivor cannot safely win or exercise it.
+        return [a for a in self._living_agents() if not a["incapacitated"]]
+
+    def _ensure_succession_daily_council(self):
+        """Convene or refresh the visible emergency assembly for this election."""
+        if not DAILY_COUNCIL_ENABLED:
+            return
+        pending = self.civilization.get("pendingSuccession")
+        if not isinstance(pending, dict):
+            return
+        council = self.civilization.get("dailyCouncil")
+        if council is None:
+            self._maybe_convene_daily_council()
+            return
+        if council.get("trigger") != "succession":
+            return
+        ballot = council.get("ballot") or {}
+        candidates = list(pending.get("candidates") or [])
+        if ballot.get("id") == pending.get("electionId") \
+                and ballot.get("candidates") == candidates:
+            return
+        council["agenda"] = self._daily_council_agenda()
+        council["ballot"] = {
+            "kind": "succession", "id": pending.get("electionId"),
+            "title": "Choose the next village elder",
+            "proposedBy": "the village", "candidates": candidates,
+            "votes": {}, "quorum": len(council.get("attendees") or []) // 2 + 1,
+        }
+        council["verdict"] = None
+        council["elderVerdictSpoken"] = False
+        council["round"] = 0
+        council["nextSpeakerIdx"] = 0
+        council["phase"] = "convening"
+        council["phaseFrame"] = self.frameTick
+        self._append_council_transcript({
+            "type": "succession_restart", "who": "the village",
+            "text": "Succession candidates changed; discussion and voting restart",
+            "candidates": candidates, "electionId": pending.get("electionId"),
+        })
+        self._sync_daily_council_turns(council)
+
+    def _ensure_succession_election(self):
+        """Repair missing/corrupt succession state without resetting a valid vote.
+
+        A living formal elder, including one temporarily incapacitated, keeps
+        office; Sage emergency owns their recovery. Only a village with no
+        living role=="elder" needs succession. The validator deliberately
+        accepts an expired but otherwise sound election so the existing TTL
+        resolver can decide it immediately instead of granting a fresh term.
+        """
+        if not LIFECYCLE_ENABLED:
+            return
+        c = self.civilization
+        succession_rules = [
+            r for r in c["pendingRules"]
+            if isinstance(r, dict) and r.get("kind") == "succession"
+        ]
+        pending = c.get("pendingSuccession")
+        living = self._living_agents()
+        if not living:
+            return
+
+        formal_elder = next((a for a in living if a.get("role") == "elder"), None)
+        if formal_elder:
+            # A restored stray ballot must never promote a second elder. Treat
+            # an incapacitated formal elder as still holding office.
+            council = c.get("dailyCouncil")
+            resolved_here = (
+                council
+                and council.get("trigger") == "succession"
+                and (council.get("verdict") or {}).get("winner") == formal_elder["name"]
+                and not pending
+            )
+            if council and council.get("trigger") == "succession" and not resolved_here:
+                self._adjourn_daily_council("formal elder retains office")
+            if pending or succession_rules:
+                c["pendingRules"] = [
+                    r for r in c["pendingRules"]
+                    if not (isinstance(r, dict) and r.get("kind") == "succession")
+                ]
+                c["pendingSuccession"] = None
+                c["lastSuccessionActivityFrame"] = self.frameTick
+                c["lastRuleActivityFrame"] = self.frameTick
+                self._push_activity(
+                    f"Succession voting is cancelled; Elder {formal_elder['name']} still holds office.")
+            return
+
+        eligible_names = {a["name"] for a in self._succession_candidates()}
+        valid = isinstance(pending, dict)
+        election_id = pending.get("electionId") if valid else None
+        candidates = pending.get("candidates") if valid else None
+        start_frame = pending.get("startFrame") if valid else None
+        deadline = pending.get("deadline") if valid else None
+        valid = (
+            valid
+            and isinstance(election_id, str) and bool(election_id)
+            and isinstance(candidates, list) and bool(candidates)
+            and all(isinstance(name, str) and name for name in candidates)
+            and len(candidates) == len(set(candidates))
+            and set(candidates).issubset(eligible_names)
+            and isinstance(start_frame, int) and not isinstance(start_frame, bool)
+            and isinstance(deadline, int) and not isinstance(deadline, bool)
+            and 0 <= start_frame <= self.frameTick
+            and deadline == start_frame + SUCCESSION_ELECTION_TTL_FRAMES
+        )
+        ballot_names = []
+        ballot_ids = []
+        if valid:
+            for rule in succession_rules:
+                candidate_name = rule.get("candidateName")
+                ballot_names.append(candidate_name)
+                ballot_ids.append(rule.get("id"))
+                if (
+                    rule.get("electionId") != election_id
+                    or rule.get("value") != candidate_name
+                    or candidate_name not in candidates
+                    or not isinstance(rule.get("id"), str) or not rule.get("id")
+                    or not isinstance(rule.get("votes"), dict)
+                    or not all(
+                        isinstance(voter, str) and vote in {"yes", "no"}
+                        for voter, vote in (rule.get("votes") or {}).items()
+                    )
+                ):
+                    valid = False
+                    break
+            valid = (
+                valid
+                and len(ballot_names) == len(candidates)
+                and len(set(ballot_ids)) == len(ballot_ids)
+                and sorted(ballot_names) == sorted(candidates)
+            )
+        if valid:
+            self._ensure_succession_daily_council()
+            return
+
+        # _start_succession_election atomically replaces every old succession
+        # ballot. If all survivors are incapacitated, clear corrupt state and
+        # defer quietly until a safe candidate recovers.
+        c["pendingRules"] = [
+            r for r in c["pendingRules"]
+            if not (isinstance(r, dict) and r.get("kind") == "succession")
+        ]
+        c["pendingSuccession"] = None
+        if self._succession_candidates():
+            self._start_succession_election()
+            self._ensure_succession_daily_council()
+
     def _start_succession_election(self):
         """One pending 'succession' rule per eligible candidate (adults,
         excluding the just-deceased elder, capped to keep MAX_PENDING_RULES
         headroom for ordinary governance). Candidates are the eligible-adult
-        set -- deterministic, no LLM involved in nomination. Villagers vote
-        via the existing vote_rule action; _vote_on_rule's exclusivity logic
-        (above) makes a "yes" on one candidate a "no" on the rest."""
+        set -- deterministic, no LLM involved in nomination. Daily Council
+        projects these records into its candidate ballot; with that feature
+        off, legacy vote_rule exclusivity still applies."""
         c = self.civilization
-        candidates = self._eligible_adults()
+        candidates = self._succession_candidates()
         if not candidates:
-            # No adult left at all (extreme edge case): fall back to any
-            # living agent so the village is never leaderless.
-            candidates = [a for a in self.agents if a.get("deathFrame") is None]
-        if not candidates:
-            return  # truly no one left; nothing to elect (village-extinction edge case)
+            return  # extinction/all-incapacitated edge: no safe winner yet
         candidates = candidates[:max(2, MAX_PENDING_RULES)]
         election_id = f"succession_{self.frameTick}"
         c["pendingRules"] = [r for r in c["pendingRules"] if r["kind"] != "succession"]
@@ -6664,7 +6860,15 @@ class SimEngine:
                              if not (r["kind"] == "succession" and r.get("electionId") == election_id)]
         c["pendingSuccession"] = None
         c["lastSuccessionActivityFrame"] = self.frameTick
-        if winner and (winner.get("deathFrame") is not None or winner["incapacitated"]):
+        incumbent = next((
+            a for a in self._living_agents()
+            if a.get("role") == "elder" and a is not winner
+        ), None)
+        if incumbent:
+            self._push_activity(
+                f"Succession voting closes; Elder {incumbent['name']} still holds office.")
+            return
+        if not winner or winner.get("deathFrame") is not None or winner["incapacitated"]:
             # Edge case: the winning candidate died (of old age) or collapsed
             # during the ~13 min TTL window between nomination and tiebreak.
             # Crowning a corpse (or a currently-incapacitated agent) would
@@ -6674,7 +6878,7 @@ class SimEngine:
             # candidates instead; the arc still cannot stall, it just takes
             # one more round.
             self._push_activity(
-                f"{winner['name']} could not take up the elder's mantle -- "
+                f"{winner_name or 'The chosen candidate'} could not take up the elder's mantle -- "
                 f"the village must choose again.")
             self._start_succession_election()
             return
@@ -6695,14 +6899,21 @@ class SimEngine:
                         self._drift_personality(loser, "humbled by losing the election")
 
     def _maybe_resolve_stalled_succession(self):
-        """Deterministic escape hatch: an election cannot stall forever. Once
-        SUCCESSION_ELECTION_TTL_FRAMES elapses with no candidate at quorum,
-        pick the one with the most yes votes (ties broken by lowest agent id,
-        fully deterministic) and enact it directly -- the arc always
-        completes, matching the hard rule that succession cannot softlock."""
+        """Flag-off deterministic escape for the legacy rule-ballot election.
+
+        Daily Council owns its own visible phase/session TTL and is never
+        bypassed here. Without it, once SUCCESSION_ELECTION_TTL_FRAMES elapses,
+        highest legacy yes count wins, tied by lowest stable agent id.
+        """
         c = self.civilization
+        self._ensure_succession_election()
         pending = c.get("pendingSuccession")
         if not pending or self.frameTick < pending["deadline"]:
+            return
+        if DAILY_COUNCIL_ENABLED:
+            # The emergency council's own phase/session TTL resolves solely
+            # from recorded candidate choices. Never bypass visible
+            # deliberation with legacy rule-ballot yes counts.
             return
         entries = [r for r in c["pendingRules"]
                   if r["kind"] == "succession" and r.get("electionId") == pending["electionId"]]
@@ -7572,6 +7783,22 @@ class SimEngine:
         recent = chronicle[-CHRONICLE_PROMPT_ENTRIES:]
         return "; ".join(e["text"] for e in recent)
 
+    def _council_digest_prompt_line(self):
+        """Bounded newest-first Daily Council continuity for every agent."""
+        digests = self.civilization.get("councilDigests") or []
+        if not digests:
+            return None
+        lines = []
+        for digest in digests[:COUNCIL_DIGEST_PROMPT_ENTRIES]:
+            topics = ",".join((digest.get("topics") or [])[:4]) or "general"
+            verdict = digest.get("verdict") or {}
+            outcome = verdict.get("outcome") or "unresolved"
+            mood = digest.get("mood") or "not recorded"
+            lines.append(
+                f"day {digest.get('day')}: {topics}; {outcome}; mood {mood}"
+            )
+        return " | ".join(lines)
+
     # --- Phase G: personality drift (CULTURE_ENABLED) ---
     def _drift_personality(self, agent, trait):
         """Major life events append one short deterministic trait clause to
@@ -8234,24 +8461,853 @@ class SimEngine:
         """
         return
 
-    # --- Phase D invention council (diegetic LLM-council; TECH_TREE_ENABLED) ---
-    def _council_active(self):
-        if not TECH_TREE_ENABLED:
-            return None
-        return self.civilization.get("councilActive")
+    # --- Daily Council Assembly (scheduled, whole-village council) ---
+    def _daily_council_living(self):
+        """Permanent death is deathFrame != None; collapse is excusable life."""
+        return [a for a in self.agents if a.get("deathFrame") is None]
+
+    def _daily_council_agenda(self):
+        c = self.civilization
+        active_projects = [
+            f"{did}: {p.get('name') or p.get('type')}"
+            for did, p in sorted((c.get("districtProjects") or {}).items())
+            if p
+        ]
+        stalled = [
+            item for item in active_projects
+            if self.frameTick - int((c.get("districtLastContribution") or {}).get(
+                item.split(":", 1)[0], self.frameTick)) >= STALL_THRESHOLD
+        ]
+        stockpile = c.get("stockpile") or {}
+        scarce = sorted(rid for rid, amount in stockpile.items() if amount <= EDIBLE_RESERVE)
+        agenda = [
+            {
+                "topic": "world_status",
+                "detail": (f"{self._current_era_name()}, technology tier "
+                           f"{self._village_tech_tier()}, "
+                           f"{len(self._daily_council_living())} living villagers"),
+            },
+            {
+                "topic": "projects",
+                "detail": ("Ongoing: " + ", ".join(active_projects[:8]))
+                if active_projects else "No ongoing district projects",
+            },
+            {
+                "topic": "limitations",
+                "detail": (
+                    ("Stalled: " + ", ".join(stalled[:4]) + ". ") if stalled else ""
+                ) + (("Low village stores: " + ", ".join(scarce[:8]))
+                     if scarce else "No acute village-store shortage recorded"),
+            },
+            {
+                "topic": "rules",
+                "detail": (", ".join(r.get("name") or r.get("id", "rule")
+                                    for r in (c.get("rules") or [])[:8])
+                           or "No active village rules"),
+            },
+            {
+                "topic": "ideas_and_proposals",
+                "detail": "Improvements, modifications, new projects, and new rules",
+            },
+            {
+                "topic": "feelings_about_evolution",
+                "detail": "How villagers feel about the village's path and progress",
+            },
+        ]
+        if self._invention_required():
+            agenda.append({
+                "topic": "invention_required",
+                "detail": "Known productive options are exhausted; a new blueprint is needed",
+            })
+        succession = c.get("pendingSuccession")
+        if LIFECYCLE_ENABLED and isinstance(succession, dict):
+            candidates = [
+                str(name) for name in (succession.get("candidates") or [])
+                if isinstance(name, str) and name
+            ]
+            if candidates:
+                agenda.append({
+                    "topic": "leadership_vacancy",
+                    "detail": (
+                        "The village has no elder. Compare the candidates and choose "
+                        f"a successor: {', '.join(candidates)}"
+                    ),
+                    "candidates": candidates,
+                    "electionId": succession.get("electionId"),
+                })
+        return agenda
+
+    def _assign_council_seats(self, attendees=None, allow_headless=False):
+        """Return stable world-coordinate seats, with the living elder at head."""
+        if attendees is None:
+            attendees = [a for a in self._daily_council_living()
+                         if not a.get("incapacitated")]
+        elder = next((a for a in attendees if a.get("role") == "elder"), None)
+        if elder is None and not allow_headless:
+            # A Daily Council cannot deliberate or ratify a verdict without
+            # its living, available elder. Succession/emergency systems own
+            # restoring leadership; seating must never create a headless
+            # active assembly in the meantime.
+            return []
+        ordered = ([elder] if elder else []) + sorted(
+            (a for a in attendees if a is not elder),
+            key=lambda a: (str(a.get("role") or ""), str(a.get("name") or "")),
+        )
+        bounds = (self.civilization.get("districts", {}).get("village_core") or
+                  STARTER_DISTRICTS["village_core"])["bounds"]
+        center_x = (bounds["x1"] + bounds["x2"]) / 2
+        center_y = (bounds["y1"] + bounds["y2"]) / 2
+        radius = min(220.0, max(105.0, 48.0 + 12.0 * len(ordered)))
+        seats = []
+        for idx, agent in enumerate(ordered):
+            angle = -math.pi / 2 + (2 * math.pi * idx / max(1, len(ordered)))
+            seats.append({
+                "name": agent["name"], "role": agent["role"], "seatIndex": idx,
+                "x": round(center_x + math.cos(angle) * radius, 2),
+                "y": round(center_y + math.sin(angle) * radius, 2),
+                "isHead": bool(idx == 0 and elder is not None),
+            })
+        return seats
 
     def _stamp_council_event(self, entry):
-        """Attach frame + wall-clock time to a council transcript line."""
+        """Attach frame + wall-clock time to either council transcript line."""
         out = dict(entry)
         out.setdefault("frame", self.frameTick)
         out.setdefault("ts", datetime.now(timezone.utc).isoformat())
         return out
 
     def _append_council_transcript(self, entry):
+        """Append once to the live council and, for Daily Council, its RAM audit."""
+        daily = self.civilization.get("dailyCouncil")
+        if daily:
+            event = self._stamp_council_event(entry)
+            daily.setdefault("transcript", []).append(event)
+            who = (event.get("who") or event.get("proposer") or
+                   event.get("elder") or event.get("voter"))
+            text = event.get("text")
+            if text is None:
+                text = event.get("message")
+            if text is None and event.get("outcome") is not None:
+                text = event.get("outcome")
+            self.council_transcript_rows.append({
+                "meeting_id": daily.get("meetingId", daily.get("day")),
+                "who": str(who) if who is not None else None,
+                "type": str(event.get("type") or "event"),
+                "text": str(text or ""),
+                "feeling": (str(event.get("feeling"))[:120]
+                            if event.get("feeling") is not None else None),
+                "frame_tick": int(event.get("frame", self.frameTick)),
+                "ts": str(event.get("ts") or ""),
+            })
+            return event
         council = self._council_active()
+        if council:
+            event = self._stamp_council_event(entry)
+            council.setdefault("transcript", []).append(event)
+            return event
+        return None
+
+    def _set_daily_council_phase(self, council, phase):
+        if council.get("phase") == phase:
+            return
+        council["phase"] = phase
+        council["phaseFrame"] = self.frameTick
+        self._append_council_transcript({
+            "type": "phase", "text": f"Council entered {phase}", "phase": phase,
+        })
+        self._sync_daily_council_turns(council)
+
+    def _sync_daily_council_turns(self, council):
+        """Issue only the one-shot council turns relevant to the current phase."""
+        attendees = set(council.get("attendees") or [])
+        phase = council.get("phase")
+        eligible = set()
+        if phase == "convening":
+            eligible.update(attendees)
+        elif phase == "discussion":
+            order = council.get("speakingOrder") or []
+            idx = int(council.get("nextSpeakerIdx") or 0)
+            total = len(order) * int(council.get("maxRounds") or 0)
+            if order and idx < total:
+                eligible.add(order[idx % len(order)])
+        elif phase == "proposal" and not council.get("ballot"):
+            eligible.update(attendees)
+        elif phase == "voting" and council.get("ballot"):
+            votes = council["ballot"].get("votes") or {}
+            eligible.update(name for name in attendees if name not in votes)
+        elif phase == "verdict" and council.get("verdict") \
+                and not council.get("elderVerdictSpoken"):
+            elder = next(
+                (s.get("name") for s in council.get("seats") or [] if s.get("isHead")),
+                None,
+            )
+            if elder:
+                eligible.add(elder)
+        for actor in self.agents:
+            actor["councilTurn"] = actor["name"] in eligible
+            if actor["councilTurn"]:
+                actor["thinkTimer"] = min(int(actor.get("thinkTimer") or 1), 1)
+
+    def _maybe_convene_daily_council(self):
+        if (not DAILY_COUNCIL_ENABLED or self.civilization.get("dailyCouncil")
+                or self.civilization.get("councilActive")):
+            return False
+        living = self._daily_council_living()
+        attendees = [a for a in living if not a.get("incapacitated")]
+        excused = sorted(a["name"] for a in living if a.get("incapacitated"))
+        succession = self.civilization.get("pendingSuccession")
+        succession_emergency = bool(
+            LIFECYCLE_ENABLED
+            and isinstance(succession, dict)
+            and not any(a.get("role") == "elder" for a in living)
+        )
+        if len(living) < DAILY_COUNCIL_MIN_LIVING and not succession_emergency:
+            return False
+        if not attendees:
+            return False
+        if not any(a.get("role") == "elder" for a in attendees) \
+                and not succession_emergency:
+            return False
+        seats = self._assign_council_seats(
+            attendees, allow_headless=succession_emergency,
+        )
+        if not seats:
+            return False
+        elder = next((s for s in seats if s["isHead"]), None)
+        ordered_names = [s["name"] for s in seats]
+        succession_ballot = None
+        if succession_emergency:
+            candidates = list(succession.get("candidates") or [])
+            succession_ballot = {
+                "kind": "succession",
+                "id": succession.get("electionId"),
+                "title": "Choose the next village elder",
+                "proposedBy": "the village",
+                "candidates": candidates,
+                "votes": {},
+                "quorum": len(ordered_names) // 2 + 1,
+            }
+        council = {
+            "trigger": "succession" if succession_emergency else "daily",
+            "phase": "convening",
+            "phaseFrame": self.frameTick,
+            "day": self.frameTick // DAY_FRAMES,
+            # Frame is unique even when an emergency council shares an
+            # in-world day with a previously adjourned scheduled council.
+            "meetingId": self.frameTick,
+            "frame": self.frameTick,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "seats": seats,
+            "attendees": ordered_names,
+            "excused": excused,
+            "agenda": self._daily_council_agenda(),
+            "round": 0,
+            "maxRounds": DAILY_COUNCIL_DISCUSSION_ROUNDS,
+            "speakingOrder": ordered_names,
+            "nextSpeakerIdx": 0,
+            "transcript": [],
+            "ballot": succession_ballot,
+            "verdict": None,
+        }
+        self.civilization["dailyCouncil"] = council
+        for seat in seats:
+            agent = self._find_agent(seat["name"])
+            if not agent:
+                continue
+            agent["goal"] = None
+            agent["assignedTask"] = None
+            agent["councilTurn"] = True
+            agent["waypoints"] = []
+            agent["targetX"], agent["targetY"] = seat["x"], seat["y"]
+            agent["idleFrames"] = 0
+        self._append_council_transcript({
+            "type": "convene",
+            "who": elder["name"] if elder else "the village",
+            "text": (f"Daily Council day {council['day']} convened with "
+                     f"{len(ordered_names)} attendees"),
+        })
+        if succession_ballot:
+            self._append_council_transcript({
+                "type": "succession_ballot",
+                "who": "the village",
+                "text": (
+                    "Leadership is vacant; candidates are "
+                    + ", ".join(succession_ballot["candidates"])
+                ),
+                "candidates": list(succession_ballot["candidates"]),
+                "electionId": succession_ballot["id"],
+            })
+        self._push_activity(
+            ("Emergency succession council" if succession_emergency else "Daily Council")
+            + f" convenes: {len(ordered_names)} attend"
+            + (f"; excused: {', '.join(excused)}" if excused else "")
+        )
+        self._sync_daily_council_turns(council)
+        return True
+
+    def _refresh_daily_council_roster(self, council):
+        """Remove deaths/collapses and seat any newly available living member."""
+        living = self._daily_council_living()
+        available = [a for a in living if not a.get("incapacitated")]
+        excused = sorted(a["name"] for a in living if a.get("incapacitated"))
+        allow_headless = (
+            council.get("trigger") == "succession"
+            and not any(a.get("role") == "elder" for a in living)
+        )
+        new_seats = self._assign_council_seats(
+            available, allow_headless=allow_headless,
+        )
+        new_names = [s["name"] for s in new_seats]
+        old_names = set(council.get("attendees") or [])
+        if new_names != council.get("attendees") or excused != council.get("excused"):
+            removed = sorted(old_names - set(new_names))
+            added = sorted(set(new_names) - old_names)
+            council["attendees"] = new_names
+            council["excused"] = excused
+            council["seats"] = new_seats
+            council["speakingOrder"] = new_names
+            max_turns = len(new_names) * council.get(
+                "maxRounds", DAILY_COUNCIL_DISCUSSION_ROUNDS)
+            council["nextSpeakerIdx"] = min(council.get("nextSpeakerIdx", 0), max_turns)
+            if council.get("ballot") is not None:
+                ballot = council["ballot"]
+                ballot["votes"] = {
+                    name: vote for name, vote in (ballot.get("votes") or {}).items()
+                    if name in new_names
+                }
+                ballot["quorum"] = len(new_names) // 2 + 1
+            self._append_council_transcript({
+                "type": "attendance",
+                "text": (f"Roster updated; added {', '.join(added) or 'none'}; "
+                         f"removed {', '.join(removed) or 'none'}; "
+                         f"excused {', '.join(excused) or 'none'}"),
+            })
+        seat_by_name = {s["name"]: s for s in new_seats}
+        for agent in self.agents:
+            if agent["name"] not in seat_by_name:
+                if agent.get("councilTurn"):
+                    agent["councilTurn"] = False
+                continue
+            seat = seat_by_name[agent["name"]]
+            agent["goal"] = None
+            agent["assignedTask"] = None
+            agent["waypoints"] = []
+            agent["targetX"], agent["targetY"] = seat["x"], seat["y"]
+        self._sync_daily_council_turns(council)
+
+    def _daily_council_all_seated(self, council):
+        for seat in council.get("seats") or []:
+            agent = self._find_agent(seat["name"])
+            if not agent or math.hypot(agent["x"] - seat["x"],
+                                       agent["y"] - seat["y"]) > 5.0:
+                return False
+        return True
+
+    def _daily_council_tally(self, council):
+        ballot = council.get("ballot") or {}
+        votes = ballot.get("votes") or {}
+        if ballot.get("kind") == "succession":
+            choices = list(ballot.get("candidates") or [])
+            return {
+                **{choice: sum(1 for vote in votes.values() if vote == choice)
+                   for choice in choices},
+                "abstain": sum(1 for vote in votes.values() if vote == "abstain"),
+            }
+        return {choice: sum(1 for vote in votes.values() if vote == choice)
+                for choice in ("yes", "no", "abstain")}
+
+    def _daily_council_reject(self, agent, action, reason):
+        agent["lastCouncilRejection"] = {
+            "action": action, "reason": reason, "frame": self.frameTick,
+        }
+        return f"{agent['name']} cannot {action.replace('_', ' ')}: {reason}"
+
+    def _daily_council_actor(self, agent, action, phases):
+        council = self.civilization.get("dailyCouncil")
+        if not DAILY_COUNCIL_ENABLED or not council:
+            return None, self._daily_council_reject(agent, action, "no Daily Council is active")
+        if agent.get("deathFrame") is not None or agent.get("incapacitated") \
+                or agent["name"] not in (council.get("attendees") or []):
+            return None, self._daily_council_reject(agent, action, "actor is not an attendee")
+        seat = next(
+            (s for s in council.get("seats") or [] if s.get("name") == agent["name"]),
+            None,
+        )
+        if not seat or math.hypot(agent["x"] - seat["x"], agent["y"] - seat["y"]) > 5.0:
+            return None, self._daily_council_reject(agent, action, "actor is not seated")
+        if council.get("phase") not in phases:
+            return None, self._daily_council_reject(
+                agent, action, f"invalid during {council.get('phase')} phase",
+            )
+        return council, None
+
+    def _council_speak(self, agent, decision):
+        council, rejection = self._daily_council_actor(
+            agent, "council_speak", {"discussion", "verdict"},
+        )
+        if rejection:
+            return rejection
+        phase = council["phase"]
+        if phase == "discussion":
+            order = council.get("speakingOrder") or []
+            idx = int(council.get("nextSpeakerIdx") or 0)
+            expected = order[idx % len(order)] if order else None
+            if expected != agent["name"]:
+                return self._daily_council_reject(
+                    agent, "council_speak", f"waiting for {expected or 'the next speaker'}",
+                )
+        else:
+            head = next(
+                (s.get("name") for s in council.get("seats") or [] if s.get("isHead")),
+                None,
+            )
+            if head != agent["name"] or not council.get("verdict"):
+                return self._daily_council_reject(
+                    agent, "council_speak", "only the elder may announce a ready verdict",
+                )
+        message = str(decision.get("message") or "").strip()
+        if not message:
+            return self._daily_council_reject(agent, "council_speak", "message is required")
+        feeling = str(decision.get("feeling") or "thoughtful").strip()[:80]
+        topic = str(decision.get("topic") or "world_status").strip()[:80]
+        message = message[:500]
+        agent["message"] = message
+        agent["messageTimer"] = 180
+        agent["lastSpokeFrame"] = self.frameTick
+        self._append_council_transcript({
+            "type": "verdict_speech" if phase == "verdict" else "speak",
+            "who": agent["name"], "text": message, "feeling": feeling, "topic": topic,
+        })
+        if phase == "discussion":
+            council["nextSpeakerIdx"] = int(council.get("nextSpeakerIdx") or 0) + 1
+            count = max(1, len(council.get("speakingOrder") or []))
+            council["round"] = min(
+                council.get("maxRounds", DAILY_COUNCIL_DISCUSSION_ROUNDS),
+                council["nextSpeakerIdx"] // count,
+            )
+        else:
+            council["elderVerdictSpoken"] = True
+            if council.get("verdict") is not None:
+                council["verdict"]["elderStatement"] = message
+        agent["lastCouncilRejection"] = None
+        self._sync_daily_council_turns(council)
+        return f"{agent['name']} spoke to the Daily Council"
+
+    def _council_propose(self, agent, decision):
+        council, rejection = self._daily_council_actor(
+            agent, "council_propose", {"proposal"},
+        )
+        if rejection:
+            return rejection
+        if council.get("ballot"):
+            return self._daily_council_reject(agent, "council_propose", "a ballot is already open")
+        kind = decision.get("kind")
+        if kind == "rule":
+            rule = decision.get("rule")
+            if not self._validate_rule(rule):
+                return self._daily_council_reject(agent, "council_propose", "invalid rule proposal")
+            self._propose_rule(agent, {"rule": rule})
+            stable_id = rule["id"]
+            title = rule["name"]
+        elif kind == "blueprint":
+            blueprint = decision.get("blueprint")
+            ok, reason = self._validate_blueprint(blueprint)
+            if not ok:
+                return self._daily_council_reject(
+                    agent, "council_propose", f"invalid blueprint proposal ({reason})",
+                )
+            self.apply_decision(agent, {
+                "action": "propose_blueprint", "blueprint": blueprint,
+                "reasoning": decision.get("reasoning") or "Daily Council proposal",
+            })
+            stable_id = blueprint["id"]
+            title = blueprint["name"]
+            if not any(p.get("id") == stable_id for p in self.civilization["pendingBlueprints"]):
+                return self._daily_council_reject(
+                    agent, "council_propose", "blueprint did not enter the pending registry",
+                )
+        elif kind == "idea":
+            title = str(decision.get("title") or "").strip()[:120]
+            detail = str(decision.get("detail") or "").strip()[:500]
+            if not title or not detail:
+                return self._daily_council_reject(
+                    agent, "council_propose", "idea requires title and detail",
+                )
+            stable_id = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")[:24]
+            stable_id = stable_id or f"idea_{self.frameTick}"
+        else:
+            return self._daily_council_reject(
+                agent, "council_propose", "kind must be rule, blueprint, or idea",
+            )
+        council["ballot"] = {
+            "kind": kind, "id": stable_id, "title": title,
+            "proposedBy": agent["name"], "votes": {agent["name"]: "yes"},
+            "quorum": len(council.get("attendees") or []) // 2 + 1,
+        }
+        self._append_council_transcript({
+            "type": "proposal", "who": agent["name"], "text": title,
+            "kind": kind, "proposalId": stable_id,
+        })
+        agent["lastCouncilRejection"] = None
+        self._set_daily_council_phase(council, "voting")
+        return f'{agent["name"]} proposed council {kind} "{title}"'
+
+    def _council_vote(self, agent, decision):
+        council, rejection = self._daily_council_actor(
+            agent, "council_vote", {"voting"},
+        )
+        if rejection:
+            return rejection
+        ballot = council.get("ballot")
+        if not ballot:
+            return self._daily_council_reject(agent, "council_vote", "no ballot is open")
+        if agent["name"] in (ballot.get("votes") or {}):
+            return self._daily_council_reject(agent, "council_vote", "vote already recorded")
+        if ballot.get("kind") == "succession":
+            candidate = decision.get("candidate")
+            vote = "abstain" if decision.get("vote") == "abstain" else candidate
+            if vote != "abstain" and vote not in (ballot.get("candidates") or []):
+                return self._daily_council_reject(
+                    agent, "council_vote",
+                    "candidate must name a current succession candidate or vote abstain",
+                )
+        else:
+            vote = decision.get("vote")
+            if vote not in ("yes", "no", "abstain"):
+                return self._daily_council_reject(
+                    agent, "council_vote", "vote must be yes, no, or abstain",
+                )
+        ballot.setdefault("votes", {})[agent["name"]] = vote
+        if ballot.get("kind") == "rule":
+            pending = next(
+                (r for r in self.civilization["pendingRules"] if r.get("id") == ballot.get("id")),
+                None,
+            )
+            if pending:
+                pending.setdefault("votes", {})[agent["name"]] = vote
+                self._tally_and_maybe_enact(pending)
+        self._append_council_transcript({
+            "type": "vote", "who": agent["name"], "text": vote,
+            "proposalId": ballot.get("id"),
+            "candidate": vote if ballot.get("kind") == "succession"
+                         and vote != "abstain" else None,
+        })
+        agent["lastCouncilRejection"] = None
+        self._sync_daily_council_turns(council)
+        return f'{agent["name"]} voted {vote} on "{ballot.get("title")}"'
+
+    def _resolve_daily_council_ballot(self, council, reason):
+        ballot = council.get("ballot")
+        if not ballot:
+            return None
+        tally = self._daily_council_tally(council)
+        if ballot.get("kind") == "succession":
+            candidates = [
+                self._find_agent(name) for name in (ballot.get("candidates") or [])
+            ]
+            candidates = [
+                candidate for candidate in candidates
+                if candidate and candidate.get("deathFrame") is None
+                and not candidate.get("incapacitated")
+            ]
+            if not candidates:
+                return None
+            high = max(tally.get(candidate["name"], 0) for candidate in candidates)
+            tied = [
+                candidate for candidate in candidates
+                if tally.get(candidate["name"], 0) == high
+            ]
+            chosen = min(tied, key=lambda candidate: candidate["id"])
+            tie_break = len(tied) > 1
+            outcome = (
+                f"{chosen['name']} chosen by stable seniority after a "
+                f"{'no-vote tie' if high == 0 else 'vote tie'}"
+                if tie_break else f"{chosen['name']} chosen with {high} village vote"
+                + ("" if high == 1 else "s")
+            )
+            council["verdict"] = {
+                "winner": chosen["name"], "tally": tally, "elderRuling": None,
+                "outcome": outcome, "reason": reason,
+                "tieBreak": "lowest stable agent id" if tie_break else None,
+            }
+            ratification = self._ratify_daily_council_ballot(
+                council, chosen["name"], tie_break=tie_break,
+            )
+            council["verdict"]["ratification"] = ratification
+            self._refresh_daily_council_roster(council)
+            self._append_council_transcript({
+                "type": "verdict", "who": "the village",
+                "text": f"{chosen['name']} is declared the new village elder: {outcome}",
+                "outcome": outcome, "tally": tally, "ratification": ratification,
+            })
+            return council["verdict"]
+        quorum = int(ballot.get("quorum") or (len(council.get("attendees") or []) // 2 + 1))
+        elder = next((s["name"] for s in council.get("seats") or [] if s.get("isHead")), None)
+        if tally["yes"] >= quorum:
+            winner, outcome = "yes", "approved by majority"
+        elif tally["no"] >= quorum:
+            winner, outcome = "no", "rejected by majority"
+        elif tally["yes"] == tally["no"]:
+            elder_vote = (ballot.get("votes") or {}).get(elder)
+            winner = elder_vote if elder_vote in ("yes", "no") else "no"
+            outcome = f"{winner} by elder tie-break"
+        else:
+            # A non-tied plurality is not a majority of the whole seated
+            # village. Abstentions therefore cannot lower the enactment
+            # threshold. Exact ties use the explicit elder exception above.
+            winner = "no"
+            outcome = "rejected: no whole-village majority"
+        council["verdict"] = {
+            "winner": winner, "tally": tally, "elderRuling": elder,
+            "outcome": outcome, "reason": reason,
+        }
+        ratification = self._ratify_daily_council_ballot(
+            council, winner, tie_break=(tally["yes"] == tally["no"]),
+        )
+        council["verdict"]["ratification"] = ratification
+        self._append_council_transcript({
+            "type": "verdict", "who": elder,
+            "text": f"{ballot.get('title') or ballot.get('id')}: {outcome}",
+            "outcome": outcome, "tally": tally, "ratification": ratification,
+        })
+        return council["verdict"]
+
+    def _ratify_daily_council_ballot(self, council, winner, tie_break=False):
+        """Apply an approved/rejected ballot only through existing real paths."""
+        ballot = council.get("ballot") or {}
+        kind = ballot.get("kind")
+        elder_name = next(
+            (s.get("name") for s in council.get("seats") or [] if s.get("isHead")),
+            None,
+        )
+        elder = self._find_agent(elder_name) if elder_name else None
+        if kind == "idea":
+            return "advisory idea recorded"
+        if kind == "succession":
+            election_id = ballot.get("id")
+            winner_rule = next((
+                rule for rule in self.civilization.get("pendingRules") or []
+                if rule.get("kind") == "succession"
+                and rule.get("electionId") == election_id
+                and rule.get("candidateName") == winner
+            ), None)
+            if winner_rule is None:
+                return "succession unresolved: winning ballot is no longer valid"
+            self._enact_succession_winner(winner_rule)
+            promoted = self._find_agent(winner)
+            return (
+                "succession enacted through village election"
+                if promoted and promoted.get("role") == "elder"
+                else "succession restart required: winner unavailable"
+            )
+        if kind == "rule":
+            pending = next(
+                (r for r in self.civilization["pendingRules"] if r.get("id") == ballot.get("id")),
+                None,
+            )
+            if pending is None:
+                enacted = any(r.get("id") == ballot.get("id")
+                              for r in self.civilization.get("rules") or [])
+                return "rule enacted through tally" if enacted else "rule ballot already resolved"
+            pending["votes"] = dict(ballot.get("votes") or {})
+            if tie_break and elder_name:
+                # The elder has an ordinary personal vote and, on an exact
+                # tie, one explicit ratification vote. The existing tally/
+                # enact path remains the sole code allowed to mutate rules.
+                pending["votes"]["__elder_ratification__"] = winner
+            result = self._tally_and_maybe_enact(pending)
+            if result == "pending" and winner == "no":
+                # No whole-village majority means this assembly proposal is
+                # closed without becoming a lingering ordinary-rule ballot.
+                # Active rules remain untouched; only the unratified pending
+                # proposal is discarded.
+                self.civilization["pendingRules"] = [
+                    r for r in self.civilization["pendingRules"]
+                    if r.get("id") != ballot.get("id")
+                ]
+                return "rule rejected without whole-village majority"
+            return f"rule {result} through existing tally path"
+        if kind == "blueprint":
+            if elder is None:
+                return "blueprint unresolved: no seated elder"
+            pending = next(
+                (p for p in self.civilization["pendingBlueprints"] if p.get("id") == ballot.get("id")),
+                None,
+            )
+            if pending is None:
+                return "blueprint was no longer pending"
+            if winner == "no":
+                self.apply_decision(elder, {
+                    "action": "reject_blueprint", "target": ballot.get("id"),
+                    "reasoning": "Ratifying the Daily Council rejection.",
+                })
+                return "blueprint rejected through elder review path"
+            if SAGE_REVIEW_ENABLED and pending.get("sageReview") == "pending":
+                self.apply_decision(elder, {
+                    "action": "sage_review_blueprint", "target": ballot.get("id"),
+                    "sage_decision": "approve",
+                    "message": "The seated council verified the proposal by majority.",
+                    "reasoning": "Council geography and resource review.",
+                })
+            self.apply_decision(elder, {
+                "action": "approve_blueprint", "target": ballot.get("id"),
+                "reasoning": "Ratifying the Daily Council majority.",
+            })
+            approved = ballot.get("id") in self.civilization["projectRegistry"]
+            return ("blueprint approved through sage/elder paths" if approved
+                    else "blueprint remained pending after elder path")
+        return "unknown ballot kind"
+
+    def _daily_council_digest(self, council):
+        ballot = council.get("ballot")
+        verdict = council.get("verdict")
+        feelings = []
+        for event in council.get("transcript") or []:
+            feeling = str(event.get("feeling") or "").strip()
+            if feeling and feeling not in feelings:
+                feelings.append(feeling[:40])
+        proposals = []
+        if ballot:
+            proposals.append({
+                "title": str(ballot.get("title") or ballot.get("id") or "proposal")[:120],
+                "kind": ballot.get("kind") or "idea",
+                "outcome": ((verdict or {}).get("outcome") or "unresolved")[:120],
+            })
+        return {
+            "meetingId": council.get("meetingId", council.get("day")),
+            "day": council.get("day"),
+            "frame": council.get("frame"),
+            "ts": council.get("ts"),
+            "topics": [str(a.get("topic") or "")[:80]
+                       for a in (council.get("agenda") or [])[:8]],
+            "proposals": proposals,
+            "verdict": ({
+                "winner": verdict.get("winner"),
+                "outcome": verdict.get("outcome"),
+            } if verdict else None),
+            "mood": ", ".join(feelings[:4]) if feelings else "not recorded",
+        }
+
+    def _prune_daily_council_transcripts(self):
+        meeting_ids = sorted({
+            r.get("meeting_id") for r in self.council_transcript_rows
+            if isinstance(r.get("meeting_id"), int)
+        }, reverse=True)
+        keep = set(meeting_ids[:DAILY_COUNCIL_TRANSCRIPT_RETENTION_MEETINGS])
+        self.council_transcript_rows = [
+            r for r in self.council_transcript_rows if r.get("meeting_id") in keep
+        ]
+
+    def _adjourn_daily_council(self, reason="completed"):
+        council = self.civilization.get("dailyCouncil")
+        if not council:
+            return False
+        if council.get("phase") != "adjourned":
+            council["phase"] = "adjourned"
+            council["phaseFrame"] = self.frameTick
+        self._append_council_transcript({
+            "type": "adjourn", "text": reason,
+            "outcome": (council.get("verdict") or {}).get("outcome")
+                       or "adjourned without resolution",
+        })
+        for agent in self.agents:
+            if agent.get("councilTurn"):
+                agent["councilTurn"] = False
+                agent["thinkTimer"] = min(agent.get("thinkTimer", 1), 1)
+        outcome = (council.get("verdict") or {}).get(
+            "outcome", "adjourned without resolution")
+        record = {
+            "meetingId": council.get("meetingId", council.get("day")),
+            "frame": council.get("frame"), "start_frame": council.get("frame"),
+            "end_frame": self.frameTick, "ts": datetime.now(timezone.utc).isoformat(),
+            "started_ts": council.get("ts"),
+            "trigger": ("succession" if council.get("trigger") == "succession"
+                        else "daily_council"),
+            "day": council.get("day"), "attendees": list(council.get("attendees") or []),
+            "excused": list(council.get("excused") or []),
+            "agenda": json.loads(json.dumps(council.get("agenda") or [])),
+            "ballot": json.loads(json.dumps(council.get("ballot"), default=str)),
+            "verdict": json.loads(json.dumps(council.get("verdict"), default=str)),
+            "outcome": outcome,
+            "transcript": json.loads(json.dumps(council.get("transcript") or [],
+                                                 default=str)),
+        }
+        log = self.civilization.setdefault("councilLog", [])
+        log.insert(0, record)
+        del log[DAILY_COUNCIL_LOG_CAP:]
+        digests = self.civilization.setdefault("councilDigests", [])
+        digests.insert(0, self._daily_council_digest(council))
+        del digests[DAILY_COUNCIL_DIGEST_CAP:]
+        self._prune_daily_council_transcripts()
+        self.civilization["dailyCouncil"] = None
+        self._push_activity(f"Daily Council adjourns: {outcome}")
+        return True
+
+    def _maybe_advance_daily_council(self):
+        if not DAILY_COUNCIL_ENABLED:
+            return
+        council = self.civilization.get("dailyCouncil")
         if not council:
             return
-        council.setdefault("transcript", []).append(self._stamp_council_event(entry))
+        self._refresh_daily_council_roster(council)
+        if len(self._daily_council_living()) < DAILY_COUNCIL_MIN_LIVING \
+                and council.get("trigger") != "succession":
+            self._adjourn_daily_council("too few living villagers")
+            return
+        if not any(seat.get("isHead") for seat in council.get("seats") or []) \
+                and council.get("trigger") != "succession":
+            self._adjourn_daily_council("no living, available elder")
+            return
+        if self.frameTick - council.get("frame", self.frameTick) >= \
+                DAILY_COUNCIL_SESSION_TTL_FRAMES:
+            self._adjourn_daily_council("session TTL expired")
+            return
+        phase = council.get("phase")
+        phase_age = self.frameTick - council.get("phaseFrame", council.get("frame", self.frameTick))
+        expired = phase_age >= DAILY_COUNCIL_PHASE_TTL_FRAMES
+        if phase == "convening":
+            if self._daily_council_all_seated(council) or expired:
+                self._set_daily_council_phase(council, "discussion")
+        elif phase == "discussion":
+            total_turns = len(council.get("speakingOrder") or []) * council.get(
+                "maxRounds", DAILY_COUNCIL_DISCUSSION_ROUNDS)
+            council["round"] = min(
+                council.get("maxRounds", DAILY_COUNCIL_DISCUSSION_ROUNDS),
+                council.get("nextSpeakerIdx", 0) // max(1, len(council.get("speakingOrder") or [])),
+            )
+            if council.get("nextSpeakerIdx", 0) >= total_turns or expired:
+                self._set_daily_council_phase(council, "proposal")
+        elif phase == "proposal":
+            if council.get("ballot"):
+                self._set_daily_council_phase(council, "voting")
+            elif expired:
+                self._set_daily_council_phase(council, "verdict")
+        elif phase == "voting":
+            ballot = council.get("ballot") or {}
+            tally = self._daily_council_tally(council)
+            all_voted = len(ballot.get("votes") or {}) >= len(council.get("attendees") or [])
+            if ballot.get("kind") == "succession":
+                ready = all_voted or expired
+            else:
+                quorum = int(ballot.get("quorum") or 1)
+                ready = tally["yes"] >= quorum or tally["no"] >= quorum \
+                    or all_voted or expired
+            if ready:
+                verdict = self._resolve_daily_council_ballot(
+                    council, "phase TTL" if expired else "vote complete")
+                if verdict is not None:
+                    self._set_daily_council_phase(council, "verdict")
+        elif phase == "verdict":
+            if council.get("elderVerdictSpoken") or expired:
+                self._set_daily_council_phase(council, "adjourned")
+        elif phase == "adjourned":
+            self._adjourn_daily_council("completed")
+
+    # --- Phase D invention council (diegetic LLM-council; TECH_TREE_ENABLED) ---
+    def _council_active(self):
+        if not TECH_TREE_ENABLED:
+            return None
+        return self.civilization.get("councilActive")
 
     def _record_council_proposal(self, agent, bp, decision):
         """A propose_blueprint that lands while a council is in session becomes
@@ -8459,6 +9515,22 @@ class SimEngine:
             return  # a council is already deliberating
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
         if not elder:
+            return
+        if elder.get("deathFrame") is not None:
+            return
+        if DAILY_COUNCIL_ENABLED:
+            # Daily Council subsumes both the legacy fan-out and single-
+            # villager delegation. Repeated failures still reach the existing
+            # deterministic elder-self-draft escape.
+            c["inventionRequiredStreak"] = 0
+            fires = c.get("inventionBackstopFires", 0)
+            if fires >= INVENTION_ELDER_TAKEOVER:
+                c["inventionBackstopFires"] = 0
+                elder["inventionTurn"] = True
+                self._push_activity(
+                    f"Elder {elder['name']} will draft the new blueprint himself.")
+            else:
+                c["inventionBackstopFires"] = fires + 1
             return
         idle = [a for a in self._idle_agents_for_elder()
                 if a["name"] != elder["name"] and not a.get("inventionTurn")]
@@ -8852,6 +9924,11 @@ class SimEngine:
             return
         c = self.civilization
         if LIFECYCLE_ENABLED and c.get("pendingSuccession"):
+            if DAILY_COUNCIL_ENABLED:
+                # The emergency assembly owns visible candidate discussion and
+                # voting. Never manufacture repeated yes votes for whichever
+                # rule-shaped candidate record happens to be listed first.
+                return
             # Election backstop: cast a ballot for the first still-eligible
             # candidate found (deterministic, round-robins across candidates
             # rule-by-rule rather than always favoring pendingRules[0], so a
@@ -9793,6 +10870,15 @@ class SimEngine:
         elif action == "vote_treaty":
             summary = self._vote_treaty(agent, decision)
 
+        elif action == "council_speak":
+            summary = self._council_speak(agent, decision)
+
+        elif action == "council_propose":
+            summary = self._council_propose(agent, decision)
+
+        elif action == "council_vote":
+            summary = self._council_vote(agent, decision)
+
         # rest / default: summary already set
 
         agent["lastAction"] = action
@@ -9823,7 +10909,8 @@ class SimEngine:
         if action in {"start_project", "build_structure", "contribute_resources",
                       "propose_rule", "vote_rule", "repeal_rule", "switch_role",
                       "found_belief", "propose_blueprint", "approve_blueprint",
-                      "reject_blueprint", "sage_review_blueprint"}:
+                      "reject_blueprint", "sage_review_blueprint",
+                      "council_speak", "council_propose", "council_vote"}:
             self._mark_all_context_dirty()
         return summary
 
@@ -9921,6 +11008,49 @@ class SimEngine:
         return True
 
     def _apply_rule_based_fallback(self, agent):
+        council = self.civilization.get("dailyCouncil")
+        if council and agent["name"] in (council.get("attendees") or []):
+            phase = council.get("phase")
+            if phase == "discussion":
+                ballot = council.get("ballot") or {}
+                succession = ballot.get("kind") == "succession"
+                candidates = ", ".join(ballot.get("candidates") or [])
+                self.apply_decision(agent, {
+                    "action": "council_speak",
+                    "message": (
+                        f"We should compare {candidates} by judgment, care, and service."
+                        if succession else
+                        "We should preserve essential supplies and finish shared work."
+                    ),
+                    "feeling": "hopeful",
+                    "topic": "leadership_vacancy" if succession else "world_status",
+                    "reasoning": "Deterministic offline council fallback.",
+                })
+                return
+            if phase == "proposal" and not council.get("ballot"):
+                self.apply_decision(agent, {
+                    "action": "council_propose", "kind": "idea",
+                    "title": "Protect essentials",
+                    "detail": "Keep food and health secure while finishing the most-stalled project.",
+                    "reasoning": "Deterministic offline council fallback.",
+                })
+                return
+            if phase == "voting" and agent["name"] not in (
+                    (council.get("ballot") or {}).get("votes") or {}):
+                self.apply_decision(agent, {
+                    "action": "council_vote", "vote": "abstain",
+                    "reasoning": "Deterministic offline council fallback.",
+                })
+                return
+            if phase == "verdict":
+                self.apply_decision(agent, {
+                    "action": "council_speak",
+                    "message": f"The council ratifies: "
+                               f"{(council.get('verdict') or {}).get('outcome', 'the result')}.",
+                    "feeling": "resolute", "topic": "verdict",
+                    "reasoning": "Deterministic offline council fallback.",
+                })
+                return
         district_id = random.choice(list(self.civilization["districts"].keys()))
         self._set_agent_target(agent, district_id)
         self._push_memory(agent, f"{agent['name']} wandered toward {district_id}")
@@ -9979,6 +11109,22 @@ class SimEngine:
         if invention_turn:
             agent["inventionTurn"] = False
         sprite_design_turn = bool(agent.get("spriteDesignTurn"))
+        # A saved mid-meeting session may still exist after the rollback flag
+        # is switched off. Treat it as inert: no council prompt/actions may be
+        # offered until the feature is explicitly re-enabled.
+        daily_council = c.get("dailyCouncil") if DAILY_COUNCIL_ENABLED else None
+        council_seated = bool(
+            daily_council
+            and agent["name"] in (daily_council.get("attendees") or [])
+            and any(
+                seat.get("name") == agent["name"]
+                and math.hypot(agent["x"] - seat["x"], agent["y"] - seat["y"]) <= 5.0
+                for seat in daily_council.get("seats") or []
+            )
+        )
+        council_turn = bool(agent.get("councilTurn") and council_seated)
+        if council_turn:
+            agent["councilTurn"] = False
         nudges = []
 
         def note(prio, text):
@@ -10394,7 +11540,9 @@ class SimEngine:
             self._maybe_seek_shelter(agent)
             self._maybe_expand_field(agent)
             self._maybe_caravan_goal(agent)
-        if invention_turn:
+        if council_turn:
+            final_nudges = []
+        elif invention_turn:
             # Invention turns get the dedicated INVENTION_SYSTEM_PROMPT/
             # INVENTION_USER_PROMPT (build_invention_prompt in server.py),
             # which already covers taken ids, resources, and tier rules --
@@ -10428,7 +11576,7 @@ class SimEngine:
         # Observability: total collected vs. how many survived selection.
         # For invention/sprite turns the override already IS the total (no
         # separate pool was capped), so nothing reads as "dropped".
-        if invention_turn or sprite_design_turn:
+        if council_turn or invention_turn or sprite_design_turn:
             nudges_total = len(final_nudges)
             nudges_dropped = 0
         else:
@@ -10442,7 +11590,10 @@ class SimEngine:
         election_active = bool(c.get("pendingSuccession"))
         treaty_unvoted = any(r.get("kind") == "treaty" and agent["name"] not in r["votes"]
                              for r in c["pendingRules"])
-        if emergency_active:
+        if council_turn and (daily_council or {}).get("phase") == "verdict" \
+                and agent.get("role") == "elder":
+            high_stakes_reason = "council_verdict"
+        elif emergency_active:
             high_stakes_reason = "emergency"
         elif election_active:
             high_stakes_reason = "election"
@@ -10530,6 +11681,52 @@ class SimEngine:
                                   "effect": r.get("effect"), "supersedes": r.get("supersedes")}
                                  for r in rules_full]
 
+        daily_prompt = None
+        if daily_council:
+            order = daily_council.get("speakingOrder") or []
+            speaker_idx = int(daily_council.get("nextSpeakerIdx") or 0)
+            daily_prompt = {
+                "trigger": daily_council.get("trigger"),
+                "phase": daily_council.get("phase"),
+                "round": daily_council.get("round"),
+                "maxRounds": daily_council.get("maxRounds"),
+                "currentSpeaker": order[speaker_idx % len(order)] if order else None,
+                "agenda": json.loads(json.dumps(daily_council.get("agenda") or [])),
+                "ballot": json.loads(json.dumps(daily_council.get("ballot"), default=str)),
+                "verdict": json.loads(json.dumps(daily_council.get("verdict"), default=str)),
+            }
+        council_action_names = {"council_speak", "council_propose", "council_vote"}
+        if council_turn:
+            phase = (daily_council or {}).get("phase")
+            allowed_council = {
+                "discussion": {"council_speak"},
+                "proposal": {"council_propose"},
+                "voting": {"council_vote"},
+                "verdict": {"council_speak"} if agent.get("role") == "elder" else set(),
+            }.get(phase, set())
+        else:
+            allowed_council = set()
+        available_actions = [
+            action_name for action_name in self.d["AVAILABLE_ACTIONS"]
+            if (action_name not in council_action_names or action_name in allowed_council)
+            and (not council_turn or action_name in allowed_council)
+            and (action_name != "start_terraform" or ECOLOGY_ENABLED)
+            and (action_name != "found_belief" or MEMES_ENABLED)
+            and (action_name != "repair_structure" or GOODS_ENABLED)
+            and (action_name != "bury_agent" or CEMETERY_ENABLED)
+            and (action_name != "repeal_rule" or RULES_ENABLED)
+            and (action_name != "upgrade_structure" or STRUCTURE_UPGRADES_ENABLED)
+            and (action_name != "submit_structure_sprite" or sprite_design_turn)
+            and (action_name not in ("propose_role", "approve_role", "reject_role")
+                 or EMERGENT_ROLES)
+            and (action_name not in ("place_block", "remove_block")
+                 or path1_on("COMPOSABLE_BUILD_ENABLED"))
+            and (action_name not in ("dig_terrain", "plant_terrain")
+                 or path1_on("TERRAIN_TILES_ENABLED"))
+            and (action_name not in ("propose_treaty", "vote_treaty")
+                 or path1_on("PATH1_DIPLOMACY_ENABLED"))
+        ]
+
         return {
             "agent_name": agent["name"],
             "frame_tick": self.frameTick,
@@ -10561,6 +11758,18 @@ class SimEngine:
                                 if d.get("build_grid")],
             "directive": self._current_directive() or "none",
             "invention_only": invention_turn,
+            "council_turn": council_turn,
+            "council_seated": council_seated,
+            "daily_council": daily_prompt,
+            "council_world_status": {
+                "era": self._current_era_name() if TECH_TREE_ENABLED else c.get("level"),
+                "techTier": self._village_tech_tier() if TECH_TREE_ENABLED else None,
+                "projects": self._active_projects_brief(),
+                "stalls": self._active_projects_progress_text(),
+                "resourcePressure": self._format_district_stocks_for_prompt(agent),
+                "activeRules": [r.get("name") or r.get("id") for r in rules_full[:8]],
+                "inventionRequired": invention_required,
+            } if council_turn else None,
             "invention_build_context": invention_build_context,
             "sprite_design_only": sprite_design_turn,
             "sprite_design_context": dict(agent["spriteDesignTurn"]) if sprite_design_turn else None,
@@ -10642,24 +11851,14 @@ class SimEngine:
             # so flag-off prompts stay byte-identical to Phase F).
             "skills": {k: round(v, 1) for k, v in agent["skills"].items()} if CULTURE_ENABLED else None,
             "chronicle_line": self._chronicle_prompt_line() if CULTURE_ENABLED else None,
+            "council_digest_line": self._council_digest_prompt_line(),
             "library_lessons": (self._library_lessons(agent.get("currentDistrict"))
                                 if CULTURE_ENABLED and LIBRARY_SCALING_ENABLED else None),
             "path1_tool_line": tool_line,
             "path1_industry_line": industry_line,
             "path1_neighbor_line": neighbor_line,
             "high_stakes_reason": high_stakes_reason,
-            "available_actions": [a for a in self.d["AVAILABLE_ACTIONS"]
-                                  if (a != "start_terraform" or ECOLOGY_ENABLED)
-                                  and (a != "found_belief" or MEMES_ENABLED)
-                                  and (a != "repair_structure" or GOODS_ENABLED)
-                                  and (a != "bury_agent" or CEMETERY_ENABLED)
-                                  and (a != "repeal_rule" or RULES_ENABLED)
-                                  and (a != "upgrade_structure" or STRUCTURE_UPGRADES_ENABLED)
-                                   and (a != "submit_structure_sprite" or sprite_design_turn)
-                                   and (a not in ("propose_role", "approve_role", "reject_role") or EMERGENT_ROLES)
-                                   and (a not in ("place_block", "remove_block") or path1_on("COMPOSABLE_BUILD_ENABLED"))
-                                  and (a not in ("dig_terrain", "plant_terrain") or path1_on("TERRAIN_TILES_ENABLED"))
-                                  and (a not in ("propose_treaty", "vote_treaty") or path1_on("PATH1_DIPLOMACY_ENABLED"))],
+            "available_actions": available_actions,
         }
 
     def _recent_conversations_text(self):
@@ -11111,6 +12310,10 @@ class SimEngine:
                 self._maybe_meta_update()
             if EMERGENT_ROLES and ft % ROLE_SWITCH_TICK_FRAMES == 0:
                 self._maybe_auto_switch_role()
+            if LIFECYCLE_ENABLED and ft % RULES_TICK_FRAMES == 0:
+                # Repair restored/malformed leaderless state before the rule
+                # backstop attempts to read or vote on succession ballots.
+                self._ensure_succession_election()
             if RULES_ENABLED and ft % RULES_TICK_FRAMES == 0:
                 self._maybe_advance_rules()
             if LIFECYCLE_ENABLED and ft % RULES_TICK_FRAMES == 0:
@@ -11168,6 +12371,10 @@ class SimEngine:
                 self._tick_structure_health_benchmark()
             if GOODS_ENABLED and ft % DAY_FRAMES == 0:
                 self._tick_shelter()
+            if DAILY_COUNCIL_ENABLED:
+                if ft % DAY_FRAMES == 0:
+                    self._maybe_convene_daily_council()
+                self._maybe_advance_daily_council()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
             if BENCHMARKS_ENABLED and (ft % BENCHMARK_TICK_FRAMES == 0 or ft == FIRST_BENCHMARK_FRAME):
@@ -11193,6 +12400,14 @@ class SimEngine:
                     if a["messageTimer"] == 0:
                         a["message"] = None
                 if a["incapacitated"]:
+                    continue
+                daily = (self.civilization.get("dailyCouncil")
+                         if DAILY_COUNCIL_ENABLED else None)
+                if daily and a["name"] in (daily.get("attendees") or []) \
+                        and (daily.get("phase") == "convening" or not a.get("councilTurn")):
+                    # Seated attendees do not resume ordinary goals/actions
+                    # between their one-shot council turns.
+                    a["thinkTimer"] = 1
                     continue
                 if responders and a["name"] in responders:
                     a["thinkTimer"] -= 1
@@ -11293,6 +12508,8 @@ class SimEngine:
             "civilization": civ,
             "agents": agents,
             "memory": memory,
+            "council_transcript": json.loads(json.dumps(
+                self.council_transcript_rows, default=str)),
         }
 
     def save_state(self):
@@ -11444,6 +12661,8 @@ class SimEngine:
                 civ.setdefault("eraIndex", 0)
                 civ.setdefault("councilActive", None)
                 civ.setdefault("councilLog", [])
+                civ.setdefault("dailyCouncil", None)
+                civ.setdefault("councilDigests", [])
                 if TECH_TREE_ENABLED:
                     for tid, tmpl in PROJECT_TEMPLATES.items():
                         if isinstance(civ.get("projectRegistry"), dict):
@@ -11594,6 +12813,7 @@ class SimEngine:
                     a.setdefault("lastBurialRejection", None)
                     a.setdefault("inventionRetryUsed", False)
                     a.setdefault("inventionBuildContext", None)
+                    a.setdefault("councilTurn", False)
                     a.setdefault("spriteDesignTurn", None)
                     a.setdefault("lastUpgradeRejection", None)
                     a.setdefault("lastSpriteRejection", None)
@@ -11665,6 +12885,10 @@ class SimEngine:
                 self._rebuild_custom_rule_modifiers()
                 self.agents = agents
                 self.agent_names = set(a["name"] for a in agents)
+                self.council_transcript_rows = [
+                    dict(row) for row in (data.get("council_transcript") or [])
+                    if isinstance(row, dict)
+                ]
                 # Rehydrate PIANO module working memory: state.db already
                 # persists each agent's moduleReports mirror (written
                 # alongside moduleTick after every think), so a restore need
@@ -11819,6 +13043,19 @@ class SimEngine:
                 civ["memeMutations"] = c.get("memeMutations", 0)
                 civ["beliefRegistry"] = json.loads(json.dumps(self._belief_registry(), default=str))
                 civ["beliefPitchCalls"] = c.get("beliefPitchCalls", 0)
+            if DAILY_COUNCIL_ENABLED:
+                # Full live projection is intentionally engine-authored: the
+                # later viewer phase consumes these persisted seats, agenda,
+                # transcript, ballot, and verdict without deriving mechanics.
+                civ["dailyCouncil"] = json.loads(json.dumps(
+                    c.get("dailyCouncil"), default=str))
+                civ["councilDigests"] = json.loads(json.dumps(
+                    (c.get("councilDigests") or [])[:DAILY_COUNCIL_DIGEST_CAP],
+                    default=str))
+                if not TECH_TREE_ENABLED:
+                    civ["councilLog"] = json.loads(json.dumps(
+                        (c.get("councilLog") or [])[:DAILY_COUNCIL_LOG_CAP],
+                        default=str))
             if TECH_TREE_ENABLED:
                 # Phase D: era chip, council banner, and the persisted debate
                 # records for the viewer's Council panel.

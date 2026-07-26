@@ -61,7 +61,7 @@ the Ollama dependency): [CLAUDE.md](../CLAUDE.md#commands).
 | [06-agents.md](06-agents.md) | Agent defs/roster, roles.json schema, agent state fields, lifecycle |
 | [07-actions.md](07-actions.md) | The action catalog (sole source for all actions) |
 | [08-systems-economy.md](08-systems-economy.md) | Survival, crafting, goals, structure effects, goods, economy |
-| [09-systems-society.md](09-systems-society.md) | Tech tree, rules/voting, memes, culture, benchmarks |
+| [09-systems-society.md](09-systems-society.md) | Tech tree, Daily Council/governance and voting, memes, culture, benchmarks |
 | [10-path1.md](10-path1.md) | Path 1 bundle: industry, tools, terrain, diplomacy, pressure loop |
 | [11-viewer.md](11-viewer.md) | Thin-viewer contract, sprites.js rendering |
 | [12-ops.md](12-ops.md) | SessionLogger, log ingestion, scripts/ tools |

@@ -19,6 +19,8 @@ not duplicate the rule text back into server.py -- this module is now the
 one editable copy (specs/03-cognition.md).
 """
 
+import json
+
 import sim_engine as _sim_engine
 
 SYSTEM_PROMPT = """You are an autonomous agent in a pixel-art village simulation.
@@ -137,6 +139,14 @@ COLLECTIVE RULES (voting):
    filters; modifier is only {"kind":"add","value":1..3}. It adds that
    many units to matching real action output. To amend an active provision,
    set supersedes to its rule id; the cited provision is replaced.
+
+DAILY COUNCIL (only when the council actions are available):
+17b. council_speak records your opinion, feeling, and agenda topic.
+     council_propose opens one rule, blueprint, or advisory idea ballot.
+     council_vote casts yes, no, or abstain on the open ballot. These actions
+     work only while you are seated in the matching council phase. On a
+     succession ballot, compare the named candidates and council_vote with
+     candidate set to one exact name, or vote set to abstain.
 
 COGNITIVE CONTROLLER:
 18. If "Module reports" are present, you are the Cognitive Controller: weigh the
@@ -297,6 +307,72 @@ EXAMPLE (elder sage-reviewing a pending blueprint's geography/resources):
 
 EXAMPLE (elder approving a pending blueprint after sage review):
 {"action":"approve_blueprint","target":"library","target_district":"forest","message":"Approved. Gather paper from the forest.","new_role":null,"relationship_update":null,"reasoning":"A worthy addition to the village."}"""
+
+
+COUNCIL_SYSTEM_PROMPT = """You are a seated villager taking one turn in the Daily Council Assembly.
+Use only the council actions offered in available_actions. Respond with ONLY valid JSON.
+No markdown, explanation, or chain-of-thought.
+
+Actions:
+- council_speak: include message (your concise opinion), feeling (a short honest feeling),
+  and topic (an agenda topic id).
+- council_propose: include kind "rule", "blueprint", or "idea". For rule include the
+  ordinary rule object; for blueprint include the ordinary blueprint object; for idea include
+  title and detail. Proposals must be concrete and useful.
+- council_vote: for an ordinary ballot include vote "yes", "no", or "abstain".
+  For a succession ballot include candidate (exactly one listed candidate name), or
+  vote "abstain".
+
+Use this shape:
+{"action":"council_speak|council_propose|council_vote","message":null,
+ "feeling":null,"topic":null,"kind":null,"title":null,"detail":null,
+ "rule":null,"blueprint":null,"vote":null,"candidate":null,
+ "reasoning":"one short sentence"}
+
+During discussion, speak only when named as the current speaker. During proposal, propose one
+validated improvement, except that a succession ballot is already open and needs no competing
+proposal. During succession discussion, compare the named candidates and explain which qualities
+the village needs. During voting, vote on the open ballot. During verdict, only the elder
+speaks: state the recorded majority result, exact-tie ruling, or non-tied sub-quorum rejection
+and ratify it."""
+
+
+def build_council_user_prompt(data):
+    """Build the bounded council-only user prompt without the routine rulebook."""
+    council = data.get("daily_council") or {}
+    agenda = council.get("agenda") or []
+    ballot = council.get("ballot")
+    verdict = council.get("verdict")
+    status = data.get("council_world_status") or {}
+    recent = data.get("council_digest_line") or "none"
+    speaker = council.get("currentSpeaker") or "none"
+    elder_note = ""
+    if data.get("role") == "elder" and council.get("phase") == "verdict":
+        elder_note = (
+            "\nELDER VERDICT: announce and ratify this result: "
+            + json.dumps(verdict or {}, separators=(",", ":"), ensure_ascii=True)
+        )
+    succession_note = ""
+    if (ballot or {}).get("kind") == "succession":
+        succession_note = (
+            "\nSUCCESSION: compare these candidates during discussion and, during voting, "
+            "set candidate to exactly one listed name or abstain: "
+            + json.dumps(ballot.get("candidates") or [], separators=(",", ":"),
+                         ensure_ascii=True)
+        )
+    return (
+        f"Name: {data.get('agent_name')} | role: {data.get('role')}\n"
+        f"Council phase: {council.get('phase')} | round: {council.get('round')}/"
+        f"{council.get('maxRounds')} | current speaker: {speaker}\n"
+        f"World status: {json.dumps(status, separators=(',', ':'), ensure_ascii=True)}\n"
+        f"Agenda: {json.dumps(agenda, separators=(',', ':'), ensure_ascii=True)}\n"
+        f"Ballot: {json.dumps(ballot, separators=(',', ':'), ensure_ascii=True)}\n"
+        f"Recent council: {recent}\n"
+        f"Available actions: {data.get('available_actions')}"
+        f"{elder_note}{succession_note}\n"
+        "State an opinion and feeling about the village's path toward evolution, then take "
+        "the action appropriate to this phase. Respond with only JSON."
+    )
 
 # Reduced-context variant for the context-overflow retry (see
 # run_agent_decision): drops the worked EXAMPLE blocks, which are the bulk of

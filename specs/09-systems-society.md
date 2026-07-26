@@ -5,7 +5,7 @@ pipeline, the rules/voting system (including the anti-oscillation guard),
 memes, culture (skills/teaching/library/chronicle), messaging, benchmarks,
 and the governance-specific slice of lifecycle succession.
 
-**Canonical for:** `TECH_TREE_ENABLED`, `SAGE_REVIEW_ENABLED`,
+**Canonical for:** `TECH_TREE_ENABLED`, `DAILY_COUNCIL_ENABLED`, `SAGE_REVIEW_ENABLED`,
 `RULES_ENABLED`, `MEMES_ENABLED`, `CULTURE_ENABLED`, `AGENT_MESSAGING`,
 `BENCHMARKS_ENABLED` semantics; the succession/harvest_quota/rationing rule
 kinds under `LIFECYCLE_ENABLED`.
@@ -33,7 +33,7 @@ cart/wagon in village hands) → (`TIER3_CONTENT_ENABLED`) Harbor → Mill.
 — a broken Forge never un-names the era — and logs/benchmarks (`era`) on
 advance.
 
-**Invention council** (plan Part 6): when `_maybe_invention_backstop()`
+**Legacy invention council (only while `DAILY_COUNCIL_ENABLED` is off).** When `_maybe_invention_backstop()`
 (sim_engine.py:7191) fires — `_invention_required()` has held true for
 `INVENTION_BACKSTOP_STREAK = 3` consecutive elder think turns and no
 blueprint is pending — up to `INVENTION_COUNCIL_SIZE = 3` idle villagers
@@ -45,6 +45,121 @@ or no villager is free, the elder drafts one himself. A council with no
 verdict for `COUNCIL_TTL_FRAMES = STALL_THRESHOLD * 20` (≈6.7 min,
 `STALL_THRESHOLD = 600`) dissolves (`_maybe_dissolve_council`); records are
 capped at `COUNCIL_LOG_CAP = 12`.
+
+## DAILY_COUNCIL_ENABLED
+
+`DAILY_COUNCIL_ENABLED = True` replaces the reactive invention-council fan-out
+as the village's primary deliberation surface. Once per in-world day, at the
+deterministic boundary `frameTick % DAY_FRAMES == 0`, the engine convenes one
+Daily Council if at least `DAILY_COUNCIL_MIN_LIVING = 2` living agents exist.
+This is a floor against a one-survivor world, never a subset selector. Ordinary
+convening also requires a living, non-incapacitated elder: without an available
+elder there is no head/ratifier, so the scheduled meeting defers. The explicit
+exception is a lifecycle succession emergency: once a living village has no
+living formal elder and `_ensure_succession_election()` has opened a valid
+election, an emergency Daily Council convenes on the next
+`RULES_TICK_FRAMES` recovery pass rather than waiting for a day boundary. This
+emergency may convene with one available survivor because leaving that survivor
+leaderless is precisely the condition it must repair.
+With the flag off, even a session restored from a mid-meeting save is inert:
+attendees resume ordinary scheduling and no council action is offered or
+accepted; the legacy invention-council path remains available.
+
+### Attendance, seating, and agenda
+
+Attendance is mandatory for every living agent except an incapacitated/collapsed
+agent, who is recorded in `excused` and excluded from the quorum denominator.
+Dead agents do not attend. They remain in `self.agents` for lifecycle/history
+rendering and are identified by non-null `deathFrame`; attendee-derived state
+filters those retained roster entries explicitly. A death during a meeting is
+removed from seats and the denominator on the next phase-advance tick. Convening
+interrupts each attendee's goal/task, sets `councilTurn`, and directs them to a
+deterministic seat. `_assign_council_seats()` puts every attendee around one
+circle sized to the full attendance; the elder occupies the distinguished head
+seat and everyone else fills clockwise by stable `(role, name)` order. A
+leaderless succession council begins with no head seat and stable `(role, name)`
+ordering; after election, roster refresh moves the winner into the head seat for
+verdict/adjourn. Persisted world-coordinate seats are the sole geometry source
+for movement and the viewer.
+
+The session agenda always covers current world status, ongoing/stalled projects,
+resource limitations, active rules, ideas/proposals, and agents' feelings about
+the village's evolution. If `_invention_required()` is true, the demand appears
+as an agenda item. A succession emergency adds `leadership_vacancy`, explicitly
+naming every current candidate and directing discussion to compare their
+suitability; it does not replace any normal topic. With this flag on,
+`_maybe_invention_backstop()` does not
+create its 2-3 idle-agent `councilActive` fan-out; its elder-self-draft escape
+remains as a deterministic safety net if no assembly produces a blueprint in the
+existing timeout path.
+
+### Persisted session and deterministic lifecycle
+
+`civilization["dailyCouncil"]` is `None` outside a meeting. An active session
+contains `phase` (`convening`, `discussion`, `proposal`, `voting`, `verdict`, or
+`adjourned`), day/frame/timestamp, a frame-derived unique `meetingId`, `trigger`
+(`daily` or `succession`), `seats`, `attendees`, `excused`, agenda,
+round/maxRounds, speaking order/next index, a full live `transcript`, optional
+`ballot`, and optional `verdict`. An ordinary ballot has kind `rule`,
+`blueprint`, or `idea`, stable id/title/proposer, per-name yes/no/abstain votes,
+and quorum. A succession ballot has kind `succession`, its election id,
+candidate list, and per-voter candidate-name/abstain choices. A verdict records
+winner, tally, elder ruling (null for the leaderless declaration), and outcome.
+
+`_maybe_advance_daily_council()` makes every transition tick-gated and
+deterministic. `DAILY_COUNCIL_DISCUSSION_ROUNDS = 2` bounds round-robin speech;
+`DAILY_COUNCIL_PHASE_TTL_FRAMES = STALL_THRESHOLD * 8` guarantees a stuck phase
+advances/adjourns; and `DAILY_COUNCIL_SESSION_TTL_FRAMES = STALL_THRESHOLD * 30`
+guarantees a stuck meeting closes. Adjourn always clears council-turn state and
+writes a record, including an unresolved result when necessary.
+
+### Majority, proposals, and elder ruling
+
+The ballot denominator is the living, non-excused attendee count; quorum is its
+strict majority, `(attendees // 2) + 1`. Thus the full available village, not a
+voluntary subset, controls the result. `council_propose` may open a rule,
+blueprint, or advisory idea ballot; rule and blueprint validation reuse the
+existing validators and all their caps. `council_vote` records a yes/no/abstain
+vote. A passed rule delegates to `_tally_and_maybe_enact` rather than mutating
+`civilization["rules"]` directly. Yes or no reaching quorum resolves normally.
+An exact yes/no tie below quorum is the explicit exception: the seated elder's
+personal yes/no vote breaks it (default no if the elder is absent or abstains),
+and the elder then ratifies that result. For a tied rule ballot, ratification is
+represented as one synthetic elder vote passed through `_tally_and_maybe_enact`,
+so only the existing enactment path mutates rules. Any non-tied sub-quorum
+plurality/abstention result rejects as "no whole-village majority"; abstentions
+never lower the threshold. An idea records an outcome but has no direct
+mechanical effect.
+
+A succession council arrives with its election ballot already open, retains the
+ordinary convening and discussion phases, passes through proposal without
+soliciting a competing proposal, and then gives every seated villager one
+`council_vote` turn. Each voter names exactly one current candidate or abstains;
+the transcript records the choice and the live ballot exposes per-candidate
+totals. Completion waits for every eligible attendee or the phase TTL. The
+candidate with the most recorded votes wins; an exact tie, including an
+all-abstain/no-vote timeout, is broken by lowest stable agent id (seniority).
+The village declares this result without elder ratification and calls only
+`_enact_succession_winner()` to assign office. Roster refresh then seats the new
+elder at the head; they may speak the normal verdict turn before adjourn.
+
+### Two record tiers
+
+Every speech, proposal, vote, and verdict is kept verbatim in the session
+transcript and, at append time, in the `state.db` `council_transcript` audit
+table documented in [02-engine-core.md](02-engine-core.md). On adjourn the same
+frame-derived `meetingId` prevents an emergency session from colliding with an
+earlier scheduled meeting on the same in-world day. The same
+verbatim transcript is archived in the bounded `councilLog` viewer record
+(`DAILY_COUNCIL_LOG_CAP = 12`). Its separate prompt-facing record is a
+deterministically derived digest, not an LLM call:
+
+`civilization["councilDigests"]` is a newest-first ring capped at
+`DAILY_COUNCIL_DIGEST_CAP = 5`. Each entry records day/frame/timestamp, short
+agenda topics, one-line proposal outcomes, verdict (if any), and a bounded mood
+folded from transcript feelings. Digests give every later agent bounded
+continuity; raw transcript rows remain human/audit data only. Transcript-table
+retention keeps the newest 30 meeting ids, as specified in [02](02-engine-core.md).
 
 **Invention safeguards** (deadlock-avoidance backstops, all deterministic):
 
@@ -186,23 +301,45 @@ Related actions: `propose_rule`, `vote_rule`, `repeal_rule` —
 
 ## Succession (LIFECYCLE_ENABLED, governance slice)
 
-On the elder's natural death, `_start_succession_election()`
-(sim_engine.py:5569) opens one pending `"succession"` rule per eligible
-adult candidate (deterministic nomination, capped at
-`max(2, MAX_PENDING_RULES)` candidates), tagged with a shared
-`electionId`. Villagers vote via the ordinary `vote_rule` action;
-`_vote_on_rule`'s exclusivity logic makes a "yes" on one candidate an
-implicit "no" on the others in the same election. `_tally_and_maybe_enact`
-detects `kind == "succession"` and routes to `_enact_succession_winner`
-instead of appending to `civilization["rules"]` — succession ballots are a
-leadership record, not an ongoing governance rule, and don't consume the
-`MAX_ACTIVE_RULES` budget. The election auto-decides via
-`_resolve_succession_tie` if no candidate reaches quorum within
-`SUCCESSION_ELECTION_TTL_FRAMES = STALL_THRESHOLD * 8` (≈13 min). If the
-winner died or collapsed during the window, a fresh election reopens among
-the remaining candidates rather than crowning a corpse. State fields
+On the elder's natural death, `_start_succession_election()` opens one
+pending `"succession"` rule per eligible adult candidate (deterministic
+nomination, capped at `max(2, MAX_PENDING_RULES)` candidates), tagged with a
+shared `electionId`. If no non-incapacitated adult exists, nomination falls
+back to any living, non-incapacitated villager; if every survivor is
+incapacitated, election creation defers until someone can safely serve.
+With `DAILY_COUNCIL_ENABLED`, these rule-shaped entries are persistence and
+winner-enactment records; visible deliberation and voting occur through the
+emergency Daily Council described above, and the ordinary
+`_maybe_advance_rules()` backstop never manufactures candidate support. With
+the council flag off, legacy `vote_rule` remains available and its exclusivity
+logic makes a "yes" on one candidate an implicit "no" on the others. Succession
+never appends to `civilization["rules"]` and does not consume the
+`MAX_ACTIVE_RULES` budget. If council cognition fails, its phase/session TTLs
+still finish discussion and voting; the recorded plurality/seniority rule is
+the deterministic no-vote fallback. If no Daily Council is available, the
+election deadline `SUCCESSION_ELECTION_TTL_FRAMES = STALL_THRESHOLD * 8`
+(≈13 min) retains the legacy bounded resolver. If a winner died or collapsed
+during the window, a fresh election reopens among the remaining candidates
+rather than crowning a corpse. State fields
 (`age`, `deathFrame`, etc.) are documented in
 [06-agents.md](06-agents.md); this section is the election mechanics only.
+
+`_ensure_succession_election()` runs on the existing `RULES_TICK_FRAMES`
+cadence whenever lifecycle is enabled. A living village with no living agent
+whose formal role is `"elder"` must have one structurally valid election. A
+valid election has a bounded deadline, a unique non-empty candidate list,
+exactly one matching succession ballot per candidate under the same
+`electionId`, and only candidates who remain living and non-incapacitated.
+Missing state, orphaned/mismatched ballots, corrupt metadata, or an ineligible
+candidate causes the old succession ballots to be replaced by one fresh
+deterministic election. A valid election is left untouched, so the recovery
+gate cannot reset its deadline or spam elections. If a living formal elder
+exists, even while temporarily incapacitated, succession does not begin:
+Sage emergency/recovery retains authority, and any stray succession state is
+cancelled so a late ballot cannot create two elders. Expired but otherwise
+valid elections are not restarted: the Daily Council phase/session TTL owns
+completion while enabled, and only the flag-off legacy path uses the direct
+election-deadline tiebreak.
 
 ## MEMES_ENABLED
 

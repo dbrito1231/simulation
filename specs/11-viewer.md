@@ -100,6 +100,34 @@ world state beyond a cached palette/season key.
   [01-architecture.md](01-architecture.md), a new action should get an entry
   but nothing breaks if briefly missing.
 
+## Daily Council Assembly window
+
+`#councilAssemblyModal` is a sibling of the existing invention-council
+transcript modal and remains a pure projection of
+`civilization.dailyCouncil` from `GET /state`. It auto-opens while a Daily
+Council session is present, closes on `adjourned`, and provides a manual
+close/re-open control so automatic opening never traps the observer.
+
+The responsive assembly view prefers a clearly readable 640x640-or-larger round
+table when the viewport permits. Its fixed 760x760 logical canvas scales down
+with a square aspect ratio to fit short or narrow viewports, keeping the full
+seat ring visible rather than clipping it. It renders every serialized attendee
+at their deterministic seat using the existing stateless agent-sprite renderer
+and a name label. The
+elder's `isHead` seat is visually distinguished. A succession emergency visibly
+starts headless, retains all normal agenda rows plus the named
+`leadership_vacancy` topic, then marks the elected winner's refreshed head seat.
+Alongside or below the table it streams the live transcript (including opinions,
+feelings, and named candidate votes), shows the agenda, shows per-attendee
+yes/no/abstain tally for ordinary ballots or per-candidate totals and each
+voter's choice for succession, and highlights either the elder ruling or the
+village-declared succession verdict. The verdict section heading changes to
+`Village verdict` for succession rather than implying a nonexistent elder
+ruling. It does not calculate seats, quorum, votes, or outcomes.
+The existing Council sidebar/history continues to render bounded `councilLog`
+records. `ACTION_LABELS` adds display gerunds for `council_speak`,
+`council_propose`, and `council_vote`.
+
 ## sprites.js: pure stateless drawing
 
 - Every function takes `ctx` plus plain data and paints; the only module

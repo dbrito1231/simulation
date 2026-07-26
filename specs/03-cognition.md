@@ -55,6 +55,7 @@ catalog — not repeated here).
 | Routine decision | `SYSTEM_PROMPT` (or `SYSTEM_PROMPT_SLIM` on retry) | `MODEL_SMART` (`sim-smart`, qwen3.5 9B) | 512 | 0.4 | `DEFAULT_TIMEOUT_S`=30s | `NON_THINKING_SAMPLING` + `think:false` |
 | High-stakes decision (elder / `invention_status` REQUIRED / rate-limited emergency,election,treaty_vote) | `SYSTEM_PROMPT`/slim | `MODEL_SMART` (`sim-smart`, qwen3.5 9B) | 512 (1600 only if thinking re-enabled, currently dead code) | 0.4 | `THINKING_TIMEOUT_S`=75s | `THINKING_SAMPLING` if `THINKING_ENABLED_HIGH_STAKES` (omits `think`, i.e. thinking on), else same as routine |
 | Invention-only turn | `INVENTION_SYSTEM_PROMPT` | `MODEL_SMART` (sprite/invention always high-stakes) | `INVENTION_MAX_TOKENS`=1024 | `INVENTION_TEMPERATURE`=0.6 | 75s | as above |
+| Daily Council turn | slim council-turn prompt | `MODEL_SMART`; routine settings except an elder verdict uses the high-stakes settings | bounded routine output | routine temperature | routine timeout, or 75s for elder verdict | routine sampling, or high-stakes sampling for elder verdict |
 | Sprite-design turn | `SPRITE_UPGRADE_SYSTEM_PROMPT` | `MODEL_SMART` | 768 | 0.3 | 75s | as above |
 | Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/80/90/100/220 per call site; PIANO=`PIANO_MODULE_MAX_TOKENS`=90) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`); PIANO fan-out 15s (`PIANO_MODULE_TIMEOUT_S`), always-on refresh 60s (`MODULE_REFRESH_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
 
@@ -158,7 +159,7 @@ the mode were `"json_object"`, or `None` if `"off"` or auto-disabled.
 
 `DECISION_SCHEMA` (server.py:780-839): `additionalProperties: False`;
 `required: ["action", "reasoning"]`. Key properties: `action` (enum =
-`DECISION_ACTIONS`, 35 entries — see specs/07-actions.md, not repeated here),
+`DECISION_ACTIONS`, 42 entries — see specs/07-actions.md, not repeated here),
 `target`/`target_district`/`message`/`new_role` (nullable strings),
 `relationship_update` (nullable object, values constrained to
 ally/neutral/rival), `blueprint` (nullable object: id/name/needs/new_resources/
@@ -234,6 +235,37 @@ invention status, commitment, idle agents, known resources/recipes, pending/
 rejected blueprints/recipes/rules, reserved structure ids), social (recent
 conversations, inbox, module reports), a `behavior_nudge` line, and finally
 `available_actions`.
+
+### Daily Council prompt contract
+
+When the engine sets `councilTurn` for a seated attendee, it routes that normal
+think slot through a slim council-turn prompt rather than the ordinary prompt.
+The prompt contains only the compact assembly state needed to deliberate:
+era/tech tier, active projects and stalls, resource pressure, active rules,
+whether an invention is required, the current agenda, and any open ballot. It
+asks the agent to state an opinion and a feeling about the village's path toward
+evolution, then to speak, optionally propose, or vote using the council actions.
+The elder's turn additionally requests a verdict/ruling once the ballot can be
+decided; that verdict turn is high-stakes. Council turns replace ordinary think
+turns and do not increase `MAX_CONCURRENT_LLM` or dispatch an extra call.
+
+For a leaderless succession council, the same bounded prompt includes the
+`leadership_vacancy` agenda item and the succession ballot's candidate list.
+Discussion turns explicitly ask villagers to compare those named candidates.
+Voting output uses `council_vote` with `candidate` set to one current candidate,
+or `vote: "abstain"`; ordinary ballots continue using `vote:
+"yes"|"no"|"abstain"`. There is no elder-verdict request until the recorded
+village result has promoted a winner and roster refresh has seated that new
+elder. Invalid/offline succession-vote fallback abstains instead of silently
+supporting whichever candidate was listed first.
+
+Every think payload, including non-council turns, receives at most
+`COUNCIL_DIGEST_PROMPT_ENTRIES = 2` newest compact entries from
+`civilization["councilDigests"]`, rendered as one short `Recent council:` line
+in the same bounded context area as Chronicle history. The full
+`council_transcript` audit table is never prompt material. This keeps council
+continuity available to every agent, including agents who did not attend or
+arrived later, while bounding context growth.
 
 **`behavior_nudge` composition** (`_build_think_payload`, sim_engine.py
 ~8888-9330): candidate nudges are collected as `(priority, text)` pairs via a

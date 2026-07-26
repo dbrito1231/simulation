@@ -80,7 +80,7 @@ their instructions are in `SYSTEM_PROMPT`, and the engine filters them when
 maps; server startup maps remain seed-only conveniences and are not a second role
 registry.
 
-## Flag index (complete — 36 module-level flags, sim_engine.py)
+## Flag index (complete — 37 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -106,6 +106,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `STRUCTURE_UPGRADES_ENABLED` | True | yes | [05](05-world.md) |
 | `GOODS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `TECH_TREE_ENABLED` | True | yes | [09](09-systems-society.md) |
+| `DAILY_COUNCIL_ENABLED` | True | no | [09](09-systems-society.md) |
 | `SAGE_REVIEW_ENABLED` | True | no | [09](09-systems-society.md) |
 | `ECONOMY_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `LIFECYCLE_ENABLED` | True | yes | [06](06-agents.md) |
