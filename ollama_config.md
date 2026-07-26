@@ -346,6 +346,64 @@ behind the flag. This feature is architecturally sound and stays dark;
 revisit only with a second GPU or a materially faster/smaller `sim-fast`
 model.
 
+## CPU-offload probe (2026-07-25) — BLOCKED, NO-GO
+
+Probed per `docs/plan-cpu-offload-probe.md`: whether pinning a throwaway
+`sim-fast`-equivalent model (`llama3.2:3b`, `PARAMETER num_gpu 0`, plus a
+`num_thread 8` variant) to the CPU would decouple decision latency (GPU,
+`sim-smart`) from module-refresh throughput (would-be CPU, `sim-fast`),
+answering the "second GPU or smaller model" open question for a retry of
+the always-on-modules Phase B gate on this box (i7-12700KF 12C/20T, 32 GB
+RAM, RTX 3060 12 GB, Ollama 0.32.3).
+
+**Blocker hit at probe step 1 (model creation + residency check), before
+any throughput or tick-integrity measurement.** `ollama create probe-fast-cpu
+-f <scratch Modelfile with PARAMETER num_gpu 0>` succeeded, and a warm
+`/api/chat` call to it correctly reported `100% CPU` in `ollama ps`/
+`size_vram: 0` — the CPU pin itself works as documented. But the same warm
+call **evicted `sim-fast` from residency**: immediately after, `/api/ps`
+listed only `probe-fast-cpu` (CPU) and `sim-smart` (GPU) — `sim-fast` was
+gone, despite `keep_alive: -1` on all three models and despite
+`probe-fast-cpu` needing zero VRAM (a purely CPU-side model competing with
+GPU models for VRAM was the failure mode this probe was designed to avoid).
+A follow-up direct call to `sim-fast` succeeded (it reloads on demand,
+~246 ms `load_duration` for this small model) but did **not** restore it to
+the resident set — the very next `/api/ps` still showed only `probe-fast-cpu`
++ `sim-smart`. No `OLLAMA_MAX_LOADED_MODELS` (or other `OLLAMA_*`) env var is
+set on this box, so Ollama's default loaded-model cap is in effect; it
+appears to count CPU-resident and GPU-resident models against the same slot
+budget rather than treating CPU offload as "free" relative to VRAM pressure.
+
+This is exactly the plan's stated timebox condition ("CPU inference evicts
+the GPU models") — per the plan, the correct response is to stop and report
+rather than improvise around it (e.g. by chasing `OLLAMA_MAX_LOADED_MODELS`
+tuning, which the plan explicitly kept out of scope: "Ollama env vars...
+stay untouched"). Steps 2-4 (thread-cap variant, throughput measurement,
+10-minute tick-integrity soak) were not run — there is nothing to measure
+once the premise (decoupled compute pools that don't contend for a shared
+resident-model slot) is falsified.
+
+Cleanup performed: `ollama rm probe-fast-cpu probe-fast-cpu8`; scratch
+Modelfiles deleted from the agent scratchpad (never written under `ollama/`);
+warmed `sim-fast` and `sim-smart` directly afterward and confirmed both
+resident together again via `/api/ps`; confirmed the live sim server
+untouched throughout (`GET /state` 200 before, during, and after; no control
+routes called).
+
+**Verdict: NO-GO for CPU-offload as the third retry option, on this specific
+Ollama 0.32.3 install/box.** The mechanism this plan bet on — CPU inference
+as a separate compute pool from the GPU decision path — does not hold here
+because Ollama's loaded-model slot accounting evicts a GPU-resident model to
+make room for a CPU-resident one, reintroducing the exact contention (now as
+reload-latency spikes on `sim-fast`, which background cognition depends on)
+the probe was meant to eliminate. This does not by itself rule out CPU
+offload on a different Ollama version/config (e.g. one with `OLLAMA_MAX_LOADED_MODELS`
+raised), but that tuning is out of this probe's scope and was left untouched
+per the plan's constraints. The always-on Phase B retry options remain: a
+second GPU, or a materially faster/smaller `sim-fast` model — unchanged from
+the existing verdict above, now with this CPU-offload avenue closed on
+evidence rather than assumption.
+
 ## Related sim knobs (not Ollama)
 
 These live in code; Phase 2 has landed, so they now target Ollama:

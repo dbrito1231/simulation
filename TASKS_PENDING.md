@@ -239,9 +239,15 @@ the target).
 **STATUS: CLOSED/FAILED (2026-07-25).** Both attempt-2 treatment soaks missed
 the gate (batch 2: latency +17.73%; batch 1 re-soak: freshness median 619.0s,
 zero-work pulses 0) — rolled back to `ALWAYS_ON_MODULES = False`, batch 2;
-feature stays dark pending a second GPU or a smaller/faster fast model. Full
-numbers in `ollama_config.md`'s "FINAL VERDICT" subsection. History below
-preserved as-is.
+feature stays dark pending a second GPU or a smaller/faster fast model.
+CPU-offload was probed as a possible third option (2026-07-25) and came back
+**NO-GO**: pinning a CPU-only throwaway model evicted `sim-fast` from Ollama's
+resident-model set (confirmed via `/api/ps`), reintroducing contention as
+reload latency on the same GPU-dependent model instead of eliminating it —
+blocker hit before any throughput/tick measurement was possible. Full numbers
+in `ollama_config.md`'s "CPU-offload probe (2026-07-25) — BLOCKED, NO-GO"
+section. Full numbers for the earlier gate in `ollama_config.md`'s "FINAL
+VERDICT" subsection. History below preserved as-is.
 
 Attempt 1 (2026-07-25) FAILED its GPU-contention gate and was correctly
 rolled back — `ALWAYS_ON_MODULES = False`, Phase A machinery intact and
