@@ -258,12 +258,122 @@
   #agentList .agent-status { display: block; color: #8a8a99; font-size: 11px; }
   #agentList .agent-vitals { color: #c0867e; white-space: nowrap; }
   #agentList .agent-vitals.agent-dead { color: #9e9e9e; }
-  #agentList .agent-beliefs {
+  #agentList .vital-row {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-right: 8px;
+  }
+  #agentList .vital-bar {
+    display: inline-block;
+    width: 46px;
+    height: 5px;
+    border-radius: 3px;
+    background: #2a2a35;
+    overflow: hidden;
+    vertical-align: middle;
+  }
+  #agentList .vital-fill {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s;
+  }
+  #agentList .agent-row.agent-critical {
+    border-left: 3px solid #d9534f;
+    padding-left: 3px;
+    background: rgba(217, 83, 79, 0.08);
+  }
+  #agentList .agent-thought {
     display: block;
     color: #9a8fc0;
     font-size: 10px;
     margin-top: 1px;
+    font-style: italic;
   }
+  #agentList .agent-thought.muted { color: #5c5c68; font-style: normal; }
+  #agentRollup {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+  #agentRollup .rollup-chip {
+    background: #1b1b26;
+    border: 1px solid #2a2a35;
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-size: 10px;
+    color: #b8b8c4;
+  }
+  #agentRollup .rollup-chip.rollup-crisis { color: #ff9d94; border-color: #d9534f; }
+  #agentDetail {
+    display: none;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid #2f2f3a;
+    font-size: 11px;
+  }
+  #agentDetail.open { display: block; }
+  #agentDetail h3 {
+    margin: 0 0 6px 0;
+    font-size: 12px;
+    color: #ddd;
+  }
+  #agentDetail .agent-detail-section {
+    margin-top: 8px;
+  }
+  #agentDetail .agent-detail-section:first-of-type { margin-top: 0; }
+  #agentDetail .agent-detail-label {
+    display: block;
+    color: #8a8a99;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 4px;
+  }
+  #agentDetail .agent-history {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  #agentDetail .agent-history li {
+    color: #c8c8d2;
+    padding: 2px 0;
+    border-left: 2px solid #3a3a48;
+    padding-left: 6px;
+    margin-bottom: 2px;
+  }
+  #agentDetail .agent-history li:first-child {
+    color: #ddd;
+  }
+  #agentDetail .agent-tie-chip {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+    margin: 0 4px 4px 0;
+  }
+  #agentDetail .agent-tie-chip.ally { background: rgba(92, 184, 92, 0.15); color: #7bd88a; border: 1px solid #3f7a45; }
+  #agentDetail .agent-tie-chip.rival { background: rgba(217, 83, 79, 0.15); color: #ff9d94; border: 1px solid #8a3d3a; }
+  #agentDetail .agent-reasoning {
+    color: #c8c8d2;
+    font-style: italic;
+  }
+  #agentFollowBtn {
+    padding: 3px 9px;
+    font: 11px sans-serif;
+    background: #2a2a35;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-left: 8px;
+  }
+  #agentFollowBtn:hover { background: #353545; color: #fff; }
+  #agentFollowBtn.active { background: #3f6b3f; color: #cfffcf; border-color: #5cb85c; }
   .agents-panel-head {
     display: flex;
     align-items: center;
@@ -688,7 +798,9 @@
         <h2>Agents <span id="livingAgentCount" class="civ-label"></span></h2>
         <button id="deadAgentsBtn" type="button" hidden>Deceased (0)</button>
       </div>
+      <div id="agentRollup"></div>
       <ul id="agentList"></ul>
+      <div id="agentDetail"></div>
     </section>
     </div>
   </aside>
@@ -1326,6 +1438,8 @@ function drawStructureLabel(ctx, structure, size) {
 const statusDot = document.getElementById("statusDot");
 const statusLabel = document.getElementById("statusLabel");
 const agentListEl = document.getElementById("agentList");
+const agentRollupEl = document.getElementById("agentRollup");
+const agentDetailEl = document.getElementById("agentDetail");
 const livingAgentCountEl = document.getElementById("livingAgentCount");
 const deadAgentsBtn = document.getElementById("deadAgentsBtn");
 const deadAgentsModal = document.getElementById("deadAgentsModal");
@@ -1333,7 +1447,15 @@ const deadAgentsListEl = document.getElementById("deadAgentsList");
 const deadAgentsCloseBtn = document.getElementById("deadAgentsCloseBtn");
 let selectedAgentId = null;
 let hoveredAgentId = null;
+let followAgentId = null;
 const AGENT_HIT_RADIUS = 28;
+
+// C5 follow-cam: center the scrollable canvas viewport on an agent, reusing the
+// existing centerViewportOn() helper (defined near the minimap handlers) so the
+// scroll/zoom math lives in exactly one place.
+function centerCameraOnAgent(agent) {
+  centerViewportOn(agent.x, agent.y);
+}
 
 function clientToWorld(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
@@ -1499,8 +1621,16 @@ function humanizeAction(agent) {
   if (agent.isThinking) return "thinking…";
   const a = agent.lastAction;
   if (!a) return "idle";
-  if (a.startsWith("move_to_")) return "heading to the " + a.replace("move_to_", "");
-  return ACTION_LABELS[a] || a.replace(/_/g, " ");
+  return actionLabel(a);
+}
+
+// Shared with humanizeAction's action-name mapping (excludes the
+// deceased/incapacitated/thinking special-cases, which don't apply to
+// historical log entries).
+function actionLabel(actionName) {
+  if (!actionName) return "idle";
+  if (actionName.startsWith("move_to_")) return "heading to the " + actionName.replace("move_to_", "");
+  return ACTION_LABELS[actionName] || actionName.replace(/_/g, " ");
 }
 
 function renderBenchmarks() {
@@ -1610,7 +1740,36 @@ function renderProjectsList() {
 // Cheap change-detection so we don't rebuild innerHTML every frame.
 let lastSidebarKey = "";
 let lastAgentPanelKey = "";
+let lastAgentDetailKey = "";
 let lastLogKey = "";
+
+// --- Client-only per-agent activity history (Plan B1: no server endpoint,
+// resets on reload). Newest entry is last in the array; capped per agent. ---
+const AGENT_HISTORY_LIMIT = 8;
+const agentHistory = new Map(); // agentId -> [{ action, label }]
+
+function recordAgentHistory() {
+  const living = getLivingAgents();
+  const seenIds = new Set();
+  for (const a of living) {
+    seenIds.add(a.id);
+    const action = a.lastAction || null;
+    let buf = agentHistory.get(a.id);
+    if (!buf) {
+      buf = [];
+      agentHistory.set(a.id, buf);
+    }
+    const last = buf.length ? buf[buf.length - 1] : null;
+    if (!last || last.action !== action) {
+      buf.push({ action, label: humanizeAction(a) });
+      if (buf.length > AGENT_HISTORY_LIMIT) buf.shift();
+    }
+  }
+  // Prune buffers for agents that no longer exist in the current world.
+  for (const id of Array.from(agentHistory.keys())) {
+    if (!seenIds.has(id)) agentHistory.delete(id);
+  }
+}
 
 function agentAgeLabel(a) {
   if (a.age == null || Number.isNaN(Number(a.age))) return "";
@@ -1625,17 +1784,50 @@ function agentVitalsHtml(a) {
   if (a.incapacitated) {
     return ` <span class="agent-vitals">☠ collapsed</span>`;
   }
-  return ` <span class="agent-vitals">❤${Math.round(a.health)} 🍗${Math.round(a.hunger)}</span>`;
+  const health = Math.round(a.health);
+  const hunger = Math.round(a.hunger);
+  const healthColor = health >= 60 ? "#5cb85c" : health >= 30 ? "#e0a63f" : "#d9534f";
+  // hunger is 0-100 where HIGHER = HUNGRIER = worse, so the bar fills (and
+  // reddens) as hunger rises — it reads as a "danger" meter, not a "fullness" one.
+  const hungerColor = hunger <= 40 ? "#5cb85c" : hunger <= 70 ? "#e0a63f" : "#d9534f";
+  return ` <span class="agent-vitals">` +
+    `<span class="vital-row" title="Health ${health}">❤<span class="vital-bar"><span class="vital-fill" style="width:${health}%;background:${healthColor}"></span></span></span>` +
+    `<span class="vital-row" title="Hunger ${hunger} (higher = hungrier)">🍗<span class="vital-bar"><span class="vital-fill" style="width:${hunger}%;background:${hungerColor}"></span></span></span>` +
+    `</span>`;
 }
 
-function universalBeliefs(living) {
-  if (!living.length) return new Set();
-  let shared = new Set(living[0].beliefs || []);
-  for (let i = 1; i < living.length; i++) {
-    const theirs = new Set(living[i].beliefs || []);
-    shared = new Set([...shared].filter((b) => theirs.has(b)));
-  }
-  return shared;
+// Truncated last-thought line for the main list row (replaces the old
+// per-agent beliefs line — see docs/plan-agents-panel-3-*.md step 4b).
+// Intentionally no "feeling" line: the decision `feeling` field is ~0%
+// populated in practice, so showing it would be an empty column.
+const AGENT_THOUGHT_TRUNCATE = 60;
+function agentThoughtHtml(a) {
+  if (a.isThinking) return `<span class="agent-thought">thinking…</span>`;
+  const reasoning = a.lastReasoning;
+  if (!reasoning) return `<span class="agent-thought muted">—</span>`;
+  const truncated = reasoning.length > AGENT_THOUGHT_TRUNCATE
+    ? reasoning.slice(0, AGENT_THOUGHT_TRUNCATE) + "…"
+    : reasoning;
+  return `<span class="agent-thought">${escapeHtml(truncated)}</span>`;
+}
+
+// Lower score = more urgent. Incapacitated agents always float to the top;
+// otherwise rank by low health / high hunger.
+function agentSeverityScore(a) {
+  if (a.incapacitated) return -1000;
+  const health = Number(a.health);
+  const hunger = Number(a.hunger);
+  const healthPenalty = Number.isFinite(health) ? (100 - health) : 0;
+  const hungerPenalty = Number.isFinite(hunger) ? hunger : 0;
+  return -(healthPenalty + hungerPenalty);
+}
+
+function isAgentCritical(a) {
+  if (!SURVIVAL_ENABLED) return false;
+  if (a.incapacitated) return true;
+  const health = Number(a.health);
+  const hunger = Number(a.hunger);
+  return (Number.isFinite(health) && health < 30) || (Number.isFinite(hunger) && hunger > 85);
 }
 
 function renderDeceasedAgentRow(a) {
@@ -1645,16 +1837,152 @@ function renderDeceasedAgentRow(a) {
     `<span class="agent-dead-detail">dead · ${burial}</span></span></li>`;
 }
 
+// Renders the inventory + activity-history detail panel for the currently
+// selected agent (or clears it when nothing is selected). Kept separate from
+// renderAgentPanel's own change-detection so selecting an agent (or new
+// history entries) always refreshes it, even when the roster itself hasn't
+// changed and renderAgentPanel's `lastAgentPanelKey` early-return fires.
+function renderAgentDetail() {
+  if (selectedAgentId == null) {
+    if (lastAgentDetailKey !== "") {
+      agentDetailEl.classList.remove("open");
+      agentDetailEl.innerHTML = "";
+      lastAgentDetailKey = "";
+    }
+    return;
+  }
+  const agent = getLivingAgents().find((a) => a.id === selectedAgentId);
+  if (!agent) {
+    if (lastAgentDetailKey !== "") {
+      agentDetailEl.classList.remove("open");
+      agentDetailEl.innerHTML = "";
+      lastAgentDetailKey = "";
+    }
+    return;
+  }
+  const history = agentHistory.get(agent.id) || [];
+  const detailKey = JSON.stringify({
+    id: agent.id, resources: agent.resources || {},
+    history: history.map((h) => h.label),
+    relationships: agent.relationships || {},
+    lastReasoning: agent.lastReasoning, isThinking: agent.isThinking,
+    following: followAgentId === agent.id,
+  });
+  if (detailKey === lastAgentDetailKey) return;
+  lastAgentDetailKey = detailKey;
+
+  const resources = agent.resources || {};
+  const breakdown = {};
+  for (const key of Object.keys(resources)) {
+    if (resources[key] > 0) breakdown[key] = resources[key];
+  }
+
+  const historyHtml = history.length
+    ? history.slice().reverse().map((h) => `<li>${escapeHtml(h.label)}</li>`).join("")
+    : `<li class="civ-label">No recent activity yet</li>`;
+
+  const relationships = agent.relationships || {};
+  const tieNames = Object.keys(relationships);
+  const relationshipsHtml = tieNames.length
+    ? tieNames.map((name) => {
+        const tie = relationships[name];
+        const cls = tie === "ally" ? "ally" : tie === "rival" ? "rival" : "";
+        return `<span class="agent-tie-chip ${cls}">${escapeHtml(name)} (${escapeHtml(tie)})</span>`;
+      }).join("")
+    : `<span class="civ-label">no notable ties</span>`;
+
+  const reasoningHtml = agent.isThinking
+    ? `<span class="agent-reasoning">thinking…</span>`
+    : agent.lastReasoning
+      ? `<span class="agent-reasoning">${escapeHtml(agent.lastReasoning)}</span>`
+      : `<span class="civ-label">no reasoning recorded</span>`;
+
+  const following = followAgentId === agent.id;
+
+  agentDetailEl.classList.add("open");
+  agentDetailEl.innerHTML =
+    `<h3>${escapeHtml(agent.name)}` +
+    `<button type="button" id="agentFollowBtn" class="${following ? "active" : ""}">${following ? "Following" : "Follow"}</button>` +
+    `</h3>` +
+    `<div class="agent-detail-section">` +
+    `<span class="agent-detail-label">Inventory</span>` +
+    renderResourceChips(breakdown) +
+    `</div>` +
+    `<div class="agent-detail-section">` +
+    `<span class="agent-detail-label">Relationships</span>` +
+    relationshipsHtml +
+    `</div>` +
+    `<div class="agent-detail-section">` +
+    `<span class="agent-detail-label">Last reasoning</span>` +
+    reasoningHtml +
+    `</div>` +
+    `<div class="agent-detail-section">` +
+    `<span class="agent-detail-label">Recent activity</span>` +
+    `<ul class="agent-history">${historyHtml}</ul>` +
+    `</div>`;
+
+  const followBtn = document.getElementById("agentFollowBtn");
+  if (followBtn) {
+    followBtn.addEventListener("click", () => {
+      followAgentId = followAgentId === agent.id ? null : agent.id;
+      lastAgentDetailKey = ""; // force re-render to reflect pressed state
+      renderAgentDetail();
+    });
+  }
+}
+
+// C4 roll-up header: counts by role, thinking, crisis, and avg hunger across
+// living agents. Gated by its own key so it only touches the DOM on change.
+let lastRollupKey = "";
+function renderAgentRollup(living) {
+  if (!living.length) {
+    if (lastRollupKey !== "") {
+      agentRollupEl.innerHTML = "";
+      lastRollupKey = "";
+    }
+    return;
+  }
+  const byRole = {};
+  let thinking = 0;
+  let crisis = 0;
+  let hungerTotal = 0;
+  let hungerCount = 0;
+  for (const a of living) {
+    byRole[a.role] = (byRole[a.role] || 0) + 1;
+    if (a.isThinking) thinking++;
+    if (isAgentCritical(a)) crisis++;
+    if (Number.isFinite(Number(a.hunger))) {
+      hungerTotal += Number(a.hunger);
+      hungerCount++;
+    }
+  }
+  const avgHunger = hungerCount ? Math.round(hungerTotal / hungerCount) : null;
+  const rollupKey = JSON.stringify({ byRole, thinking, crisis, avgHunger, n: living.length });
+  if (rollupKey === lastRollupKey) return;
+  lastRollupKey = rollupKey;
+
+  const roleChips = Object.keys(byRole).sort().map((role) =>
+    `<span class="rollup-chip">${escapeHtml(role)} ${byRole[role]}</span>`
+  ).join("");
+  const thinkingChip = `<span class="rollup-chip">thinking ${thinking}/${living.length}</span>`;
+  const crisisChip = `<span class="rollup-chip${crisis ? " rollup-crisis" : ""}">crisis ${crisis}</span>`;
+  const hungerChip = avgHunger != null ? `<span class="rollup-chip">avg hunger ${avgHunger}</span>` : "";
+  agentRollupEl.innerHTML = roleChips + thinkingChip + crisisChip + hungerChip;
+}
+
 function renderAgentPanel() {
   if (selectedAgentId != null && !getLivingAgents().some((a) => a.id === selectedAgentId)) {
     selectedAgentId = null;
   }
+  recordAgentHistory();
+  renderAgentDetail();
   const living = getLivingAgents();
   const deceased = getDeceasedAgents();
   const panelKey = JSON.stringify({
-    living: living.map((a) => [a.id, a.name, a.role, a.age, a.incapacitated, a.health, a.hunger, a.lastAction, a.isThinking, a.beliefs || []]),
+    living: living.map((a) => [a.id, a.name, a.role, a.age, a.incapacitated, a.health, a.hunger, a.lastAction, a.isThinking, a.lastReasoning]),
     deceased: deceased.map((a) => [a.id, a.name, a.role, a.buried, a.age]),
   });
+  renderAgentRollup(living);
   if (panelKey === lastAgentPanelKey) return;
   lastAgentPanelKey = panelKey;
 
@@ -1669,19 +1997,19 @@ function renderAgentPanel() {
   if (living.length === 0) {
     agentListEl.innerHTML = '<li><span class="civ-label">No living villagers</span></li>';
   } else {
-    const universal = universalBeliefs(living);
-    agentListEl.innerHTML = living.map((a) => {
+    // Float agents in crisis to the top; stable sort via original-index tiebreak.
+    const sortedLiving = living
+      .map((a, index) => ({ a, index, score: agentSeverityScore(a) }))
+      .sort((x, y) => (x.score - y.score) || (x.index - y.index))
+      .map((entry) => entry.a);
+    agentListEl.innerHTML = sortedLiving.map((a) => {
       const selected = selectedAgentId === a.id;
-      // Human-readable beliefs; hide memes everyone shares (reduces noise once saturated).
-      const beliefs = (a.beliefs || []).filter((b) => !universal.has(b)).slice(0, 2);
-      const beliefHtml = beliefs.length
-        ? `<span class="agent-beliefs">${beliefs.map((b) => escapeHtml(String(b))).join(" · ")}</span>`
-        : "";
-      return `<li class="agent-row${selected ? " agent-selected" : ""}" data-agent-id="${a.id}">` +
+      const critical = isAgentCritical(a);
+      return `<li class="agent-row${selected ? " agent-selected" : ""}${critical ? " agent-critical" : ""}" data-agent-id="${a.id}">` +
         `<span class="dot" style="background:${a.color}"></span>` +
         `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}${escapeHtml(agentAgeLabel(a))}</span>` +
         `<span class="agent-status">${escapeHtml(humanizeAction(a))}${agentVitalsHtml(a)}</span>` +
-        beliefHtml +
+        agentThoughtHtml(a) +
         `</span></li>`;
     }).join("");
   }
@@ -1709,8 +2037,18 @@ agentListEl.addEventListener("click", (event) => {
   const li = event.target.closest("li.agent-row");
   if (!li) return;
   const id = Number(li.dataset.agentId);
-  selectedAgentId = selectedAgentId === id ? null : id;
+  const wasSelected = selectedAgentId === id;
+  selectedAgentId = wasSelected ? null : id;
+  if (wasSelected) {
+    // Deselecting releases any active follow-cam lock on this agent.
+    if (followAgentId === id) followAgentId = null;
+  } else {
+    // First-time selection: one-time jump-to-center on the agent.
+    const agent = getLivingAgents().find((a) => a.id === id);
+    if (agent) centerCameraOnAgent(agent);
+  }
   syncAgentListSelection();
+  renderAgentDetail();
 });
 canvasWrapEl.addEventListener("mousemove", (event) => {
   const { x, y } = clientToWorld(event.clientX, event.clientY);
@@ -2569,6 +2907,18 @@ function tick() {
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
   drawLightGlows(world.calendar);
+
+  // C5 follow-cam: re-center every frame on the followed agent while active;
+  // release the lock once they're deselected or no longer living.
+  if (followAgentId != null) {
+    if (selectedAgentId !== followAgentId) {
+      followAgentId = null;
+    } else {
+      const followed = getLivingAgents().find((a) => a.id === followAgentId);
+      if (!followed) followAgentId = null;
+      else centerCameraOnAgent(followed);
+    }
+  }
 
   renderSidebar();
   drawCouncilAssemblyTable((world.civilization || {}).dailyCouncil, renderFrame);
