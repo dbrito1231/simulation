@@ -156,6 +156,24 @@ The existing Council sidebar/history continues to render bounded `councilLog`
 records. `ACTION_LABELS` adds display gerunds for `council_speak`,
 `council_propose`, and `council_vote`.
 
+The history transcript modal (`openCouncilTranscript`, index.html) reads
+`record.transcript` from a past `councilLog` entry, which may have been
+written by either council system — the legacy invention council
+(`proposer`/`elder`/`blueprint_name`/... fields, `type` in `convene`,
+`proposal`, `verdict`, `dissolve`) or the Daily Council
+(`who`/`text`/`feeling` fields, plus `phase`, `attendance`, `speak`,
+`verdict_speech`, `vote`, `succession_ballot`, `succession_restart`, and
+more). `isDailyCouncilRecord()` classifies a record by checking whether any
+transcript entry carries a `who` field or a `type` outside the legacy
+4-type set. Legacy records render through the existing field-rich
+`renderTranscriptEntry()` (proposer/blueprint/needs/rejections/reasoning),
+filtered to the 4 legacy types. Daily Council records render their entire
+transcript, in order, through `renderDailyCouncilTranscriptEntry()` (the
+same `who`/`text`/`feeling` fallback logic as the live Assembly window's
+`dailyCouncilTranscriptEntry()`, emitting `.ct-*` markup to match the modal).
+The modal's intro note and the "Blueprint pitches & verdict (LLM)" section
+heading are chosen per the same classification.
+
 ## sprites.js: pure stateless drawing
 
 - Every function takes `ctx` plus plain data and paints; the only module

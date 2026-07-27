@@ -2504,6 +2504,27 @@ function councilTranscriptEntries(record) {
   return (record.transcript || []).filter((e) => COUNCIL_TRANSCRIPT_TYPES.has(e.type));
 }
 
+// Two council systems both persist to record.transcript with different
+// per-entry schemas: the legacy invention council (proposer/elder/blueprint
+// fields, type in the 4-entry COUNCIL_TRANSCRIPT_TYPES set) and the Daily
+// Council (who/text/feeling fields, plus phase/speak/vote/adjourn/etc types).
+// Detect which one a record holds so the modal can render each correctly.
+function isDailyCouncilRecord(record) {
+  const transcript = (record && record.transcript) || [];
+  return transcript.some((e) => e.who !== undefined || !COUNCIL_TRANSCRIPT_TYPES.has(e.type));
+}
+
+// Daily Council schema-tolerant renderer (mirrors dailyCouncilTranscriptEntry
+// used by the live Assembly modal), but emits .ct-* markup to match the rest
+// of the history transcript modal.
+function renderDailyCouncilTranscriptEntry(entry) {
+  const time = councilTimePrefix(entry, councilModalRecord);
+  const who = entry.who || entry.proposer || entry.elder || entry.candidate || "Council";
+  const text = entry.text || entry.message || entry.title || entry.topic || entry.outcome || entry.type || "event";
+  const feeling = entry.feeling ? ` <span class="ct-reasoning">feeling: ${escapeHtml(entry.feeling)}</span>` : "";
+  return `<div class="ct-entry">${time}<span class="ct-who">${escapeHtml(who)}</span>: ${escapeHtml(text)}${feeling}</div>`;
+}
+
 function councilEntryTimeLabel(entry, record) {
   const frame = entry.frame != null ? entry.frame : entry.frame_tick;
   if (entry.ts) {
@@ -2588,14 +2609,18 @@ async function openCouncilTranscript(idx) {
   councilTranscriptTitleEl.textContent =
     `Council — ${formatCouncilTime(record.ts, record.frame)}: ${record.outcome || "debate"}`;
   const proposals = record.proposals || [];
-  const sequence = councilTranscriptEntries(record);
-  let html = `<p class="ct-note">Invention councils are blueprint pitches, not live debate chat. ` +
-    `Villagers each propose a structure design; the elder compares them and picks a winner.</p>`;
+  const dailyCouncil = isDailyCouncilRecord(record);
+  const sequence = dailyCouncil ? (record.transcript || []) : councilTranscriptEntries(record);
+  let html = dailyCouncil
+    ? `<p class="ct-note">Daily Council session — a live village gathering where attendees speak, debate ` +
+      `proposals, vote, and the elder delivers a verdict.</p>`
+    : `<p class="ct-note">Invention councils are blueprint pitches, not live debate chat. ` +
+      `Villagers each propose a structure design; the elder compares them and picks a winner.</p>`;
   if (!sequence.length && (!record.transcript || !record.transcript.length)) {
     html += `<p class="ct-note">Full timeline available for councils held after the transcript update.</p>`;
   } else if (sequence.length) {
     html += `<div class="ct-section"><h4>Council timeline</h4>` +
-      sequence.map(renderTranscriptEntry).join("") + `</div>`;
+      sequence.map(dailyCouncil ? renderDailyCouncilTranscriptEntry : renderTranscriptEntry).join("") + `</div>`;
   } else if (record.transcript && record.transcript.length) {
     html += `<p class="ct-note">Older record — only structured events are shown (random village chat omitted).</p>`;
   }
@@ -2603,7 +2628,8 @@ async function openCouncilTranscript(idx) {
     html += `<div class="ct-section"><h4>Proposals compared</h4>` +
       proposals.map((p) => councilCardHtml(p, record.verdict)).join("") + `</div>`;
   }
-  councilTranscriptBodyEl.innerHTML = html + `<div class="ct-section" id="councilLlmSection"><h4>Blueprint pitches &amp; verdict (LLM)</h4><span class="civ-label">Loading…</span></div>`;
+  const llmHeading = dailyCouncil ? "Council speeches &amp; verdict (LLM)" : "Blueprint pitches &amp; verdict (LLM)";
+  councilTranscriptBodyEl.innerHTML = html + `<div class="ct-section" id="councilLlmSection"><h4>${llmHeading}</h4><span class="civ-label">Loading…</span></div>`;
   councilTranscriptModal.classList.add("open");
 
   const start = record.start_frame != null ? record.start_frame : record.frame;
@@ -2614,12 +2640,12 @@ async function openCouncilTranscript(idx) {
     const resp = await fetch(`/council-llm-log?start_frame=${start}&end_frame=${end}&agents=${encodeURIComponent(agents)}`);
     const data = await resp.json();
     const entries = data.entries || [];
-    llmSection.innerHTML = `<h4>Blueprint pitches &amp; verdict (LLM)</h4>` +
+    llmSection.innerHTML = `<h4>${llmHeading}</h4>` +
       (entries.length
         ? entries.map(renderLlmTranscriptEntry).join("")
         : `<span class="civ-label">No blueprint or verdict LLM turns logged for this council window.</span>`);
   } catch (_err) {
-    llmSection.innerHTML = `<h4>Blueprint pitches &amp; verdict (LLM)</h4><span class="civ-label">Could not load LM records.</span>`;
+    llmSection.innerHTML = `<h4>${llmHeading}</h4><span class="civ-label">Could not load LM records.</span>`;
   }
 }
 
