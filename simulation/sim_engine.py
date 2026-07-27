@@ -569,6 +569,13 @@ SAGE_REVIEW_TIMEOUT_FRAMES = STALL_THRESHOLD * 20
 MAX_PENDING_RULES = 4
 MAX_ACTIVE_RULES = 8
 MAX_EMERGENT_ROLES = 8
+# Unlike MAX_ACTIVE_RULES (live provisions), the constitution is an
+# append-only historical ledger with no cap of its own. Unique per-enactment
+# ids for auto-proposed priority rules (see _maybe_advance_rules) mean a long
+# soak's enact/repeal cycles would otherwise grow it unboundedly. Trim the
+# oldest INACTIVE (non-"active") rows once the ledger exceeds this size;
+# every currently-active provision is always preserved regardless of count.
+MAX_CONSTITUTION_HISTORY = 200
 
 ROLE_SWITCH_TICK_FRAMES = 120
 ROLE_SWITCH_COOLDOWN = 600
@@ -1852,6 +1859,27 @@ class SimEngine:
             "lastBlueprintActivityFrame": 0,
             "lastCraftActivityFrame": 0,
             "lastRuleActivityFrame": 0,
+            # Distinct from lastRuleActivityFrame (which only advances on a
+            # SUCCESSFUL enact/repeal and also backstops blueprint-stall
+            # detection): this advances on every propose_rule attempt,
+            # success or failure, so a rejected auto-proposal still respects
+            # the full RULE_PROPOSE_COOLDOWN before retrying instead of
+            # re-firing every RULES_TICK_FRAMES window.
+            "lastRuleAttemptFrame": 0,
+            # Monotonic counter (not frameTick) for auto-proposed priority-rule
+            # instance ids -- see _maybe_advance_rules. Using a counter instead
+            # of the raw frame number keeps the base36 suffix compact
+            # indefinitely (a raw growing frameTick would eventually push
+            # "priority_<resource>_<frame>" past SLUG_RE's 25-char cap on a
+            # long-running/24-7 server, silently recreating the exact
+            # permanently-blocked-id bug this field exists to fix).
+            "priorityRuleSeq": 0,
+            # Same rationale as priorityRuleSeq, but for auto-proposed
+            # resource_tax instance ids (see _maybe_advance_rules' tax
+            # branch) -- kept as a separate counter/field for restore
+            # compatibility with existing saves that only know about
+            # priorityRuleSeq.
+            "taxRuleSeq": 0,
             "lastRoleSwitchFrame": 0,
             # Phase 1 Sid-parity: frame when a role need first appeared; used
             # for role_rebalance_latency. Cleared when the need resolves or a
@@ -5806,6 +5834,19 @@ class SimEngine:
                 provision.setdefault("description", rule.get("description") or "")
                 provision.setdefault("enactedFrame", rule.get("enactedFrame", 0))
                 provision["status"] = "active"
+        if len(cleaned) > MAX_CONSTITUTION_HISTORY:
+            # Trim oldest inactive rows first (chronological order is
+            # preserved since `cleaned` is already oldest-first); every
+            # active provision is kept regardless of how far back it sits,
+            # so a currently-enacted law is never silently dropped.
+            overflow = len(cleaned) - MAX_CONSTITUTION_HISTORY
+            trimmed = []
+            for provision in cleaned:
+                if overflow > 0 and provision.get("status") != "active":
+                    overflow -= 1
+                    continue
+                trimmed.append(provision)
+            cleaned = trimmed
         c["constitution"] = cleaned
         return cleaned
 
@@ -6046,6 +6087,15 @@ class SimEngine:
             return f"{agent['name']} cannot propose rules"
         rule = decision.get("rule")
         if not self._validate_rule(rule):
+            # Advance the attempt cooldown even on failure so a rejected
+            # proposal (colliding id, malformed rule, etc.) waits a full
+            # RULE_PROPOSE_COOLDOWN before the auto-proposer retries, instead
+            # of lastRuleActivityFrame staying frozen and the deterministic
+            # backstop re-firing every RULES_TICK_FRAMES window. Deliberately
+            # NOT lastRuleActivityFrame itself -- that field also backstops
+            # blueprint-stall detection and must only reflect real governance
+            # activity.
+            c["lastRuleAttemptFrame"] = self.frameTick
             return f"{agent['name']} drafted an invalid rule"
         kind = rule.get("kind") or "custom"
         if kind == "resource_tax":
@@ -9948,6 +9998,25 @@ class SimEngine:
             self._found_district(kind, tmpl, plot)
             return  # one founding per gate check keeps this easy to reason about
 
+    def _next_rule_seq_token(self, counter_key):
+        """Compact monotonic lowercase base36 token for auto-proposed
+        rule instance ids, keyed by a persisted civ-dict counter field
+        (e.g. "priorityRuleSeq", "taxRuleSeq") -- see those fields' civ-init
+        comments for why this is a counter and not the raw frameTick."""
+        c = self.civilization
+        n = c.get(counter_key, 0) + 1
+        c[counter_key] = n
+        digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        out = []
+        while n:
+            n, r = divmod(n, 36)
+            out.append(digits[r])
+        return "".join(reversed(out)) or "0"
+
+    def _next_priority_rule_seq_token(self):
+        """Back-compat wrapper for the priority-rule instance-id counter."""
+        return self._next_rule_seq_token("priorityRuleSeq")
+
     # --- rules backstop ---
     def _maybe_advance_rules(self):
         if not RULES_ENABLED:
@@ -9997,7 +10066,8 @@ class SimEngine:
                                             "vote": vote,
                                             "reasoning": reason})
             return
-        if self.frameTick - c["lastRuleActivityFrame"] < RULE_PROPOSE_COOLDOWN:
+        last_rule_activity = max(c["lastRuleActivityFrame"], c.get("lastRuleAttemptFrame", 0))
+        if self.frameTick - last_rule_activity < RULE_PROPOSE_COOLDOWN:
             return
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
         if not elder:
@@ -10007,17 +10077,29 @@ class SimEngine:
         if self._active_resource_tax() > 0 and not self._active_priority_resource():
             unmet = self._first_unmet_resource_anywhere() or "wood"
             if unmet in c["resourceRegistry"]:
-                self.apply_decision(elder, {
-                    "action": "propose_rule",
-                    "rule": {
-                        "id": f"priority_{unmet}",
-                        "name": f"{unmet.title()} Priority",
-                        "kind": "priority",
-                        "value": unmet,
-                        "description": f"Contributors prioritize delivering {unmet} to active builds.",
-                    },
-                    "reasoning": f"Proposing a priority rule so the village focuses on {unmet}.",
-                })
+                # Rule ids are globally non-reusable (see _ensure_constitution),
+                # so a repealed "priority_<resource>" id can never validate
+                # again -- give every enactment attempt its own instance id
+                # (priority lookup keys off kind=="priority" + value, not id,
+                # so this is safe for _active_priority_resource consumers).
+                rule = {
+                    "id": f"priority_{unmet}_{self._next_priority_rule_seq_token()}",
+                    "name": f"{unmet.title()} Priority",
+                    "kind": "priority",
+                    "value": unmet,
+                    "description": f"Contributors prioritize delivering {unmet} to active builds.",
+                }
+                if self._validate_rule(rule):
+                    self.apply_decision(elder, {
+                        "action": "propose_rule",
+                        "rule": rule,
+                        "reasoning": f"Proposing a priority rule so the village focuses on {unmet}.",
+                    })
+                    return
+                # Defensive: known-invalid (e.g. pending/active rule queue
+                # full) -- don't knowingly emit an invalid action; still mark
+                # this as an attempt so the cooldown advances normally.
+                c["lastRuleAttemptFrame"] = self.frameTick
                 return
         # If several rules are stacked, propose repealing the oldest non-tax
         # rule so amendment is exercised (Sid's amendable-rules benchmark).
@@ -10038,11 +10120,28 @@ class SimEngine:
             return
         if self._active_resource_tax() > 0:
             return
-        self.apply_decision(elder, {
-            "action": "propose_rule",
-            "rule": {"id": "resource_tax", "name": "Resource Tax", "kind": "resource_tax",
-                     "value": 1, "description": "Contributors add 1 of the same resource to a shared stockpile."},
-            "reasoning": "Proposing a small resource tax to build a shared village stockpile."})
+        # Rule ids are globally non-reusable (see _ensure_constitution), so a
+        # repealed "resource_tax" id (an LLM-driven repeal_rule can target it
+        # even though the deterministic repeal branch above excludes it via
+        # non_tax) could never validate again -- give every enactment attempt
+        # its own instance id, exactly like the priority-rule fix above.
+        # _active_resource_tax() keys off kind=="resource_tax", not id, so
+        # this is safe for that (and every other) consumer.
+        tax_rule = {
+            "id": f"resource_tax_{self._next_rule_seq_token('taxRuleSeq')}",
+            "name": "Resource Tax", "kind": "resource_tax",
+            "value": 1, "description": "Contributors add 1 of the same resource to a shared stockpile.",
+        }
+        if self._validate_rule(tax_rule):
+            self.apply_decision(elder, {
+                "action": "propose_rule",
+                "rule": tax_rule,
+                "reasoning": "Proposing a small resource tax to build a shared village stockpile."})
+            return
+        # Defensive: known-invalid (e.g. pending/active rule queue full) --
+        # don't knowingly emit an invalid action; still mark this as an
+        # attempt so the cooldown advances normally.
+        c["lastRuleAttemptFrame"] = self.frameTick
 
     # --- benchmarks ---
     def _role_entropy(self):
@@ -12631,6 +12730,9 @@ class SimEngine:
                 civ.setdefault("lastReorgCheckFrame", 0)
                 civ.setdefault("lastReorgNoRoomFrame", 0)
                 civ.setdefault("lastRoleSwitchFrame", 0)
+                civ.setdefault("lastRuleAttemptFrame", 0)
+                civ.setdefault("priorityRuleSeq", 0)
+                civ.setdefault("taxRuleSeq", 0)
                 civ.setdefault("roleNeedSinceFrame", None)
                 civ.setdefault("lastRoleRebalanceLatency", None)
                 # Phase 2 role registry migration: older saves only know the

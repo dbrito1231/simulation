@@ -270,6 +270,66 @@ enactment under the engine lock: if a pending amendment loses its target, or a
 pending ordinary rule loses its budget slot, its passed ballot is discarded as
 rejected without mutating effects or the constitution.
 
+**Rule ids are globally non-reusable** (`_ensure_constitution`,
+sim_engine.py): `_validate_rule` rejects any id already present in
+`civilization["constitution"]` regardless of status, so a repealed id can
+never be re-enacted under the same id. The deterministic priority-rule
+auto-proposer in `_maybe_advance_rules` therefore mints a **unique
+per-enactment instance id** — `priority_<resource>_<token>`, where `<token>`
+is a compact lowercase base36 counter (`civilization["priorityRuleSeq"]`,
+via the shared `_next_rule_seq_token(counter_key)` helper, kept as the
+back-compat wrapper `_next_priority_rule_seq_token()`) rather than the raw
+frame number, so the id stays short indefinitely on a long-running/24-7
+server instead of eventually exceeding `SLUG_RE`'s 25-character cap.
+`_active_priority_resource` matches enacted priority rules by
+`kind == "priority"` and `value` (the resource), never by id, so unique
+instance ids do not affect priority-rule lookup or mutual exclusion. The
+branch also pre-validates the candidate rule (`_validate_rule`) before
+calling `propose_rule`, so a known-invalid candidate (e.g. the pending/active
+rule budget is already full) is skipped rather than knowingly emitted as an
+invalid action.
+
+The same defect and fix apply to the auto-proposed **resource tax**: an
+LLM-driven `repeal_rule` can target the tax even though the deterministic
+repeal backstop deliberately excludes it (see "Anti-oscillation guard"
+below), so a repealed `"resource_tax"` id could otherwise never be
+re-enacted. The tax auto-proposer therefore mints
+`resource_tax_<token>` using the same shared counter helper with its own
+persisted field, `civilization["taxRuleSeq"]`, and pre-validates the
+candidate before proposing, mirroring the priority-rule branch exactly.
+`_active_resource_tax` matches by `kind == "resource_tax"`, never by id, so
+this is safe for every consumer (belief-affinity sets, `RULE_KINDS`, the
+vote-bias heuristic, etc. all key off `kind`, not the literal id).
+
+**Constitution history cap.** Unlike the live `MAX_ACTIVE_RULES` (8) budget,
+`civilization["constitution"]` is an append-only historical ledger with no
+cap of its own; unique priority-rule instance ids mean long soaks of
+enact/repeal cycles would otherwise grow it unboundedly. `_ensure_constitution`
+trims the ledger to `MAX_CONSTITUTION_HISTORY = 200` rows once exceeded,
+dropping the oldest **non-`"active"`** rows first (chronological order is
+preserved); every currently-`"active"` provision is always kept regardless
+of age or count, so a live law can never be silently dropped by the trim.
+
+**Failed-proposal cooldown.** `_propose_rule` returns early on a validation
+failure (invalid rule shape, colliding id, budget full, etc.) *before* the
+success-only `c["lastRuleActivityFrame"] = self.frameTick` line, so that
+field alone cannot be used to gate retries after a failure — it also
+backstops blueprint-stall detection elsewhere and must only reflect real
+governance activity. A separate `civilization["lastRuleAttemptFrame"]`
+advances on every `propose_rule` attempt, success or failure, and the
+`_maybe_advance_rules` cooldown guard checks
+`max(lastRuleActivityFrame, lastRuleAttemptFrame)` against
+`RULE_PROPOSE_COOLDOWN`. This keeps a rejected auto-proposal on the full
+~50s cooldown instead of retrying every `RULES_TICK_FRAMES` (~5s) window —
+a 10x amplification that previously spammed `"<elder> drafted an invalid
+rule"` into the activity log whenever the priority-rule id was permanently
+blocked (the same 10x amplification and permanently-blocked-id risk applied
+to the resource-tax auto-proposer once its id was uniquified, since it shares
+this same cooldown guard). All new fields — `lastRuleAttemptFrame`,
+`priorityRuleSeq`, `taxRuleSeq` — are restore-safe (`setdefault`-backfilled to
+`0`/`None` on load; a pre-fix save simply resumes as if no attempt/enactment
+had yet happened).
+
 **`repeal_rule`** action → `_propose_repeal` (sim_engine.py:5008): opens a
 new pending ballot (kind `"repeal"`, id `repeal_<target>`) reusing the same
 vote/quorum scaffold; `_enact_repeal` removes the target from
