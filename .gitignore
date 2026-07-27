@@ -29,3 +29,13 @@ simulation/memory_store.json.tmp
 
 # Manual state backups
 archive/
+
+# Local agent/tool state (not part of the repo)
+.codex/
+
+# Smoke/soak script output
+scripts/out/
+
+# Local scheduled-task helper scripts (machine-specific paths)
+scripts/sim_schedule_start.ps1
+scripts/sim_schedule_stop.ps1
