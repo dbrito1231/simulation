@@ -41,9 +41,19 @@ world state beyond a cached palette/season key.
   only when a district is founded server-side; rebuilds the terrain cache
   only when the served district-id list actually changed (index.html:1064-1086).
 - The render loop is **decoupled from polling** via `requestAnimationFrame`:
-  `tick()` (index.html:2244-2278) redraws every animation frame from
+  `tick()` (index.html:2899-2914) redraws every animation frame from
   whatever `world` currently holds, keeping ~60fps even though network polls
-  land at ~10 Hz (index.html:2239-2241).
+  land at ~10 Hz.
+- **Render-error resilience**: `tick()` is a thin wrapper that calls the
+  actual per-frame render work (`tickBody()`) inside a `try/catch`, with the
+  `requestAnimationFrame(tick)` reschedule moved into a `finally` so it
+  always runs. If `tickBody()` throws (e.g. a future rendering bug touching
+  an unexpected field shape), the error is logged via `console.error` and
+  that single frame is skipped, but the rAF chain keeps going — before this,
+  any uncaught exception inside the rAF callback silently and permanently
+  killed the render loop (no more frames ever painted) while `pollState()`'s
+  independent `setInterval` kept fetching fresh `/state` data in the
+  background that was never rendered.
 - Controls (Pause/Resume/Reset) POST to `/control/pause|resume|reset` via
   `postControl()` (index.html:2202-2224) with optimistic local flips
   reconciled by the next poll; keyboard shortcut `R` also resets

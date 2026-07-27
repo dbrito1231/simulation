@@ -2897,6 +2897,23 @@ document.addEventListener("keydown", (e) => {
 let renderFrame = 0;
 
 function tick() {
+  // Defense-in-depth: an uncaught exception inside a requestAnimationFrame
+  // callback silently kills the rAF chain forever (no more frames ever
+  // render, with no visible console surface unless devtools happens to be
+  // open at that exact moment) while pollState()'s independent setInterval
+  // keeps fetching /state in the background. Catching here means a future
+  // rendering bug degrades to "one skipped frame + a logged error" instead
+  // of "the viewer is frozen until the page is manually reloaded."
+  try {
+    tickBody();
+  } catch (err) {
+    console.error("tick() render error (frame skipped, loop continues):", err);
+  } finally {
+    requestAnimationFrame(tick);
+  }
+}
+
+function tickBody() {
   renderFrame++;
   ctx.clearRect(0, 0, WORLD_W, WORLD_H);
   drawWorld(ctx, renderFrame);
@@ -2974,7 +2991,6 @@ function tick() {
   renderSidebar();
   drawCouncilAssemblyTable((world.civilization || {}).dailyCouncil, renderFrame);
   renderMinimap();
-  requestAnimationFrame(tick);
 }
 
 // Kick off: render immediately (mock or last frame), poll on an interval.
