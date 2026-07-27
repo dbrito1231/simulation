@@ -58,6 +58,20 @@ folder for its lifetime.
   (`state.db` is the authoritative memory store across restarts, so an old
   session's `memory.json` is pure disk bloat once its directory ages out of
   the retention window).
+- **`/council-llm-log` searches across retained sessions, not just the live
+  one**: `frame_tick` is a global counter persisted in `state.db` that never
+  resets on restart, so a council meeting's `[start_frame, end_frame]` window
+  can fall entirely inside an *older* session's `llm.jsonl` if the server was
+  restarted since that meeting happened. The route lists every subdirectory
+  of `logs/` matching `SESSION_DIR_RE` (same regex `_prune_old_sessions`
+  uses, so it never looks past the retention window), sorts them
+  lexicographically (== chronologically), applies the same per-line frame/
+  agent/action filter to each directory's `llm.jsonl` via a shared helper
+  (`_council_llm_entries_from_file`), and merges + re-sorts all matches by
+  `frame_tick`. This is a small, bounded scan (at most `LOG_RETENTION_SESSIONS`
+  files) — no attempt is made to guess which single session a frame range
+  belongs to via mtime/stat, since simplicity/correctness matters more than
+  the marginal cost of reading a few extra small JSONL files.
 - **Four JSONL streams**, each created empty on startup (server.py:255-264):
   | File | Written by | Record `type` |
   |---|---|---|

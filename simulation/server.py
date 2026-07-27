@@ -3915,22 +3915,12 @@ else:
     print("[server] cold start (no valid state.db)")
 
 
-@app.route("/council-llm-log")
-def council_llm_log():
-    """Return slim decision records (llm.jsonl) for a council frame window.
-
-    Only blueprint-pitch and verdict turns are included — routine gather/talk
-    decisions from the same agents during the council window are omitted."""
-    try:
-        start_frame = int(request.args.get("start_frame", 0))
-        end_frame = int(request.args.get("end_frame", 0))
-    except (TypeError, ValueError):
-        return jsonify({"entries": [], "error": "invalid frame range"}), 400
-    agents_raw = request.args.get("agents") or ""
-    agent_set = {a.strip() for a in agents_raw.split(",") if a.strip()}
-    path = session_logger.llm_path
+def _council_llm_entries_from_file(path, start_frame, end_frame, agent_set):
+    """Return slim decision records from one llm.jsonl matching a council
+    frame window. Shared by /council-llm-log across every retained session
+    directory -- see that route's docstring for the filtering rules."""
     if not os.path.isfile(path):
-        return jsonify({"entries": []})
+        return []
     entries = []
     try:
         with open(path, encoding="utf-8") as fh:
@@ -3982,7 +3972,43 @@ def council_llm_log():
                     "error": rec.get("error"),
                 })
     except OSError:
-        return jsonify({"entries": []})
+        return []
+    return entries
+
+
+@app.route("/council-llm-log")
+def council_llm_log():
+    """Return slim decision records (llm.jsonl) for a council frame window.
+
+    Only blueprint-pitch and verdict turns are included — routine gather/talk
+    decisions from the same agents during the council window are omitted.
+
+    Searches every retained session directory under logs/ (not just the
+    live one), since a past council meeting's frame window may fall inside
+    an older server session's llm.jsonl (frame_tick is monotonic and never
+    resets across restarts, but each session only covers the frame range it
+    was alive for). Session dirs are pruned by SessionLogger._prune_old_sessions
+    to LOG_RETENTION_SESSIONS newest, so this scan is bounded and cheap."""
+    try:
+        start_frame = int(request.args.get("start_frame", 0))
+        end_frame = int(request.args.get("end_frame", 0))
+    except (TypeError, ValueError):
+        return jsonify({"entries": [], "error": "invalid frame range"}), 400
+    agents_raw = request.args.get("agents") or ""
+    agent_set = {a.strip() for a in agents_raw.split(",") if a.strip()}
+    logs_root = os.path.dirname(session_logger.dir)
+    try:
+        session_dirs = sorted(
+            name for name in os.listdir(logs_root)
+            if SESSION_DIR_RE.match(name)
+            and os.path.isdir(os.path.join(logs_root, name))
+        )  # ISO session-id names sort lexicographically == chronologically
+    except OSError:
+        session_dirs = []
+    entries = []
+    for name in session_dirs:
+        path = os.path.join(logs_root, name, "llm.jsonl")
+        entries.extend(_council_llm_entries_from_file(path, start_frame, end_frame, agent_set))
     entries.sort(key=lambda e: e.get("frame_tick") or 0)
     return jsonify({"entries": entries})
 
