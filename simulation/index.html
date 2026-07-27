@@ -691,14 +691,23 @@
      before it consumes its preferred 760px size.  Tall viewports still get
      the readable 640px+ target; short ones scale the canvas instead. */
   #councilAssemblyCanvas { width:min(100%, 760px, calc(100vh - 116px)); height:auto; aspect-ratio:1; min-width:0; image-rendering:pixelated; image-rendering:crisp-edges; }
-  #councilAssemblyInfo { min-height:0; padding:14px; overflow-y:auto; border-left:1px solid #3d3424; font-size:12px; line-height:1.45; }
-  .assembly-section { margin-bottom:16px; }
+  #councilAssemblyInfo {
+    min-height:0; padding:14px; overflow:hidden; border-left:1px solid #3d3424;
+    font-size:12px; line-height:1.45; display:flex; flex-direction:column;
+  }
+  .assembly-section { margin-bottom:16px; flex:0 0 auto; }
   .assembly-section h4 { margin:0 0 6px; color:#d6bc78; font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
   #councilAssemblyAgenda { margin:0; padding-left:18px; color:#c9c5bb; }
   #councilAssemblyAgenda li { margin-bottom:4px; }
-  #councilAssemblyTranscript { max-height:280px; overflow-y:auto; border:1px solid #302b29; border-radius:5px; background:#101015; }
+  /* Live discussion is the last section: it flex-grows to consume whatever
+     vertical space Agenda/Ballot/Verdict don't need, instead of being capped
+     to a fixed height, and owns the only scrollbar in the info column so
+     autoscroll-to-latest has one unambiguous scroll container to target. */
+  #councilAssemblyTranscriptSection { flex:1 1 auto; min-height:0; margin-bottom:0; display:flex; flex-direction:column; }
+  #councilAssemblyTranscript { flex:1 1 auto; min-height:0; overflow-y:auto; border:1px solid #302b29; border-radius:5px; background:#101015; }
   .assembly-entry { padding:7px 8px; border-bottom:1px solid #28252a; }
   .assembly-entry:last-child { border-bottom:0; }
+  .assembly-time { display:block; font-size:10px; color:#6e6e7a; margin-bottom:2px; font-variant-numeric:tabular-nums; }
   .assembly-who { color:#8ed2ed; font-weight:600; }
   .assembly-feeling { color:#d8a9d8; font-style:italic; }
   #councilAssemblyTally { display:grid; grid-template-columns:repeat(3, 1fr); gap:5px; }
@@ -857,7 +866,7 @@
         <section class="assembly-section"><h4>Agenda</h4><ul id="councilAssemblyAgenda"></ul></section>
         <section class="assembly-section" id="councilAssemblyBallotSection"><h4>Ballot</h4><div id="councilAssemblyTally"></div></section>
         <section class="assembly-section" id="councilAssemblyVerdictSection"><h4 id="councilAssemblyVerdictHeading">Elder ruling</h4><div id="councilAssemblyVerdict"></div></section>
-        <section class="assembly-section"><h4>Live discussion</h4><div id="councilAssemblyTranscript"></div></section>
+        <section class="assembly-section" id="councilAssemblyTranscriptSection"><h4>Live discussion</h4><div id="councilAssemblyTranscript"></div></section>
       </div>
     </div>
   </div>
@@ -2372,7 +2381,16 @@ function dailyCouncilTranscriptEntry(entry) {
   const who = entry.who || entry.proposer || entry.elder || "Council";
   const text = entry.text || entry.message || entry.title || entry.outcome || entry.type || "event";
   const feeling = entry.feeling ? ` <span class="assembly-feeling">feeling: ${escapeHtml(entry.feeling)}</span>` : "";
-  return `<div class="assembly-entry"><span class="assembly-who">${escapeHtml(who)}</span>: ${escapeHtml(text)}${feeling}</div>`;
+  const time = formatCouncilTime(entry.ts, entry.frame);
+  return `<div class="assembly-entry"><span class="assembly-time">${escapeHtml(time)}</span>` +
+    `<span class="assembly-who">${escapeHtml(who)}</span>: ${escapeHtml(text)}${feeling}</div>`;
+}
+
+// Autoscroll only sticks the view to the newest entry while the observer is
+// already at (or near) the bottom -- if they've scrolled up to read earlier
+// discussion, the ~10Hz /state poll must not yank them back down every tick.
+function isScrolledNearBottom(el, thresholdPx = 40) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= thresholdPx;
 }
 
 function renderDailyCouncil(council) {
@@ -2437,9 +2455,11 @@ function renderDailyCouncil(council) {
     councilAssemblyVerdictEl.textContent = ruling;
   }
   const transcript = council.transcript || [];
+  const stickToBottom = isScrolledNearBottom(councilAssemblyTranscriptEl);
   councilAssemblyTranscriptEl.innerHTML = transcript.length
     ? transcript.map(dailyCouncilTranscriptEntry).join("")
     : '<div class="assembly-entry">The council is gathering.</div>';
+  if (stickToBottom) councilAssemblyTranscriptEl.scrollTop = councilAssemblyTranscriptEl.scrollHeight;
 }
 
 function drawCouncilAssemblyTable(council, frameTick) {

@@ -1,8 +1,11 @@
 # Plan — Session-log retention policy
 
-**Status:** proposed (2026-07-26). Owner: orchestrator + one `implementer`
-subagent per [CLAUDE.md](../CLAUDE.md#model-policy). Plan only — no
-implementation here.
+**Status:** in implementation (2026-07-26). Owner: orchestrator + one
+`implementer` subagent per [CLAUDE.md](../CLAUDE.md#model-policy).
+**Resolved defaults** (§7 open questions, decided 2026-07-26): count-based
+retention, `LOG_RETENTION_SESSIONS = 20`. No one-time backfill needed (the
+tree is already clean; the first server start after this lands prunes any
+future pile-up automatically).
 
 ## 1. Problem
 

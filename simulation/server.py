@@ -13,6 +13,7 @@ import json
 import math
 import os
 import re
+import shutil
 import signal
 import threading
 import time
@@ -359,6 +360,20 @@ def model_for_decision(data):
     return MODEL_SMART
 
 
+# Session-log retention (docs/plan-log-retention.md): keep-N-newest, pruned
+# once at SessionLogger.__init__ right after the current session's directory
+# is created. Only directories whose basename fully matches this regex are
+# ever candidates -- loose files in logs/ root (soak-*.json, path1_soak_*,
+# *.db) and non-session subdirs (replay_bench/) are never touched.
+SESSION_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$")
+# SIM_LOG_RETENTION env override, parsed defensively -- a missing/blank/
+# malformed value falls back to the 20 default rather than raising at import.
+try:
+    LOG_RETENTION_SESSIONS = int(os.environ.get("SIM_LOG_RETENTION", "20") or 20)
+except (TypeError, ValueError):
+    LOG_RETENTION_SESSIONS = 20
+
+
 class SessionLogger:
     """Append-only JSON Lines logger. One session folder per server run."""
 
@@ -366,6 +381,7 @@ class SessionLogger:
         self.session_id = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
         self.dir = os.path.join(base_dir, "logs", self.session_id)
         os.makedirs(self.dir, exist_ok=True)
+        self._prune_old_sessions(os.path.join(base_dir, "logs"))
         self.activity_path = os.path.join(self.dir, "activity.jsonl")
         self.conversation_path = os.path.join(self.dir, "conversation.jsonl")
         self.llm_path = os.path.join(self.dir, "llm.jsonl")
@@ -382,6 +398,33 @@ class SessionLogger:
             "Conversation log started. Agent speech, directives, and talk attempts are recorded here.",
             kind="session_start",
         )
+
+    def _prune_old_sessions(self, logs_root):
+        """Keep the LOG_RETENTION_SESSIONS newest session directories under
+        logs_root, deleting the rest. Runs once, right after this session's
+        own directory is created (no thread/tick). Never raises -- mirrors
+        _append's "logging must never break the simulation" contract: a
+        listing failure aborts pruning for this run, and a per-directory
+        deletion failure is swallowed so one un-deletable folder never blocks
+        the rest. docs/plan-log-retention.md / specs/12-ops.md."""
+        keep = LOG_RETENTION_SESSIONS
+        if keep <= 0:
+            return  # retention disabled -- keep everything
+        try:
+            names = sorted(
+                name for name in os.listdir(logs_root)
+                if SESSION_DIR_RE.match(name)
+                and os.path.isdir(os.path.join(logs_root, name))
+            )  # session-id names are ISO %Y-%m-%dT%H-%M-%S: lexicographic
+               # sort == chronological sort, no stat() needed
+        except OSError:
+            return
+        stale = [name for name in names[:-keep] if name != self.session_id]
+        for name in stale:
+            try:
+                shutil.rmtree(os.path.join(logs_root, name))
+            except OSError:
+                pass  # best-effort; one un-deletable dir must not block others
 
     def _append(self, path, record):
         record = {
