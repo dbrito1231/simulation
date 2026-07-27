@@ -142,6 +142,16 @@
   #sidebarBody {
     flex: 1 1 0;
     min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  /* Time keeps its compact natural height; Civilization and Activity split
+     the remaining space evenly, each scrolling independently. */
+  #sidebarBody #timePanel { flex-shrink: 0; }
+  #sidebarBody #civPanel {
+    flex: 1 1 0;
+    min-height: 0;
     overflow-y: auto;
   }
   .panel-section {
@@ -595,6 +605,16 @@
     min-height: 0;
     padding-bottom: 12px;
   }
+  /* Activity moved into #sidebarBody, which now splits space between
+     Civilization and Activity -- see #sidebarBody rules above. */
+  /* Agents is now the primary (and only unbounded) content left in
+     #convPanel, so it needs its own scroll region rather than relying on
+     unconstrained natural height (the old cause of Activity being squeezed). */
+  #agentsPanel {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+  }
   #actList {
     list-style: none;
     margin: 0;
@@ -708,7 +728,7 @@
 <div id="wrap">
   <aside id="convPanel">
     <h1>Agents &amp; Activity</h1>
-    <section class="panel-section">
+    <section class="panel-section" id="agentsPanel">
       <div class="agents-panel-head">
         <h2>Agents <span id="livingAgentCount" class="civ-label"></span></h2>
         <button id="deadAgentsBtn" type="button" hidden>Deceased (0)</button>
@@ -720,10 +740,6 @@
     <section class="panel-section" id="conversationLog" style="display:none">
       <h2>Conversations</h2>
       <ul id="convList"></ul>
-    </section>
-    <section class="panel-section" id="activityLog">
-      <h2>Activity</h2>
-      <ul id="actList"></ul>
     </section>
     <section class="panel-section" id="settlementsSection" style="display:none">
       <details id="settlementsPanel" open>
@@ -801,6 +817,10 @@
         <span class="civ-label">Pending:</span>
         <div id="civPending"></div>
       </div>
+    </section>
+    <section class="panel-section" id="activityLog">
+      <h2>Activity</h2>
+      <ul id="actList"></ul>
     </section>
     </div>
   </aside>

@@ -86,18 +86,28 @@ world state beyond a cached palette/season key.
   recenters the main view (index.html:2114-2115).
 - **Two side panels**, both filled by `renderSidebar()`:
   - **Left panel** (`#convPanel`), titled "Agents & Activity": the **Agents**
-    section (rollup header, living-agent list with vitals/crisis sort, and the
-    selected-agent detail panel), then **Activity**, then a **Council** section
-    (shown when council data exists). A **Conversations** section
-    (`#conversationLog`) and a **Settlements** section (`#settlementsSection`)
-    also live here but are **hidden by default** behind the client-side viewer
-    toggles `SHOW_CONVERSATIONS` / `SHOW_SETTLEMENTS` (index.html ~1028, both
-    `false`). These are viewer-only display flags, not server `config.flags`;
-    flip either to `true` to restore its section. The underlying `world.conversation`
-    and `civ.settlements` data still arrives in `/state` regardless.
+    section (`#agentsPanel` — rollup header, living-agent list with
+    vitals/crisis sort, and the selected-agent detail panel), then a
+    **Council** section (shown when council data exists). A **Conversations**
+    section (`#conversationLog`) and a **Settlements** section
+    (`#settlementsSection`) also live here but are **hidden by default** behind
+    the client-side viewer toggles `SHOW_CONVERSATIONS` / `SHOW_SETTLEMENTS`
+    (index.html ~1028, both `false`). These are viewer-only display flags, not
+    server `config.flags`; flip either to `true` to restore its section. The
+    underlying `world.conversation` and `civ.settlements` data still arrives in
+    `/state` regardless. `#agentsPanel` is a flex child of `#convPanel` with its
+    own `overflow-y: auto` (index.html ~608), so a long agent roster scrolls
+    within the section instead of being clipped by the panel's own
+    `overflow: hidden`.
   - **Right panel** (`#sidebar`): the "AI Simulation World" title, LM/server
-    status dot+label, **Time** (EST clock, uptime, calendar string), and
-    **Civilization** (era/level, structures, active builds, resources).
+    status dot+label, then `#sidebarBody` (a flex column, `overflow: hidden`)
+    holding **Time** (`#timePanel`, EST clock/uptime/calendar — fixed,
+    `flex-shrink: 0`, natural height), **Civilization** (`#civPanel`
+    era/level/structures/active builds/resources), and **Activity**
+    (`#activityLog`, the world-event feed, `#actList`). Civilization and
+    Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (index.html
+    ~142-153), so they split the space remaining after Time equally and each
+    scrolls independently.
 - **`ACTION_LABELS`** (index.html:1357-1390) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
   `humanizeAction(agent)` (index.html:1391-1398) special-cases
