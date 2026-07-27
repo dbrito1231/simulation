@@ -12995,6 +12995,10 @@ class SimEngine:
                 # from a temporary survival collapse (grey overlay, same body).
                 "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
                 "buried": bool(CEMETERY_ENABLED and a.get("buried")),
+                # Non-neutral social ties only, to keep the payload small.
+                "relationships": {k: v for k, v in (a.get("relationships") or {}).items() if v != "neutral"},
+                # Capped preview of the model's last decision justification.
+                "lastReasoning": (a.get("lastReasoning") or "")[:160] or None,
             } for a in self.agents]
             env_lit_types = self._env_lit_types() if ENV_EFFECTS_ENABLED else set()
             civ = {

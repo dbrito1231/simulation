@@ -41,9 +41,19 @@ world state beyond a cached palette/season key.
   only when a district is founded server-side; rebuilds the terrain cache
   only when the served district-id list actually changed (index.html:1064-1086).
 - The render loop is **decoupled from polling** via `requestAnimationFrame`:
-  `tick()` (index.html:2244-2278) redraws every animation frame from
+  `tick()` (index.html:2899-2914) redraws every animation frame from
   whatever `world` currently holds, keeping ~60fps even though network polls
-  land at ~10 Hz (index.html:2239-2241).
+  land at ~10 Hz.
+- **Render-error resilience**: `tick()` is a thin wrapper that calls the
+  actual per-frame render work (`tickBody()`) inside a `try/catch`, with the
+  `requestAnimationFrame(tick)` reschedule moved into a `finally` so it
+  always runs. If `tickBody()` throws (e.g. a future rendering bug touching
+  an unexpected field shape), the error is logged via `console.error` and
+  that single frame is skipped, but the rAF chain keeps going — before this,
+  any uncaught exception inside the rAF callback silently and permanently
+  killed the render loop (no more frames ever painted) while `pollState()`'s
+  independent `setInterval` kept fetching fresh `/state` data in the
+  background that was never rendered.
 - Controls (Pause/Resume/Reset) POST to `/control/pause|resume|reset` via
   `postControl()` (index.html:2202-2224) with optimistic local flips
   reconciled by the next poll; keyboard shortcut `R` also resets
@@ -84,12 +94,30 @@ world state beyond a cached palette/season key.
   (index.html:2070+) draws a scaled-down world plus a viewport rectangle
   from scroll position/`zoomLevel` (index.html:2092-2100); clicking it
   recenters the main view (index.html:2114-2115).
-- **Sidebar panel** (`#sidebar`, index.html:588+), via `renderSidebar()`
-  (index.html:1645+): Time (EST clock, uptime, calendar string), LM
-  Studio/server status dot+label, Civilization (era/level, structures,
-  active builds, resources), Agents, Council, Conversations/Activity
-  (`#convPanel`, index.html:552-577), and a conditionally-shown Settlements
-  section (index.html:562-568, hidden until diplomacy data arrives).
+- **Two side panels**, both filled by `renderSidebar()`:
+  - **Left panel** (`#convPanel`), titled "Agents & Activity": the **Agents**
+    section (`#agentsPanel` — rollup header, living-agent list with
+    vitals/crisis sort, and the selected-agent detail panel), then a
+    **Council** section (shown when council data exists). A **Conversations**
+    section (`#conversationLog`) and a **Settlements** section
+    (`#settlementsSection`) also live here but are **hidden by default** behind
+    the client-side viewer toggles `SHOW_CONVERSATIONS` / `SHOW_SETTLEMENTS`
+    (index.html ~1028, both `false`). These are viewer-only display flags, not
+    server `config.flags`; flip either to `true` to restore its section. The
+    underlying `world.conversation` and `civ.settlements` data still arrives in
+    `/state` regardless. `#agentsPanel` is a flex child of `#convPanel` with its
+    own `overflow-y: auto` (index.html ~608), so a long agent roster scrolls
+    within the section instead of being clipped by the panel's own
+    `overflow: hidden`.
+  - **Right panel** (`#sidebar`): the "AI Simulation World" title, LM/server
+    status dot+label, then `#sidebarBody` (a flex column, `overflow: hidden`)
+    holding **Time** (`#timePanel`, EST clock/uptime/calendar — fixed,
+    `flex-shrink: 0`, natural height), **Civilization** (`#civPanel`
+    era/level/structures/active builds/resources), and **Activity**
+    (`#activityLog`, the world-event feed, `#actList`). Civilization and
+    Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (index.html
+    ~142-153), so they split the space remaining after Time equally and each
+    scrolls independently.
 - **`ACTION_LABELS`** (index.html:1357-1390) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
   `humanizeAction(agent)` (index.html:1391-1398) special-cases
@@ -127,6 +155,24 @@ ruling. It does not calculate seats, quorum, votes, or outcomes.
 The existing Council sidebar/history continues to render bounded `councilLog`
 records. `ACTION_LABELS` adds display gerunds for `council_speak`,
 `council_propose`, and `council_vote`.
+
+The history transcript modal (`openCouncilTranscript`, index.html) reads
+`record.transcript` from a past `councilLog` entry, which may have been
+written by either council system — the legacy invention council
+(`proposer`/`elder`/`blueprint_name`/... fields, `type` in `convene`,
+`proposal`, `verdict`, `dissolve`) or the Daily Council
+(`who`/`text`/`feeling` fields, plus `phase`, `attendance`, `speak`,
+`verdict_speech`, `vote`, `succession_ballot`, `succession_restart`, and
+more). `isDailyCouncilRecord()` classifies a record by checking whether any
+transcript entry carries a `who` field or a `type` outside the legacy
+4-type set. Legacy records render through the existing field-rich
+`renderTranscriptEntry()` (proposer/blueprint/needs/rejections/reasoning),
+filtered to the 4 legacy types. Daily Council records render their entire
+transcript, in order, through `renderDailyCouncilTranscriptEntry()` (the
+same `who`/`text`/`feeling` fallback logic as the live Assembly window's
+`dailyCouncilTranscriptEntry()`, emitting `.ct-*` markup to match the modal).
+The modal's intro note and the "Blueprint pitches & verdict (LLM)" section
+heading are chosen per the same classification.
 
 ## sprites.js: pure stateless drawing
 

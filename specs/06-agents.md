@@ -112,6 +112,24 @@ Post-build setup (sim_engine.py:1381-1387) staggers `thinkInterval = 360 + i*60`
 (elder forced to `240`) and `thinkTimer = i*30` per roster index `i`, and sets each
 agent's initial movement target to its starting district.
 
+## `/state` agent snapshot (`SimEngine.snapshot()`, sim_engine.py ~12977-12998)
+
+Not every internal field above is echoed to the viewer's `agents` array in
+`/state` (specs/04-http-api.md) — the snapshot is a filtered/derived view built
+under the lock each poll. Two fields worth calling out because they're
+transformed, not passed through raw:
+
+- `relationships` — a **filtered** copy of the internal `relationships` dict
+  (Social group, above): only non-`"neutral"` ties (`ally`/`rival`) are
+  included, to keep the payload small. An agent with no allies/rivals sends
+  `{}`.
+- `lastReasoning` — the internal `lastReasoning` string (Cognition group,
+  above), **capped to 160 characters**; empty/missing becomes `null` rather
+  than `""`.
+
+Both are unconditional (no feature flag gates them) since the underlying
+fields always exist on every agent.
+
 ## Speeds
 
 Set in `_make_agents` (sim_engine.py:1306-1310): default `2.8`; **Sage** (elder)

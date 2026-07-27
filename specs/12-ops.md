@@ -22,6 +22,56 @@ folder for its lifetime.
   datetime.now().strftime("%Y-%m-%dT%H-%M-%S")` (server.py:252-253), e.g.
   `simulation/logs/2026-07-15T09-30-00/`. The whole `logs/` tree is
   gitignored.
+- **Retention (`docs/plan-log-retention.md`)**: count-based, keep-N-newest.
+  Module constant `LOG_RETENTION_SESSIONS = 20` (server.py, beside
+  `SessionLogger`), overridable via the `SIM_LOG_RETENTION` env var (parsed
+  defensively -- a missing, blank, or malformed value falls back to the `20`
+  constant rather than raising at import). `0` (or negative) **disables
+  pruning entirely**, an explicit opt-out for mid-investigation runs.
+  Pruning runs **once**, inside `SessionLogger.__init__` immediately after
+  `os.makedirs(self.dir, exist_ok=True)` creates the current session's own
+  directory -- there is no background thread or tick hook; the folder count
+  only changes at startup, so that is the only moment pruning needs to run.
+  `_prune_old_sessions(logs_root)` lists `logs_root`, keeps only entries that
+  are directories **and** whose basename fully matches the dedicated
+  `SESSION_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$")`
+  (a full match, not a loose prefix check), sorts those names (session-id
+  names are ISO `%Y-%m-%dT%H-%M-%S`, so lexicographic sort == chronological
+  sort -- no `stat()` needed), and deletes every entry beyond the newest
+  `LOG_RETENTION_SESSIONS` via `shutil.rmtree`, excluding the current
+  session's own id (`self.session_id`) as an explicit belt-and-suspenders
+  guard even though the just-created directory is always the newest and so
+  can never fall outside the keep-N window for any N >= 1. Everything in
+  `logs/` that isn't a session directory is never a candidate: loose files
+  in the root (`soak-<label>.json` from `soak_monitor.py`, `path1_soak_*`
+  artifacts, ad-hoc `.db` dumps) and non-session subdirectories (e.g.
+  `replay_bench/`) are left untouched regardless of age or count, because
+  they never match `SESSION_DIR_RE`. Pruning is wrapped so it can **never**
+  raise into `__init__` and abort server startup, mirroring `_append`'s
+  "logging must never break the simulation" contract: a failure listing
+  `logs_root` aborts pruning for that run (nothing deleted), and a failure
+  deleting one specific session directory (permission, a file held open by
+  another process) is caught and swallowed per-directory so the loop
+  continues to the next candidate -- one un-deletable folder never blocks
+  the rest. Deleting a session directory also discards its per-session
+  `memory.json`; that is safe by the same reasoning as the paragraph below
+  (`state.db` is the authoritative memory store across restarts, so an old
+  session's `memory.json` is pure disk bloat once its directory ages out of
+  the retention window).
+- **`/council-llm-log` searches across retained sessions, not just the live
+  one**: `frame_tick` is a global counter persisted in `state.db` that never
+  resets on restart, so a council meeting's `[start_frame, end_frame]` window
+  can fall entirely inside an *older* session's `llm.jsonl` if the server was
+  restarted since that meeting happened. The route lists every subdirectory
+  of `logs/` matching `SESSION_DIR_RE` (same regex `_prune_old_sessions`
+  uses, so it never looks past the retention window), sorts them
+  lexicographically (== chronologically), applies the same per-line frame/
+  agent/action filter to each directory's `llm.jsonl` via a shared helper
+  (`_council_llm_entries_from_file`), and merges + re-sorts all matches by
+  `frame_tick`. This is a small, bounded scan (at most `LOG_RETENTION_SESSIONS`
+  files) — no attempt is made to guess which single session a frame range
+  belongs to via mtime/stat, since simplicity/correctness matters more than
+  the marginal cost of reading a few extra small JSONL files.
 - **Four JSONL streams**, each created empty on startup (server.py:255-264):
   | File | Written by | Record `type` |
   |---|---|---|
