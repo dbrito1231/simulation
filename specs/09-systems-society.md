@@ -414,7 +414,21 @@ retires first) so studying agents can still learn it
 
 **Chronicle:** a capped ring (`CHRONICLE_CAP = 20`) of major village
 events, folded into prompts as one "Village history: ..." line
-(`CHRONICLE_PROMPT_ENTRIES = 3` most recent).
+(`CHRONICLE_PROMPT_ENTRIES = 3` most recent). `CHRONICLE_ENABLED` is a
+viewer-projection gate (default True): when enabled, `/state` adds a bounded
+top-level `chronicle` projection of that existing ring. It never creates a
+second event store and never changes prompt history. The projection admits only
+the named milestone kinds `death`, `burial`, `election`, `belief_founded`,
+`belief_adoption`, `meme_mutation`, and `knowledge_preserved`; routine gather,
+talk, craft, and build activity remains exclusively in `activity`.
+
+**Social ties:** `SOCIAL_LAYER_ENABLED` (default True) is another read-only
+viewer gate. `/state.socialTies` is a compact, deduplicated list of non-neutral
+relationships between living agents, shaped as `{from, to, valence}` where
+`from` and `to` are agent ids and `valence` is `ally` or `rival`. A reciprocal
+disagreement resolves conservatively to `rival`. The browser uses this
+authoritative projection only to render nearby relationship cues; it does not
+derive or mutate social state.
 
 **Personality drift:** major life events (collapse, etc.) append one short
 deterministic trait clause to an agent's persona text, capped at

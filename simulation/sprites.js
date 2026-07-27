@@ -1,10 +1,15 @@
 "use strict";
 
 // Current season for seasonal sprite accents. Set by the viewer (setSpriteSeason)
-// once per state poll; the only mutable module state in this otherwise
-// stateless file (documented exception -- see CLAUDE.md "pure, stateless").
+// once per state poll. This and the viewer-controlled accent gate are the only
+// mutable module state in this otherwise stateless file (documented exception
+// -- see CLAUDE.md "pure, stateless").
 let spriteSeason = "summer";
 function setSpriteSeason(season) { spriteSeason = season || "summer"; }
+let seasonalAgentAccentsEnabled = true;
+function setSeasonalAgentAccentsEnabled(enabled) {
+  seasonalAgentAccentsEnabled = enabled !== false;
+}
 
 const TILE = 16;
 
@@ -527,6 +532,18 @@ const STRUCTURE_GRIDS = {
   ], C),
 };
 
+// A collapsed silhouette deliberately shared by every ruined structure. It is
+// visually distinct from a darkened intact building and keeps the sprite art
+// legible even for custom blueprint types with no seed grid.
+const RUIN_GRID = tileFromStrings([
+  "................",
+  "....br..........",
+  "..brbr..s1......",
+  ".dkbrs1br..dk...",
+  "br..dk..brbr....",
+  ".g1....g1....g1.",
+], C);
+
 function colorFromId(id) {
   const str = String(id || "structure");
   let hash = 0;
@@ -716,6 +733,23 @@ function structureIsUpgraded(structure) {
   return (Number.isFinite(lvl) && lvl > 1) || (Number.isFinite(vt) && vt > 1);
 }
 
+function structureConditionTier(structure) {
+  if (!structure) return "pristine";
+  const supplied = structure.conditionTier;
+  if (["pristine", "worn", "crumbling", "ruin"].includes(supplied)) return supplied;
+  const condition = Number(structure.condition);
+  if (structure.isRuin || (Number.isFinite(condition) && condition <= 0)) return "ruin";
+  if (!Number.isFinite(condition)) return "pristine"; // older snapshots
+  if (condition < 30) return "crumbling";
+  if (condition < 60) return "worn";
+  return "pristine";
+}
+
+function structureRenderGrid(structure, wearEnabled = true) {
+  if (wearEnabled && structureConditionTier(structure) === "ruin") return RUIN_GRID;
+  return getStructureGrid(structure);
+}
+
 function getStructureGrid(structure) {
   const upgraded = structureIsUpgraded(structure);
   // Seed houses need a stable architectural silhouette at the milestone
@@ -752,8 +786,8 @@ function getStructureGrid(structure) {
 
 // Pixel footprint of a structure's sprite, used by index.html to place the
 // shadow and name label regardless of grid size or fallback type.
-function getStructureRenderSize(structure) {
-  const grid = getStructureGrid(structure);
+function getStructureRenderSize(structure, wearEnabled = true) {
+  const grid = structureRenderGrid(structure, wearEnabled);
   const scale = STRUCTURE_SCALE * structureRenderScale(structure);
   if (!grid) return { width: 8 * scale, height: 8 * scale };
   const width = grid.reduce((max, row) => Math.max(max, row.length), 0) * scale;
@@ -781,11 +815,12 @@ function drawGenericStructure(ctx, x, y, label, accentColor) {
   ctx.textBaseline = "alphabetic";
 }
 
-function drawStructure(ctx, structure) {
-  const grid = getStructureGrid(structure);
+function drawStructure(ctx, structure, wearEnabled = true) {
+  const grid = structureRenderGrid(structure, wearEnabled);
   const scale = STRUCTURE_SCALE * structureRenderScale(structure);
   if (grid) {
     drawPixelGrid(ctx, structure.x, structure.y, grid, scale, false);
+    if (wearEnabled) drawStructureWear(ctx, structure, grid, scale);
     // Cheap per-frame winter accent for agent-built structures: clumped
     // snow along the sprite's top edge. spriteSeason is the module-level
     // mirror of the viewer's current season (set via setSpriteSeason) --
@@ -802,6 +837,89 @@ function drawStructure(ctx, structure) {
     structure.name || structure.type,
     colorFromId(structure.type)
   );
+}
+
+function deterministicSeed(value) {
+  const str = String(value == null ? "structure" : value);
+  let hash = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function drawStructureWear(ctx, structure, grid, scale) {
+  const tier = structureConditionTier(structure);
+  if (tier === "pristine" || tier === "ruin") return;
+  const width = grid.reduce((max, row) => Math.max(max, row.length), 0) * scale;
+  const height = grid.length * scale;
+  const x = structure.x, y = structure.y;
+  const seed = deterministicSeed(structure.id != null ? structure.id : structure.type);
+  ctx.save();
+  // source-atop keeps the wash constrained to painted sprite pixels.
+  ctx.globalCompositeOperation = "source-atop";
+  ctx.fillStyle = tier === "worn" ? "rgba(90, 95, 86, 0.25)" : "rgba(28, 25, 23, 0.42)";
+  ctx.fillRect(x, y, width, height);
+  ctx.restore();
+
+  if (tier === "worn") {
+    ctx.fillStyle = "rgba(45, 40, 34, 0.48)";
+    for (let i = 0; i < 3; i++) {
+      const px = x + ((seed >>> (i * 5)) % Math.max(1, Math.floor(width / scale))) * scale;
+      const py = y + ((i % 2 ? grid.length - 1 : 1) * scale);
+      ctx.fillRect(px, py, scale, scale);
+    }
+    return;
+  }
+  ctx.fillStyle = "rgba(42, 30, 26, 0.86)";
+  const cracks = 4;
+  for (let i = 0; i < cracks; i++) {
+    const px = x + ((seed >>> (i * 6)) % Math.max(1, Math.floor(width / scale))) * scale;
+    const py = y + (1 + ((seed >>> (i * 4 + 2)) % Math.max(1, grid.length - 2))) * scale;
+    ctx.fillRect(px, py, scale, scale * 2);
+    if (i % 2 === 0) ctx.fillRect(px - scale, py + scale, scale, scale);
+  }
+  ctx.fillRect(x, y + height - scale, scale * 2, scale);
+  ctx.fillRect(x + width - scale * 2, y + height - scale, scale * 2, scale);
+}
+
+const HEAT_CRAFT_TYPES = /(?:forge|kiln|furnace|smelter|charcoal)/;
+
+function drawStructureSmoke(ctx, structure, frameTick) {
+  if (!HEAT_CRAFT_TYPES.test(String(structure.type || "").toLowerCase())) return;
+  const tier = structureConditionTier(structure);
+  if (tier === "ruin" || tier === "crumbling" || Number(structure.condition) < 30) return;
+  const phase = Math.floor(frameTick / 9);
+  const seed = deterministicSeed(structure.id != null ? structure.id : structure.type);
+  const baseX = structure.x + 20 + (seed % 18);
+  const baseY = structure.y - 4;
+  ctx.save();
+  for (let i = 0; i < 3; i++) {
+    const age = (phase + i * 3 + (seed % 7)) % 12;
+    const size = 3 + age * 0.45;
+    ctx.globalAlpha = Math.max(0, 0.28 - age * 0.018);
+    ctx.fillStyle = "#d8d2c5";
+    ctx.fillRect(Math.round(baseX + ((seed >>> (i * 4)) % 7) - age * 0.35),
+                 Math.round(baseY - age * 2.2), Math.ceil(size), Math.ceil(size));
+  }
+  ctx.restore();
+}
+
+function drawActivityDust(ctx, agent, frameTick) {
+  if (!["build_structure", "contribute_resources", "start_project"].includes(agent.lastAction)) return;
+  const phase = Math.floor(frameTick / 5) % 8;
+  if (phase > 3) return; // brief, looping puffs without retaining client state
+  const seed = deterministicSeed(agent.id != null ? agent.id : agent.name);
+  ctx.save();
+  ctx.globalAlpha = 0.34 - phase * 0.06;
+  ctx.fillStyle = "#c9ad78";
+  for (let i = 0; i < 3; i++) {
+    const size = 2 + phase;
+    ctx.fillRect(Math.round(agent.x - 8 + i * 6 + ((seed >>> (i * 3)) % 3)),
+                 Math.round(agent.y + 2 - phase - (i % 2)), size, Math.max(2, size - 1));
+  }
+  ctx.restore();
 }
 
 // --- Agent sprites (16x24), unique per agent ---
@@ -1365,6 +1483,39 @@ const ACCESSORIES = {
   Sage: tileFromStrings(["...ee...","..eeee..",".eeeeee.","...ee...","....e..."], makeAgentPalette("#8D6E63", "#FFF176")),
 };
 
+// Small post-body pixels keep seasonal dress readable at the existing 2x
+// sprite scale without replacing the named accessory art or altering agents.
+function drawSeasonalAgentAccent(ctx, agent, grid, scale, flipX) {
+  if (!seasonalAgentAccentsEnabled || agent.deceased) return;
+  const w = grid[0].length * scale;
+  const h = grid.length * scale;
+  const ox = Math.round(agent.x - w / 2);
+  const oy = Math.round(agent.y - h + scale * 2);
+  const side = flipX ? ox + scale * 3 : ox + w - scale * 4;
+  ctx.save();
+  if (spriteSeason === "winter") {
+    ctx.fillStyle = "#DCEAF2"; // wool cap + scarf
+    ctx.fillRect(ox + scale * 4, oy + scale * 2, scale * 8, scale);
+    ctx.fillRect(ox + scale * 5, oy + scale * 8, scale * 7, scale);
+    ctx.fillRect(side, oy + scale * 9, scale, scale * 2);
+  } else if (spriteSeason === "spring") {
+    ctx.fillStyle = "#8BC34A"; // leaf pin
+    ctx.fillRect(side, oy + scale * 7, scale, scale);
+    ctx.fillStyle = "#C5E86C";
+    ctx.fillRect(side + (flipX ? scale : -scale), oy + scale * 6, scale, scale);
+  } else if (spriteSeason === "summer") {
+    ctx.fillStyle = "#F7D774"; // straw hat brim
+    ctx.fillRect(ox + scale * 3, oy + scale * 2, scale * 10, scale);
+    ctx.fillStyle = "#C8923F";
+    ctx.fillRect(ox + scale * 5, oy + scale, scale * 6, scale);
+  } else if (spriteSeason === "autumn") {
+    ctx.fillStyle = "#C96C35"; // warm scarf
+    ctx.fillRect(ox + scale * 5, oy + scale * 8, scale * 7, scale);
+    ctx.fillRect(side, oy + scale * 9, scale, scale * 2);
+  }
+  ctx.restore();
+}
+
 function drawAgentSprite(ctx, agent, frameTick) {
   const scale = 2;
   if (agent.deceased && agent.buried) {
@@ -1387,6 +1538,7 @@ function drawAgentSprite(ctx, agent, frameTick) {
     const oy = Math.round(agent.y - h + scale * 2);
     drawPixelGrid(ctx, ox + scale * 4, oy, acc, scale, flipX);
   }
+  drawSeasonalAgentAccent(ctx, agent, grid, scale, flipX);
 
   // Sid-parity Phase 3: tint living agents by dominant belief id.
   const beliefIds = agent.beliefIds || [];

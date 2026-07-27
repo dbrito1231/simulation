@@ -196,6 +196,18 @@ SURVIVAL_ENABLED = True
 CRAFTING_ENABLED = True
 USE_GOALS = True
 STRUCTURE_EFFECTS_ENABLED = True
+# Viewer-only projections of existing simulation state. These flags never
+# change decay, ruin, or action mechanics; they only control /state consumers.
+STRUCTURE_WEAR_ENABLED = True
+ACTIVITY_CUES_ENABLED = True
+# Read-only viewer projections of relationships and the existing culture
+# chronicle. These never alter social/culture simulation state or prompts.
+SOCIAL_LAYER_ENABLED = True
+CHRONICLE_ENABLED = True
+# Viewer-only projections of the existing calendar and sprite season mirror.
+# They do not alter simulation time, terrain, or agent state.
+WORLD_CLOCK_HUD_ENABLED = True
+SEASONAL_AGENTS_ENABLED = True
 MEMORY_ENABLED = True
 # Wiki-style compounding memory (TASKS_PENDING item 3 / plan Phase 4): when
 # True, _run_memory_maintenance's existing round-robin summarizer call is
@@ -748,6 +760,18 @@ SHELTER_HUNGER_FLOOR = 20
 STRUCTURE_DECAY_PER_GOODS_TICK = 0.05
 STRUCTURE_DISREPAIR_THRESHOLD = 30
 REPAIR_CONDITION_RESTORE = 50
+
+
+def structure_condition_tier(structure):
+    """Return the authoritative viewer tier for a persisted structure."""
+    condition = float(structure.get("condition", 100) or 0)
+    if structure.get("isRuin") or condition <= 0:
+        return "ruin"
+    if condition < STRUCTURE_DISREPAIR_THRESHOLD:
+        return "crumbling"
+    if condition < 60:
+        return "worn"
+    return "pristine"
 # Disaster: rare random damage so decay isn't perfectly predictable. 0.005 per
 # ~30s goods tick => expected roughly once per 100 minutes of runtime.
 DISASTER_PROB = 0.005
@@ -954,6 +978,12 @@ LIBRARY_STUDY_WEIGHT_CAP = 5         # study-gain upgrade-weight cap (knowledge-
 CHRONICLE_CAP = 20
 CHRONICLE_PROMPT_ENTRIES = 3         # how many recent entries to fold into the prompt line
 COUNCIL_DIGEST_PROMPT_ENTRIES = 2    # newest compact Daily Council records per think payload
+# The viewer chronicle is deliberately narrower than the prompt-facing ring:
+# only named historical milestones belong beside the raw Activity feed.
+CHRONICLE_MILESTONE_KINDS = frozenset({
+    "death", "burial", "election", "belief_founded", "belief_adoption",
+    "meme_mutation", "knowledge_preserved",
+})
 # Memes: mutation is capped and event-driven -- at most one lm_complete call
 # per mutation ATTEMPT (itself gated to a low probability on ordinary
 # proximity spread), and a hard per-session ceiling so a long soak can never
@@ -12958,6 +12988,40 @@ class SimEngine:
         self.clear_state()
         self.save_state()
 
+    def _social_ties_snapshot(self):
+        """Return compact non-neutral ties between living agents for the viewer.
+
+        Relationships are name-keyed and may be one-sided. One canonical pair
+        avoids duplicate canvas lines; a disagreement resolves to rival so the
+        more adverse visible state is never hidden.
+        """
+        living = {
+            agent["name"]: agent for agent in self.agents
+            if agent.get("deathFrame") is None
+        }
+        pairs = {}
+        for source in living.values():
+            for target_name, valence in (source.get("relationships") or {}).items():
+                target = living.get(target_name)
+                if target is None or valence not in {"ally", "rival"}:
+                    continue
+                source_id, target_id = sorted((source["id"], target["id"]))
+                key = (source_id, target_id)
+                prior = pairs.get(key)
+                pairs[key] = "rival" if valence == "rival" or prior == "rival" else "ally"
+        return [
+            {"from": source_id, "to": target_id, "valence": valence}
+            for (source_id, target_id), valence in sorted(pairs.items())
+        ]
+
+    def _chronicle_snapshot(self):
+        """Return the curated viewer projection of the persisted chronicle ring."""
+        return [
+            {"text": str(entry.get("text") or ""), "frame": entry.get("frame"), "kind": kind}
+            for entry in self.civilization.get("chronicle") or []
+            if (kind := entry.get("kind")) in CHRONICLE_MILESTONE_KINDS
+        ][-CHRONICLE_CAP:]
+
     def snapshot(self):
         """Consistent /state snapshot per Contract 2 (copied under lock)."""
         with self.lock:
@@ -13009,6 +13073,7 @@ class SimEngine:
                                 "districtId": s.get("districtId"),
                                 "condition": s.get("condition", 100),
                                 "isRuin": bool(s.get("isRuin")),
+                                "conditionTier": structure_condition_tier(s),
                                 "homeOf": s.get("homeOf"),
                                 "level": s.get("level", 1),
                                 "visualTier": s.get("visualTier", 1),
@@ -13094,7 +13159,7 @@ class SimEngine:
             benchmarks = dict(self.lastBenchmarks)
             activity = list(self.activityLog)
             conversation = list(self.conversationLog[:30])
-            return {
+            snapshot = {
                 "frameTick": self.frameTick,
                 "paused": self.paused,
                 "uptimeSeconds": time.time() - self.processStartTime,
@@ -13121,6 +13186,12 @@ class SimEngine:
                         "CULTURE_ENABLED": CULTURE_ENABLED,
                         "CEMETERY_ENABLED": CEMETERY_ENABLED,
                         "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
+                        "STRUCTURE_WEAR_ENABLED": STRUCTURE_WEAR_ENABLED,
+                        "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
+                        "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
+                        "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
+                        "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
+                        "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
                         "PATH1_ENABLED": PATH1_ENABLED,
                         "INDUSTRY_ENABLED": path1_on("INDUSTRY_ENABLED"),
                         "TOOL_TIERS_ENABLED": path1_on("TOOL_TIERS_ENABLED"),
@@ -13137,3 +13208,8 @@ class SimEngine:
                     },
                 },
             }
+            if SOCIAL_LAYER_ENABLED:
+                snapshot["socialTies"] = self._social_ties_snapshot()
+            if CHRONICLE_ENABLED and CULTURE_ENABLED:
+                snapshot["chronicle"] = self._chronicle_snapshot()
+            return snapshot

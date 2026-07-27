@@ -49,6 +49,17 @@
   #pauseBtn { left: 18px; }
   #resetBtn { left: 98px; }
   #pauseBtn:hover, #resetBtn:hover { background: #444; }
+  #worldClockHud {
+    /* Fixed like the map controls: the indicator remains legible while the
+       large world canvas scrolls below it. */
+    position: fixed; top: 18px; right: 380px;
+    padding: 6px 10px;
+    background: rgba(18, 21, 32, 0.86); color: #f5ead4;
+    border: 1px solid rgba(241, 205, 126, 0.6); border-radius: 12px;
+    font: 600 12px system-ui, sans-serif; letter-spacing: 0.02em;
+    pointer-events: none; z-index: 10;
+    text-transform: capitalize;
+  }
   #zoomInBtn, #zoomOutBtn, #zoomFitBtn {
     /* Same fixed cluster as pause/reset, stacked into a second row so the
        world can be zoomed out to see it as a whole (esp. on small screens)
@@ -598,7 +609,7 @@
   #convList .msg { color: #bbb; }
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
-  #activityLog {
+  #activityLog, #chronicleLog {
     flex: 1 1 0;
     display: flex;
     flex-direction: column;
@@ -615,7 +626,7 @@
     min-height: 0;
     overflow-y: auto;
   }
-  #actList {
+  #actList, #chronicleList {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -625,7 +636,9 @@
     line-height: 1.5;
     color: #aaa;
   }
-  #actList li { padding: 3px 0; }
+  #actList li, #chronicleList li { padding: 3px 0; }
+  #chronicleList .chronicle-kind { color: #d9b96e; font-weight: 600; }
+  #chronicleList .chronicle-frame { color: #777; font-size: 10px; }
   /* --- Phase D: council banner + Council panel (lives in the left convPanel column) --- */
   #councilBanner {
     position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
@@ -727,6 +740,7 @@
        so the desktop right:380px offset (sized to dodge #sidebar's column)
        no longer applies -- fall back to the viewport corner. */
     #minimap { right: auto; left: 18px; }
+    #worldClockHud { right: 18px; }
     #councilAssemblyBody { grid-template-columns:1fr; }
     #councilAssemblyInfo { border-left:0; border-top:1px solid #3d3424; }
     #councilAssemblyCanvas { min-width:0; }
@@ -773,6 +787,7 @@
     <button id="zoomOutBtn" title="Zoom out">&minus;</button>
     <button id="zoomInBtn" title="Zoom in">+</button>
     <button id="zoomFitBtn" title="Fit whole world">Fit</button>
+    <div id="worldClockHud" aria-live="polite"></div>
     <canvas id="minimap" width="220" height="160"></canvas>
     <div id="councilBanner"></div>
   </div>
@@ -830,6 +845,10 @@
     <section class="panel-section" id="activityLog">
       <h2>Activity</h2>
       <ul id="actList"></ul>
+    </section>
+    <section class="panel-section" id="chronicleLog">
+      <h2>Chronicle</h2>
+      <ul id="chronicleList"></ul>
     </section>
     </div>
   </aside>
@@ -1053,6 +1072,13 @@ let ECOLOGY_ENABLED = true;
 let PIANO_MODULES = false;
 let META_SYSTEM = false;
 let PATH1_ENABLED = false;
+let STRUCTURE_WEAR_ENABLED = true;
+let ACTIVITY_CUES_ENABLED = true;
+let SOCIAL_LAYER_ENABLED = true;
+let CHRONICLE_ENABLED = true;
+let ENV_EFFECTS_ENABLED = true;
+let WORLD_CLOCK_HUD_ENABLED = true;
+let SEASONAL_AGENTS_ENABLED = true;
 
 // --- Viewer-only display toggles (client-side, not server flags). Flipping
 // either to true fully restores that section with no other edits. ---
@@ -1257,12 +1283,25 @@ function nightAlpha(cal) {
   return MAX_NIGHT_ALPHA * (1.00 - f) / 0.05;
 }
 
+// ENV_EFFECTS_ENABLED's golden-hour extension shares the night overlay's
+// transition windows without changing calendar state or adding another flag.
+function goldenHourAlpha(cal) {
+  if (!ENV_EFFECTS_ENABLED || !cal || cal.dayFraction == null) return 0;
+  const f = cal.dayFraction;
+  const band = (start, end) => {
+    if (f < start || f >= end) return 0;
+    return Math.sin(((f - start) / (end - start)) * Math.PI);
+  };
+  return 0.13 * Math.max(band(0.70, 0.80), band(0.95, 1.00));
+}
+
 // Light glow (ENV_EFFECTS_ENABLED): warm radial glow over lit structures while
 // the night overlay is active, pushing back the dark in lit districts. Purely
 // data-driven — a no-op when the server hasn't sent `light`/`litDistricts`
 // yet (older payload), so it's safe regardless of rollout order.
 const LIGHT_GLOW_RADIUS = 140;
 function drawLightGlows(cal) {
+  if (!ENV_EFFECTS_ENABLED) return;
   const na = nightAlpha(cal);
   if (na <= 0) return;
   const civ = getCiv();
@@ -1440,12 +1479,12 @@ function drawAgent(ctx, agent, frameTick) {
 }
 
 function drawStructureWithShadow(structure) {
-  const size = getStructureRenderSize(structure);
+  const size = getStructureRenderSize(structure, STRUCTURE_WEAR_ENABLED);
   ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
   ctx.beginPath();
   ctx.ellipse(structure.x + size.width / 2, structure.y + size.height, size.width * 0.55, 7, 0, 0, Math.PI * 2);
   ctx.fill();
-  drawStructure(ctx, structure);
+  drawStructure(ctx, structure, STRUCTURE_WEAR_ENABLED);
   drawStructureLabel(ctx, structure, size);
 }
 
@@ -1527,9 +1566,12 @@ function syncAgentListSelection() {
 }
 const convListEl = document.getElementById("convList");
 const actListEl = document.getElementById("actList");
+const chronicleLogEl = document.getElementById("chronicleLog");
+const chronicleListEl = document.getElementById("chronicleList");
 const timeNowEl = document.getElementById("timeNow");
 const timeUptimeEl = document.getElementById("timeUptime");
 const timeCalendarEl = document.getElementById("timeCalendar");
+const worldClockHudEl = document.getElementById("worldClockHud");
 const civLevelEl = document.getElementById("civLevel");
 const civStructuresEl = document.getElementById("civStructures");
 const civUpgradesRowEl = document.getElementById("civUpgradesRow");
@@ -1776,6 +1818,7 @@ let lastSidebarKey = "";
 let lastAgentPanelKey = "";
 let lastAgentDetailKey = "";
 let lastLogKey = "";
+let lastChronicleKey = "";
 
 // --- Client-only per-agent activity history (Plan B1: no server endpoint,
 // resets on reload). Newest entry is last in the array; capped per agent. ---
@@ -2287,6 +2330,52 @@ function renderSidebar() {
       `<li>${escapeHtml(line)}</li>`
     ).join("");
   }
+
+  if (!CHRONICLE_ENABLED) {
+    chronicleLogEl.style.display = "none";
+  } else {
+    chronicleLogEl.style.display = "";
+    const chronicle = world.chronicle || [];
+    const chronicleKey = JSON.stringify(chronicle);
+    if (chronicleKey !== lastChronicleKey) {
+      lastChronicleKey = chronicleKey;
+      const scrollTop = chronicleListEl.scrollTop;
+      chronicleListEl.innerHTML = chronicle.slice().reverse().map((entry) => {
+        const kind = String(entry.kind || "event").replace(/_/g, " ");
+        const frame = entry.frame != null ? `frame ${entry.frame}` : "";
+        return `<li><span class="chronicle-kind">${escapeHtml(kind)}</span> ` +
+          `${escapeHtml(entry.text || "")}` +
+          (frame ? ` <span class="chronicle-frame">${escapeHtml(frame)}</span>` : "") +
+          `</li>`;
+      }).join("") || `<li class="civ-label">No village milestones yet</li>`;
+      chronicleListEl.scrollTop = scrollTop;
+    }
+  }
+}
+
+function calendarPhase(cal) {
+  if (!cal) return null;
+  const f = cal.dayFraction;
+  if (f == null) return cal.isNight ? "night" : "day";
+  if (f < 0.70) return "day";
+  if (f < 0.80) return "dusk";
+  if (f < 0.95) return "night";
+  return "dawn";
+}
+
+function renderWorldClockHud() {
+  if (!WORLD_CLOCK_HUD_ENABLED) {
+    worldClockHudEl.style.display = "none";
+    return;
+  }
+  const cal = world.calendar;
+  const phase = calendarPhase(cal);
+  if (!cal || !cal.season || !phase) {
+    worldClockHudEl.style.display = "none";
+    return;
+  }
+  worldClockHudEl.style.display = "block";
+  worldClockHudEl.textContent = `${cal.season} ${phase}`;
 }
 
 // =====================================================================
@@ -2837,6 +2926,50 @@ function applyFlags(flags) {
   if ("PIANO_MODULES" in flags) PIANO_MODULES = !!flags.PIANO_MODULES;
   if ("META_SYSTEM" in flags) META_SYSTEM = !!flags.META_SYSTEM;
   if ("PATH1_ENABLED" in flags) PATH1_ENABLED = !!flags.PATH1_ENABLED;
+  if ("STRUCTURE_WEAR_ENABLED" in flags) STRUCTURE_WEAR_ENABLED = !!flags.STRUCTURE_WEAR_ENABLED;
+  if ("ACTIVITY_CUES_ENABLED" in flags) ACTIVITY_CUES_ENABLED = !!flags.ACTIVITY_CUES_ENABLED;
+  if ("SOCIAL_LAYER_ENABLED" in flags) SOCIAL_LAYER_ENABLED = !!flags.SOCIAL_LAYER_ENABLED;
+  if ("CHRONICLE_ENABLED" in flags) CHRONICLE_ENABLED = !!flags.CHRONICLE_ENABLED;
+  if ("ENV_EFFECTS_ENABLED" in flags) ENV_EFFECTS_ENABLED = !!flags.ENV_EFFECTS_ENABLED;
+  if ("WORLD_CLOCK_HUD_ENABLED" in flags) WORLD_CLOCK_HUD_ENABLED = !!flags.WORLD_CLOCK_HUD_ENABLED;
+  if ("SEASONAL_AGENTS_ENABLED" in flags) SEASONAL_AGENTS_ENABLED = !!flags.SEASONAL_AGENTS_ENABLED;
+}
+
+// Bounded viewer-only social pass. The engine has already filtered and
+// deduplicated `socialTies`; this just culls to visible, nearby living pairs.
+const SOCIAL_TIE_RADIUS = 180;
+const SOCIAL_TIE_CAP = 36;
+function drawSocialTies(ctx) {
+  if (!SOCIAL_LAYER_ENABLED) return;
+  const ties = world.socialTies || [];
+  if (!ties.length) return;
+  const agentsById = new Map(getLivingAgents().map((agent) => [agent.id, agent]));
+  const left = canvasWrapEl.scrollLeft / zoomLevel;
+  const top = canvasWrapEl.scrollTop / zoomLevel;
+  const right = left + canvasWrapEl.clientWidth / zoomLevel;
+  const bottom = top + canvasWrapEl.clientHeight / zoomLevel;
+  let drawn = 0;
+  for (const tie of ties) {
+    if (drawn >= SOCIAL_TIE_CAP) break;
+    const from = agentsById.get(tie.from);
+    const to = agentsById.get(tie.to);
+    if (!from || !to || from.x < left || from.x > right || from.y < top || from.y > bottom
+        || to.x < left || to.x > right || to.y < top || to.y > bottom) continue;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance > SOCIAL_TIE_RADIUS) continue;
+    const alpha = Math.max(0.16, 0.58 * (1 - distance / SOCIAL_TIE_RADIUS));
+    ctx.strokeStyle = tie.valence === "rival"
+      ? `rgba(105, 183, 234, ${alpha})`
+      : `rgba(242, 164, 93, ${alpha})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(from.x, from.y - 14);
+    ctx.lineTo(to.x, to.y - 14);
+    ctx.stroke();
+    drawn++;
+  }
 }
 
 async function pollState() {
@@ -2857,6 +2990,7 @@ async function pollState() {
       scheduleTerrainCacheBuild();
     }
     applyFlags(snapshot.config && snapshot.config.flags);
+    setSeasonalAgentAccentsEnabled(SEASONAL_AGENTS_ENABLED);
     renderDailyCouncil((snapshot.civilization || {}).dailyCouncil);
     syncPauseButton();
     if (terrainCanvas) hideWorldLoading();
@@ -2943,6 +3077,7 @@ function tickBody() {
   renderFrame++;
   ctx.clearRect(0, 0, WORLD_W, WORLD_H);
   drawWorld(ctx, renderFrame);
+  drawSocialTies(ctx);
 
   const agents = getAgents();
   // Derive facing/walk direction from last frame's positions (the server snapshot
@@ -2962,6 +3097,11 @@ function tickBody() {
   for (const item of drawList) {
     if (item.type === "structure") drawStructureWithShadow(item.structure);
     else drawAgent(ctx, item.agent, renderFrame);
+  }
+  if (ACTIVITY_CUES_ENABLED) {
+    // Pure frame-derived accents: no activity state is retained in the viewer.
+    for (const structure of structures) drawStructureSmoke(ctx, structure, renderFrame);
+    for (const agent of agents) drawActivityDust(ctx, agent, renderFrame);
   }
 
   // Server-derived decoration only: boats remain resources, not entities.
@@ -3000,6 +3140,11 @@ function tickBody() {
     ctx.fillStyle = `rgba(10, 16, 48, ${na.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
+  const gha = goldenHourAlpha(world.calendar);
+  if (gha > 0) {
+    ctx.fillStyle = `rgba(255, 177, 78, ${gha.toFixed(3)})`;
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+  }
   drawLightGlows(world.calendar);
 
   // C5 follow-cam: re-center every frame on the followed agent while active;
@@ -3015,6 +3160,7 @@ function tickBody() {
   }
 
   renderSidebar();
+  renderWorldClockHud();
   drawCouncilAssemblyTable((world.civilization || {}).dailyCouncil, renderFrame);
   renderMinimap();
 }

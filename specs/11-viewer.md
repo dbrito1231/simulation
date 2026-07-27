@@ -74,10 +74,17 @@ world state beyond a cached palette/season key.
   into the terrain cache once at build time: autumn = warm multiply+overlay,
   winter = desaturate then cool overlay+lighter passes, spring = faint green
   overlay, summer = untinted baseline (no-op).
-- **Day/night overlay** (`nightAlpha(cal)`, index.html:1038-1046): ramps a
+- **Day/night overlay** (`nightAlpha`, index.html): ramps a
   `MAX_NIGHT_ALPHA = 0.45` navy overlay in over `dayFraction` 0.70–0.80,
   holds through 0.95, ramps out to 1.00 — applied as a full-canvas `fillRect`
-  after agents/structures each frame (index.html:2269-2273).
+  after agents/structures each frame. When `ENV_EFFECTS_ENABLED` is on, a
+  low-alpha golden band is composited during the same dusk (0.70–0.80) and
+  dawn (0.95–1.00) ramps; it adds no state or separate feature flag.
+- **World clock HUD** (`WORLD_CLOCK_HUD_ENABLED`): a fixed, non-interactive
+  badge over the map projects the existing `calendar.season` and
+  `calendar.dayFraction`/`isNight` as one of dawn, day, dusk, or night. It is
+  a pure read of the latest `/state` snapshot and disappears cleanly when the
+  echoed flag is off.
 - **Light glow** (`ENV_EFFECTS_ENABLED`): while the night overlay is active,
   each structure flagged `light: true` in the `/state` structures payload
   whose district is in `civilization.litDistricts` gets a warm radial
@@ -85,6 +92,25 @@ world state beyond a cached palette/season key.
   ~140 world px) composited over the night overlay so lit districts visibly
   push back the dark. No glow by day or for unfueled lights (they simply
   lack the flag/district entry that night).
+- **Structure wear** (`STRUCTURE_WEAR_ENABLED`): the server snapshot's
+  `conditionTier` selects a deterministic visual pass over every structure:
+  pristine has no treatment, worn adds subtle desaturation and edge gaps,
+  crumbling adds dark cracks/corner damage, and ruin uses a dedicated rubble
+  silhouette. The client accepts older snapshots by deriving the same tier from
+  `condition`/`isRuin`, then defaults to pristine when neither exists. Turning
+  the flag off leaves the pre-wear structure sprites untouched.
+- **Activity cues** (`ACTIVITY_CUES_ENABLED`): the per-frame world pass adds
+  small deterministic canvas-only smoke puffs above working heat/craft
+  structures and brief dust puffs beneath agents whose last action is
+  `build_structure`, `contribute_resources`, or `start_project`. The effects
+  are keyed by existing ids and `frameTick`; they retain no viewer state and
+  disappear entirely when the flag is off.
+- **Social layer** (`SOCIAL_LAYER_ENABLED`): before agent sprites, the viewer
+  draws at most a bounded number of thin relationship lines for `socialTies`
+  whose two living endpoints are currently inside the canvas viewport and
+  nearby in world space. Ally lines are warm and rival lines cool; alpha fades
+  with distance. The pass does no all-world pair scan and is a clean no-op when
+  the flag is off or an older snapshot lacks `socialTies`.
 - **Zoom**: `zoomLevel` (index.html:780) scales `canvas.style.width/height`
   over the fixed-resolution backing store (`applyZoom`, index.html:784-786);
   +/- buttons multiply by 1.25/0.8 (index.html:819-820), scroll-wheel zoom
@@ -117,7 +143,10 @@ world state beyond a cached palette/season key.
     (`#activityLog`, the world-event feed, `#actList`). Civilization and
     Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (index.html
     ~142-153), so they split the space remaining after Time equally and each
-    scrolls independently.
+    scrolls independently. A third scrollable **Chronicle** panel is a curated
+    projection of top-level `world.chronicle`, distinct from the raw Activity
+    feed. It preserves its scroll position across snapshot updates and is
+    hidden cleanly when `CHRONICLE_ENABLED` is off.
 - **`ACTION_LABELS`** (index.html:1357-1390) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
   `humanizeAction(agent)` (index.html:1391-1398) special-cases
@@ -177,8 +206,10 @@ heading are chosen per the same classification.
 ## sprites.js: pure stateless drawing
 
 - Every function takes `ctx` plus plain data and paints; the only module
-  state is a season mirror (`spriteSeason`, sprites.js:3-7) and a per-season
-  tree-grid cache (`TREE_GRIDS`, sprites.js:280-284, built once per season).
+  state is a season mirror plus viewer-set seasonal-agent-accent gate
+  (`spriteSeason`/`seasonalAgentAccentsEnabled`, sprites.js:3-11) and a
+  per-season tree-grid cache (`TREE_GRIDS`, sprites.js:280-284, built once per
+  season).
 - **Agent sprites**: `buildAgentSprite(palette, standRows, walkRows)`
   (sprites.js:833) composes stand + walk-cycle frames per agent palette;
   `genericAgentSprite(agent)` (sprites.js:1307) is the deterministic
@@ -204,11 +235,15 @@ heading are chosen per the same classification.
 - **Seasonal variants**: tree grids are cached per season
   (`TREE_GRIDS[season]`, sprites.js:284, 341); in winter `drawSnowCap`
   (sprites.js:83) layers onto trees, rocks, and any agent-built structure's
-  top edge (sprites.js:794-797) — the only place in the file reading the
-  module-level `spriteSeason` mirror instead of an explicit `season` param.
+  top edge (sprites.js:794-797). Seasonal agent accents also read the
+  module-level `spriteSeason` mirror rather than an explicit `season` param.
   `setSpriteSeason(season)` (sprites.js:7) is called once per `/state` poll
   from `pollState()` (index.html:2170) so rendering tracks
-  `calendar.season`.
+  `calendar.season`. `SEASONAL_AGENTS_ENABLED` uses the same mirror and a
+  viewer-set boolean to draw small post-body seasonal accessory pixels on
+  living agents (winter wool cap/scarf, spring leaf pin, summer straw brim,
+  autumn scarf); turning it off leaves their base and named accessory sprites
+  unchanged.
 - **`STARTER_DISTRICTS_JS`** (sprites.js:1443-1456, 12 entries) is a
   client-side fallback used before the first `/districts.js` fetch resolves;
   a comment flags it **"MUST be kept in sync with sim_engine.py's

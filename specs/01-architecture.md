@@ -80,7 +80,7 @@ their instructions are in `SYSTEM_PROMPT`, and the engine filters them when
 maps; server startup maps remain seed-only conveniences and are not a second role
 registry.
 
-## Flag index (complete — 37 module-level flags, sim_engine.py)
+## Flag index (complete — 43 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -104,6 +104,12 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `ECOLOGY_ENABLED` | True | yes | [05](05-world.md) |
 | `ROADS_ENABLED` | True | yes | [05](05-world.md) |
 | `STRUCTURE_UPGRADES_ENABLED` | True | yes | [05](05-world.md) |
+| `STRUCTURE_WEAR_ENABLED` | True | yes | [11](11-viewer.md) |
+| `ACTIVITY_CUES_ENABLED` | True | yes | [11](11-viewer.md) |
+| `SOCIAL_LAYER_ENABLED` | True | yes | [09](09-systems-society.md) |
+| `CHRONICLE_ENABLED` | True | yes | [09](09-systems-society.md) |
+| `WORLD_CLOCK_HUD_ENABLED` | True | yes | [11](11-viewer.md) |
+| `SEASONAL_AGENTS_ENABLED` | True | yes | [11](11-viewer.md) |
 | `GOODS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `TECH_TREE_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `DAILY_COUNCIL_ENABLED` | True | no | [09](09-systems-society.md) |
