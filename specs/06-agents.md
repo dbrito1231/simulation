@@ -211,6 +211,79 @@ slices (never replacing them); `server.py`'s `MEMORY_PROMPT_CHAR_BUDGET` was
 raised 600 -> 900 so those lines have headroom instead of being the first
 thing evicted by the char-budget's oldest-first trim.
 
+## Sovereign God mode: per-agent omen state and sight (Phase 3)
+
+Agents carry no new persisted field for this — a private omen lives entirely
+in `civilization["godState"]["privateOmens"]`, keyed by `str(agent["id"])`
+(never by name; names are display-only), not on the agent object itself.
+`_find_agent_by_id(agent_id)` (sim_engine.py, next to `_find_agent`) is the
+id-keyed lookup this and every other Phase 3 command use. `_god_apply_
+private_omen` rejects an unknown id or a deceased target
+(`agent.get("deathFrame") is not None`) before any text is even normalized —
+"one living agent id" per the plan's catalog.
+
+An active omen is reachable from cognition only through the dedicated
+`divine_private_line` prompt field ([03-cognition.md](03-cognition.md)) —
+never through `agent["memory"]`. Exactly once, when it closes (expiry,
+revocation, or replacement — whichever happens first), its text is written
+into the target's ordinary memory via
+`_push_memory(agent, text, kind="divine_omen")`, guarded by a `memoryWritten`
+flag on the omen record so a restore-time re-sweep of an already-closed omen
+can never fire it twice. See [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-and-providence)
+for the full closure/expiry mechanics.
+
+`god_sight(filters)`'s per-agent projection exposes omen **status** only —
+`{"active": true, "expiresFrame": int}` or `None` — never the raw omen text
+in that specific field (the text is still reachable via the same response's
+`recentInterventions`, and only through the authenticated
+`/control/god/sight` route — never `/state`, activity, communication, or the
+Chronicle).
+
+## Sovereign God mode: `agent_vitals` miracle bounds (Phase 4)
+
+`{"kind": "agent_vitals", "payload": {"targetId": int, "healthDelta":
+number?, "hungerDelta": number?}}` — full command details in
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-4--bounded-immediate-miracles);
+this section documents the agent-state contract specifically. `targetId`
+must resolve to a living agent via `_find_agent_by_id` (unknown or
+`deathFrame is not None` both reject before any delta is checked); at least
+one of `healthDelta`/`hungerDelta` must be present and non-zero; each is
+independently capped at `GOD_VITALS_DELTA_MAX = 100` magnitude.
+
+**The no-kill floor.** `agent["health"]` and `agent["hunger"]` are the same
+two fields `_update_survival` maintains every tick, and this miracle clamps
+them through the same conceptual `0..100` range — with one deliberate
+exception. `_update_survival` treats `health <= 0` as the *incapacitation*
+threshold (`agent["incapacitated"] = True`), not death: permanent death is a
+separate, distinct transition that only ever happens through `_agent_dies`
+(old age today; see [09-systems-society.md](09-systems-society.md) for the
+lifecycle), and nothing in `_update_survival`'s health-loss branch calls it.
+A negative `healthDelta` is nonetheless clamped to stop at
+`GOD_VITALS_HEALTH_FLOOR = 1` — one full point above the incapacitation
+threshold — rather than at `0`. This is the documented floor above death the
+"cannot kill" contract requires: the miracle can never itself be the
+mutation that flips `incapacitated = True`, and it never reads or writes
+`deathFrame`, `incapacitated`, `goal`, `assignedTask`, or any other
+lifecycle-succession field `_agent_dies` touches — it is a pure
+`health`/`hunger` write, nothing else. Repeated large negative deltas floor
+at `GOD_VITALS_HEALTH_FLOOR` every time (each command reads the agent's
+*current* health before clamping), so there is no way to compound damage
+below the floor across multiple commands.
+
+Hunger carries no equivalent floor: `hunger <= 0` does not incapacitate or
+kill an agent by itself (it only makes the *next* `_update_survival` tick
+apply `HEALTH_RATE` loss instead of `HEALTH_REGEN` gain), so a negative
+`hungerDelta` clamps to the ordinary `max(0, ...)` floor like every other
+hunger-decreasing path in the engine (`HUNGER_RATE` drain, etc.). Positive
+deltas on either field clamp at the ordinary `min(100, ...)` ceiling
+`_update_survival` also uses.
+
+The miracle calls `_mark_context_dirty(agent)` unconditionally after mutating
+(`_update_survival` only does this on a health/hunger threshold crossing; the
+miracle is more liberal so a divine vitals change is always reflected in the
+agent's next think payload rather than waiting for the next survival tick to
+happen to cross a threshold).
+
 ## Emergent roles (`EMERGENT_ROLES`, default True)
 
 Any agent may submit `propose_role` with a role object containing `slug`, `name`,

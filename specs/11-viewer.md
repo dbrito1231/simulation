@@ -481,6 +481,180 @@ via `drawShipments(ctx, world.frameTick)`, called right after
   server restart `world.shipments` is simply absent/empty until new
   transfers occur, so there is nothing to orphan visually.
 
+## Divine Console (Sovereign God mode, Phase 7)
+
+`#divineConsoleSection` is a single collapsed `<details>` panel appended to
+the right-hand `#sidebarBody`, after Chronicle, holding a tabbar of seven
+always-present sections — **Unlock**, **Sight**, **Voice**, **Miracles**,
+**Story**, **Laws**, **History** — plus an eighth, **Compile**, shown only
+when the server reports the Optional Phase 8 compiler enabled (see below).
+It is strictly additive over
+[docs/plan-sovereign-god-mode-v2.md](../docs/plan-sovereign-god-mode-v2.md)'s
+already-shipped backend (Phases 2–6, see
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel)
+and [04-http-api.md](04-http-api.md#sovereign-god-mode)) — no engine or route
+code changed for this phase.
+
+**Feature gate.** The entire panel (DOM visibility, JS behavior, fetches) is
+driven by exactly one signal: `GOD_MODE_ENABLED_FLAG`, a module-level mirror
+of `state.config.flags.GOD_MODE_ENABLED`, set in `applyFlags()` the same way
+every other echoed flag is (see "Polling and render loop" above).
+`updateGodModeGate()` (called once per `renderSidebar()`, itself once per
+`pollState()` tick — **no new poll loop**) toggles
+`#divineConsoleSection`'s `display` and, when off, force-hides
+`#godPublicBanner` too. When the flag is absent or false — including an older
+snapshot from before this key existed, or a snapshot from a
+`GOD_MODE_ENABLED`-off server — the panel makes zero `/control/god/*`
+requests: every fetch in this section is wired to an explicit button click
+(Connect/Preview/Apply/Cancel/Refresh), never a timer, so a flag-off session
+never issues a single God HTTP call. A flag-off render is byte-identical to
+the pre-Phase-7 page for every other panel.
+
+**Token handling.** The token lives in one JS variable, `godToken`, held only
+in memory. The Unlock tab offers a "remember for this tab" checkbox
+(`#godRememberCheckbox`, default unchecked) that, only when checked, mirrors
+the token into `sessionStorage` — `localStorage` is never used anywhere in
+this section. `godApiFetch()` (the single fetch wrapper every God call goes
+through) clears `godToken`/`godAuthorized`/the cached capabilities/sight
+response and re-locks the console (`godLockConsole()`, switches back to the
+Unlock tab) on any `401` response, matching the backend's uniform
+unauthorized shape (04-http-api.md).
+
+**Rendering contract.** Every dynamic string this section writes into
+`innerHTML` is escaped with the file's existing `escapeHtml()` helper before
+insertion (this section alone adds dozens of call sites, on top of the
+65+ pre-existing ones cited above) — narration, titles, error/rejection
+reasons, agent names, resource/structure labels, and history entries all go
+through it. `god_preview()`'s `normalizedCommand` field is deliberately
+**never** written into `innerHTML` or otherwise rendered anywhere; every
+preview/apply outcome shown to the operator is instead rebuilt field-by-field
+from the response's typed keys (`renderGodPreviewOutcomeHtml()`/
+`renderGodAppliedHtml()`), each value escaped individually.
+
+**Preview → Apply.** `wireDivineForm(formSelector, opts)` is the one reusable
+wiring helper behind every mutating subform (proclamation, providence,
+private omen, the three miracles, story event, law): an `input`/`change`
+listener on the whole `<fieldset>` invalidates any cached preview and
+disables Apply; Preview posts the built envelope to
+`/control/god/preview` and, on success, caches the response and renders
+`reversibilityClass` as a color-coded badge
+(`.divine-badge-irreversible`/`-consequential`/`-cancellable`) plus the
+preview's outcome and any disclosed replacement (`fingerprint.outgoingId`,
+rendered as an explicit "this will REPLACE …" warning for
+providence/private_omen); Apply posts **only** `{previewId, requestId}` — the
+client never re-sends the normalized command — and renders exactly what
+`/control/god/apply` returns, clearing the cached preview either way (success
+or rejection) so a second Apply always requires a fresh Preview.
+
+Timed effects display both units together via `godDurationLabel()`
+(`"Xs (Yf)"`, dividing by the same 30-ticks/s assumption the rest of the
+viewer uses) and a live countdown via `godCountdownLabel()` computed against
+the latest polled `world.frameTick`.
+
+**Replacement-conflict asymmetry (Story/Laws).** Providence and private-omen
+replacement is disclosed proactively by the preview response
+(`fingerprint.outgoingId`), so the console can show the warning before the
+operator ever needs to know an id. A `story_event` modifier-key conflict
+(used by both the Story and Laws tabs, since Laws submits a `story_event`
+carrying only `modifiers`) is instead a **hard preview rejection** naming the
+occupying event's id in the reason string (`_validate_god_story_event`, see
+02-engine-core.md) — there is no disclosed `outgoingId` to read. The console
+recovers the id by pattern-matching the rejection text
+(`onPreviewRejected` in `wireDivineForm`), then offers a "Replace conflicting
+effect" checkbox pre-filled with that id so a second Preview (now carrying
+`replaceEffectId`) can succeed. This is a viewer-side accommodation of an
+existing backend asymmetry, not a claim that the backend discloses the
+conflict the same way — see this phase's report for the underlying gap.
+
+**Sections:**
+
+- **Unlock** — token field, "remember for this tab" checkbox, Connect button,
+  and a status readout (`locked` / `Authorized.` / an unauthorized message).
+  A disabled-flag hint line was scoped out per the phase brief (the panel is
+  never rendered at all when the flag is off, so there is nothing to hint
+  from inside it).
+- **Sight** — an agent selector (`getLivingAgents()`, the same public roster
+  every other panel already reads) plus a Refresh button that calls
+  `GET /control/god/sight` and renders the selected agent's health/hunger/
+  incapacitated/district/resources/last action, private-omen status
+  (active + countdown only, never the omen text — matching `god_sight()`'s
+  own restraint), and every active effect from the authenticated
+  `activeEvents` list (including private-visibility ones, tagged with a
+  `private` badge) with a countdown each.
+- **Voice** — three independent subforms (`proclamation`, `providence` with
+  a duration field, `private_omen` with an agent selector and duration),
+  each following the Preview → Apply contract above.
+- **Miracles** — `agent_vitals` (agent + health delta + hunger delta),
+  `grant_resource` (resource + amount + stockpile-or-agent target),
+  `structure_condition` (structure + signed delta); all three are labeled
+  `IRREVERSIBLE` in their preview badge, matching `_god_reversibility_class`.
+- **Story** — title, narration, visibility (public, or private with an
+  agent target), duration, a shared 7-key modifier editor
+  (`renderGodModifierEditor()`, bounds populated from
+  `capabilities.modifierRanges` after Connect), an optional embedded
+  providence, and a bounded (`capabilities`-reported `primitives.maxItems`,
+  default 5) repeatable primitive-effect list reusing the same three
+  Miracles payload shapes inline. `reversibilityClass` in the response
+  badge flips from `cancellable` to `CONSEQUENTIAL` automatically once any
+  primitive is present, per the engine's own rule.
+- **Laws** — the same 7-key modifier editor submitted as a `story_event`
+  with no primitives (so mechanically identical to Story minus title/
+  narration ceremony — both are auto-filled with a sensible default if left
+  blank rather than forced on the operator), plus a live "currently active"
+  list (preferring the authenticated Sight projection when available, since
+  it — unlike the public `/state` projection — can include a
+  private-visibility law's modifiers; falling back to
+  `state.god.activePublicEvents` otherwise) with a per-effect Cancel button
+  wired straight to `/control/god/cancel`.
+- **History** — the last (up to 50, newest first) entries from
+  `state.god.recentPublicInterventions`, each tagged with a `public` badge.
+  Private history (omens, private story events) is deliberately never shown
+  here — per `snapshot()`'s allowlist (04-http-api.md), it is not present in
+  `/state` at all and is reachable only through the authenticated Sight tab.
+- **Compile** (Optional Phase 8, dual-gated) — `#godCompileTabBtn` stays
+  `display:none` until `applyGodCapabilitiesToForms()` sees
+  `capabilities.compiler.enabled === true` (itself already the AND of
+  `GOD_MODE_ENABLED` and the separate `GOD_COMPILER_ENABLED` dark flag on the
+  server — see [04-http-api.md](04-http-api.md#optional-phase-8-controlgodcompile)
+  and [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler)); the
+  same check also bounds the prose textarea's `maxLength` to
+  `capabilities.compiler.promptMaxChars` and stores
+  `capabilities.compiler.minIntervalSec` for the client-side rate-limit UX
+  below. The tab holds one textarea and a single Compile button — **no Apply
+  button of its own, on purpose**. Clicking Compile posts `{prose}` to
+  `POST /control/god/compile`; on `compileOk: true` it calls
+  `godPopulateStoryFromCompiled(normalizedCommand)` — which fills the Story
+  tab's title/narration/visibility/target/duration/modifier-checkboxes/
+  primitive rows/providence fields from the compiled draft, explicitly
+  invalidates any stale Story preview (dispatches the same `input` event
+  `wireDivineForm`'s own listener already watches), then calls
+  `showGodTab("story")` — so the operator reviews and Applies through the
+  **exact same** Preview → Apply flow every other Voice/Miracle/Law/Story
+  action already uses, documented above. On rejection or a network error the
+  reason is written via `.textContent` only (never `innerHTML`) into
+  `#godCompileResult` — the compiler's raw model output can appear inside
+  that reason string (e.g. a truncated non-JSON response), so it gets the
+  same plain-text-only treatment as every other stored/adversarial string in
+  this panel. After every click (success, rejection, or error alike) the
+  Compile button disables itself client-side for `minIntervalSec` seconds —
+  advisory only; `GOD_COMPILER_MIN_INTERVAL_SEC` on the server is the
+  authoritative rate limit and rejects independently of what the client UI
+  does.
+
+**Public banner.** `#godPublicBanner` (fixed, top-center, styled distinctly
+from `#councilBanner`/`#foundingBanner`) fires on the same client-diff
+edge-detection pattern the Founding banner already established: each
+`renderDivineConsole()` call (itself gated by a `JSON.stringify(world.god)`
+change-detect key, mirroring `lastChronicleKey`) diffs
+`state.god.recentPublicInterventions` for an id not yet in a small in-memory
+`Set` (`godSeenInterventionIds`, pruned as the bounded ring evicts old
+entries), shows one line of `textContent` for 6s on a fresh one, and — on
+the very first snapshot after a page load — records existing history as
+"already seen" without banner-ing it, so resuming a long `GOD_MODE_ENABLED`
+session doesn't replay its whole intervention history as a banner burst.
+There is no full-screen flash, no forced camera movement, and no banner (or
+any other public surface) for a private omen or private story event.
+
 ## Active viewer work
 
 Three open design docs describe further, not-yet-fully-landed viewer polish

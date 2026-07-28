@@ -13,8 +13,22 @@ deep mechanics.
 
 ## Non-goals
 
-- Not a game or shippable product — no win condition, scoring, or player input beyond
-  observation and admin controls (pause/resume/reset/roster size).
+- Not a game or shippable product — no win condition or scoring. Player input is
+  limited to observation and admin controls (pause/resume/reset/roster size),
+  plus the optional, default-off intervention mode described below.
+- **Optional intervention mode (God mode).** `GOD_MODE_ENABLED` is off unless the
+  operator sets both `SIM_GOD_MODE=1` and a non-empty `SIM_GOD_TOKEN` at startup.
+  When off — the default — the simulation is exactly as autonomous as it was
+  before the flag existed. When on, an authenticated operator may observe private
+  state and author bounded, typed interventions. This is a deliberate departure
+  from the pure-observer stance of earlier drafts, and it is stated here rather
+  than hidden behind an "admin tool" label: a god-enabled run is partly
+  interactive. Divine influence must never masquerade as emergent agent behavior,
+  so every intervention is attributable and replay-auditable, and a run that has
+  received one is permanently marked `intervened`. **Intervened runs are not
+  comparable to untouched autonomous runs** and must never be cited as evidence
+  of emergent behavior. See [02-engine-core.md](02-engine-core.md) for state and
+  [04-http-api.md](04-http-api.md) for the routes.
 - Not a research-grade multi-agent benchmark — `BENCHMARKS_ENABLED` sampling exists for
   observability, not publishable evaluation.
 - Kept minimal and observable: every mechanic must be debuggable from JSONL logs and

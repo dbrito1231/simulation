@@ -80,7 +80,40 @@ their instructions are in `SYSTEM_PROMPT`, and the engine filters them when
 maps; server startup maps remain seed-only conveniences and are not a second role
 registry.
 
-## Flag index (complete — 49 module-level flags, sim_engine.py)
+## Control-plane data flow (Sovereign God mode)
+
+A second, deliberately separate control plane exists alongside the normal
+agent think cycle above: `/control/god/*` (server.py), gated by
+`GOD_MODE_ENABLED` (sim_engine.py) plus a token check (server.py). It never
+enters `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT`/`apply_decision`/
+`available_actions`/`ACTION_LABELS` — the action-sync invariant above does not
+apply to it, by design (a future agent-facing action, e.g. `pray`, would be a
+separate change that does).
+
+- server.py checks `X-God-Token` (constant-time compare) and the module flag
+  before a request ever reaches the engine; every God route acquires
+  `self.lock` itself once it does.
+- `god_preview()` validates and normalizes a command with NO mutation,
+  returning a short-lived, bounded, in-memory preview record.
+- `god_apply()` accepts only `{previewId, requestId}` — never a client-
+  returned command — resolves the server-held preview, revalidates it against
+  current state, and applies atomically under the lock.
+- `god_cancel()` / `god_sight()` are the remaining two entry points; see
+  [02-engine-core.md](02-engine-core.md) for their Phase 2 shape.
+- `god_compile_prose()` (Optional Phase 8) is a SECOND-gated entry point —
+  `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED` — that only ever produces a
+  `god_preview()`-shaped draft; it never mutates and has no apply-adjacent
+  behavior of its own. See [03-cognition.md](03-cognition.md#sovereign-god-mode-optional-phase-8-free-prose-story-compiler)
+  and [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler).
+
+`GOD_MODE_ENABLED` is also the **first** env-var-backed flag in
+`sim_engine.py` (`os.environ.get("SIM_GOD_MODE", ...)`, read once at import).
+Every prior env-var precedent (`SIM_HOST`, `SIM_PORT`, `SIM_AGENTS`,
+`SIM_LOG_RETENTION`) lives only in server.py; sim_engine.py previously read no
+environment state at all. The companion `SIM_GOD_TOKEN` env var stays in
+server.py only, since the token check itself lives there.
+
+## Flag index (complete — 51 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -137,3 +170,5 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `CARAVAN_VISUALS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WEATHER_ENABLED` | True | yes | [05](05-world.md) |
 | `WEATHER_GOVERNANCE_ENABLED` | True | yes | [05](05-world.md) |
+| `GOD_MODE_ENABLED` | False (env-backed, `SIM_GOD_MODE`) | yes | [02](02-engine-core.md), [04](04-http-api.md) |
+| `GOD_COMPILER_ENABLED` | False (env-backed, `SIM_GOD_COMPILER`) | no (advertised only via `/control/god/capabilities`'s `compiler.enabled`, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |

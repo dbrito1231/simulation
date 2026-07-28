@@ -455,3 +455,191 @@ itself is echoed in `config.flags.CARAVAN_VISUALS_ENABLED`. Off means the
 key is simply absent and the viewer draws nothing extra — the moored
 `physicalProps` boats (`TRANSIT_ENABLED`, [11](11-viewer.md)) are entirely
 unaffected by this flag either way.
+
+## Sovereign God mode: `grant_resource` semantics (Phase 4)
+
+`{"kind": "grant_resource", "payload": {"resourceId": str, "amount": int,
+"target": "stockpile" | {"agentId": int}?}}` — full command/reversibility
+details in
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-4--bounded-immediate-miracles);
+this section documents the resource-transfer contract specifically.
+
+**Known-resource gate.** `resourceId` must already exist as a key in the live
+`civilization["resourceRegistry"]` — the same registry `_perform_gather`,
+crafting, invention, and cognition's `known_resource_ids` all read from
+(seeded from `BASE_RESOURCES`/`CRAFTED_RESOURCES` plus any invented custom
+resources). There is no separate "known resource" allowlist for God mode; a
+`resourceId` that has never been seeded or invented is rejected as "unknown
+resource id" before any other check.
+
+**Caps.** `amount` is a positive integer, capped per command at
+`GOD_GRANT_PER_COMMAND_CAP = 200`. A second, cumulative cap,
+`GOD_GRANT_SESSION_CAP = 2000`, bounds the running total of every
+`grant_resource` command *applied* (not merely previewed) since process
+start, tracked by `self._god_grant_session_total` — in-memory only, like
+`self._god_preview_cache`/`self._god_requests`, reset by `reset()` and never
+written to `state.db`. A command whose `amount` would push the running total
+past the session cap is rejected at validation time (both at preview and at
+apply-time revalidation), applying nothing.
+
+**Storage/carry semantics, preserved explicitly.** `target` omitted or the
+literal string `"stockpile"` adds `amount` straight to
+`civilization["stockpile"][resourceId]` — identical to how tax collection,
+rationing, and every other stockpile-crediting path already writes it.
+`target: {"agentId": int}` must resolve to a living agent, and the grant is
+split through the exact same two sinks `_perform_gather`'s carry-cap clamp
+and every other gain-resource path already use, via `_carry_cap(agent)`:
+
+```text
+cap    = _carry_cap(agent)                       # COLLECT_CAP (+cart/wagon bonus)
+held   = agent["resources"].get(resourceId, 0)
+room   = max(0, cap - held)
+agent_added     = min(amount, room)               # fills the agent's carry room first
+stockpile_added = amount - agent_added            # remainder routes to the village stockpile
+```
+
+This is the plan's chosen resolution for "if a grant would exceed carry
+capacity, either clamp to capacity or route the remainder to the
+stockpile": the remainder is **routed to the stockpile**, never clamped away
+and lost, and never a third bypass sink distinct from the two every ordinary
+resource-gain path already writes to. `god_preview()`'s `previewOutcome` for
+this kind reports `agentAdded`/`stockpileAdded` computed against the agent's
+*current* held amount, so the operator sees the exact split before
+committing to apply.
+
+## Sovereign God mode: timed lawgiver modifiers — the arithmetic contract (Phase 5)
+
+Seven allowlisted `float` keys, each read through one helper —
+`_divine_modifier(key, default=1.0)` — at the exact existing calculation
+site each already had, in the exact existing order, before the existing
+clamp. With no active effect for a key (flag off, or flag on with nothing
+occupying that key) the helper returns exactly `1.0`, so multiplying by it
+is always safe to leave in the code path unconditionally: `1.0 * x == x`
+(for the `int`/`floor` cases below, `math.floor(x * 1.0) == x` for any `x`
+already an `int`), which is *why* an untouched or all-`1.0` run is
+byte-identical to the feature-off baseline rather than merely similar to it.
+See [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
+for the `activeEvents`/`story_event` state this reads and the
+one-value-per-key composition rule.
+
+**Gathering (`_perform_gather`).** The existing sequence: base `amount`,
+then `+= self._custom_rule_modifier("collect_resource", ...)` (an
+agent-authored village-law addition), then an ecology-scale
+`max(1, int(amount * scale))`, then a grove-ratio `max(1, int(amount *
+grove_mult))`, then a carry-cap clamp `max(1, min(amount, cap_room))`, then
+`collectSuccesses += 1` and the tool benchmark. The divine step is inserted
+**after** the grove-ratio line and **before** the carry-cap clamp:
+
+```text
+mult   = fish_yield_multiplier if resource == "fish" and active
+         else gather_yield_multiplier
+amount = floor(amount * mult)
+if amount <= 0:
+    return early — before the carry-cap clamp
+```
+
+**Ordering is load-bearing, not stylistic.** The carry-cap clamp is `max(1,
+min(...))` — applying the divine multiplier *after* that clamp would
+resurrect a `0.0`/near-zero result back to `1`, silently defeating the
+headline "a divine famine nulls the harvest" case. Multiplying *before* the
+clamp and returning early on a non-positive result is the only ordering that
+lets a divine multiplier actually produce zero.
+
+**The zero-path is a full early return**, not merely skipping the resource
+add. It happens *before*: the resource being added to `agent["resources"]`,
+`c["collectSuccesses"] += 1`, `self._path1_tool_benchmark(resource, True)`,
+ecology stock depletion (`_deplete_district_stock`), harvest-quota recording
+(`_record_harvest_quota_use`), and gather-skill practice (`_practice_skill`).
+It still sets `agent["lastGatherRejection"]` (the same field every other
+gather-rejection branch sets) and returns a "found nothing" narration in the
+same voice as its neighbors, so a divinely-nulled gather is indistinguishable
+from any other legitimate rejection in the agent's own eyes — and, crucially,
+never inflates `collectSuccesses` or the tool-tier benchmark, which is
+exactly the evidence stream God-mode's `intervened` marker exists to keep
+honest.
+
+**Fish precedence.** `fish_yield_multiplier` *replaces* — never multiplies
+with — `gather_yield_multiplier` for `resource == "fish"`. A fish gather
+reads only `_divine_modifier("fish_yield_multiplier")`; it never falls back
+to or combines with the general key, even when only the general key is
+active. `gather_yield_multiplier`'s range is `0.25..3.0` (it can never reach
+`0.0` on its own — a base `amount == 1` gather already floors to `0` at its
+own minimum, `floor(1 * 0.25) == 0`, so the zero-path is still reachable
+through the general key at its floor); `fish_yield_multiplier`'s range is
+`0.0..3.0`, reaching true zero directly.
+
+**Divine law scales village law, not the other way around.** The divine
+multiplier is applied *after* `_custom_rule_modifier`'s additive village-law
+bonus (an agent-authored governance effect, e.g. a "Wood Charter" custom
+rule), not instead of it — a divine famine suppresses a village's own
+harvest bonus too, which is the intended default. `god_preview()`'s
+`previewOutcome` for a `story_event` naming `gather_yield_multiplier` or
+`fish_yield_multiplier` adds a `customRuleContext` list (one `{ruleId,
+subject, value}` entry per currently-enacted village rule that modifies
+`collect_resource`) alongside the proposed `modifiers`, so an operator sees
+both contributions **named separately** — the divine value is never merged
+into or replacing the custom-rule value in the preview response, only in the
+live arithmetic where composition is genuinely intended.
+
+**Hunger drain (`_update_survival`).** `agent["hunger"] = max(0,
+agent["hunger"] - HUNGER_RATE * _divine_modifier("hunger_drain_multiplier"))`
+— the multiplier scales the delta *before* the existing `max(0, ...)` clamp.
+`0.0` suppresses drain entirely for that tick without touching any other
+survival effect.
+
+**Starvation damage (`_update_survival`, the `hunger <= 0` branch).**
+`agent["health"] = max(0, agent["health"] - HEALTH_RATE *
+_divine_modifier("starvation_damage_multiplier"))` — same before-the-clamp
+ordering. New relative to the vitals-miracle catalog: this is the only knob
+that lets a divine effect reduce *ongoing* starvation damage rather than
+granting a one-off vitals bump, which is what makes a "Merciful Rain" story
+template mechanically possible.
+
+**Fed regen (`_update_survival`, the `hunger > 0`, not-incapacitated
+branch).** `agent["health"] = min(100, agent["health"] + HEALTH_REGEN *
+_divine_modifier("health_regen_multiplier"))` — same before-the-clamp
+ordering. This is the **only** consumer site `health_regen_multiplier`
+reaches.
+
+**`COLLAPSE_REGEN` is deliberately excluded from divine scaling.** The
+`agent["incapacitated"]` branch — `agent["health"] = min(100,
+agent["health"] + COLLAPSE_REGEN)` — is left completely untouched by
+`health_regen_multiplier` or any other divine modifier. `COLLAPSE_REGEN` is
+what lets an incapacitated agent climb back to `COLLAPSE_REVIVE_HEALTH = 15`;
+if a `0.0` `health_regen_multiplier` reached this line, a collapsed agent
+would be permanently stranded below the revive threshold with no
+deterministic escape. This is the one line in the entire seven-key catalog
+where "scale everything uniformly" was rejected on purpose — the smoke suite
+proves a collapsed agent still recovers under an active `0.0`
+`health_regen_multiplier`.
+
+**Structure decay (`_tick_structure_decay`).** The passive per-goods-tick
+delta is scaled before being handed to the shared helper: `decay =
+STRUCTURE_DECAY_PER_GOODS_TICK * _divine_modifier("structure_decay_multiplier")`,
+then `self._apply_structure_condition_delta(s, -decay)` for every
+non-ruined structure — the identical helper the `structure_condition`
+miracle (Phase 4) and direct disaster damage both call with their own
+deltas. Only *this* passive-decay call site is scaled; a miracle's own
+`delta` and any disaster-damage delta are untouched by
+`structure_decay_multiplier`.
+
+**Spoilage (`_tick_spoilage`).** The existing computation — `base_spoil =
+max(1, int(overflow * SPOILAGE_RATIO))` (the floor-of-1 guarantee that
+normal spoilage always removes at least one unit once there is any overflow
+at all) — is now followed by `to_spoil = min(overflow, floor(base_spoil *
+_divine_modifier("spoilage_multiplier")))`. The divine multiplier is applied
+to `base_spoil` **before** the existing `min(overflow, ...)` bound is
+re-applied, so spoilage can never remove more than the eligible overflow
+regardless of how large the multiplier is (`3.0` max), and an active `0.0`
+overrides the normal floor-of-1 guarantee entirely — no spoilage happens
+that tick.
+
+**Identity.** For every site above, an effective `1.0` — flag off, or flag
+on with nothing occupying that key — executes the identical multiplication
+and produces the identical clamp result as the feature-off baseline; no
+site special-cases "is God mode on" to skip the multiplication, because
+`_divine_modifier`'s own default already makes doing so unnecessary. The
+smoke suite proves this for every site (gather, survival, structure decay,
+spoilage) by running identical operations against two independently
+constructed engines — one with the flag off, one with the flag on and every
+key pinned to `1.0` — and asserting the observable results match exactly.

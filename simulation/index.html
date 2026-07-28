@@ -738,6 +738,75 @@
   #councilAssemblyVerdict { padding:9px; border:1px solid #b99446; border-radius:5px; background:#302718; color:#ffe4a1; }
   #councilAssemblyReopenBtn { display:none; position:fixed; right:18px; bottom:18px; z-index:109; box-shadow:0 4px 18px rgba(0,0,0,.45); }
   #councilAssemblyReopenBtn.visible { display:block; }
+  /* --- Divine Console (Sovereign God mode Phase 7, docs/plan-sovereign-god-
+     mode-v2.md "Viewer: Divine Console"). Strictly additive: every rule below
+     only ever touches elements inside #divineConsoleSection/#godPublicBanner,
+     which stay display:none unless config.flags.GOD_MODE_ENABLED is true
+     (see updateGodModeGate()) -- a flag-off snapshot renders byte-identical
+     to before this section existed. */
+  #divineConsoleSection summary {
+    cursor: pointer; font-size: 13px; font-weight: 600; color: #ffd27a;
+    margin-bottom: 6px; outline: none;
+  }
+  .divine-tabbar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+  .divine-tab-btn {
+    padding: 4px 8px; font: 11px sans-serif; background: #24242e; color: #bbb;
+    border: 1px solid #3a3a48; border-radius: 3px; cursor: pointer;
+  }
+  .divine-tab-btn:hover { background: #2c2c38; }
+  .divine-tab-btn.active { background: #4a3a1a; color: #ffd27a; border-color: #b5883a; }
+  .divine-tab-panel { font-size: 12px; color: #ccc; }
+  .divine-fieldset {
+    border: 1px solid #2e2e3a; border-radius: 4px; padding: 8px; margin-bottom: 10px;
+  }
+  .divine-fieldset legend { font-size: 11px; color: #d9b96e; padding: 0 4px; }
+  .divine-row { margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .divine-row label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #9a9aa8; flex: 1 1 auto; }
+  .divine-row input[type=text], .divine-row input[type=password], .divine-row input[type=number],
+  .divine-row select, .divine-row textarea {
+    background: #1b1b26; color: #ddd; border: 1px solid #3a3a48; border-radius: 3px;
+    padding: 3px 5px; font: 12px sans-serif; box-sizing: border-box; width: 100%;
+  }
+  .divine-row textarea { min-height: 44px; resize: vertical; font-family: ui-monospace, monospace; }
+  .divine-actions { display: flex; gap: 6px; margin-top: 4px; }
+  .divine-actions button {
+    padding: 4px 10px; font: 12px sans-serif; background: #333; color: #fff;
+    border: 1px solid #666; border-radius: 3px; cursor: pointer;
+  }
+  .divine-actions button:hover:not(:disabled) { background: #444; }
+  .divine-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .divine-result { margin-top: 6px; font-size: 11px; line-height: 1.5; color: #bbb; }
+  .divine-result:empty { display: none; }
+  .divine-error { color: #ef9a9a; font-weight: 600; }
+  .divine-applied-banner { color: #a5d6a7; font-weight: 600; margin-bottom: 3px; }
+  .divine-warning { color: #ffcc80; font-weight: 600; }
+  .divine-meta { color: #7a7a88; font-size: 10px; margin-top: 3px; }
+  .divine-kv-key { color: #8ed2ed; }
+  .divine-badge {
+    display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px;
+    font-weight: 700; letter-spacing: 0.03em; margin-bottom: 4px;
+  }
+  .divine-badge-irreversible { background: #4a1e1e; color: #ffb3b3; border: 1px solid #a24545; }
+  .divine-badge-consequential { background: #4a3a12; color: #ffdca0; border: 1px solid #b5883a; }
+  .divine-badge-cancellable { background: #1e3a2a; color: #b3ffcf; border: 1px solid #3a8a5a; }
+  .divine-status { margin-top: 6px; font-size: 11px; font-weight: 600; }
+  .divine-status-ok { color: #a5d6a7; }
+  .divine-status-locked { color: #ef9a9a; }
+  .divine-status-disabled { color: #888; }
+  .divine-note { font-size: 11px; color: #888; margin-bottom: 6px; }
+  .divine-history-item { padding: 4px 0; border-bottom: 1px solid #22222c; }
+  .divine-history-badge { font-size: 9px; padding: 0 4px; border-radius: 2px; margin-right: 4px; }
+  .divine-history-public { background: #1e3a2a; color: #b3ffcf; }
+  .divine-history-private { background: #3a1e3a; color: #e0b3ff; }
+  .divine-primitive-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 4px; padding: 4px; border: 1px dashed #333; border-radius: 3px; }
+  .divine-primitive-row select, .divine-primitive-row input { font-size: 11px; padding: 2px 4px; }
+  #godPublicBanner {
+    position: fixed; top: 78px; left: 50%; transform: translateX(-50%);
+    padding: 6px 18px; font: 600 13px system-ui, sans-serif;
+    background: rgba(74, 30, 58, 0.92); color: #f0d0ff;
+    border: 1px solid #a24594; border-radius: 4px;
+    z-index: 11; display: none; pointer-events: none;
+  }
   @media (max-width: 900px) {
     #wrap { flex-direction: column; height: auto; padding: 0; }
     #world { height: auto; max-height: 70vh; width: 100%; }
@@ -798,6 +867,7 @@
     <canvas id="minimap" width="220" height="160"></canvas>
     <div id="councilBanner"></div>
     <div id="foundingBanner"></div>
+    <div id="godPublicBanner"></div>
   </div>
   <aside id="sidebar">
     <h1>AI Simulation World</h1>
@@ -857,6 +927,199 @@
     <section class="panel-section" id="chronicleLog">
       <h2>Chronicle</h2>
       <ul id="chronicleList"></ul>
+    </section>
+    <section class="panel-section" id="divineConsoleSection" style="display:none">
+      <details id="divineConsolePanel">
+        <summary>Divine Console</summary>
+        <div class="divine-tabbar">
+          <button type="button" class="divine-tab-btn" data-tab="unlock">Unlock</button>
+          <button type="button" class="divine-tab-btn" data-tab="sight">Sight</button>
+          <button type="button" class="divine-tab-btn" data-tab="voice">Voice</button>
+          <button type="button" class="divine-tab-btn" data-tab="miracles">Miracles</button>
+          <button type="button" class="divine-tab-btn" data-tab="story">Story</button>
+          <button type="button" class="divine-tab-btn" data-tab="laws">Laws</button>
+          <button type="button" class="divine-tab-btn" data-tab="history">History</button>
+          <!-- Sovereign God mode Optional Phase 8: dual-gated (GOD_MODE_ENABLED
+               AND the separate GOD_COMPILER_ENABLED dark flag). Hidden by
+               default; applyGodCapabilitiesToForms() reveals it only when
+               capabilities.compiler.enabled is true. -->
+          <button type="button" class="divine-tab-btn" data-tab="compile" id="godCompileTabBtn" style="display:none">Compile</button>
+        </div>
+
+        <div class="divine-tab-panel" id="divineTab-unlock">
+          <div class="divine-row">
+            <label>Token
+              <input type="password" id="godTokenInput" autocomplete="off" placeholder="X-God-Token" />
+            </label>
+          </div>
+          <div class="divine-row">
+            <label style="flex-direction:row; align-items:center; gap:6px;">
+              <input type="checkbox" id="godRememberCheckbox" style="width:auto;" />
+              Remember for this tab (sessionStorage — never localStorage)
+            </label>
+          </div>
+          <div class="divine-actions"><button type="button" id="godConnectBtn">Connect</button></div>
+          <div id="godAuthStatus" class="divine-status">Locked.</div>
+        </div>
+
+        <div class="divine-tab-panel" id="divineTab-sight" style="display:none">
+          <div class="divine-row">
+            <label>Agent <select id="godSightAgentSelect"></select></label>
+            <div class="divine-actions"><button type="button" id="godSightRefreshBtn">Refresh sight</button></div>
+          </div>
+          <div id="godSightOutput" class="divine-result"></div>
+        </div>
+
+        <div class="divine-tab-panel" id="divineTab-voice" style="display:none">
+          <fieldset class="divine-fieldset" id="godProclamationFieldset">
+            <legend>Proclamation (public, one-shot)</legend>
+            <div class="divine-row"><label>Text <textarea id="godProcText"></textarea></label></div>
+            <div class="divine-actions">
+              <button type="button" id="godProcPreviewBtn">Preview</button>
+              <button type="button" id="godProcApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godProcResult"></div>
+          </fieldset>
+          <fieldset class="divine-fieldset" id="godProvidenceFieldset">
+            <legend>Providence (public, cancellable)</legend>
+            <div class="divine-row"><label>Text <textarea id="godProvText"></textarea></label></div>
+            <div class="divine-row"><label>Duration (frames) <input type="number" id="godProvDuration" /></label></div>
+            <div class="divine-actions">
+              <button type="button" id="godProvPreviewBtn">Preview</button>
+              <button type="button" id="godProvApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godProvResult"></div>
+          </fieldset>
+          <fieldset class="divine-fieldset" id="godOmenFieldset">
+            <legend>Private omen (one agent, cancellable)</legend>
+            <div class="divine-row"><label>Agent <select id="godOmenAgentSelect"></select></label></div>
+            <div class="divine-row"><label>Text <textarea id="godOmenText"></textarea></label></div>
+            <div class="divine-row"><label>Duration (frames) <input type="number" id="godOmenDuration" /></label></div>
+            <div class="divine-actions">
+              <button type="button" id="godOmenPreviewBtn">Preview</button>
+              <button type="button" id="godOmenApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godOmenResult"></div>
+          </fieldset>
+        </div>
+
+        <div class="divine-tab-panel" id="divineTab-miracles" style="display:none">
+          <fieldset class="divine-fieldset" id="godVitalsFieldset">
+            <legend>Agent vitals (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label>Agent <select id="godVitalsAgentSelect"></select></label></div>
+            <div class="divine-row"><label>Health delta <input type="number" id="godVitalsHealth" value="0" step="1" /></label>
+              <label>Hunger delta <input type="number" id="godVitalsHunger" value="0" step="1" /></label></div>
+            <div class="divine-actions">
+              <button type="button" id="godVitalsPreviewBtn">Preview</button>
+              <button type="button" id="godVitalsApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godVitalsResult"></div>
+          </fieldset>
+          <fieldset class="divine-fieldset" id="godGrantFieldset">
+            <legend>Grant resource (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label>Resource <select id="godGrantResourceSelect"></select></label>
+              <label>Amount <input type="number" id="godGrantAmount" value="1" min="1" step="1" /></label></div>
+            <div class="divine-row"><label>Target
+              <select id="godGrantTargetKind"><option value="stockpile">Stockpile</option><option value="agent">Agent</option></select>
+            </label>
+            <label>Agent (if target=agent) <select id="godGrantAgentSelect"></select></label></div>
+            <div class="divine-actions">
+              <button type="button" id="godGrantPreviewBtn">Preview</button>
+              <button type="button" id="godGrantApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godGrantResult"></div>
+          </fieldset>
+          <fieldset class="divine-fieldset" id="godStructureFieldset">
+            <legend>Structure condition (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label>Structure <select id="godStructureSelect"></select></label>
+              <label>Delta (+repair / -damage) <input type="number" id="godStructureDelta" value="0" step="1" /></label></div>
+            <div class="divine-actions">
+              <button type="button" id="godStructurePreviewBtn">Preview</button>
+              <button type="button" id="godStructureApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godStructureResult"></div>
+          </fieldset>
+        </div>
+
+        <div class="divine-tab-panel" id="divineTab-story" style="display:none">
+          <fieldset class="divine-fieldset" id="godStoryFieldset">
+            <legend>Story event (cancellable, or CONSEQUENTIAL with primitives)</legend>
+            <div class="divine-row"><label>Title <input type="text" id="godStoryTitle" /></label></div>
+            <div class="divine-row"><label>Narration <textarea id="godStoryNarration"></textarea></label></div>
+            <div class="divine-row">
+              <label>Visibility
+                <select id="godStoryVisibility"><option value="public">Public</option><option value="private">Private</option></select>
+              </label>
+              <label>Target (if private) <select id="godStoryTargetSelect"></select></label>
+              <label>Duration (frames) <input type="number" id="godStoryDuration" /></label>
+            </div>
+            <div id="godStoryModifiers" class="divine-row" style="flex-direction:column; align-items:stretch;"></div>
+            <div class="divine-row">
+              <label style="flex-direction:row; align-items:center; gap:6px;">
+                <input type="checkbox" id="godStoryProvidenceCheckbox" style="width:auto;" /> Also set public providence
+              </label>
+              <label>Providence text <input type="text" id="godStoryProvidenceText" /></label>
+            </div>
+            <div id="godStoryPrimitives"></div>
+            <div class="divine-actions">
+              <button type="button" id="godStoryAddPrimitiveBtn">+ Add primitive effect</button>
+            </div>
+            <div class="divine-row">
+              <label style="flex-direction:row; align-items:center; gap:6px;">
+                <input type="checkbox" id="godStoryReplaceCheckbox" style="width:auto;" disabled /> Replace conflicting effect (id shown after a rejected preview)
+              </label>
+              <input type="text" id="godStoryReplaceId" placeholder="effect id" readonly />
+            </div>
+            <div class="divine-actions">
+              <button type="button" id="godStoryPreviewBtn">Preview</button>
+              <button type="button" id="godStoryApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godStoryResult"></div>
+          </fieldset>
+        </div>
+
+        <div class="divine-tab-panel" id="divineTab-laws" style="display:none">
+          <div class="divine-note">Active timed law modifiers:</div>
+          <div id="godLawsActive" class="divine-result"></div>
+          <fieldset class="divine-fieldset" id="godLawFieldset">
+            <legend>New law (bounded timed multiplier)</legend>
+            <div class="divine-row"><label>Title <input type="text" id="godLawTitle" placeholder="Divine decree" /></label></div>
+            <div class="divine-row"><label>Narration <textarea id="godLawNarration" placeholder="(auto-filled from selected modifiers if left blank)"></textarea></label></div>
+            <div class="divine-row"><label>Duration (frames) <input type="number" id="godLawDuration" /></label></div>
+            <div id="godLawModifiers" class="divine-row" style="flex-direction:column; align-items:stretch;"></div>
+            <div class="divine-row">
+              <label style="flex-direction:row; align-items:center; gap:6px;">
+                <input type="checkbox" id="godLawReplaceCheckbox" style="width:auto;" disabled /> Replace conflicting law (id shown after a rejected preview)
+              </label>
+              <input type="text" id="godLawReplaceId" placeholder="effect id" readonly />
+            </div>
+            <div class="divine-actions">
+              <button type="button" id="godLawPreviewBtn">Preview</button>
+              <button type="button" id="godLawApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godLawResult"></div>
+          </fieldset>
+        </div>
+
+        <div class="divine-tab-panel" id="divineTab-history" style="display:none">
+          <ul id="godHistoryList" class="divine-result"></ul>
+        </div>
+
+        <!-- Sovereign God mode Optional Phase 8 (docs/plan-sovereign-god-
+             mode-v2.md "Free-prose story compiler"): the compiler NEVER
+             mutates and has no Apply button here on purpose -- a successful
+             compile fills the Story tab's fields and switches to it, so the
+             operator reviews and Applies through the SAME Preview/Apply flow
+             every other kind already uses (see godPopulateStoryFromCompiled). -->
+        <div class="divine-tab-panel" id="divineTab-compile" style="display:none">
+          <fieldset class="divine-fieldset" id="godCompileFieldset">
+            <legend>Compile free prose into a draft story event (preview-only)</legend>
+            <div class="divine-row"><label>Prose <textarea id="godCompileProse" rows="4"></textarea></label></div>
+            <div class="divine-actions"><button type="button" id="godCompileBtn">Compile</button></div>
+            <div class="divine-result" id="godCompileResult"></div>
+          </fieldset>
+        </div>
+      </details>
     </section>
     </div>
   </aside>
@@ -2486,6 +2749,8 @@ function renderSidebar() {
   } else {
     foundingBannerEl.style.display = "none";
   }
+
+  renderDivineConsole();
 }
 
 function calendarPhase(cal) {
@@ -3047,6 +3312,11 @@ const STATE_POLL_MS = 100;
 let polling = false;
 
 let STRUCTURE_UPGRADES_ENABLED = true;
+// Sovereign God mode Phase 7: the ONLY thing gating the entire Divine Console
+// (DOM visibility, fetches, banner) -- mirrors config.flags.GOD_MODE_ENABLED,
+// always echoed by /state regardless of the flag's value (see
+// specs/01-architecture.md flag index). false until the first /state poll.
+let GOD_MODE_ENABLED_FLAG = false;
 
 function applyFlags(flags) {
   if (!flags) return;
@@ -3073,6 +3343,7 @@ function applyFlags(flags) {
   if ("WILDLIFE_ENABLED" in flags) WILDLIFE_ENABLED = !!flags.WILDLIFE_ENABLED;
   if ("CARAVAN_VISUALS_ENABLED" in flags) CARAVAN_VISUALS_ENABLED = !!flags.CARAVAN_VISUALS_ENABLED;
   if ("WEATHER_ENABLED" in flags) WEATHER_ENABLED = !!flags.WEATHER_ENABLED;
+  if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
 }
 
 // Bounded viewer-only social pass. The engine has already filtered and
@@ -3431,6 +3702,972 @@ function tickBody() {
   renderWorldClockHud();
   drawCouncilAssemblyTable((world.civilization || {}).dailyCouncil, renderFrame);
   renderMinimap();
+}
+
+// =====================================================================
+// Divine Console (Sovereign God mode Phase 7, docs/plan-sovereign-god-mode-
+// v2.md "Viewer: Divine Console"). Strictly additive and feature-gated on
+// GOD_MODE_ENABLED_FLAG (mirrors config.flags.GOD_MODE_ENABLED from /state,
+// see applyFlags above): every function below is a no-op, and the panel/
+// banner stay display:none, unless the flag is true. No new poll loop is
+// added -- this reuses the existing pollState()->renderSidebar() cadence for
+// the passive History/Laws/banner projections, and only fetches
+// /control/god/* on an explicit user click (Connect/Preview/Apply/Cancel/
+// Refresh).
+//
+// Security contract (docs/plan "Feature gate and security contract" +
+// "Stored-content safety"):
+//   - the token lives in the `godToken` variable only -- never localStorage,
+//     optionally sessionStorage behind the explicit "remember" checkbox;
+//   - every dynamic string reaching innerHTML goes through escapeHtml();
+//     normalizedCommand is NEVER rendered raw -- previews/results are
+//     rebuilt field-by-field from known, typed response keys;
+//   - a 401 from any /control/god/* call clears the in-memory token and
+//     re-locks the console (godApiFetch below);
+//   - Apply always sends only {previewId, requestId} -- see wireDivineForm.
+// =====================================================================
+
+let godToken = null;               // in-memory ONLY
+let godAuthorized = false;
+let godCapabilities = null;        // last /control/god/capabilities response
+let godLastSight = null;           // last /control/god/sight response
+let godActiveTab = "unlock";
+let godLastStateKey = null;        // change-detect for world.god (History/Laws/banner)
+let godSeenInterventionIds = null; // Set of ids already shown in the public banner (edge-detected, like foundingFramesSeen)
+let godBannerTimer = null;
+
+const godTokenInput = document.getElementById("godTokenInput");
+const godRememberCheckbox = document.getElementById("godRememberCheckbox");
+const godConnectBtn = document.getElementById("godConnectBtn");
+const godAuthStatusEl = document.getElementById("godAuthStatus");
+const divineConsoleSectionEl = document.getElementById("divineConsoleSection");
+const godPublicBannerEl = document.getElementById("godPublicBanner");
+const godHistoryListEl = document.getElementById("godHistoryList");
+const godLawsActiveEl = document.getElementById("godLawsActive");
+const godSightOutputEl = document.getElementById("godSightOutput");
+const godSightAgentSelectEl = document.getElementById("godSightAgentSelect");
+
+function godFramesToSeconds(frames) {
+  return Math.round((Number(frames) || 0) / 30);
+}
+
+// Both simulation time AND raw frames, per docs/plan UX requirement.
+function godDurationLabel(frames) {
+  return `${godFramesToSeconds(frames)}s (${Math.round(Number(frames) || 0)}f)`;
+}
+
+function godCountdownLabel(expiresFrame) {
+  const now = world.frameTick || 0;
+  const remaining = Math.max(0, (Number(expiresFrame) || 0) - now);
+  return remaining > 0 ? `expires in ${godDurationLabel(remaining)}` : "expired (awaiting cleanup)";
+}
+
+function godAgentOptionsHtml(selectedId) {
+  return getLivingAgents().map((a) =>
+    `<option value="${a.id}"${a.id === selectedId ? " selected" : ""}>${escapeHtml(a.name)} (#${a.id}, ${escapeHtml(a.role)})</option>`
+  ).join("") || `<option value="">(no living agents)</option>`;
+}
+
+function populateGodAgentSelects() {
+  const html = godAgentOptionsHtml(null);
+  [godSightAgentSelectEl, document.getElementById("godOmenAgentSelect"),
+   document.getElementById("godVitalsAgentSelect"), document.getElementById("godGrantAgentSelect"),
+   document.getElementById("godStoryTargetSelect")].forEach((el) => {
+    if (!el) return;
+    const prior = el.value;
+    el.innerHTML = html;
+    if (prior && Array.from(el.options).some((o) => o.value === prior)) el.value = prior;
+  });
+  const resourceSelect = document.getElementById("godGrantResourceSelect");
+  if (resourceSelect) {
+    const reg = resourceRegistry();
+    resourceSelect.innerHTML = Object.keys(reg).map((id) =>
+      `<option value="${escapeHtml(id)}">${escapeHtml(reg[id].label || id)}</option>`
+    ).join("");
+  }
+  const structureSelect = document.getElementById("godStructureSelect");
+  if (structureSelect) {
+    const structures = (getCiv().structures || []).filter((s) => !s.isRuin && (s.condition == null || s.condition > 0));
+    structureSelect.innerHTML = structures.map((s) =>
+      `<option value="${s.id}">${escapeHtml(s.name || s.type)} (#${s.id})</option>`
+    ).join("") || `<option value="">(no structures)</option>`;
+  }
+}
+
+// --- Auth / fetch plumbing --------------------------------------------
+async function godApiFetch(path, opts) {
+  opts = opts || {};
+  const headers = {};
+  if (godToken) headers["X-God-Token"] = godToken;
+  if (opts.body !== undefined) headers["Content-Type"] = "application/json";
+  let res;
+  try {
+    res = await fetch(path, {
+      method: opts.method || (opts.body !== undefined ? "POST" : "GET"),
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      cache: "no-store",
+    });
+  } catch (err) {
+    return { ok: false, status: 0, data: { ok: false, reason: "network error" } };
+  }
+  let data = null;
+  try { data = await res.json(); } catch (err) { data = null; }
+  if (res.status === 401) {
+    godLockConsole("Authorization failed — token cleared. Re-enter it to continue.");
+  }
+  return { ok: res.ok, status: res.status, data: data || { ok: false, reason: `HTTP ${res.status}` } };
+}
+
+function updateGodAuthStatus(text, cls) {
+  godAuthStatusEl.textContent = text;
+  godAuthStatusEl.className = "divine-status" + (cls ? " " + cls : "");
+}
+
+function godLockConsole(message) {
+  godToken = null;
+  godAuthorized = false;
+  godCapabilities = null;
+  godLastSight = null;
+  try { sessionStorage.removeItem("godToken"); } catch (err) { /* ignore */ }
+  updateGodAuthStatus(message || "Locked.", "divine-status-locked");
+  showGodTab("unlock");
+}
+
+async function godConnect(tokenValue) {
+  if (!tokenValue) {
+    updateGodAuthStatus("Enter a token first.", "divine-status-locked");
+    return;
+  }
+  godToken = tokenValue;
+  const resp = await godApiFetch("/control/god/capabilities");
+  if (resp.ok && resp.data && resp.data.ok) {
+    godAuthorized = true;
+    godCapabilities = resp.data;
+    updateGodAuthStatus("Authorized.", "divine-status-ok");
+    applyGodCapabilitiesToForms();
+    populateGodAgentSelects();
+    showGodTab("sight");
+  } else {
+    godToken = null;
+    godAuthorized = false;
+    updateGodAuthStatus("Unauthorized — check the token (or god mode may be disabled).", "divine-status-locked");
+  }
+}
+
+godConnectBtn.addEventListener("click", () => godConnect(godTokenInput.value.trim()));
+
+// Apply capabilities-reported bounds/defaults to number/text inputs so the
+// forms are driven by the server's allowlist rather than hardcoded twins.
+function applyGodCapabilitiesToForms() {
+  if (!godCapabilities) return;
+  const kinds = godCapabilities.kinds || {};
+  const setBounds = (id, field) => {
+    const el = document.getElementById(id);
+    if (!el || !field) return;
+    if (field.min != null) el.min = field.min;
+    if (field.max != null) el.max = field.max;
+    if (field.default != null && !el.value) el.value = field.default;
+    if (field.maxChars != null) el.maxLength = field.maxChars;
+  };
+  const prov = (kinds.providence || {}).payload || {};
+  setBounds("godProvDuration", prov.durationFrames);
+  setBounds("godProvText", prov.text);
+  const omen = (kinds.private_omen || {}).payload || {};
+  setBounds("godOmenDuration", omen.durationFrames);
+  setBounds("godOmenText", omen.text);
+  const proc = (kinds.proclamation || {}).payload || {};
+  setBounds("godProcText", proc.text);
+  const vitals = (kinds.agent_vitals || {}).payload || {};
+  if (vitals.healthDelta) { setBounds("godVitalsHealth", vitals.healthDelta); }
+  if (vitals.hungerDelta) { setBounds("godVitalsHunger", vitals.hungerDelta); }
+  const grant = (kinds.grant_resource || {}).payload || {};
+  setBounds("godGrantAmount", grant.amount);
+  const structure = (kinds.structure_condition || {}).payload || {};
+  setBounds("godStructureDelta", structure.delta);
+  const story = (kinds.story_event || {}).payload || {};
+  setBounds("godStoryTitle", story.title);
+  setBounds("godStoryNarration", story.narration);
+  setBounds("godStoryDuration", story.durationFrames);
+  setBounds("godLawDuration", story.durationFrames);
+  renderGodModifierEditor("godStoryModifiers", "gs");
+  renderGodModifierEditor("godLawModifiers", "gl");
+  // Sovereign God mode Optional Phase 8: the Compile tab is dual-gated --
+  // only shown when the server reports GOD_MODE_ENABLED AND the separate
+  // GOD_COMPILER_ENABLED dark flag both on (capabilities.compiler.enabled
+  // already folds both together server-side).
+  const compiler = godCapabilities.compiler || {};
+  const compileTabBtn = document.getElementById("godCompileTabBtn");
+  if (compileTabBtn) compileTabBtn.style.display = compiler.enabled ? "" : "none";
+  const proseEl = document.getElementById("godCompileProse");
+  if (proseEl && compiler.promptMaxChars) proseEl.maxLength = compiler.promptMaxChars;
+  godCompilerMinIntervalSec = compiler.minIntervalSec || 5;
+  if (!compiler.enabled && godActiveTab === "compile") showGodTab("sight");
+}
+
+// --- sessionStorage "remember for this tab" (never localStorage) ------
+(function restoreGodTokenFromSession() {
+  try {
+    const stored = sessionStorage.getItem("godToken");
+    if (stored) {
+      godTokenInput.value = stored;
+      godRememberCheckbox.checked = true;
+    }
+  } catch (err) { /* ignore */ }
+})();
+godRememberCheckbox.addEventListener("change", () => {
+  if (!godRememberCheckbox.checked) {
+    try { sessionStorage.removeItem("godToken"); } catch (err) { /* ignore */ }
+  } else if (godToken) {
+    try { sessionStorage.setItem("godToken", godToken); } catch (err) { /* ignore */ }
+  }
+});
+// Re-derive the "remember" persistence on every successful connect (not just
+// the change event) so a token typed AFTER checking the box is still saved.
+const _godConnectOriginal = godConnect;
+godConnect = async function (tokenValue) {
+  await _godConnectOriginal(tokenValue);
+  if (godAuthorized && godRememberCheckbox.checked) {
+    try { sessionStorage.setItem("godToken", tokenValue); } catch (err) { /* ignore */ }
+  }
+};
+
+// --- Tabs ---------------------------------------------------------------
+const GOD_TABS = ["unlock", "sight", "voice", "miracles", "story", "laws", "history", "compile"];
+const godTabButtons = Array.from(document.querySelectorAll(".divine-tab-btn"));
+function showGodTab(name) {
+  if (GOD_TABS.indexOf(name) === -1) name = "unlock";
+  godActiveTab = name;
+  godTabButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === name));
+  GOD_TABS.forEach((t) => {
+    const el = document.getElementById("divineTab-" + t);
+    if (el) el.style.display = (t === name) ? "" : "none";
+  });
+  if (name === "sight" && godAuthorized) refreshGodSight();
+  if (name === "laws") renderGodLawsActive();
+  if (name === "history") renderGodHistory();
+}
+godTabButtons.forEach((btn) => btn.addEventListener("click", () => showGodTab(btn.dataset.tab)));
+
+// --- Preview -> Apply generic wiring ------------------------------------
+// One reusable helper per mutating form (docs/plan: "no Apply before a
+// successful preview; any field edit invalidates it"). `resultEl` renders
+// via escapeHtml()-composed HTML fragments only -- normalizedCommand itself
+// is never inserted into innerHTML (rule: stored-content safety).
+function wireDivineForm(formSelector, opts) {
+  const formEl = document.querySelector(formSelector);
+  const previewBtn = document.getElementById(opts.previewBtnId);
+  const applyBtn = document.getElementById(opts.applyBtnId);
+  const resultEl = document.getElementById(opts.resultElId);
+  let previewState = null;
+
+  function invalidate() {
+    previewState = null;
+    applyBtn.disabled = true;
+  }
+  formEl.addEventListener("input", invalidate);
+  formEl.addEventListener("change", invalidate);
+
+  previewBtn.addEventListener("click", async () => {
+    invalidate();
+    const built = opts.buildEnvelope();
+    if (!built || built.error) {
+      renderGodError(resultEl, (built && built.error) || "invalid form input");
+      return;
+    }
+    const resp = await godApiFetch("/control/god/preview", { method: "POST", body: built.envelope });
+    if (!resp.data || !resp.data.ok) {
+      renderGodError(resultEl, (resp.data && resp.data.reason) || "preview failed");
+      if (opts.onPreviewRejected) opts.onPreviewRejected(resp.data && resp.data.reason);
+      return;
+    }
+    previewState = resp.data;
+    resultEl.innerHTML = renderGodPreviewHtml(resp.data, opts.label);
+    applyBtn.disabled = false;
+  });
+
+  applyBtn.addEventListener("click", async () => {
+    if (!previewState) return;
+    applyBtn.disabled = true;
+    const requestId = (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ("req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+    const resp = await godApiFetch("/control/god/apply", {
+      method: "POST",
+      body: { previewId: previewState.previewId, requestId },
+    });
+    previewState = null;
+    if (!resp.data || !resp.data.ok) {
+      renderGodError(resultEl, (resp.data && resp.data.reason) || "apply failed");
+      return;
+    }
+    resultEl.innerHTML = renderGodAppliedHtml(resp.data);
+    if (opts.onApplied) opts.onApplied(resp.data);
+    refreshGodSightIfOpen();
+  });
+}
+
+function refreshGodSightIfOpen() {
+  if (godActiveTab === "sight" && godAuthorized) refreshGodSight();
+  if (godActiveTab === "laws") renderGodLawsActive();
+}
+
+function renderGodError(el, message) {
+  el.innerHTML = `<div class="divine-error">${escapeHtml(String(message))}</div>`;
+}
+
+function godReversibilityBadge(cls) {
+  const norm = String(cls || "irreversible");
+  const label = norm === "irreversible" ? "IRREVERSIBLE" : norm === "consequential" ? "CONSEQUENTIAL" : "CANCELLABLE";
+  const css = norm === "irreversible" ? "divine-badge-irreversible"
+    : norm === "consequential" ? "divine-badge-consequential" : "divine-badge-cancellable";
+  return `<span class="divine-badge ${css}">${escapeHtml(label)}</span>`;
+}
+
+// Every value inserted below is either a known numeric/boolean field or run
+// through escapeHtml() -- never the raw normalizedCommand object.
+function renderGodPreviewOutcomeHtml(kind, outcome) {
+  if (!outcome) return "";
+  const rows = [];
+  if (kind === "agent_vitals") {
+    rows.push(`Target: ${escapeHtml(String(outcome.targetName))} (#${escapeHtml(String(outcome.targetId))})`);
+    rows.push(`Health: ${escapeHtml(String(outcome.oldHealth))} &rarr; ${escapeHtml(String(outcome.newHealth))}`);
+    rows.push(`Hunger: ${escapeHtml(String(outcome.oldHunger))} &rarr; ${escapeHtml(String(outcome.newHunger))}`);
+  } else if (kind === "grant_resource") {
+    rows.push(`Resource: ${escapeHtml(String(outcome.resourceId))} &times; ${escapeHtml(String(outcome.amount))}`);
+    if (outcome.targetKind === "agent") {
+      rows.push(`To ${escapeHtml(String(outcome.targetName))}: +${escapeHtml(String(outcome.agentAdded))} carried` +
+        (outcome.stockpileAdded ? `, +${escapeHtml(String(outcome.stockpileAdded))} overflow to stockpile` : ""));
+    } else {
+      rows.push(`To village stockpile: +${escapeHtml(String(outcome.stockpileAdded))}`);
+    }
+  } else if (kind === "structure_condition") {
+    rows.push(`Structure: ${escapeHtml(String(outcome.structureName))} (#${escapeHtml(String(outcome.structureId))})`);
+    rows.push(`Condition: ${escapeHtml(String(outcome.oldCondition))} &rarr; ${escapeHtml(String(outcome.newCondition))}`);
+    if (outcome.wouldBecomeRuin) rows.push(`<span class="divine-warning">This would reduce the structure to ruin.</span>`);
+  } else if (kind === "story_event" || kind === "law") {
+    const mods = outcome.modifiers || {};
+    if (Object.keys(mods).length) {
+      rows.push("Modifiers: " + Object.entries(mods).map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(String(v))}`).join(", "));
+    }
+    if (outcome.customRuleContext && outcome.customRuleContext.length) {
+      rows.push("Composes with active village custom rule(s) on gather: " +
+        outcome.customRuleContext.map((r) => `${escapeHtml(r.ruleId)} (modifier ${escapeHtml(String(r.value))})`).join(", "));
+    }
+    if (outcome.primitives && outcome.primitives.length) {
+      rows.push(`${outcome.primitives.length} immediate primitive effect(s) will apply atomically with this event.`);
+    }
+    if (outcome.providenceOutgoingId) {
+      rows.push(`<span class="divine-warning">This will REPLACE the active providence (id ${escapeHtml(String(outcome.providenceOutgoingId))}).</span>`);
+    }
+  }
+  return rows.map((r) => `<div>${r}</div>`).join("");
+}
+
+function renderGodPreviewHtml(data, label) {
+  let html = godReversibilityBadge(data.reversibilityClass);
+  if (data.fingerprint && data.fingerprint.outgoingId) {
+    html += `<div class="divine-warning">This will REPLACE the active ${escapeHtml(label || "guidance")} (id ${escapeHtml(String(data.fingerprint.outgoingId))}).</div>`;
+  }
+  const kind = data.normalizedCommand && data.normalizedCommand.kind;
+  html += renderGodPreviewOutcomeHtml(kind, data.previewOutcome);
+  const secsLeft = Math.max(0, Math.round((data.expiresAt || 0) - Date.now() / 1000));
+  html += `<div class="divine-meta">Preview valid ~${secsLeft}s. Any field edit invalidates it.</div>`;
+  return html;
+}
+
+function godRenderKeyValueRows(obj, skipKeys) {
+  const skip = new Set(skipKeys || []);
+  return Object.entries(obj || {})
+    .filter(([k, v]) => !skip.has(k) && v !== null && v !== undefined && typeof v !== "object")
+    .map(([k, v]) => `<div><span class="divine-kv-key">${escapeHtml(k)}:</span> ${escapeHtml(String(v))}</div>`)
+    .join("");
+}
+
+function renderGodAppliedHtml(data) {
+  const outcome = data.outcome || {};
+  let html = `<div class="divine-applied-banner">Applied — intervention ${escapeHtml(String(data.interventionId))}, frame ${escapeHtml(String(data.appliedFrame))}.</div>`;
+  if (outcome.kind === "story_event") {
+    html += `<div>Title: ${escapeHtml(String(outcome.title || ""))}</div>`;
+    const mods = outcome.modifiers || {};
+    if (Object.keys(mods).length) {
+      html += "<div>Modifiers: " + Object.entries(mods).map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(String(v))}`).join(", ") + "</div>";
+    }
+    if (outcome.replacedEventId) html += `<div>Replaced event: ${escapeHtml(String(outcome.replacedEventId))}</div>`;
+    if (outcome.primitiveOutcomes && outcome.primitiveOutcomes.length) {
+      html += `<div>${outcome.primitiveOutcomes.length} primitive effect(s) applied.</div>`;
+    }
+    html += `<div>Expires: ${godDurationLabel((outcome.expiresFrame || 0) - (world.frameTick || 0))}</div>`;
+  } else {
+    html += godRenderKeyValueRows(outcome, ["interventionId", "kind"]);
+    if (outcome.expiresFrame != null) {
+      html += `<div>Expires: ${godDurationLabel(outcome.expiresFrame - (world.frameTick || 0))}</div>`;
+    }
+  }
+  return html;
+}
+
+// --- Sight ---------------------------------------------------------------
+async function refreshGodSight() {
+  const resp = await godApiFetch("/control/god/sight");
+  if (!resp.data || !resp.data.ok) {
+    godLastSight = null;
+    renderGodError(godSightOutputEl, (resp.data && resp.data.reason) || "sight unavailable");
+    return;
+  }
+  godLastSight = resp.data;
+  renderGodSight();
+  if (godActiveTab === "laws") renderGodLawsActive();
+}
+document.getElementById("godSightRefreshBtn").addEventListener("click", refreshGodSight);
+
+function renderGodSight() {
+  if (!godLastSight) { godSightOutputEl.innerHTML = ""; return; }
+  const selectedId = godSightAgentSelectEl.value ? Number(godSightAgentSelectEl.value) : null;
+  const agent = (godLastSight.agents || []).find((a) => a.id === selectedId) || (godLastSight.agents || [])[0];
+  if (!agent) { godSightOutputEl.innerHTML = `<div class="divine-note">No agents.</div>`; return; }
+  const resourceRows = Object.entries(agent.resources || {})
+    .map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(String(v))}`).join(", ") || "(none)";
+  const omen = agent.omen
+    ? `active, ${escapeHtml(godCountdownLabel(agent.omen.expiresFrame))}`
+    : "none";
+  const active = (godLastSight.activeEvents || [])
+    .filter((e) => e.status === "active")
+    .map((e) => `<li>${escapeHtml(e.kind === "story_event" ? (e.title || e.kind) : e.kind)} — ${escapeHtml(godCountdownLabel(e.expiresFrame))}${e.visibility === "private" ? " <span class=\"divine-history-badge divine-history-private\">private</span>" : ""}</li>`)
+    .join("") || "<li>(none)</li>";
+  godSightOutputEl.innerHTML =
+    `<div><span class="divine-kv-key">Health:</span> ${escapeHtml(String(agent.health))} &nbsp; <span class="divine-kv-key">Hunger:</span> ${escapeHtml(String(agent.hunger))}</div>` +
+    `<div><span class="divine-kv-key">Incapacitated:</span> ${escapeHtml(String(!!agent.incapacitated))} &nbsp; <span class="divine-kv-key">District:</span> ${escapeHtml(String(agent.currentDistrict || "—"))}</div>` +
+    `<div><span class="divine-kv-key">Resources:</span> ${resourceRows}</div>` +
+    `<div><span class="divine-kv-key">Last action:</span> ${escapeHtml(String(agent.lastAction || "—"))}</div>` +
+    `<div><span class="divine-kv-key">Private omen:</span> ${omen}</div>` +
+    `<div><span class="divine-kv-key">Active effects (village-wide, this authenticated view):</span><ul>${active}</ul></div>`;
+}
+godSightAgentSelectEl.addEventListener("change", renderGodSight);
+
+// --- Voice: proclamation / providence / private omen ---------------------
+wireDivineForm("#godProclamationFieldset", {
+  previewBtnId: "godProcPreviewBtn", applyBtnId: "godProcApplyBtn", resultElId: "godProcResult",
+  label: "proclamation",
+  buildEnvelope: () => {
+    const text = document.getElementById("godProcText").value;
+    if (!text.trim()) return { error: "text is required" };
+    return { envelope: { kind: "proclamation", payload: { text } } };
+  },
+});
+
+wireDivineForm("#godProvidenceFieldset", {
+  previewBtnId: "godProvPreviewBtn", applyBtnId: "godProvApplyBtn", resultElId: "godProvResult",
+  label: "providence",
+  buildEnvelope: () => {
+    const text = document.getElementById("godProvText").value;
+    if (!text.trim()) return { error: "text is required" };
+    const durationRaw = document.getElementById("godProvDuration").value;
+    const payload = { text };
+    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    return { envelope: { kind: "providence", payload } };
+  },
+});
+
+wireDivineForm("#godOmenFieldset", {
+  previewBtnId: "godOmenPreviewBtn", applyBtnId: "godOmenApplyBtn", resultElId: "godOmenResult",
+  label: "private omen",
+  buildEnvelope: () => {
+    const targetId = document.getElementById("godOmenAgentSelect").value;
+    if (!targetId) return { error: "select an agent" };
+    const text = document.getElementById("godOmenText").value;
+    if (!text.trim()) return { error: "text is required" };
+    const durationRaw = document.getElementById("godOmenDuration").value;
+    const payload = { targetId: parseInt(targetId, 10), text };
+    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    return { envelope: { kind: "private_omen", payload } };
+  },
+});
+
+// --- Miracles: agent_vitals / grant_resource / structure_condition -------
+wireDivineForm("#godVitalsFieldset", {
+  previewBtnId: "godVitalsPreviewBtn", applyBtnId: "godVitalsApplyBtn", resultElId: "godVitalsResult",
+  label: "agent vitals",
+  buildEnvelope: () => {
+    const targetId = document.getElementById("godVitalsAgentSelect").value;
+    if (!targetId) return { error: "select an agent" };
+    const health = parseFloat(document.getElementById("godVitalsHealth").value || "0");
+    const hunger = parseFloat(document.getElementById("godVitalsHunger").value || "0");
+    if (!health && !hunger) return { error: "at least one of health/hunger delta must be non-zero" };
+    const payload = { targetId: parseInt(targetId, 10) };
+    if (health) payload.healthDelta = health;
+    if (hunger) payload.hungerDelta = hunger;
+    return { envelope: { kind: "agent_vitals", payload } };
+  },
+});
+
+wireDivineForm("#godGrantFieldset", {
+  previewBtnId: "godGrantPreviewBtn", applyBtnId: "godGrantApplyBtn", resultElId: "godGrantResult",
+  label: "grant",
+  buildEnvelope: () => {
+    const resourceId = document.getElementById("godGrantResourceSelect").value;
+    if (!resourceId) return { error: "select a resource" };
+    const amount = parseInt(document.getElementById("godGrantAmount").value || "0", 10);
+    if (!amount || amount <= 0) return { error: "amount must be positive" };
+    const targetKind = document.getElementById("godGrantTargetKind").value;
+    let target = "stockpile";
+    if (targetKind === "agent") {
+      const agentId = document.getElementById("godGrantAgentSelect").value;
+      if (!agentId) return { error: "select a target agent" };
+      target = { agentId: parseInt(agentId, 10) };
+    }
+    return { envelope: { kind: "grant_resource", payload: { resourceId, amount, target } } };
+  },
+});
+
+wireDivineForm("#godStructureFieldset", {
+  previewBtnId: "godStructurePreviewBtn", applyBtnId: "godStructureApplyBtn", resultElId: "godStructureResult",
+  label: "structure condition",
+  buildEnvelope: () => {
+    const structureId = document.getElementById("godStructureSelect").value;
+    if (!structureId) return { error: "select a structure" };
+    const delta = parseFloat(document.getElementById("godStructureDelta").value || "0");
+    if (!delta) return { error: "delta must be non-zero" };
+    return { envelope: { kind: "structure_condition", payload: { structureId: parseInt(structureId, 10), delta } } };
+  },
+});
+
+// --- Shared modifier editor (Story + Laws both submit story_event) -------
+const GOD_MODIFIER_KEYS = [
+  "gather_yield_multiplier", "fish_yield_multiplier", "hunger_drain_multiplier",
+  "health_regen_multiplier", "starvation_damage_multiplier", "structure_decay_multiplier",
+  "spoilage_multiplier",
+];
+function renderGodModifierEditor(containerId, prefix) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const ranges = (godCapabilities && godCapabilities.modifierRanges) || {};
+  el.innerHTML = GOD_MODIFIER_KEYS.map((key) => {
+    const range = ranges[key] || [0, 3];
+    return `<label style="flex-direction:row; align-items:center; gap:6px;">` +
+      `<input type="checkbox" class="${prefix}-mod-enable" data-key="${escapeHtml(key)}" style="width:auto;" /> ` +
+      `${escapeHtml(key)} <input type="number" class="${prefix}-mod-value" data-key="${escapeHtml(key)}" ` +
+      `min="${range[0]}" max="${range[1]}" step="0.05" value="1.0" style="width:80px;" />` +
+      ` <span class="divine-meta">(${range[0]}..${range[1]})</span></label>`;
+  }).join("");
+}
+function godReadModifiers(prefix) {
+  const modifiers = {};
+  document.querySelectorAll(`.${prefix}-mod-enable`).forEach((cb) => {
+    if (!cb.checked) return;
+    const key = cb.dataset.key;
+    const valueInput = document.querySelector(`.${prefix}-mod-value[data-key="${key}"]`);
+    modifiers[key] = parseFloat(valueInput ? valueInput.value : "1.0");
+  });
+  return modifiers;
+}
+
+// --- Story primitives editor (bounded, up to GOD_STORY_EVENT_MAX_PRIMITIVES) ---
+let godStoryPrimitiveCount = 0;
+function godPrimitiveFieldsHtml(kind, index) {
+  if (kind === "agent_vitals") {
+    return `<select class="godPrimAgent">${godAgentOptionsHtml(null)}</select>` +
+      `<input type="number" class="godPrimHealth" placeholder="health delta" value="0" style="width:90px;" />` +
+      `<input type="number" class="godPrimHunger" placeholder="hunger delta" value="0" style="width:90px;" />`;
+  }
+  if (kind === "grant_resource") {
+    const reg = resourceRegistry();
+    const resOptions = Object.keys(reg).map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(reg[id].label || id)}</option>`).join("");
+    return `<select class="godPrimResource">${resOptions}</select>` +
+      `<input type="number" class="godPrimAmount" placeholder="amount" value="1" min="1" style="width:70px;" />` +
+      `<select class="godPrimTargetKind"><option value="stockpile">Stockpile</option><option value="agent">Agent</option></select>` +
+      `<select class="godPrimTargetAgent">${godAgentOptionsHtml(null)}</select>`;
+  }
+  if (kind === "structure_condition") {
+    const structures = (getCiv().structures || []).filter((s) => !s.isRuin && (s.condition == null || s.condition > 0));
+    const structOptions = structures.map((s) => `<option value="${s.id}">${escapeHtml(s.name || s.type)} (#${s.id})</option>`).join("");
+    return `<select class="godPrimStructure">${structOptions}</select>` +
+      `<input type="number" class="godPrimDelta" placeholder="delta" value="0" style="width:80px;" />`;
+  }
+  return "";
+}
+document.getElementById("godStoryAddPrimitiveBtn").addEventListener("click", () => {
+  const cap = (godCapabilities && godCapabilities.kinds && godCapabilities.kinds.story_event &&
+    godCapabilities.kinds.story_event.payload.primitives && godCapabilities.kinds.story_event.payload.primitives.maxItems) || 5;
+  if (godStoryPrimitiveCount >= cap) return;
+  const container = document.getElementById("godStoryPrimitives");
+  const row = document.createElement("div");
+  row.className = "divine-primitive-row";
+  const index = godStoryPrimitiveCount++;
+  row.dataset.index = index;
+  row.innerHTML = `<select class="godPrimKind">` +
+    `<option value="agent_vitals">Agent vitals</option>` +
+    `<option value="grant_resource">Grant resource</option>` +
+    `<option value="structure_condition">Structure condition</option>` +
+    `</select><span class="godPrimFields">${godPrimitiveFieldsHtml("agent_vitals", index)}</span>` +
+    `<button type="button" class="godPrimRemove">Remove</button>`;
+  container.appendChild(row);
+  row.querySelector(".godPrimKind").addEventListener("change", (e) => {
+    row.querySelector(".godPrimFields").innerHTML = godPrimitiveFieldsHtml(e.target.value, index);
+    container.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  row.querySelector(".godPrimRemove").addEventListener("click", () => {
+    row.remove();
+    container.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  container.dispatchEvent(new Event("change", { bubbles: true }));
+});
+
+function godReadStoryPrimitives() {
+  const rows = Array.from(document.querySelectorAll("#godStoryPrimitives .divine-primitive-row"));
+  const primitives = [];
+  for (const row of rows) {
+    const kind = row.querySelector(".godPrimKind").value;
+    if (kind === "agent_vitals") {
+      const agentId = row.querySelector(".godPrimAgent").value;
+      if (!agentId) return { error: "primitive: select an agent" };
+      const health = parseFloat(row.querySelector(".godPrimHealth").value || "0");
+      const hunger = parseFloat(row.querySelector(".godPrimHunger").value || "0");
+      if (!health && !hunger) return { error: "primitive: health/hunger delta required" };
+      const payload = { targetId: parseInt(agentId, 10) };
+      if (health) payload.healthDelta = health;
+      if (hunger) payload.hungerDelta = hunger;
+      primitives.push({ kind: "agent_vitals", payload });
+    } else if (kind === "grant_resource") {
+      const resourceId = row.querySelector(".godPrimResource").value;
+      const amount = parseInt(row.querySelector(".godPrimAmount").value || "0", 10);
+      if (!resourceId || !amount) return { error: "primitive: resource + amount required" };
+      const targetKind = row.querySelector(".godPrimTargetKind").value;
+      let target = "stockpile";
+      if (targetKind === "agent") {
+        const agentId = row.querySelector(".godPrimTargetAgent").value;
+        if (!agentId) return { error: "primitive: select a target agent" };
+        target = { agentId: parseInt(agentId, 10) };
+      }
+      primitives.push({ kind: "grant_resource", payload: { resourceId, amount, target } });
+    } else if (kind === "structure_condition") {
+      const structureId = row.querySelector(".godPrimStructure").value;
+      const delta = parseFloat(row.querySelector(".godPrimDelta").value || "0");
+      if (!structureId || !delta) return { error: "primitive: structure + non-zero delta required" };
+      primitives.push({ kind: "structure_condition", payload: { structureId: parseInt(structureId, 10), delta } });
+    }
+  }
+  return { primitives };
+}
+
+// --- Story tab ------------------------------------------------------------
+wireDivineForm("#godStoryFieldset", {
+  previewBtnId: "godStoryPreviewBtn", applyBtnId: "godStoryApplyBtn", resultElId: "godStoryResult",
+  label: "story event",
+  buildEnvelope: () => {
+    const title = document.getElementById("godStoryTitle").value;
+    const narration = document.getElementById("godStoryNarration").value;
+    if (!title.trim() || !narration.trim()) return { error: "title and narration are required" };
+    const visibility = document.getElementById("godStoryVisibility").value;
+    const payload = { title, narration, visibility };
+    if (visibility === "private") {
+      const targetId = document.getElementById("godStoryTargetSelect").value;
+      if (!targetId) return { error: "select a private target agent" };
+      payload.targetId = parseInt(targetId, 10);
+    }
+    const durationRaw = document.getElementById("godStoryDuration").value;
+    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const modifiers = godReadModifiers("gs");
+    if (Object.keys(modifiers).length) payload.modifiers = modifiers;
+    const primResult = godReadStoryPrimitives();
+    if (primResult.error) return { error: primResult.error };
+    if (primResult.primitives.length) payload.primitives = primResult.primitives;
+    if (document.getElementById("godStoryProvidenceCheckbox").checked) {
+      const provText = document.getElementById("godStoryProvidenceText").value;
+      if (!provText.trim()) return { error: "providence text is required when the checkbox is on" };
+      payload.providence = { text: provText };
+    }
+    const replaceCheckbox = document.getElementById("godStoryReplaceCheckbox");
+    const replaceId = document.getElementById("godStoryReplaceId").value;
+    if (replaceCheckbox.checked && replaceId) payload.replaceEffectId = replaceId;
+    return { envelope: { kind: "story_event", payload } };
+  },
+  onPreviewRejected: (reason) => {
+    // Hard-reject conflict (backend rejects rather than disclosing an
+    // outgoingId for modifier keys — see report's backend-gap note): parse
+    // the id out of the reason string so the operator can opt into replacing
+    // it without having to already know the id.
+    const match = /\(id ([^)]+)\)/.exec(String(reason || ""));
+    const replaceCheckbox = document.getElementById("godStoryReplaceCheckbox");
+    const replaceIdInput = document.getElementById("godStoryReplaceId");
+    if (match) {
+      replaceCheckbox.disabled = false;
+      replaceIdInput.value = match[1];
+    } else {
+      replaceCheckbox.disabled = true;
+      replaceCheckbox.checked = false;
+      replaceIdInput.value = "";
+    }
+  },
+  onApplied: () => {
+    document.getElementById("godStoryReplaceCheckbox").checked = false;
+    document.getElementById("godStoryReplaceCheckbox").disabled = true;
+    document.getElementById("godStoryReplaceId").value = "";
+  },
+});
+
+// --- Compile tab (Sovereign God mode Optional Phase 8, docs/plan-sovereign-
+// god-mode-v2.md "Free-prose story compiler") ---------------------------
+// Deliberately NOT wired through wireDivineForm/Apply: a successful compile
+// fills the Story tab and switches to it -- the operator still has to
+// explicitly Preview (again, through the normal Story tab flow) and Apply
+// there. No shortcut Apply button exists on this tab.
+let godCompilerMinIntervalSec = 5;
+
+// Populates the Story tab's own fields from a compiled draft's
+// normalizedCommand, then invalidates any stale Story preview (any field
+// edit already invalidates a preview per the standard contract) so the
+// operator must re-Preview before Applying -- matching how every other
+// Voice/Miracle/Law/Story action already works.
+function godPopulateStoryFromCompiled(normalizedCommand) {
+  const payload = (normalizedCommand && normalizedCommand.payload) || {};
+  document.getElementById("godStoryTitle").value = payload.title || "";
+  document.getElementById("godStoryNarration").value = payload.narration || "";
+  const visibilityEl = document.getElementById("godStoryVisibility");
+  visibilityEl.value = payload.visibility === "private" ? "private" : "public";
+  if (payload.visibility === "private" && payload.targetId != null) {
+    document.getElementById("godStoryTargetSelect").value = String(payload.targetId);
+  }
+  document.getElementById("godStoryDuration").value = payload.durationFrames || "";
+
+  document.querySelectorAll(".gs-mod-enable").forEach((cb) => { cb.checked = false; });
+  const modifiers = payload.modifiers || {};
+  Object.keys(modifiers).forEach((key) => {
+    const cb = document.querySelector(`.gs-mod-enable[data-key="${key}"]`);
+    const valueInput = document.querySelector(`.gs-mod-value[data-key="${key}"]`);
+    if (cb) cb.checked = true;
+    if (valueInput) valueInput.value = modifiers[key];
+  });
+
+  const primContainer = document.getElementById("godStoryPrimitives");
+  primContainer.innerHTML = "";
+  godStoryPrimitiveCount = 0;
+  const addBtn = document.getElementById("godStoryAddPrimitiveBtn");
+  (payload.primitives || []).forEach((prim) => {
+    addBtn.click();
+    const row = primContainer.lastElementChild;
+    if (!row) return;
+    const kindSelect = row.querySelector(".godPrimKind");
+    kindSelect.value = prim.kind;
+    kindSelect.dispatchEvent(new Event("change"));
+    const p = prim.payload || {};
+    if (prim.kind === "agent_vitals") {
+      if (p.targetId != null) row.querySelector(".godPrimAgent").value = String(p.targetId);
+      if (p.healthDelta != null) row.querySelector(".godPrimHealth").value = p.healthDelta;
+      if (p.hungerDelta != null) row.querySelector(".godPrimHunger").value = p.hungerDelta;
+    } else if (prim.kind === "grant_resource") {
+      if (p.resourceId) row.querySelector(".godPrimResource").value = p.resourceId;
+      if (p.amount != null) row.querySelector(".godPrimAmount").value = p.amount;
+      if (p.target && typeof p.target === "object" && p.target.agentId != null) {
+        row.querySelector(".godPrimTargetKind").value = "agent";
+        row.querySelector(".godPrimTargetAgent").value = String(p.target.agentId);
+      }
+    } else if (prim.kind === "structure_condition") {
+      if (p.structureId != null) row.querySelector(".godPrimStructure").value = String(p.structureId);
+      if (p.delta != null) row.querySelector(".godPrimDelta").value = p.delta;
+    }
+  });
+
+  if (payload.providence) {
+    document.getElementById("godStoryProvidenceCheckbox").checked = true;
+    document.getElementById("godStoryProvidenceText").value = payload.providence.text || "";
+  } else {
+    document.getElementById("godStoryProvidenceCheckbox").checked = false;
+    document.getElementById("godStoryProvidenceText").value = "";
+  }
+  document.getElementById("godStoryReplaceCheckbox").checked = false;
+  document.getElementById("godStoryReplaceCheckbox").disabled = true;
+  document.getElementById("godStoryReplaceId").value = "";
+
+  // Any field edit invalidates a stale preview per the standard contract
+  // (wireDivineForm's invalidate() listens for "input"/"change" directly on
+  // the fieldset) -- fire one so a leftover Story preview from before this
+  // compile can never be Applied unreviewed.
+  document.getElementById("godStoryFieldset").dispatchEvent(new Event("input"));
+}
+
+const godCompileBtnEl = document.getElementById("godCompileBtn");
+const godCompileResultEl = document.getElementById("godCompileResult");
+if (godCompileBtnEl) {
+  godCompileBtnEl.addEventListener("click", async () => {
+    const proseEl = document.getElementById("godCompileProse");
+    const prose = proseEl.value;
+    if (!prose || !prose.trim()) {
+      godCompileResultEl.textContent = "Enter some prose first.";
+      return;
+    }
+    godCompileBtnEl.disabled = true;
+    godCompileResultEl.textContent = "Compiling...";
+    const resp = await godApiFetch("/control/god/compile", { method: "POST", body: { prose } });
+    const data = resp.data || {};
+    if (data.compileOk) {
+      godCompileResultEl.textContent = "Compiled -- review and Apply from the Story tab.";
+      godPopulateStoryFromCompiled(data.normalizedCommand);
+      showGodTab("story");
+    } else {
+      // Rejection or error -- render the reason as plain text only (rule:
+      // stored-content safety -- never innerHTML for anything the compiler
+      // or its model produced).
+      godCompileResultEl.textContent = data.reason || "compile failed";
+    }
+    // Client-side rate-limit UX only -- the server's GOD_COMPILER_MIN_INTERVAL_SEC
+    // check is authoritative regardless of what this timer does.
+    setTimeout(() => { godCompileBtnEl.disabled = false; }, godCompilerMinIntervalSec * 1000);
+  });
+}
+
+// --- Laws tab (a story_event carrying ONLY modifiers, no primitives) -----
+wireDivineForm("#godLawFieldset", {
+  previewBtnId: "godLawPreviewBtn", applyBtnId: "godLawApplyBtn", resultElId: "godLawResult",
+  label: "law",
+  buildEnvelope: () => {
+    const modifiers = godReadModifiers("gl");
+    if (!Object.keys(modifiers).length) return { error: "enable at least one modifier" };
+    let title = document.getElementById("godLawTitle").value.trim();
+    let narration = document.getElementById("godLawNarration").value.trim();
+    if (!title) title = "Divine decree";
+    if (!narration) {
+      narration = "The village feels a shift: " +
+        Object.entries(modifiers).map(([k, v]) => `${k} set to ${v}`).join(", ") + ".";
+    }
+    const payload = { title, narration, visibility: "public", modifiers };
+    const durationRaw = document.getElementById("godLawDuration").value;
+    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const replaceCheckbox = document.getElementById("godLawReplaceCheckbox");
+    const replaceId = document.getElementById("godLawReplaceId").value;
+    if (replaceCheckbox.checked && replaceId) payload.replaceEffectId = replaceId;
+    return { envelope: { kind: "story_event", payload } };
+  },
+  onPreviewRejected: (reason) => {
+    const match = /\(id ([^)]+)\)/.exec(String(reason || ""));
+    const replaceCheckbox = document.getElementById("godLawReplaceCheckbox");
+    const replaceIdInput = document.getElementById("godLawReplaceId");
+    if (match) {
+      replaceCheckbox.disabled = false;
+      replaceIdInput.value = match[1];
+    } else {
+      replaceCheckbox.disabled = true;
+      replaceCheckbox.checked = false;
+      replaceIdInput.value = "";
+    }
+  },
+  onApplied: () => {
+    document.getElementById("godLawReplaceCheckbox").checked = false;
+    document.getElementById("godLawReplaceCheckbox").disabled = true;
+    document.getElementById("godLawReplaceId").value = "";
+    renderGodLawsActive();
+  },
+});
+
+async function godCancelEffect(targetId) {
+  const resp = await godApiFetch("/control/god/cancel", { method: "POST", body: { targetId } });
+  refreshGodSightIfOpen();
+  return resp;
+}
+
+function renderGodLawsActive() {
+  // Prefer the authenticated Sight projection (includes private-visibility
+  // law events, which the public /state god.activePublicEvents omits) --
+  // falls back to the public projection when Sight hasn't been fetched yet.
+  const events = (godLastSight && godLastSight.activeEvents)
+    || (world.god && world.god.activePublicEvents) || [];
+  const lawEvents = events.filter((e) => e && e.status === "active" && e.modifiers && Object.keys(e.modifiers).length);
+  if (!lawEvents.length) {
+    godLawsActiveEl.innerHTML = `<div class="divine-note">No active timed law modifiers.</div>`;
+    return;
+  }
+  godLawsActiveEl.innerHTML = lawEvents.map((e) => {
+    const mods = Object.entries(e.modifiers).map(([k, v]) => `${escapeHtml(k)}=${escapeHtml(String(v))}`).join(", ");
+    return `<div class="divine-history-item">` +
+      `<div>${escapeHtml(e.title || "law")} — ${mods}</div>` +
+      `<div class="divine-meta">${escapeHtml(godCountdownLabel(e.expiresFrame))}</div>` +
+      `<div class="divine-actions"><button type="button" class="godCancelLawBtn" data-id="${escapeHtml(e.id)}">Cancel</button></div>` +
+      `</div>`;
+  }).join("");
+  godLawsActiveEl.querySelectorAll(".godCancelLawBtn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      await godCancelEffect(btn.dataset.id);
+      renderGodLawsActive();
+    });
+  });
+}
+
+// --- History (public interventions only; private history is Sight-only) --
+function renderGodHistory() {
+  const records = ((world.god && world.god.recentPublicInterventions) || []).slice().reverse().slice(0, 50);
+  if (!records.length) {
+    godHistoryListEl.innerHTML = `<li class="divine-note">No public interventions yet.</li>`;
+    return;
+  }
+  godHistoryListEl.innerHTML = records.map((r) => {
+    const badge = `<span class="divine-history-badge divine-history-public">public</span>`;
+    const label = escapeHtml(String(r.title || r.text || r.kind || "intervention"));
+    return `<li class="divine-history-item">${badge}` +
+      `<span class="divine-kv-key">${escapeHtml(String(r.kind || ""))}</span> — ${label}` +
+      `<div class="divine-meta">frame ${escapeHtml(String(r.frameTick))}, id ${escapeHtml(String(r.id))}</div></li>`;
+  }).join("");
+}
+
+// --- Gate + passive per-poll refresh (History/Laws/banner) ---------------
+let godLastAgentListKey = null;
+function updateGodModeGate() {
+  const flags = (world.config && world.config.flags) || {};
+  const enabled = !!flags.GOD_MODE_ENABLED;
+  if (enabled !== GOD_MODE_ENABLED_FLAG) GOD_MODE_ENABLED_FLAG = enabled;
+  divineConsoleSectionEl.style.display = GOD_MODE_ENABLED_FLAG ? "" : "none";
+  if (!GOD_MODE_ENABLED_FLAG) {
+    godPublicBannerEl.style.display = "none";
+    return;
+  }
+  // Change-detected, not every-poll: repopulating <select> elements on every
+  // 100ms tick would reset an in-progress dropdown selection.
+  const agentKey = JSON.stringify([
+    getLivingAgents().map((a) => [a.id, a.name, a.role]),
+    Object.keys(resourceRegistry()),
+    (getCiv().structures || []).map((s) => [s.id, s.isRuin, s.condition]),
+  ]);
+  if (agentKey !== godLastAgentListKey) {
+    godLastAgentListKey = agentKey;
+    populateGodAgentSelects();
+  }
+}
+
+function renderGodPublicBanner() {
+  const records = (world.god && world.god.recentPublicInterventions) || [];
+  if (godSeenInterventionIds === null) {
+    // First snapshot after page load: remember existing history without
+    // banner-ing it (same edge-detection precedent as the founding banner).
+    godSeenInterventionIds = new Set(records.map((r) => r.id));
+    return;
+  }
+  const fresh = records.find((r) => !godSeenInterventionIds.has(r.id));
+  if (!fresh) return;
+  godSeenInterventionIds.add(fresh.id);
+  const label = fresh.title || fresh.text || fresh.kind || "A divine intervention";
+  godPublicBannerEl.textContent = `Divine: ${String(label)}`;
+  godPublicBannerEl.style.display = "block";
+  if (godBannerTimer) clearTimeout(godBannerTimer);
+  godBannerTimer = setTimeout(() => {
+    godPublicBannerEl.style.display = "none";
+    godBannerTimer = null;
+  }, 6000);
+  // Bounded like foundingFramesSeen: drop ids that aged out of the ring.
+  const stillPresent = new Set(records.map((r) => r.id));
+  for (const id of Array.from(godSeenInterventionIds)) {
+    if (!stillPresent.has(id)) godSeenInterventionIds.delete(id);
+  }
+}
+
+function renderDivineConsole() {
+  updateGodModeGate();
+  if (!GOD_MODE_ENABLED_FLAG) return;
+  const key = JSON.stringify(world.god || null);
+  if (key === godLastStateKey) return;
+  godLastStateKey = key;
+  renderGodPublicBanner();
+  if (godActiveTab === "history") renderGodHistory();
+  if (godActiveTab === "laws" && !(godLastSight && godLastSight.activeEvents)) renderGodLawsActive();
 }
 
 // Kick off: render immediately (mock or last frame), poll on an interval.

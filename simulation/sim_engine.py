@@ -12,14 +12,17 @@ normalize_decision, role_fallback_action, MemoryStore, lm_complete) is reused
 from server.py and injected at construction time to avoid a circular import.
 """
 
+import hashlib
 import json
 import math
 import os
 import random
 import re
+import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -324,6 +327,117 @@ STORM_DISASTER_PROB = 0.32
 WEATHER_GOVERNANCE_ENABLED = True
 WEATHER_STORM_REGROW_MULT = 0.3     # suppression multiplier for storm-affected districts
 WEATHER_CLEARING_REGROW_MULT = 1.5  # post-storm "rain" boost for the same districts while clearing
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
+# GOD_MODE_ENABLED is an environment-backed, READ-ONCE-AT-IMPORT module flag,
+# not a runtime toggle: no HTTP route may change it, and there is no live
+# on/off switch by design -- enabling or disabling it requires the normal
+# single-instance server restart with SIM_GOD_MODE set (or unset) in the
+# process environment beforehand. Absent/blank/"0"/false-like resolves to
+# disabled, which is the default -- the simulation stays a pure observer
+# experience unless a deployer opts in deliberately. This is also the FIRST
+# env-var-backed flag in sim_engine.py (every prior env-var precedent, e.g.
+# SIM_HOST/SIM_PORT/SIM_AGENTS/SIM_LOG_RETENTION, lives only in server.py);
+# see specs/01-architecture.md for that precedent note. server.py separately
+# requires a non-empty SIM_GOD_TOKEN before any God route actually accepts
+# requests -- see server.py's God-mode section for that half of the gate.
+GOD_MODE_ENABLED = str(os.environ.get("SIM_GOD_MODE", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+GOD_STATE_VERSION = 1               # schema version for civilization["godState"]
+GOD_PREVIEW_CACHE_MAX = 32          # bounded, in-memory, never persisted
+GOD_PREVIEW_TTL_SECONDS = 60        # wall-clock, not frame-based (previews are a request-scoped concept)
+GOD_REQUEST_CACHE_MAX = 100         # bounded, in-memory idempotency store (never persisted -- see docs/plan)
+GOD_RECENT_INTERVENTIONS_CAP = 100  # persisted viewer-history ring inside godState
+GOD_ACTIVE_EVENTS_CAP = 8           # bounded timed-effect ring (Phase 5 payload; plumbing only in Phase 2)
+GOD_TEXT_MAX_CHARS = 240            # title/narration/proclamation cap (post-NFC-normalization character count)
+GOD_TEXT_MAX_BYTES = 600            # a tighter-than-4x-chars UTF-8 byte cap so the byte check is load-bearing,
+                                     # not merely redundant with the character cap (see _normalize_divine_text)
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Optional Phase 8) ---
+# GOD_COMPILER_ENABLED is a SECOND, independent, env-backed, read-once-at-
+# import dark flag, gated on GOD_MODE_ENABLED as well (both must be True --
+# see god_compile_prose and server.py's route). The plan is explicit that
+# this phase's contention gate is NOT cleared by shipping the code: the
+# compiler "needs its own A/B contention check" that "is not required for a
+# complete structured Storyteller God" (docs/plan "Optional Phase 8"). No
+# A/B measurement has been run in this change, so the flag ships OFF by
+# default and stays off until that measurement happens -- see specs/12-ops.md
+# "not-yet-A/B-measured" section for the recommended protocol.
+GOD_COMPILER_ENABLED = str(os.environ.get("SIM_GOD_COMPILER", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+GOD_COMPILER_MIN_INTERVAL_SEC = 5.0    # per-process rate limit, distinct from agent cognition
+GOD_COMPILER_SESSION_CAP = 60          # hard ceiling on compiles for this process's lifetime
+GOD_COMPILER_TIMEOUT_SEC = 10.0        # aggressive: a hung Ollama request must not lock the console
+GOD_COMPILER_PROSE_MAX_CHARS = 800     # operator free-prose input cap (post-NFC-normalization character count)
+GOD_COMPILER_PROSE_MAX_BYTES = 2400    # byte cap scaled to the larger prose cap (see GOD_TEXT_MAX_BYTES's ratio)
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 3) ---
+# Voice/providence duration bounds, frame-based like every other timed system
+# (DIRECTIVE_TTL_FRAMES above is the closest precedent -- 5400 frames is the
+# same ~3-minute default this reuses). A caller may omit durationFrames (the
+# default applies) or supply one, silently clamped into range rather than
+# rejected -- consistent with the plan's "clamped values" preview contract.
+GOD_GUIDANCE_MIN_DURATION_FRAMES = 300      # ~10s at 30 ticks/s
+GOD_GUIDANCE_MAX_DURATION_FRAMES = 54000    # ~30 min at 30 ticks/s
+GOD_GUIDANCE_DEFAULT_DURATION_FRAMES = 5400  # ~3 min, mirrors DIRECTIVE_TTL_FRAMES
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 4) ---
+# Immediate miracles: agent_vitals, grant_resource, structure_condition. All
+# three are irreversible (docs/plan "Honest reversibility" -- the default
+# branch of _god_reversibility_class already covers any kind that is not
+# providence/private_omen, so no change was needed there).
+#
+# agent_vitals "cannot kill" (Decision #6): health <= 0 is the
+# _update_survival incapacitation threshold (see HEALTH_RATE/COLLAPSE_REGEN
+# above), not death -- death only ever happens through _agent_dies (old age,
+# or a future cause), never as a direct consequence of health hitting 0. A
+# divine negative health delta is still clamped to stop ONE full point above
+# that threshold rather than at it, so a miracle can never itself be the
+# thing that flips incapacitated=True -- the "floor above death" the plan's
+# Phase 4 section requires documented. Hunger has no such floor: hunger
+# reaching 0 does not incapacitate or kill by itself (it only makes the next
+# _update_survival tick apply HEALTH_RATE loss instead of HEALTH_REGEN gain),
+# so hunger clamps to the ordinary 0..100 survival range like health's
+# positive/upper bound does.
+GOD_VITALS_HEALTH_FLOOR = 1
+GOD_VITALS_DELTA_MAX = 100   # per-command |delta| cap, health and hunger independently
+# grant_resource: per-command cap bounds a single miracle's blast radius;
+# per-session cap (Decision-adjacent, new in Phase 4) bounds the cumulative
+# total across every grant_resource command applied since process start --
+# in-memory only (self._god_grant_session_total), like every other God-mode
+# counter that is not part of the persisted godState ring buffers.
+GOD_GRANT_PER_COMMAND_CAP = 200
+GOD_GRANT_SESSION_CAP = 2000
+# structure_condition: per-command |delta| cap. Repair/damage both reuse the
+# SAME shared _apply_structure_condition_delta helper _tick_structure_decay
+# uses (see sim_engine.py's structure-decay section), so disrepair/ruin
+# transitions -- including the homeOf homeless handling -- fire through their
+# normal narration rather than a parallel code path.
+GOD_STRUCTURE_DELTA_MAX = 100
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 5) ---
+# Timed lawgiver modifiers + storyteller events. "One active value per key":
+# a new event whose modifiers include a key already held by another ACTIVE
+# event is rejected unless it declares replaceEffectId naming that event.
+# Base module constants (HUNGER_RATE etc.) are unchanged -- every consumer
+# site multiplies its own local delta/amount by _divine_modifier(key), which
+# returns exactly 1.0 with no active effect for that key, so a feature-off
+# (or effect-free) run is byte-identical to before this phase (see
+# specs/08-systems-economy.md "Exact consumer sites and arithmetic").
+GOD_MODIFIER_RANGES = {
+    "gather_yield_multiplier": (0.25, 3.0),
+    "fish_yield_multiplier": (0.0, 3.0),
+    "hunger_drain_multiplier": (0.0, 3.0),
+    "health_regen_multiplier": (0.0, 3.0),   # fed regen ONLY -- never COLLAPSE_REGEN, see _update_survival
+    "starvation_damage_multiplier": (0.0, 3.0),
+    "structure_decay_multiplier": (0.0, 3.0),
+    "spoilage_multiplier": (0.0, 3.0),
+}
+GOD_EVENT_TITLE_MAX_CHARS = 80        # shorter than GOD_TEXT_MAX_CHARS -- a title is a label, not narration
+GOD_STORY_EVENT_MAX_PRIMITIVES = 5    # bounded blast radius for one atomic story event
+GOD_STORY_EVENT_MAX_MODIFIERS = len(GOD_MODIFIER_RANGES)  # every key, at most once each
 
 # --- World geometry ---
 # WORLD_H was 1000, then 2700 (to stop the village/farm build-out grids from
@@ -1093,6 +1207,10 @@ CHRONICLE_MILESTONE_KINDS = frozenset({
     "death", "burial", "election", "belief_founded", "belief_adoption",
     "meme_mutation", "knowledge_preserved", "disaster", "district_founded",
     "emergency_measure",
+    # Sovereign God mode (Phase 2): a proclamation's chronicle entry. Viewer
+    # rendering of this kind is out of scope until the later Divine Console
+    # phase, but the milestone-set membership itself is data-shape only.
+    "divine",
 })
 # Memes: mutation is capped and event-driven -- at most one lm_complete call
 # per mutation ATTEMPT (itself gated to a low probability on ordinary
@@ -1788,6 +1906,27 @@ class SimEngine:
         # never written to state.db.
         self.shipments = []
         self._shipment_seq = 0
+        # Sovereign God mode (Phase 2): both caches are deliberately kept off
+        # the civilization dict, in-memory only, never persisted to state.db
+        # -- restart/reset/restore always start empty (see reset() and
+        # restore_state()). _god_preview_cache: previewId -> preview record
+        # (bounded GOD_PREVIEW_CACHE_MAX, each valid GOD_PREVIEW_TTL_SECONDS
+        # wall-clock seconds). _god_requests: requestId -> apply outcome
+        # (bounded GOD_REQUEST_CACHE_MAX), the idempotency store.
+        self._god_preview_cache = {}
+        self._god_requests = {}
+        self._god_rejected_count = 0  # session-lifetime counter, benchmark metadata only
+        # Sovereign God mode (Phase 4): cumulative grant_resource total across
+        # every applied command this process lifetime, in-memory only, never
+        # persisted -- see GOD_GRANT_SESSION_CAP above.
+        self._god_grant_session_total = 0
+        # Sovereign God mode (Optional Phase 8): compiler rate-limit +
+        # session-cap state, in-memory only, never persisted -- mirrors
+        # _god_preview_cache/_god_requests above. lastCompileWallTime
+        # enforces GOD_COMPILER_MIN_INTERVAL_SEC; compileCount enforces
+        # GOD_COMPILER_SESSION_CAP for this process's lifetime (bumped even
+        # on a rejected/failed compile -- see god_compile_prose).
+        self._god_compiler_state = {"lastCompileWallTime": 0.0, "compileCount": 0}
         self._reset_world(roster_size)
 
     # --- roster + cold start ---
@@ -2076,6 +2215,15 @@ class SimEngine:
             # districts exist, since "storm" picks from them); restore_state
             # setdefaults this for old saves without re-rolling an existing one.
             "weather": None,
+            # Sovereign God mode (docs/plan-sovereign-god-mode-v2.md Phase 2):
+            # set to a real default below via _default_god_state(), mirroring
+            # the weather pattern above. Persists wholesale with the rest of
+            # civilization (see save_state/_serialize_state) with NO
+            # serializer change needed -- civ persists everything except
+            # _CIV_SET_KEYS. recentRequests (the idempotency store) is
+            # deliberately NOT part of this dict -- it lives only in
+            # self._god_requests, in-memory, never persisted.
+            "godState": None,
         }
         self._effect_period_fired = 0
         self._module_period_runs = 0
@@ -2087,6 +2235,7 @@ class SimEngine:
         if ECOLOGY_ENABLED:
             self.civilization["districtStocks"] = self._init_district_stocks(self.civilization["districts"])
         self.civilization["weather"] = self._weather_default(0)
+        self.civilization["godState"] = self._default_god_state()
         if path1_on():
             for d in self.civilization["districts"].values():
                 d.setdefault("tiles", {})
@@ -2109,15 +2258,25 @@ class SimEngine:
         except Exception:
             pass
 
-    def _push_communication(self, kind, frm, to, message, outcome=None):
+    def _push_communication(self, kind, frm, to, message, outcome=None, source=None):
         entry = {"kind": kind, "from": frm, "to": to, "message": message}
         if outcome:
             entry["outcome"] = outcome
+        if source:
+            # Explicit non-emergent attribution (Sovereign God mode Phase 2's
+            # "source: divine" contract). Additive-only: every pre-existing
+            # caller passes no source and gets byte-identical entries/log
+            # calls to before this parameter existed.
+            entry["source"] = source
         self.conversationLog.insert(0, entry)
         del self.conversationLog[100:]
         try:
+            log_outcome = outcome
+            if source:
+                log_outcome = dict(outcome or {})
+                log_outcome["source"] = source
             self.d["log_conversation"](frm, to, message, self.frameTick,
-                                       kind=kind, outcome=outcome)
+                                       kind=kind, outcome=log_outcome)
         except Exception:
             pass
 
@@ -2184,6 +2343,14 @@ class SimEngine:
     def _find_agent(self, name):
         for a in self.agents:
             if a["name"] == name:
+                return a
+        return None
+
+    def _find_agent_by_id(self, agent_id):
+        """Sovereign God mode (Phase 3): omens/miracles target stable int
+        ids, never names (see docs/plan "Agent ids are stable ints")."""
+        for a in self.agents:
+            if a["id"] == agent_id:
                 return a
         return None
 
@@ -2543,8 +2710,16 @@ class SimEngine:
             self._push_activity(f"{agent['name']} ate {edible}")
         if not edible and agent["hunger"] <= 0:
             self._share_edible_with(agent)
-        agent["hunger"] = max(0, agent["hunger"] - HUNGER_RATE)
+        # Sovereign God mode Phase 5: hunger drain is scaled BEFORE the
+        # max(0, ...) clamp -- 0.0 suppresses drain entirely without
+        # touching any other survival effect.
+        agent["hunger"] = max(0, agent["hunger"] - HUNGER_RATE * self._divine_modifier("hunger_drain_multiplier"))
         if agent["incapacitated"]:
+            # COLLAPSE_REGEN is DELIBERATELY excluded from divine scaling
+            # (docs/plan "Collapse recovery -- deliberately excluded"):
+            # health_regen_multiplier must never reach this line, or a 0.0
+            # value would permanently strand an incapacitated agent below
+            # COLLAPSE_REVIVE_HEALTH with no deterministic escape.
             agent["health"] = min(100, agent["health"] + COLLAPSE_REGEN)
             if agent["health"] >= COLLAPSE_REVIVE_HEALTH:
                 agent["incapacitated"] = False
@@ -2552,9 +2727,14 @@ class SimEngine:
                 self._push_activity(f"{agent['name']} recovered")
         else:
             if agent["hunger"] <= 0:
-                agent["health"] = max(0, agent["health"] - HEALTH_RATE)
+                # Starvation damage scaled BEFORE the max(0, ...) clamp.
+                agent["health"] = max(0, agent["health"]
+                                      - HEALTH_RATE * self._divine_modifier("starvation_damage_multiplier"))
             else:
-                agent["health"] = min(100, agent["health"] + HEALTH_REGEN)
+                # Fed regen scaled BEFORE the min(100, ...) clamp. This is
+                # the ONLY health_regen_multiplier consumer site.
+                agent["health"] = min(100, agent["health"]
+                                      + HEALTH_REGEN * self._divine_modifier("health_regen_multiplier"))
             if agent["health"] <= 0:
                 agent["incapacitated"] = True
                 agent["goal"] = None
@@ -3614,6 +3794,60 @@ class SimEngine:
         elif state == "clear":
             w["districts"] = []
 
+    def _weather_enter_forced(self, state, districts, exit_frame):
+        """Sovereign God mode Phase 6 (docs/plan Answer 3 -- "RNG
+        discipline"): enters `state` with an OPERATOR-chosen district list
+        and an exit frame DERIVED from the divine event's expiresFrame
+        (Answer 1: the event owns the clock), drawing NO RNG at all --
+        unlike _weather_enter, this never calls random.randint or
+        random.sample; state/districts/exitFrame all come straight from the
+        already-validated god command. Emits the SAME narration
+        _weather_enter emits for that state, so a forced storm/clearing
+        reads identically to a natural one in activity. Left completely
+        separate from _weather_enter (which stays untouched and still
+        RNG-driven) rather than adding a branch to it, so the natural
+        machine's RNG-consumption contract can never be affected by this
+        code path existing."""
+        c = self.civilization
+        w = c["weather"]
+        w["state"] = state
+        w["since"] = self.frameTick
+        w["exitFrame"] = exit_frame
+        w["districts"] = list(districts)
+        if state == "storm":
+            where = ", ".join(w["districts"]) if w["districts"] else "the village"
+            self._push_activity(f"Storm clouds break over {where} -- structures may take damage")
+        elif state == "clearing":
+            where = ", ".join(w["districts"]) if w["districts"] else "the village"
+            self._push_activity(f"The storm passes; skies begin to clear over {where}")
+        elif state == "clear":
+            w["districts"] = []
+
+    def _weather_handoff_successor(self, state):
+        """Sovereign God mode Phase 6 (docs/plan Answer 2 -- "returning to
+        the natural cycle"): the natural _tick_weather successor for the
+        OVERRIDDEN `state`, entered via the SAME RNG-drawing _weather_enter()
+        the natural machine always uses -- mirrors _tick_weather's
+        transition table exactly (clear -> gathering, gathering -> storm or
+        clear (same probability branch), storm -> clearing, clearing ->
+        clear), but is invoked unconditionally at override-close time (the
+        caller -- _close_weather_override -- already knows the override is
+        ending) rather than gated on civilization["weather"]["exitFrame"].
+        Deliberately does NOT restore the pre-override state -- that would
+        double back and desync the strict cycle. Callers in a deterministic
+        smoke must random.seed() a fixed value before invoking this (via
+        expiry or cancel) to keep the resulting draw reproducible."""
+        if state == "clear":
+            self._weather_enter("gathering")
+        elif state == "gathering":
+            storminess = WEATHER_SEASON_STORMINESS.get(self._current_season(), 1.0)
+            p_storm = min(0.95, max(0.05, WEATHER_BASE_STORM_CHANCE * storminess))
+            self._weather_enter("storm" if random.random() < p_storm else "clear")
+        elif state == "storm":
+            self._weather_enter("clearing")
+        else:  # "clearing" (or any unknown legacy value) -> clear
+            self._weather_enter("clear")
+
     def _tick_weather(self):
         """Living-ecosystem Phase 4: deterministic clear -> gathering ->
         storm -> clearing -> clear cycle, advanced on the existing
@@ -4110,7 +4344,15 @@ class SimEngine:
             overflow = stock + held - cap
             if overflow <= 0:
                 continue
-            to_spoil = min(overflow, max(1, int(overflow * SPOILAGE_RATIO)))
+            # Sovereign God mode Phase 5: the divine spoilage multiplier
+            # scales the ordinary computed to_spoil amount (base_spoil,
+            # which already floors at 1 to guarantee normal-rate spoilage)
+            # BEFORE the existing min(overflow, ...) bound, so spoilage can
+            # never exceed the eligible overflow -- an active 0.0 multiplier
+            # means no spoilage at all that tick, overriding the normal
+            # floor-of-1 guarantee.
+            base_spoil = max(1, int(overflow * SPOILAGE_RATIO))
+            to_spoil = min(overflow, math.floor(base_spoil * self._divine_modifier("spoilage_multiplier")))
             spoiled = min(to_spoil, stock)
             if spoiled > 0:
                 c["stockpile"][rid] = stock - spoiled
@@ -4131,6 +4373,40 @@ class SimEngine:
             c["lastSpoilage"] = {"reason": reason, "frame": self.frameTick}
             self._push_activity(reason[0].upper() + reason[1:])
 
+    def _apply_structure_condition_delta(self, s, delta):
+        """Shared condition-delta + ruin-transition helper. Used by BOTH the
+        passive per-goods-tick decay below (always a negative delta) AND the
+        Sovereign God mode structure_condition miracle (docs/plan-sovereign-
+        god-mode-v2.md Phase 4: "Reuse condition/ruin helpers ... so disrepair
+        and ruin transitions fire with their normal narration"). A no-op on
+        an already-ruined structure (cond <= 0) -- callers that can reach a
+        ruin (the miracle) reject it earlier in validation instead. Returns
+        the new condition. Must be called with self.lock already held (both
+        callers already hold it: the tick loop and god_apply)."""
+        cond = s.get("condition", 100.0)
+        if cond <= 0:
+            return cond
+        new_cond = min(100.0, cond + delta) if delta >= 0 else max(0.0, cond + delta)
+        s["condition"] = new_cond
+        name = s.get("name") or s.get("type")
+        did = s.get("districtId") or "the village"
+        if cond >= STRUCTURE_DISREPAIR_THRESHOLD > new_cond:
+            self._push_activity(
+                f"The {name} in {did} has fallen into disrepair -- it stops "
+                f"working until someone uses repair_structure")
+        if new_cond <= 0:
+            s["isRuin"] = True
+            self._push_activity(
+                f"The {name} in {did} has collapsed into a ruin! "
+                f"repair_structure can rebuild it for half the original materials")
+            if ECONOMY_ENABLED and s.get("homeOf"):
+                owner = self._find_agent(s["homeOf"])
+                if owner and owner.get("homeStructureId") == s["id"]:
+                    owner["homeStructureId"] = None
+                self._push_activity(f"{s['homeOf']} is left homeless — the {name} they lived in is a ruin")
+                s["homeOf"] = None
+        return new_cond
+
     def _tick_structure_decay(self):
         """Structures decay STRUCTURE_DECAY_PER_GOODS_TICK per goods tick.
         Below STRUCTURE_DISREPAIR_THRESHOLD they stop working (produces/
@@ -4138,29 +4414,15 @@ class SimEngine:
         they collapse into a ruin, rebuildable via repair_structure for half
         the original materials (the deterministic escape)."""
         c = self.civilization
+        # Sovereign God mode Phase 5: scales only ordinary passive decay --
+        # direct disaster damage and the god_apply structure_condition
+        # miracle both call _apply_structure_condition_delta directly with
+        # their own delta and are unaffected.
+        decay = STRUCTURE_DECAY_PER_GOODS_TICK * self._divine_modifier("structure_decay_multiplier")
         for s in c["structures"]:
-            cond = s.get("condition", 100.0)
-            if cond <= 0:
+            if s.get("condition", 100.0) <= 0:
                 continue
-            new_cond = max(0.0, cond - STRUCTURE_DECAY_PER_GOODS_TICK)
-            s["condition"] = new_cond
-            name = s.get("name") or s.get("type")
-            did = s.get("districtId") or "the village"
-            if cond >= STRUCTURE_DISREPAIR_THRESHOLD > new_cond:
-                self._push_activity(
-                    f"The {name} in {did} has fallen into disrepair -- it stops "
-                    f"working until someone uses repair_structure")
-            if new_cond <= 0:
-                s["isRuin"] = True
-                self._push_activity(
-                    f"The {name} in {did} has collapsed into a ruin! "
-                    f"repair_structure can rebuild it for half the original materials")
-                if ECONOMY_ENABLED and s.get("homeOf"):
-                    owner = self._find_agent(s["homeOf"])
-                    if owner and owner.get("homeStructureId") == s["id"]:
-                        owner["homeStructureId"] = None
-                    self._push_activity(f"{s['homeOf']} is left homeless — the {name} they lived in is a ruin")
-                    s["homeOf"] = None
+            self._apply_structure_condition_delta(s, -decay)
 
     def _tick_structure_health_benchmark(self):
         """Logs a `structure_health` benchmark every goods tick so village-wide
@@ -4966,6 +5228,28 @@ class SimEngine:
             if did:
                 grove_mult = 0.5 + self._terrain_grove_ratio(did)
                 amount = max(1, int(amount * grove_mult))
+        # Sovereign God mode Phase 5 (docs/plan-sovereign-god-mode-v2.md
+        # "Exact consumer sites and arithmetic"): the divine yield multiplier
+        # is applied AFTER the custom-rule addition above (line ~5095) and
+        # the ecology/grove scaling, and BEFORE the carry-cap clamp below --
+        # that clamp is `max(1, min(...))`, so multiplying after it would
+        # resurrect a 0.0 result back to 1. Fish gets its own modifier that
+        # REPLACES (never multiplies with) the general gather modifier. A
+        # resulting amount <= 0 returns HERE, before the resource is added
+        # and before collectSuccesses/the tool benchmark/ecology depletion/
+        # harvest-quota recording/skill practice, so a divinely-nulled gather
+        # never inflates that evidence stream. With no active effect for the
+        # relevant key, _divine_modifier returns exactly 1.0 and
+        # floor(amount * 1.0) == amount, so this is byte-identical to the
+        # feature-off baseline.
+        divine_mult = (self._divine_modifier("fish_yield_multiplier")
+                       if resource == "fish"
+                       else self._divine_modifier("gather_yield_multiplier"))
+        amount = math.floor(amount * divine_mult)
+        if amount <= 0:
+            reason = "a divine hand stills the harvest"
+            agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
+            return f"{agent['name']} found nothing — {reason}"
         amount = max(1, min(amount, self._carry_cap(agent) - agent["resources"].get(resource, 0)))
         agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
         c["collectSuccesses"] += 1
@@ -5946,6 +6230,40 @@ class SimEngine:
         if self.frameTick - c.get("directiveFrame", 0) > DIRECTIVE_TTL_FRAMES:
             return None
         return c["directive"]
+
+    def _divine_prompt_lines(self, agent):
+        """Sovereign God mode (Phase 3): the at-most-two divine cognition
+        lines for one agent's think payload -- (public_line, private_line),
+        either or both None. Deliberately SEPARATE from _current_directive:
+        elder leadership and divine providence are different fields that
+        must never overwrite or shadow each other (see docs/plan "Bounded
+        cognition impact" + this repo's own directive/providence
+        distinction). Enforces the exact
+        `startFrame <= frameTick < expiresFrame` predicate itself rather
+        than trusting _expire_divine_effects to have already run this same
+        tick -- an expired-but-not-yet-swept record must still never reach a
+        prompt."""
+        if not GOD_MODE_ENABLED:
+            return None, None
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None, None
+        ft = self.frameTick
+        public_line = None
+        prov = god.get("providence")
+        if isinstance(prov, dict):
+            start = prov.get("createdFrame", 0)
+            expires = prov.get("expiresFrame")
+            if isinstance(expires, int) and start <= ft < expires:
+                public_line = prov.get("text")
+        private_line = None
+        omen = (god.get("privateOmens") or {}).get(str(agent["id"]))
+        if isinstance(omen, dict):
+            start = omen.get("createdFrame", 0)
+            expires = omen.get("expiresFrame")
+            if isinstance(expires, int) and start <= ft < expires:
+                private_line = omen.get("text")
+        return public_line, private_line
 
     def _is_idle(self, agent):
         return agent["role"] != "elder" and (
@@ -8003,6 +8321,8 @@ class SimEngine:
         recipient["beliefs"].add(belief_id)
         self._nudge_ally(speaker, recipient["name"])
         self._nudge_ally(recipient, speaker["name"])
+        if CULTURE_ENABLED:
+            self._maybe_mutate_meme(belief_id, speaker, recipient)
         source = "deterministic fallback" if fallback else f"pitch quality {quality:.2f}"
         self._push_activity(f'{recipient["name"]} adopted {self._belief_name(belief_id)} from {speaker["name"]} ({source})')
         self._push_communication("belief", speaker["name"], recipient["name"], self._belief_text(belief_id))
@@ -8157,7 +8477,12 @@ class SimEngine:
         if not mutated or mutated == current_text or looks_meta or not has_words \
                 or self.d["is_scaffold_text"](mutated):
             return
-        c.setdefault("memeTexts", {})[belief_id] = mutated
+        entry = self._belief_entry(belief_id)
+        if entry.get("tenet"):
+            entry.setdefault("originalTenet", entry["tenet"])
+            entry["tenet"] = mutated
+        else:
+            c.setdefault("memeTexts", {})[belief_id] = mutated
         c["memeMutations"] = c.get("memeMutations", 0) + 1
         self._push_activity(f'The belief "{current_text}" drifted into "{mutated}" as it spread through the village.')
         self._push_chronicle(f'A belief mutated: "{mutated}"', kind="meme_mutation")
@@ -8327,14 +8652,21 @@ class SimEngine:
         return f"{agent['name']} studied {best['skill']} at the Library (from {best['agent']}'s preserved knowledge)"
 
     # --- Phase G: chronicle (CULTURE_ENABLED) ---
-    def _push_chronicle(self, text, kind="event"):
+    def _push_chronicle(self, text, kind="event", source=None):
         """Village-level ring of major events (#3), STORED in civilization
         state (not just activity.jsonl) so it survives restarts and can be
-        summarized into prompts. Capped at CHRONICLE_CAP; oldest drops first."""
+        summarized into prompts. Capped at CHRONICLE_CAP; oldest drops first.
+
+        source is additive (default None, byte-identical entries for every
+        pre-existing caller) -- Sovereign God mode Phase 2 passes
+        source="divine" for explicit non-emergent attribution."""
         if not CULTURE_ENABLED:
             return
         chronicle = self.civilization.setdefault("chronicle", [])
-        chronicle.append({"text": text, "frame": self.frameTick, "kind": kind})
+        entry = {"text": text, "frame": self.frameTick, "kind": kind}
+        if source:
+            entry["source"] = source
+        chronicle.append(entry)
         if len(chronicle) > CHRONICLE_CAP:
             del chronicle[:-CHRONICLE_CAP]
 
@@ -10853,6 +11185,18 @@ class SimEngine:
                 "chronicle_size", len(c.get("chronicle") or []),
                 {"meme_mutations": c.get("memeMutations", 0),
                  "belief_pitch_calls": c.get("beliefPitchCalls", 0)})
+        if GOD_MODE_ENABLED:
+            # Sovereign God mode (Phase 2): intervention-aware evidence (rule
+            # 6 of the plan) -- expose `intervened` in benchmark metadata so
+            # autonomous and god-influenced runs are never mixed accidentally,
+            # plus counts for interventions/active-effects/rejected-commands.
+            god = self.civilization.get("godState") or {}
+            self.lastBenchmarks["intervened"] = bool(god.get("intervened"))
+            self._log_benchmark(
+                "god_interventions", len(god.get("recentInterventions") or []),
+                {"intervened": bool(god.get("intervened")),
+                 "active_effects": len(god.get("activeEvents") or []),
+                 "rejected_commands": self._god_rejected_count})
 
     def _run_wiki_memory_merge(self, agent, ms, joined):
         """WIKI_MEMORY path for _run_memory_maintenance. Replaces the plain
@@ -12398,6 +12742,10 @@ class SimEngine:
                  or path1_on("PATH1_DIPLOMACY_ENABLED"))
         ]
 
+        # Sovereign God mode (Phase 3): computed once per think payload,
+        # separate from directive above -- see _divine_prompt_lines.
+        divine_public_line, divine_private_line = self._divine_prompt_lines(agent)
+
         return {
             "agent_name": agent["name"],
             "frame_tick": self.frameTick,
@@ -12428,6 +12776,12 @@ class SimEngine:
             "known_districts": [{"id": did, "kind": d["kind"]} for did, d in c["districts"].items()
                                 if d.get("build_grid")],
             "directive": self._current_directive() or "none",
+            # Sovereign God mode (Phase 3): SEPARATE keys from "directive"
+            # above, rendered as their own prompt lines only when set (see
+            # server.py build_user_prompt) -- never folded into the elder
+            # directive line, in either direction.
+            "divine_public_line": divine_public_line,
+            "divine_private_line": divine_private_line,
             "invention_only": invention_turn,
             "council_turn": council_turn,
             "council_seated": council_seated,
@@ -12973,6 +13327,16 @@ class SimEngine:
             self.frameTick += 1
             ft = self.frameTick
 
+            if GOD_MODE_ENABLED:
+                # Sovereign God mode (Phase 2): bounded scan (activeEvents
+                # capped at 8), immediately after frameTick advances and
+                # before every other consumer -- see docs/plan-sovereign-god-
+                # mode-v2.md's "Expiry ownership" section. In Phase 2 there
+                # are no timed effects yet (only the no-mechanics
+                # `proclamation` command applies), so this call is a cheap
+                # no-op scan; it earns its keep starting Phase 5.
+                self._expire_divine_effects()
+
             if SURVIVAL_ENABLED and ft % SURVIVAL_TICK_FRAMES == 0:
                 for a in self.agents:
                     self._update_survival(a)
@@ -13281,6 +13645,12 @@ class SimEngine:
                 # weather value, so a save that already has real weather
                 # state resumes it unchanged (no re-roll on load).
                 civ.setdefault("weather", self._weather_default(0))
+                # Sovereign God mode (Phase 2): old saves get a fresh default
+                # god state via setdefault, same discipline as weather above
+                # -- never overwrites an already-persisted godState. Malformed
+                # nested fields on an existing godState are normalized
+                # conservatively (never raise) by _normalize_god_state.
+                civ["godState"] = self._normalize_god_state(civ.get("godState"))
                 civ.setdefault("lastRoleSwitchFrame", 0)
                 civ.setdefault("lastRuleAttemptFrame", 0)
                 civ.setdefault("priorityRuleSeq", 0)
@@ -13591,6 +13961,20 @@ class SimEngine:
                 rs = data.get("roster_size")
                 if rs:
                     self.roster_size = int(rs)
+                # Sovereign God mode (Phase 2): restart/restore invalidates
+                # every outstanding preview and in-flight idempotency record
+                # (neither is persisted -- see __init__). Then close out any
+                # timed effect that was already past its expiresFrame at the
+                # restored frameTick, exactly once, using the same bounded
+                # scan _tick_once uses every tick.
+                self._god_preview_cache = {}
+                self._god_requests = {}
+                # Optional Phase 8: compiler rate-limit/session-cap state is
+                # equally in-memory-only and never persisted -- restart/
+                # restore resets it, exactly like the preview/idempotency
+                # caches above.
+                self._god_compiler_state = {"lastCompileWallTime": 0.0, "compileCount": 0}
+                self._expire_divine_effects(restore=True)
                 self._recompute_road_paths()
                 if CEMETERY_ENABLED:
                     self._ensure_cemetery_district()
@@ -13608,6 +13992,1887 @@ class SimEngine:
             return True
         except Exception:
             return False
+
+    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
+    # Secure kernel only: the module-level GOD_MODE_ENABLED flag gates the
+    # dark default, and server.py's SIM_GOD_TOKEN + X-God-Token check gates
+    # every route BEFORE it reaches these methods -- these engine entry
+    # points have no access to (and never see) the token. Every public entry
+    # point below still re-checks GOD_MODE_ENABLED itself and no-ops cleanly
+    # if it is somehow called with the flag off, so a misrouted call can
+    # never mutate state. The only applyable command this phase is a
+    # no-mechanics `proclamation` -- every other kind validates far enough to
+    # be rejected cleanly with "not implemented in this phase".
+
+    def _default_god_state(self):
+        """Authoritative shape (docs/plan section "Authoritative state
+        model"). recentRequests is deliberately absent -- the idempotency
+        store is self._god_requests, in-memory only, never persisted."""
+        return {
+            "version": GOD_STATE_VERSION,
+            "intervened": False,
+            "nextInterventionSeq": 1,
+            "providence": None,
+            "privateOmens": {},
+            "activeEvents": [],
+            "recentInterventions": [],
+        }
+
+    def _normalize_god_state(self, raw):
+        """Conservative restore-time normalizer: never raises, backfills any
+        missing/malformed nested field with its default instead of rejecting
+        the whole structure -- the same setdefault-only back-compat
+        discipline every other phase's restore_state block uses. Never
+        overwrites an already-valid persisted field."""
+        base = self._default_god_state()
+        if not isinstance(raw, dict):
+            return base
+        out = dict(base)
+        if isinstance(raw.get("version"), int):
+            out["version"] = raw["version"]
+        out["intervened"] = bool(raw.get("intervened"))
+        seq = raw.get("nextInterventionSeq")
+        out["nextInterventionSeq"] = seq if isinstance(seq, int) and seq >= 1 else 1
+        # Phase 3: a malformed/incomplete providence or omen record is
+        # dropped (conservative, never raise) rather than kept half-shaped --
+        # a record missing expiresFrame could never expire, and one missing
+        # memoryWritten on an omen could re-fire its memory write on the
+        # very next restore-time expiry sweep.
+        providence = raw.get("providence")
+        out["providence"] = (
+            providence if isinstance(providence, dict)
+            and all(k in providence for k in ("id", "text", "createdFrame", "expiresFrame"))
+            else None
+        )
+        omens_raw = raw.get("privateOmens")
+        omens = {}
+        if isinstance(omens_raw, dict):
+            for k, v in omens_raw.items():
+                if (isinstance(k, str) and isinstance(v, dict)
+                        and all(kk in v for kk in ("id", "targetId", "text", "createdFrame", "expiresFrame"))):
+                    v = dict(v)
+                    v.setdefault("memoryWritten", False)
+                    omens[k] = v
+        out["privateOmens"] = omens
+        events = raw.get("activeEvents")
+        out["activeEvents"] = (
+            [e for e in events if isinstance(e, dict)][:GOD_ACTIVE_EVENTS_CAP]
+            if isinstance(events, list) else []
+        )
+        recent = raw.get("recentInterventions")
+        out["recentInterventions"] = (
+            [r for r in recent if isinstance(r, dict)][-GOD_RECENT_INTERVENTIONS_CAP:]
+            if isinstance(recent, list) else []
+        )
+        return out
+
+    # --- stored-text contract ---
+    def _normalize_divine_text(self, raw, max_chars=GOD_TEXT_MAX_CHARS, max_bytes=GOD_TEXT_MAX_BYTES):
+        """Single normalizer used by every divine text field (docs/plan
+        section "Stored-content safety"): Unicode NFC, reject NUL and C0/C1
+        controls other than ordinary space, reject embedded newlines, enforce
+        char AND UTF-8-byte limits post-normalization, return plain text --
+        never HTML. Returns (normalized_text, None) on success or
+        (None, reason) on rejection; `reason` is short and secret-free (safe
+        to return over HTTP / write to divine.jsonl)."""
+        if not isinstance(raw, str):
+            return None, "must be a string"
+        normalized = unicodedata.normalize("NFC", raw)
+        for ch in normalized:
+            cp = ord(ch)
+            if ch in ("\n", "\r"):
+                return None, "must not contain newlines"
+            if cp == 0 or cp < 0x20 or 0x7F <= cp <= 0x9F:
+                return None, "must not contain NUL or control characters"
+        normalized = normalized.strip()
+        if not normalized:
+            return None, "must not be empty"
+        if len(normalized) > max_chars:
+            return None, f"exceeds {max_chars} characters"
+        if len(normalized.encode("utf-8")) > max_bytes:
+            return None, f"exceeds {max_bytes} bytes"
+        return normalized, None
+
+    # --- command envelope ---
+    # Kinds already named in the v2 catalog (docs/plan) that this phase still
+    # does not implement -- validated far enough to be rejected cleanly
+    # rather than falling into the generic "unknown kind" branch. Phase 4
+    # implements agent_vitals/grant_resource/structure_condition (removed
+    # below); story_event (Phase 5, timed/composite) remains deferred.
+    _GOD_FUTURE_KINDS = frozenset()
+
+    # --- Sovereign God mode Phase 5: storyteller events ---
+    _GOD_PRIMITIVE_KINDS = ("agent_vitals", "grant_resource", "structure_condition")
+
+    def _god_active_event_holding_key(self, key, exclude_id=None):
+        """The currently-active activeEvents record that carries `key` in
+        its modifiers, or None if the key is unoccupied. Shared by the
+        one-value-per-key conflict check (both preview time and apply-time
+        revalidation re-run this against CURRENT state) and by
+        _divine_modifier's read side staying consistent with what
+        "occupied" means."""
+        god = self.civilization.get("godState") or {}
+        for event in god.get("activeEvents") or []:
+            if not isinstance(event, dict) or event.get("status") != "active":
+                continue
+            if exclude_id is not None and event.get("id") == exclude_id:
+                continue
+            modifiers = event.get("modifiers")
+            if isinstance(modifiers, dict) and key in modifiers:
+                return event
+        return None
+
+    def _validate_god_story_event(self, payload):
+        """Validate + canonicalize a story_event command. NO mutation.
+        Atomic by construction: every sub-component (title, narration,
+        visibility/target, duration, modifiers, primitives, providence,
+        replaceEffectId conflict check) is validated here before anything is
+        accepted; a single invalid component rejects the WHOLE envelope, so
+        god_apply's revalidate-then-apply sequence can never partially
+        apply a story event."""
+        title, reason = self._normalize_divine_text(payload.get("title"), max_chars=GOD_EVENT_TITLE_MAX_CHARS)
+        if reason:
+            return None, f"story_event title {reason}"
+        narration, reason = self._normalize_divine_text(payload.get("narration"))
+        if reason:
+            return None, f"story_event narration {reason}"
+
+        visibility = payload.get("visibility", "public")
+        if visibility not in ("public", "private"):
+            return None, 'visibility must be "public" or "private"'
+        target_id = None
+        if visibility == "private":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id for a private story_event"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+
+        replace_effect_id = payload.get("replaceEffectId")
+        if replace_effect_id is not None and (
+            not isinstance(replace_effect_id, str) or not replace_effect_id.strip()
+        ):
+            return None, "replaceEffectId must be a non-empty string"
+        if isinstance(replace_effect_id, str):
+            replace_effect_id = replace_effect_id.strip()
+            replaced_event = next(
+                (e for e in (self.civilization.get("godState") or {}).get("activeEvents") or []
+                 if isinstance(e, dict) and e.get("id") == replace_effect_id
+                 and e.get("status") == "active"), None)
+            if replaced_event is None:
+                return None, "replaceEffectId does not name an active event"
+
+        modifiers_raw = payload.get("modifiers")
+        modifiers = {}
+        if modifiers_raw is not None:
+            if not isinstance(modifiers_raw, dict):
+                return None, "modifiers must be an object"
+            if len(modifiers_raw) > GOD_STORY_EVENT_MAX_MODIFIERS:
+                return None, f"modifiers may name at most {GOD_STORY_EVENT_MAX_MODIFIERS} keys"
+            for mkey, mvalue in modifiers_raw.items():
+                if mkey not in GOD_MODIFIER_RANGES:
+                    return None, f"unknown modifier key '{mkey}'"
+                if isinstance(mvalue, bool) or not isinstance(mvalue, (int, float)):
+                    return None, f"modifier '{mkey}' must be a number"
+                if not math.isfinite(mvalue):
+                    return None, f"modifier '{mkey}' must be finite"
+                lo, hi = GOD_MODIFIER_RANGES[mkey]
+                if not (lo <= mvalue <= hi):
+                    return None, f"modifier '{mkey}' must be between {lo} and {hi}"
+                # One active value per key: reject an occupied key unless
+                # replaceEffectId names the event that holds it.
+                holder = self._god_active_event_holding_key(mkey)
+                if holder is not None and holder.get("id") != replace_effect_id:
+                    return None, (f"modifier '{mkey}' already has an active effect "
+                                  f"(id {holder.get('id')}) -- supply replaceEffectId to replace it")
+                modifiers[mkey] = float(mvalue)
+
+        primitives_raw = payload.get("primitives")
+        primitives = []
+        if primitives_raw is not None:
+            if not isinstance(primitives_raw, list):
+                return None, "primitives must be a list"
+            if len(primitives_raw) > GOD_STORY_EVENT_MAX_PRIMITIVES:
+                return None, f"primitives may contain at most {GOD_STORY_EVENT_MAX_PRIMITIVES} entries"
+            for prim in primitives_raw:
+                if not isinstance(prim, dict):
+                    return None, "each primitive must be an object"
+                prim_kind = prim.get("kind")
+                if prim_kind not in self._GOD_PRIMITIVE_KINDS:
+                    return None, f"primitive kind must be one of {self._GOD_PRIMITIVE_KINDS}"
+                prim_normalized, prim_reason = self._validate_god_envelope(
+                    {"kind": prim_kind, "payload": prim.get("payload") or {}})
+                if prim_reason:
+                    return None, f"primitive '{prim_kind}': {prim_reason}"
+                primitives.append(prim_normalized)
+
+        providence_raw = payload.get("providence")
+        providence_payload = None
+        if providence_raw is not None:
+            if not isinstance(providence_raw, dict):
+                return None, "providence must be an object"
+            prov_text, reason = self._normalize_divine_text(providence_raw.get("text"))
+            if reason:
+                return None, f"story_event providence text {reason}"
+            providence_payload = {"text": prov_text}
+
+        return {
+            "kind": "story_event",
+            "payload": {
+                "title": title, "narration": narration,
+                "visibility": visibility, "targetId": target_id,
+                "durationFrames": duration,
+                "modifiers": modifiers, "primitives": primitives,
+                "providence": providence_payload,
+                "replaceEffectId": replace_effect_id,
+            },
+        }, None
+
+    def _clamp_god_duration(self, raw):
+        """Sovereign God mode (Phase 3): silently clamp a caller-supplied
+        durationFrames into range, or fall back to the default when omitted
+        -- the plan's preview contract clamps rather than rejects in-range
+        violations. `raw` has already been type-checked (int, not bool) by
+        the caller when not None."""
+        if raw is None:
+            return GOD_GUIDANCE_DEFAULT_DURATION_FRAMES
+        return max(GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                   min(GOD_GUIDANCE_MAX_DURATION_FRAMES, raw))
+
+    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 6) ---
+    def _god_active_weather_override(self, exclude_id=None):
+        """The currently-active weather_override activeEvents record, or
+        None -- "one active weather override at a time" (docs/plan
+        Validation), mirroring _god_active_event_holding_key's shape for the
+        story_event one-value-per-key policy."""
+        god = self.civilization.get("godState") or {}
+        for event in god.get("activeEvents") or []:
+            if not isinstance(event, dict) or event.get("status") != "active":
+                continue
+            if event.get("kind") != "weather_override":
+                continue
+            if exclude_id is not None and event.get("id") == exclude_id:
+                continue
+            return event
+        return None
+
+    def _validate_god_weather_override(self, payload):
+        """Validate + canonicalize a weather_override command. NO mutation.
+        docs/plan Phase 6 "Validation": requires WEATHER_ENABLED; state must
+        be a real machine state; district ids must exist, with an empty list
+        allowed only for "clear" (the only state the natural machine itself
+        ever clears districts for -- gathering/storm/clearing all require at
+        least one, matching what _weather_enter actually does for each);
+        duration uses the existing god duration clamp; one active override at
+        a time unless replaceEffectId names the currently active one."""
+        if not WEATHER_ENABLED:
+            return None, "weather_override requires WEATHER_ENABLED"
+
+        state = payload.get("state")
+        if state not in WEATHER_STATES:
+            return None, f"state must be one of {WEATHER_STATES}"
+
+        districts_raw = payload.get("districts")
+        if districts_raw is None:
+            districts_raw = []
+        if not isinstance(districts_raw, list):
+            return None, "districts must be a list"
+        if state == "clear":
+            if districts_raw:
+                return None, 'state "clear" does not take districts (must be empty)'
+            districts = []
+        else:
+            if not districts_raw:
+                return None, f'state "{state}" requires at least one district'
+            districts = []
+            seen = set()
+            for d in districts_raw:
+                if not isinstance(d, str) or d not in self.civilization["districts"]:
+                    return None, f"unknown district id '{d}'"
+                if d not in seen:
+                    seen.add(d)
+                    districts.append(d)
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+
+        replace_effect_id = payload.get("replaceEffectId")
+        if replace_effect_id is not None and (
+            not isinstance(replace_effect_id, str) or not replace_effect_id.strip()
+        ):
+            return None, "replaceEffectId must be a non-empty string"
+        if isinstance(replace_effect_id, str):
+            replace_effect_id = replace_effect_id.strip()
+            replaced = self._god_active_weather_override()
+            if replaced is None or replaced.get("id") != replace_effect_id:
+                return None, "replaceEffectId does not name the active weather override"
+        else:
+            existing = self._god_active_weather_override()
+            if existing is not None:
+                return None, (f"a weather override is already active (id {existing.get('id')}) "
+                              "-- supply replaceEffectId to replace it")
+
+        return {"kind": "weather_override",
+                "payload": {"state": state, "districts": districts,
+                           "durationFrames": duration, "replaceEffectId": replace_effect_id}}, None
+
+    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 5) ---
+    def _divine_modifier(self, key, default=1.0):
+        """The one active value for `key` (docs/plan "Timed lawgiver
+        modifiers" + "Expiry ownership"), or exactly `default` when the flag
+        is off, godState is missing/malformed, or no activeEvents record
+        currently carries that key within [startFrame, expiresFrame). Every
+        consumer site multiplies its own local delta/amount by this value,
+        so an effective 1.0 (flag off, or flag on with no matching active
+        effect) executes the identical arithmetic as the feature-off
+        baseline -- see each consumer site's comment for the exact ordering.
+        Called from inside the tick loop / apply_decision, both of which
+        already hold self.lock -- this method never acquires it itself."""
+        if not GOD_MODE_ENABLED:
+            return default
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return default
+        events = god.get("activeEvents")
+        if not isinstance(events, list):
+            return default
+        ft = self.frameTick
+        for event in events[:GOD_ACTIVE_EVENTS_CAP]:
+            if not isinstance(event, dict) or event.get("status") != "active":
+                continue
+            modifiers = event.get("modifiers")
+            if not isinstance(modifiers, dict) or key not in modifiers:
+                continue
+            start = event.get("startFrame")
+            expires = event.get("expiresFrame")
+            if not isinstance(start, int) or not isinstance(expires, int):
+                continue
+            if start <= ft < expires:
+                value = modifiers[key]
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return float(value)
+        return default
+
+    def _validate_god_envelope(self, envelope):
+        """Validate + canonicalize a {kind, payload, expectedFrame} command
+        envelope. NO mutation. Returns (normalized_command, reason);
+        normalized_command is None on rejection."""
+        if not isinstance(envelope, dict):
+            return None, "envelope must be an object"
+        kind = envelope.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            return None, "kind is required"
+        kind = kind.strip()
+        payload = envelope.get("payload")
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return None, "payload must be an object"
+        expected_frame = envelope.get("expectedFrame")
+        if expected_frame is not None and not isinstance(expected_frame, int):
+            return None, "expectedFrame must be an integer"
+
+        if kind == "proclamation":
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"proclamation text {reason}"
+            return {"kind": "proclamation", "payload": {"text": text}}, None
+
+        if kind == "providence":
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"providence text {reason}"
+            duration_raw = payload.get("durationFrames")
+            if duration_raw is not None and (
+                isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+            ):
+                return None, "durationFrames must be an integer"
+            duration = self._clamp_god_duration(duration_raw)
+            return {"kind": "providence",
+                    "payload": {"text": text, "durationFrames": duration}}, None
+
+        if kind == "private_omen":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"private_omen text {reason}"
+            duration_raw = payload.get("durationFrames")
+            if duration_raw is not None and (
+                isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+            ):
+                return None, "durationFrames must be an integer"
+            duration = self._clamp_god_duration(duration_raw)
+            return {"kind": "private_omen",
+                    "payload": {"targetId": target_id, "text": text,
+                               "durationFrames": duration}}, None
+
+        if kind == "revoke_guidance":
+            guidance_id = payload.get("id")
+            if not isinstance(guidance_id, str) or not guidance_id.strip():
+                return None, "id is required"
+            return {"kind": "revoke_guidance",
+                    "payload": {"id": guidance_id.strip()}}, None
+
+        # --- Sovereign God mode Phase 4: bounded immediate miracles ---
+        if kind == "agent_vitals":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+
+            def _vitals_num(raw, label):
+                if raw is None:
+                    return 0.0, None
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                    return None, f"{label} must be a number"
+                if not math.isfinite(raw):
+                    return None, f"{label} must be finite"
+                if abs(raw) > GOD_VITALS_DELTA_MAX:
+                    return None, f"{label} magnitude exceeds {GOD_VITALS_DELTA_MAX}"
+                return float(raw), None
+
+            health_delta, reason = _vitals_num(payload.get("healthDelta"), "healthDelta")
+            if reason:
+                return None, reason
+            hunger_delta, reason = _vitals_num(payload.get("hungerDelta"), "hungerDelta")
+            if reason:
+                return None, reason
+            if health_delta == 0.0 and hunger_delta == 0.0:
+                return None, "at least one of healthDelta/hungerDelta must be non-zero"
+            return {"kind": "agent_vitals",
+                    "payload": {"targetId": target_id, "healthDelta": health_delta,
+                               "hungerDelta": hunger_delta}}, None
+
+        if kind == "grant_resource":
+            resource_id = payload.get("resourceId")
+            if not isinstance(resource_id, str) or not resource_id.strip():
+                return None, "resourceId is required"
+            resource_id = resource_id.strip()
+            if resource_id not in self.civilization.get("resourceRegistry", {}):
+                return None, "unknown resource id"
+            amount = payload.get("amount")
+            if isinstance(amount, bool) or not isinstance(amount, int):
+                return None, "amount must be an integer"
+            if amount <= 0:
+                return None, "amount must be positive"
+            if amount > GOD_GRANT_PER_COMMAND_CAP:
+                return None, f"amount exceeds the per-command cap of {GOD_GRANT_PER_COMMAND_CAP}"
+            if self._god_grant_session_total + amount > GOD_GRANT_SESSION_CAP:
+                return None, f"amount would exceed the per-session cap of {GOD_GRANT_SESSION_CAP}"
+            # NOTE: the normalized "target" field below deliberately keeps the
+            # SAME shape as the raw input ("stockpile" string, or {"agentId":
+            # int}) rather than expanding it into separate targetKind/
+            # targetAgentId keys -- apply-time revalidation re-runs this exact
+            # validator over its OWN previously normalized output (see
+            # god_apply), so the normalized shape must be idempotent under
+            # re-validation or a stale digest mismatch fires on every apply.
+            target = payload.get("target")
+            if target is None:
+                target = "stockpile"
+            if target == "stockpile":
+                normalized_target = "stockpile"
+            elif isinstance(target, dict) and "agentId" in target:
+                agent_id = target.get("agentId")
+                if isinstance(agent_id, bool) or not isinstance(agent_id, int):
+                    return None, "target.agentId must be an integer agent id"
+                agent = self._find_agent_by_id(agent_id)
+                if agent is None:
+                    return None, "unknown target agent"
+                if agent.get("deathFrame") is not None:
+                    return None, "target agent is deceased"
+                normalized_target = {"agentId": agent_id}
+            else:
+                return None, 'target must be "stockpile" or {"agentId": <int>}'
+            return {"kind": "grant_resource",
+                    "payload": {"resourceId": resource_id, "amount": amount,
+                               "target": normalized_target}}, None
+
+        if kind == "structure_condition":
+            structure_id = payload.get("structureId")
+            if isinstance(structure_id, bool) or not isinstance(structure_id, int):
+                return None, "structureId must be an integer"
+            structure = next((s for s in self.civilization["structures"]
+                              if s.get("id") == structure_id), None)
+            if structure is None:
+                return None, "unknown structure"
+            if structure.get("isRuin") or structure.get("condition", 100.0) <= 0:
+                return None, "structure is already ruined"
+            delta = payload.get("delta")
+            if isinstance(delta, bool) or not isinstance(delta, (int, float)):
+                return None, "delta must be a number"
+            if not math.isfinite(delta):
+                return None, "delta must be finite"
+            if delta == 0:
+                return None, "delta must be non-zero"
+            if abs(delta) > GOD_STRUCTURE_DELTA_MAX:
+                return None, f"delta magnitude exceeds {GOD_STRUCTURE_DELTA_MAX}"
+            return {"kind": "structure_condition",
+                    "payload": {"structureId": structure_id, "delta": float(delta)}}, None
+
+        # --- Sovereign God mode Phase 6: weather override ---
+        if kind == "weather_override":
+            return self._validate_god_weather_override(payload)
+
+        # --- Sovereign God mode Phase 5: storyteller events ---
+        if kind == "story_event":
+            return self._validate_god_story_event(payload)
+
+        if kind in self._GOD_FUTURE_KINDS:
+            return None, f"kind '{kind}' is not implemented in this phase"
+        return None, f"unknown kind '{kind}'"
+
+    def _god_command_digest(self, normalized_command):
+        blob = json.dumps(normalized_command, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def _god_preview_outcome(self, normalized):
+        """Sovereign God mode Phase 4: a non-mutating projection of the EXACT
+        clamped/bounded value an immediate miracle would apply, computed
+        against CURRENT live state (docs/plan Phase 4: "Preview must show the
+        exact clamped/bounded value that will be applied, plus the affected
+        target, computed against current world state"). Uses the identical
+        clamp arithmetic the corresponding _god_apply_* helper uses, so as
+        long as no other mutation touches the same target between preview and
+        apply, the value shown here is the value that gets applied. Returns
+        None for kinds with no derived value to preview (every Phase 2/3
+        kind, and any target that has vanished since preview -- apply-time
+        revalidation is the authoritative rejection path for that)."""
+        kind = normalized["kind"]
+        payload = normalized["payload"]
+        if kind == "agent_vitals":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            health_delta, hunger_delta = payload["healthDelta"], payload["hungerDelta"]
+            old_health, old_hunger = agent["health"], agent["hunger"]
+            new_health = old_health
+            if health_delta:
+                new_health = (min(100.0, old_health + health_delta) if health_delta >= 0
+                             else max(GOD_VITALS_HEALTH_FLOOR, old_health + health_delta))
+            new_hunger = old_hunger
+            if hunger_delta:
+                new_hunger = max(0.0, min(100.0, old_hunger + hunger_delta))
+            return {"targetId": payload["targetId"], "targetName": agent["name"],
+                    "oldHealth": old_health, "newHealth": new_health,
+                    "oldHunger": old_hunger, "newHunger": new_hunger}
+        if kind == "grant_resource":
+            amount = payload["amount"]
+            target = payload["target"]
+            if target == "stockpile":
+                return {"resourceId": payload["resourceId"], "amount": amount,
+                        "targetKind": "stockpile", "agentAdded": 0, "stockpileAdded": amount}
+            target_agent_id = target["agentId"]
+            agent = self._find_agent_by_id(target_agent_id)
+            if agent is None:
+                return None
+            cap = self._carry_cap(agent)
+            held = agent["resources"].get(payload["resourceId"], 0)
+            room = max(0, cap - held)
+            agent_added = min(amount, room)
+            stockpile_added = amount - agent_added
+            return {"resourceId": payload["resourceId"], "amount": amount,
+                    "targetKind": "agent", "targetAgentId": target_agent_id,
+                    "targetName": agent["name"], "agentAdded": agent_added,
+                    "stockpileAdded": stockpile_added}
+        if kind == "structure_condition":
+            structure = next((s for s in self.civilization["structures"]
+                              if s.get("id") == payload["structureId"]), None)
+            if structure is None:
+                return None
+            old_cond = structure.get("condition", 100.0)
+            delta = payload["delta"]
+            new_cond = min(100.0, old_cond + delta) if delta >= 0 else max(0.0, old_cond + delta)
+            return {"structureId": payload["structureId"],
+                    "structureName": structure.get("name") or structure.get("type"),
+                    "oldCondition": old_cond, "newCondition": new_cond,
+                    "wouldBecomeRuin": bool(delta < 0 and new_cond <= 0)}
+        if kind == "story_event":
+            modifiers = payload.get("modifiers") or {}
+            outcome = {
+                "modifiers": dict(modifiers),
+                "primitives": [
+                    {"kind": prim["kind"], "outcome": self._god_preview_outcome(prim)}
+                    for prim in (payload.get("primitives") or [])
+                ],
+                "providenceOutgoingId": None,
+            }
+            # docs/plan "Divine law vs. village law": when a proposed
+            # gather/fish modifier composes with an agent-authored custom
+            # rule, preview discloses BOTH contributions separately so the
+            # operator sees they are amplifying an emergent effect rather
+            # than replacing it -- the divine multiplier is applied AFTER
+            # the custom-rule addition at the gather consumer site.
+            if "gather_yield_multiplier" in modifiers or "fish_yield_multiplier" in modifiers:
+                outcome["customRuleContext"] = self._god_custom_rule_gather_context()
+            if payload.get("providence"):
+                outcome["providenceOutgoingId"] = self._god_current_outgoing_guidance_id("providence", {})
+            return outcome
+        if kind == "weather_override":
+            # docs/plan Phase 6 Answer 4 ("consequential disclosure"):
+            # preview must state explicitly that entering "storm" can
+            # PERMANENTLY damage structures in the named districts, that
+            # neither cancelling nor expiry undoes that damage, and must
+            # list the exact districts plus the count of currently
+            # non-ruined structures at risk in them -- computed against
+            # CURRENT live state, same discipline as every other
+            # _god_preview_outcome branch.
+            state, districts = payload["state"], payload["districts"]
+            w = self.civilization.get("weather") or {}
+            at_risk = sum(
+                1 for s in self.civilization["structures"]
+                if s.get("districtId") in districts and not s.get("isRuin")
+                and s.get("condition", 100.0) > 0
+            ) if districts else 0
+            warning = None
+            if state == "storm":
+                warning = ("Entering 'storm' can PERMANENTLY damage structures in the "
+                          "named districts. That damage is not undone by cancelling this "
+                          "override or by its natural expiry.")
+            return {
+                "state": state, "districts": list(districts),
+                "priorState": w.get("state", "clear"),
+                "atRiskStructureCount": at_risk,
+                "warning": warning,
+            }
+        return None
+
+    def _god_custom_rule_gather_context(self):
+        """Compact summary of currently-enacted village custom rules that
+        modify collect_resource -- shown alongside a proposed divine
+        gather/fish multiplier in preview (docs/plan "Divine law vs. village
+        law"). Mirrors the matching logic in _custom_rule_modifier without
+        needing an agent/resource to evaluate against (a preview has
+        neither)."""
+        entries = []
+        for rule_id, effect in (self.civilization.get("customRuleModifiers") or {}).items():
+            if not isinstance(effect, dict):
+                continue
+            condition = effect.get("condition") or {}
+            if condition.get("action", "collect_resource") != "collect_resource":
+                continue
+            subject = effect.get("subject") or {}
+            subject_kind, subject_value = next(iter(subject.items()), (None, None))
+            entries.append({
+                "ruleId": rule_id,
+                "subject": {subject_kind: subject_value} if subject_kind else {},
+                "value": int((effect.get("modifier") or {}).get("value") or 0),
+            })
+        return entries
+
+    def _god_reversibility_class(self, normalized_command):
+        """Three classes per the docs/plan "Honest reversibility" table.
+        providence/private_omen are cancellable (revocable before expiry,
+        expire naturally otherwise). proclamation is a one-shot broadcast
+        with no revocable state, and revoke_guidance is itself the "undo" --
+        neither has anything left to cancel -- so both stay irreversible,
+        like the vitals/resource/structure primitives Phase 4 added. A
+        story_event with no immediate primitives is cancellable (only timed
+        modifiers/providence, both revocable). One WITH primitives is
+        consequential: cancelling it stops future effect (modifiers,
+        providence) but cannot retract the primitives it already applied --
+        those are irreversible mutations by their own nature (docs/plan
+        "Honest reversibility" -- the third, consequential, class)."""
+        kind = normalized_command["kind"] if isinstance(normalized_command, dict) else normalized_command
+        if kind in ("providence", "private_omen"):
+            return "cancellable"
+        if kind == "story_event":
+            payload = normalized_command["payload"] if isinstance(normalized_command, dict) else {}
+            return "consequential" if payload.get("primitives") else "cancellable"
+        # docs/plan Phase 6 Answer 4: weather_override is consequential, not
+        # merely cancellable -- entering "storm" can trigger real, permanent
+        # structure damage (via the normal _maybe_disaster path) that
+        # neither cancelling the override nor letting it expire retracts.
+        if kind == "weather_override":
+            return "consequential"
+        return "irreversible"
+
+    def _god_current_outgoing_guidance_id(self, kind, payload):
+        """The id of the guidance record a providence/private_omen command
+        would replace if applied right now, or None if the slot is empty.
+        Shared by the preview-time fingerprint and the apply-time
+        revalidation of it -- this IS the "disclose-then-replace" mechanism:
+        preview freezes the outgoing id it saw; apply recomputes it fresh and
+        rejects on mismatch (docs/plan "Replacing an existing one is allowed
+        ONLY when the preview disclosed the replacement")."""
+        god = self.civilization.get("godState") or {}
+        if kind == "providence":
+            prov = god.get("providence")
+            return prov.get("id") if isinstance(prov, dict) else None
+        if kind == "private_omen":
+            omen = (god.get("privateOmens") or {}).get(str(payload.get("targetId")))
+            return omen.get("id") if isinstance(omen, dict) else None
+        return None
+
+    def _god_current_revoke_target(self, guidance_id):
+        """Where a revoke_guidance id currently points, or a not-found
+        marker -- used the same way as _god_current_outgoing_guidance_id so
+        a revoke preview can't apply against a target that already expired
+        or was replaced in the meantime."""
+        god = self.civilization.get("godState") or {}
+        prov = god.get("providence")
+        if isinstance(prov, dict) and prov.get("id") == guidance_id:
+            return {"targetKind": "providence", "existed": True}
+        for omen in (god.get("privateOmens") or {}).values():
+            if isinstance(omen, dict) and omen.get("id") == guidance_id:
+                return {"targetKind": "private_omen", "existed": True}
+        return {"targetKind": None, "existed": False}
+
+    def _god_target_fingerprint(self, normalized_command):
+        """Precondition fingerprint bound into a preview record, revalidated
+        at apply time. proclamation targets "everyone" and has no
+        target-specific precondition. providence/private_omen record the
+        outgoing guidance id they would replace; revoke_guidance records
+        where its id currently points. Later phases
+        (agent_vitals/grant_resource/structure_condition/story_event) will
+        add target ids, current values, and district ids here too."""
+        kind = normalized_command["kind"]
+        if kind in ("providence", "private_omen"):
+            return {"outgoingId": self._god_current_outgoing_guidance_id(
+                kind, normalized_command["payload"])}
+        if kind == "revoke_guidance":
+            return self._god_current_revoke_target(normalized_command["payload"]["id"])
+        return {}
+
+    def _god_check_fingerprint(self, normalized_command, fingerprint):
+        """Returns a rejection reason string, or None if every recorded
+        precondition still matches current state. frameTick drift alone is
+        acceptable and never checked here."""
+        kind = normalized_command["kind"]
+        if kind in ("providence", "private_omen"):
+            current = self._god_current_outgoing_guidance_id(
+                kind, normalized_command["payload"])
+            if current != fingerprint.get("outgoingId"):
+                return f"{kind} changed since preview -- re-preview to see the current guidance"
+            return None
+        if kind == "revoke_guidance":
+            current = self._god_current_revoke_target(normalized_command["payload"]["id"])
+            if current != fingerprint:
+                return "guidance target changed since preview -- re-preview to see the current state"
+            return None
+        return None
+
+    # --- preview cache (in-memory, bounded, never persisted) ---
+    def _god_preview_evict_expired(self):
+        now = time.time()
+        expired = [pid for pid, rec in self._god_preview_cache.items()
+                  if rec["expiresAt"] <= now]
+        for pid in expired:
+            del self._god_preview_cache[pid]
+
+    def _god_preview_insert(self, record):
+        self._god_preview_evict_expired()
+        while len(self._god_preview_cache) >= GOD_PREVIEW_CACHE_MAX:
+            oldest_id = min(self._god_preview_cache,
+                            key=lambda pid: self._god_preview_cache[pid]["createdAt"])
+            del self._god_preview_cache[oldest_id]
+        self._god_preview_cache[record["previewId"]] = record
+
+    # --- idempotency store (in-memory, bounded, never persisted) ---
+    def _god_requests_evict(self):
+        while len(self._god_requests) > GOD_REQUEST_CACHE_MAX:
+            oldest_id = min(self._god_requests,
+                            key=lambda rid: self._god_requests[rid]["createdAt"])
+            del self._god_requests[oldest_id]
+
+    def _hash_request_id(self, request_id):
+        """Never log a raw client-supplied requestId verbatim (docs/plan
+        Logging section: "Hash or redact request_id")."""
+        if not request_id:
+            return None
+        return hashlib.sha256(str(request_id).encode("utf-8")).hexdigest()[:16]
+
+    def _log_divine(self, intervention_id, request_id, kind, normalized_command,
+                    outcome, status, public):
+        log_fn = self.d.get("log_divine")
+        if not log_fn:
+            return
+        try:
+            log_fn(
+                intervention_id=intervention_id,
+                request_id=self._hash_request_id(request_id),
+                frame_tick=self.frameTick,
+                kind=kind,
+                normalized_command=normalized_command,
+                outcome=outcome,
+                status=status,
+                public=public,
+            )
+        except Exception:
+            pass  # logging must never break the simulation
+
+    # --- guidance closure (Phase 3: providence + private omens) ---
+    def _close_providence(self, status):
+        """Clears the single active providence slot exactly once, emitting
+        one audit record (docs/plan "Expiry ownership" + "Cancellable"
+        reversibility). Returns the closed record, or None if none was
+        active. Must be called with self.lock already held. Providence
+        carries no memory-write contract -- only private omens do."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        prov = god.get("providence")
+        if not isinstance(prov, dict):
+            return None
+        god["providence"] = None
+        self._log_divine(prov.get("id"), None, "providence", prov,
+                         {"status": status}, status, public=True)
+        return prov
+
+    def _close_omen(self, key, status):
+        """Clears one private omen (keyed by str(agent id)) exactly once.
+        Writes the omen's text into the target's ordinary memory EXACTLY
+        ONCE via _push_memory(..., kind="divine_omen") -- guarded by the
+        record's own `memoryWritten` flag so expiry, revocation, and
+        replacement can never double-fire it, and restore-time re-closure of
+        an already-closed omen (memoryWritten already True, or the key
+        already gone) is a safe no-op (docs/plan Phase 3 memory contract).
+        Must be called with self.lock already held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        omens = god.get("privateOmens")
+        omen = omens.get(key) if isinstance(omens, dict) else None
+        if not isinstance(omen, dict):
+            return None
+        if not omen.get("memoryWritten"):
+            agent = self._find_agent_by_id(omen.get("targetId"))
+            if agent is not None:
+                self._push_memory(agent, omen.get("text", ""), kind="divine_omen")
+            omen["memoryWritten"] = True
+        del omens[key]
+        self._log_divine(omen.get("id"), None, "private_omen", omen,
+                         {"status": status}, status, public=False)
+        return omen
+
+    # --- expiry (rule: "Expiry ownership") ---
+    def _expire_divine_effects(self, restore=False):
+        """Bounded scan: marks newly expired activeEvents (Phase 5 payload,
+        empty today), providence, and every private omen exactly once each,
+        leaving already-closed entries untouched. Called every tick
+        immediately after frameTick advances (_tick_once) and once more
+        after restore rehydration. Must be called with self.lock already
+        held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        ft = self.frameTick
+        events = god.get("activeEvents")
+        if isinstance(events, list) and events:
+            for event in events[:GOD_ACTIVE_EVENTS_CAP]:
+                if not isinstance(event, dict) or event.get("status") != "active":
+                    continue
+                expires_frame = event.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    if event.get("kind") == "weather_override":
+                        # Phase 6: closes the override and hands off to the
+                        # natural cycle's successor state via the SAME path
+                        # cancel uses (_close_weather_override) -- never the
+                        # story_event closer, which has no weather semantics.
+                        self._close_weather_override(event, status)
+                        if not restore:
+                            self._push_activity(
+                                "A divine weather override ends -- the sky "
+                                "returns to its natural course.")
+                    else:
+                        # Shared with god_cancel's story_event branch: closes the
+                        # event exactly once and, if it still owns the current
+                        # providence slot, closes that too through the SAME
+                        # _close_providence path (docs/plan Phase 5: expiry
+                        # closes every sub-effect of an event exactly once).
+                        self._close_story_event(event, status)
+                        if not restore and event.get("visibility", "public") == "public":
+                            self._push_activity(f'A divine story fades: "{event.get("title")}"')
+
+        prov = god.get("providence")
+        if isinstance(prov, dict):
+            expires_frame = prov.get("expiresFrame")
+            if isinstance(expires_frame, int) and ft >= expires_frame:
+                status = "restore-closed" if restore else "expired"
+                self._close_providence(status)
+                if not restore:
+                    self._push_activity("A divine providence fades from the village's thoughts.")
+
+        omens = god.get("privateOmens")
+        if isinstance(omens, dict) and omens:
+            for key in list(omens.keys()):
+                omen = omens.get(key)
+                if not isinstance(omen, dict):
+                    continue
+                expires_frame = omen.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_omen(key, status)
+
+    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Optional
+    # Phase 8: free-prose story compiler) ---
+    # This section NEVER mutates world state and NEVER calls god_apply --
+    # god_compile_prose's only side effect is populating the SAME
+    # _god_preview_cache slot god_preview uses, via a direct call to
+    # god_preview itself (self.lock is a threading.RLock -- see __init__ --
+    # so a nested acquire from an already-locked caller is safe). The
+    # operator still has to explicitly Apply the resulting previewId through
+    # the normal /control/god/apply route, which revalidates it exactly like
+    # every other preview. The compiler is also never given SIM_GOD_TOKEN --
+    # server.py's route handler checks the token BEFORE calling this method,
+    # and this method has no parameter for it and never reads os.environ.
+    def _god_compiler_prompt(self, prose):
+        """Strict system+user prompt for the compiler model. Lists every
+        known modifier key + bound and the three known primitive kinds
+        inline, with two worked few-shot examples -- a small model needs the
+        shape SHOWN, not merely described (docs/plan "Optional Phase 8")."""
+        modifier_lines = "\n".join(
+            f'  - "{k}": number in [{lo}, {hi}]' for k, (lo, hi) in GOD_MODIFIER_RANGES.items())
+        system = (
+            "You are a strict JSON compiler for a village-simulation divine story "
+            "event. You NEVER write prose commentary. You output ONLY one JSON "
+            "object, nothing before or after it, matching EXACTLY this shape:\n"
+            '{"kind": "story_event", "payload": {\n'
+            f'  "title": "<string, max {GOD_EVENT_TITLE_MAX_CHARS} chars>",\n'
+            f'  "narration": "<string, max {GOD_TEXT_MAX_CHARS} chars>",\n'
+            '  "visibility": "public",\n'
+            f'  "durationFrames": <integer, {GOD_GUIDANCE_MIN_DURATION_FRAMES}-{GOD_GUIDANCE_MAX_DURATION_FRAMES}>,\n'
+            '  "modifiers": {<zero or more of the allowed keys below>},\n'
+            '  "primitives": [<zero or more allowed primitive objects below, usually empty>]\n'
+            "}}\n\n"
+            f"Allowed modifier keys (payload.modifiers), each optional, at most once each:\n{modifier_lines}\n\n"
+            "Allowed primitive kinds (payload.primitives[].kind), each optional and usually omitted "
+            "because you are not given real resource/agent/structure ids to target safely:\n"
+            '  - "agent_vitals": {"targetId": <int>, "healthDelta": <number>, "hungerDelta": <number>}\n'
+            '  - "grant_resource": {"resourceId": "<string>", "amount": <positive int>, "target": "stockpile"}\n'
+            '  - "structure_condition": {"structureId": <int>, "delta": <number>}\n\n'
+            "NEVER invent a modifier key outside the allowed list above. NEVER invent a resource id, "
+            "agent id, or structure id. If the prose gives you no real id to target, omit \"primitives\" "
+            "entirely (use only \"modifiers\" and \"narration\" to convey the effect)."
+        )
+        examples = (
+            "Example 1\n"
+            'Prose: "The river runs dark for three days and the fish flee."\n'
+            "Output: "
+            '{"kind": "story_event", "payload": {"title": "The Black River", '
+            '"narration": "The river runs dark and the fish flee the shallows.", '
+            '"visibility": "public", "durationFrames": 8100, '
+            '"modifiers": {"fish_yield_multiplier": 0.1}, "primitives": []}}\n\n'
+            "Example 2\n"
+            'Prose: "A gentle mercy rain falls, easing hunger across the land for a while."\n'
+            "Output: "
+            '{"kind": "story_event", "payload": {"title": "Merciful Rain", '
+            '"narration": "A gentle rain falls and the village\'s hunger eases.", '
+            '"visibility": "public", "durationFrames": 5400, '
+            '"modifiers": {"hunger_drain_multiplier": 0.5, "starvation_damage_multiplier": 0.2}, '
+            '"primitives": []}}\n'
+        )
+        user = f"{examples}\nNow compile this prose into ONE JSON object of the same shape:\n{prose}"
+        return system, user
+
+    def _god_compiler_call_model(self, system_prompt, user_prompt):
+        """Call the compiler model and return (raw_text_or_None, latency_ms).
+        Never raises -- any lm_complete failure (including a simulated
+        timeout in tests) degrades to (None, latency_ms) so the caller can
+        reject cleanly instead of propagating an unhandled exception."""
+        lm_fn = self.d.get("lm_complete")
+        started = time.time()
+        if lm_fn is None:
+            return None, 0
+        try:
+            # Model routing (docs/plan-sovereign-god-mode-v2.md "Optional
+            # Phase 8" + "Model routing and implementation ownership"):
+            # sim-fast ALREADY serves PIANO/background cognition, and past
+            # sim-fast contention increased PIANO module drops. This phase
+            # deliberately does NOT default a new LLM path onto sim-fast --
+            # it routes to sim-smart (the same tier every agent decision
+            # already uses) instead. That is a genuinely blocking
+            # lm_complete call on sim-smart's own slot pool, not a new
+            # background-cognition workload; see specs/03-cognition.md for
+            # exactly which pool this participates in (it is NOT
+            # MAX_CONCURRENT_LLM's PIANO pool). The plan is explicit that
+            # this routing choice still needs its own A/B contention
+            # measurement before GOD_COMPILER_ENABLED ships live -- see
+            # GOD_COMPILER_ENABLED's definition and specs/12-ops.md.
+            raw_text = lm_fn(system_prompt, user_prompt, model="sim-smart",
+                             max_tokens=400, temperature=0.3,
+                             timeout=GOD_COMPILER_TIMEOUT_SEC)
+        except Exception:
+            raw_text = None
+        latency_ms = int((time.time() - started) * 1000)
+        return raw_text, latency_ms
+
+    def _god_compiler_parse(self, raw_text):
+        """Parse the compiler model's raw text into the exact {kind,
+        payload} shape the prompt demands. Returns (payload_dict, None) on
+        success or (None, reason) on any parse/shape failure -- `reason` is
+        short, secret-free, and safe to return over HTTP / write to
+        compiler.jsonl. Tolerates a fenced code block the same way this
+        codebase's other LLM-output parsing does."""
+        if not isinstance(raw_text, str):
+            return None, "compiler produced no text output"
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+        try:
+            parsed = json.loads(cleaned)
+        except (ValueError, TypeError):
+            return None, f"could not parse compiler output as JSON: {raw_text[:200]!r}"
+        if not isinstance(parsed, dict):
+            return None, f"compiler output was not a JSON object: {raw_text[:200]!r}"
+        if parsed.get("kind") != "story_event":
+            return None, f"compiler output kind must be 'story_event', got {parsed.get('kind')!r}"
+        payload = parsed.get("payload")
+        if not isinstance(payload, dict):
+            return None, "compiler output payload must be an object"
+        return payload, None
+
+    def _log_compiler(self, prose, model, latency_ms, status, reason=None, preview_id=None):
+        """One record per compile attempt (docs/plan Logging section:
+        "request text, model, latency, and result"). NEVER receives or logs
+        SIM_GOD_TOKEN -- this method has no such parameter. Swallows any
+        logging failure, matching every other divine log call in this
+        module."""
+        log_fn = self.d.get("log_compiler")
+        if not log_fn:
+            return
+        try:
+            log_fn(prose=prose, model=model, latency_ms=latency_ms,
+                  status=status, reason=reason, preview_id=preview_id)
+        except Exception:
+            pass
+
+    def god_compile_prose(self, prose):
+        """Turn free operator prose into a DRAFT typed story_event preview.
+        NEVER mutates world state; NEVER calls god_apply. Dual-gated on
+        GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED (docs/plan: "the
+        contention gate is not cleared by shipping" -- both flags must be
+        explicitly on). Enforces its own rate limit and session cap,
+        distinct from agent cognition's MAX_CONCURRENT_LLM pool."""
+        with self.lock:
+            if not (GOD_MODE_ENABLED and GOD_COMPILER_ENABLED):
+                return {"compileOk": False, "reason": "god compiler disabled"}
+
+            prose_norm, reason = self._normalize_divine_text(
+                prose, max_chars=GOD_COMPILER_PROSE_MAX_CHARS,
+                max_bytes=GOD_COMPILER_PROSE_MAX_BYTES)
+            if reason:
+                return {"compileOk": False, "reason": f"prose {reason}"}
+
+            state = self._god_compiler_state
+            now = time.time()
+            if state["compileCount"] >= GOD_COMPILER_SESSION_CAP:
+                return {"compileOk": False,
+                        "reason": (f"compiler session cap ({GOD_COMPILER_SESSION_CAP}) reached "
+                                  "for this process lifetime")}
+            if now - state["lastCompileWallTime"] < GOD_COMPILER_MIN_INTERVAL_SEC:
+                return {"compileOk": False,
+                        "reason": f"rate limited: at most one compile per {GOD_COMPILER_MIN_INTERVAL_SEC:.0f}s"}
+
+            # Bump BEFORE the model call so a hung/failed/rejected compile
+            # still counts against the session cap and interval (docs/plan:
+            # "Bump session count regardless of success").
+            state["lastCompileWallTime"] = now
+            state["compileCount"] += 1
+
+            model_id = "sim-smart"
+            system_prompt, user_prompt = self._god_compiler_prompt(prose_norm)
+            raw_text, latency_ms = self._god_compiler_call_model(system_prompt, user_prompt)
+
+            if not raw_text:
+                fail_reason = "the compiler model produced no output (timeout or empty response)"
+                self._log_compiler(prose_norm, model_id, latency_ms, "rejected", fail_reason)
+                return {"compileOk": False, "reason": fail_reason}
+
+            payload, parse_reason = self._god_compiler_parse(raw_text)
+            if parse_reason:
+                self._log_compiler(prose_norm, model_id, latency_ms, "rejected", parse_reason)
+                return {"compileOk": False, "reason": parse_reason}
+
+            normalized, validate_reason = self._validate_god_story_event(payload)
+            if validate_reason:
+                self._log_compiler(prose_norm, model_id, latency_ms, "rejected", validate_reason)
+                return {"compileOk": False, "reason": validate_reason}
+
+            # Preview-only: reuse the SAME entry point every other kind uses,
+            # so the compiled draft lands in the identical
+            # _god_preview_cache slot, under the identical digest/
+            # fingerprint/reversibility machinery -- and this method never
+            # touches _god_preview_cache directly or calls god_apply.
+            preview = self.god_preview({"kind": "story_event", "payload": normalized["payload"]})
+            if not preview.get("ok"):
+                # Should be unreachable -- `normalized` already passed the
+                # SAME validator god_preview re-runs -- but never let a
+                # compiler-side bug surface as an unhandled exception.
+                fail_reason = preview.get("reason") or "preview rejected the compiled draft"
+                self._log_compiler(prose_norm, model_id, latency_ms, "rejected", fail_reason)
+                return {"compileOk": False, "reason": fail_reason}
+
+            self._log_compiler(prose_norm, model_id, latency_ms, "draft",
+                               None, preview.get("previewId"))
+            return {
+                "compileOk": True,
+                "previewId": preview["previewId"],
+                "commandDigest": preview["commandDigest"],
+                "previewOutcome": preview.get("previewOutcome"),
+                "normalizedCommand": preview.get("normalizedCommand"),
+                "reversibilityClass": preview.get("reversibilityClass"),
+                "expiresAt": preview.get("expiresAt"),
+            }
+
+    # --- entry points (each acquires self.lock itself; Flask request
+    # threads call these from outside the tick thread) ---
+    def god_preview(self, envelope):
+        """Validate + normalize WITHOUT mutation. Returns a preview record
+        (opaque previewId, canonical digest, TTL, reversibility class)."""
+        with self.lock:
+            if not GOD_MODE_ENABLED:
+                return {"ok": False, "reason": "god mode disabled"}
+            normalized, reason = self._validate_god_envelope(envelope)
+            if reason:
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": reason}
+            digest = self._god_command_digest(normalized)
+            preview_id = secrets.token_urlsafe(24)
+            now = time.time()
+            record = {
+                "previewId": preview_id,
+                "normalizedCommand": normalized,
+                "commandDigest": digest,
+                "previewFrame": self.frameTick,
+                "createdAt": now,
+                "expiresAt": now + GOD_PREVIEW_TTL_SECONDS,
+                "fingerprint": self._god_target_fingerprint(normalized),
+            }
+            self._god_preview_insert(record)
+            return {
+                "ok": True,
+                "previewId": preview_id,
+                "commandDigest": digest,
+                "previewFrame": self.frameTick,
+                "expiresAt": record["expiresAt"],
+                "normalizedCommand": normalized,
+                "reversibilityClass": self._god_reversibility_class(normalized),
+                # Sovereign God mode (Phase 3): "include the outgoing
+                # providence in the preview response" -- the same fingerprint
+                # bound into the cached preview record is echoed back here so
+                # a client can show the disclosed replacement BEFORE the
+                # operator commits to apply. Empty dict for kinds with no
+                # precondition (proclamation).
+                "fingerprint": record["fingerprint"],
+                # Sovereign God mode (Phase 4): the exact clamped/bounded
+                # value an immediate miracle would apply right now, or None
+                # for every kind with no derived value (Phase 2/3 kinds).
+                "previewOutcome": self._god_preview_outcome(normalized),
+            }
+
+    def _next_intervention_id(self):
+        """Shared per-world intervention id sequence + the monotonic
+        `intervened` marker -- every successful apply (proclamation,
+        providence, private_omen, revoke_guidance, and later phases) goes
+        through this one counter. Must be called with self.lock already
+        held, and only after every rejection path has already returned (a
+        failed apply must never consume a sequence number)."""
+        god = self.civilization["godState"]
+        seq = god.get("nextInterventionSeq", 1)
+        intervention_id = f"divine-{seq}"
+        god["nextInterventionSeq"] = seq + 1
+        god["intervened"] = True
+        return intervention_id
+
+    def _god_record_intervention(self, record):
+        """Append one outcome record to the bounded recentInterventions ring.
+        `record["public"]` MUST be set by the caller -- snapshot()'s
+        recentPublicInterventions filters on it, and it is the ONLY thing
+        standing between a private_omen record and a public /state leak."""
+        god = self.civilization["godState"]
+        recent = god["recentInterventions"]
+        recent.append(record)
+        if len(recent) > GOD_RECENT_INTERVENTIONS_CAP:
+            del recent[:-GOD_RECENT_INTERVENTIONS_CAP]
+
+    def _god_apply_command(self, normalized):
+        """Dispatch by kind. Returns (outcome, reason); outcome is None on
+        rejection. Must be called with self.lock already held."""
+        kind = normalized["kind"]
+        if kind == "proclamation":
+            return self._god_apply_proclamation(normalized["payload"]["text"]), None
+        if kind == "providence":
+            return self._god_apply_providence(normalized["payload"]), None
+        if kind == "private_omen":
+            return self._god_apply_private_omen(normalized["payload"]), None
+        if kind == "revoke_guidance":
+            return self._god_apply_revoke_guidance(normalized["payload"]["id"])
+        if kind == "agent_vitals":
+            return self._god_apply_agent_vitals(normalized["payload"]), None
+        if kind == "grant_resource":
+            return self._god_apply_grant_resource(normalized["payload"]), None
+        if kind == "structure_condition":
+            return self._god_apply_structure_condition(normalized["payload"]), None
+        if kind == "story_event":
+            return self._god_apply_story_event(normalized["payload"]), None
+        if kind == "weather_override":
+            return self._god_apply_weather_override(normalized["payload"]), None
+        return None, f"kind '{kind}' is not implemented in this phase"
+
+    def _god_apply_proclamation(self, text):
+        intervention_id = self._next_intervention_id()
+        self._push_activity(f'A divine voice proclaims: "{text}"')
+        self._push_communication("divine_proclamation", "divine", "everyone", text,
+                                 source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "proclamation",
+            "frameTick": self.frameTick, "text": text, "status": "applied",
+            "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "proclamation", "text": text}
+
+    def _god_apply_providence(self, payload):
+        """Sets the single active public providence line, replacing any
+        prior one. The outgoing record (if any) is closed through the SAME
+        _close_providence path expiry/revocation use, so it is logged
+        exactly once regardless of how it ends. Public per docs/plan
+        Visibility: activity/communication/Chronicle, same treatment as
+        proclamation."""
+        god = self.civilization["godState"]
+        outgoing = self._close_providence("replaced") if isinstance(god.get("providence"), dict) else None
+        intervention_id = self._next_intervention_id()
+        text = payload["text"]
+        expires_frame = self.frameTick + payload["durationFrames"]
+        god["providence"] = {
+            "id": intervention_id, "text": text, "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame, "visibility": "public",
+        }
+        self._push_activity(f'A divine providence settles over the village: "{text}"')
+        self._push_communication("divine_providence", "divine", "everyone", text,
+                                 source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "providence", "frameTick": self.frameTick,
+            "text": text, "expiresFrame": expires_frame, "status": "applied",
+            "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "providence", "text": text,
+                "expiresFrame": expires_frame,
+                "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None}
+
+    def _god_apply_private_omen(self, payload):
+        """Sets the one active private omen for a single living agent,
+        replacing any prior one for that same agent. Never touches public
+        activity/communication/Chronicle (docs/plan Visibility: private
+        omens must never appear there). The outgoing record (if any) is
+        closed through the SAME _close_omen path expiry/revocation use, so
+        its memory write (if not already written) fires exactly once here,
+        not again later."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = self._close_omen(key, "replaced") if key in god["privateOmens"] else None
+        intervention_id = self._next_intervention_id()
+        agent = self._find_agent_by_id(target_id)
+        text = payload["text"]
+        expires_frame = self.frameTick + payload["durationFrames"]
+        god["privateOmens"][key] = {
+            "id": intervention_id, "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "text": text, "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame, "memoryWritten": False,
+        }
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "private_omen", "frameTick": self.frameTick,
+            "targetId": target_id, "text": text, "expiresFrame": expires_frame,
+            "status": "applied", "public": False,
+        })
+        return {"interventionId": intervention_id, "kind": "private_omen",
+                "targetId": target_id, "expiresFrame": expires_frame,
+                "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None}
+
+    def _god_apply_revoke_guidance(self, guidance_id):
+        """Ends a providence or omen early by id (docs/plan: "records a
+        revocation"). Returns (outcome, reason) directly -- unlike the other
+        _god_apply_* helpers this can itself fail (unknown/already-inactive
+        id), and a failed revoke must never consume an intervention id."""
+        god = self.civilization["godState"]
+        prov = god.get("providence")
+        if isinstance(prov, dict) and prov.get("id") == guidance_id:
+            self._close_providence("revoked")
+            self._push_activity("A divine providence is revoked.")
+            intervention_id = self._next_intervention_id()
+            self._god_record_intervention({
+                "id": intervention_id, "kind": "revoke_guidance", "frameTick": self.frameTick,
+                "targetGuidanceId": guidance_id, "targetKind": "providence",
+                "status": "applied", "public": True,
+            })
+            return {"interventionId": intervention_id, "kind": "revoke_guidance",
+                    "targetGuidanceId": guidance_id, "targetKind": "providence"}, None
+        for key, omen in list((god.get("privateOmens") or {}).items()):
+            if isinstance(omen, dict) and omen.get("id") == guidance_id:
+                self._close_omen(key, "revoked")
+                intervention_id = self._next_intervention_id()
+                self._god_record_intervention({
+                    "id": intervention_id, "kind": "revoke_guidance", "frameTick": self.frameTick,
+                    "targetGuidanceId": guidance_id, "targetKind": "private_omen",
+                    "status": "applied", "public": False,
+                })
+                return {"interventionId": intervention_id, "kind": "revoke_guidance",
+                        "targetGuidanceId": guidance_id, "targetKind": "private_omen"}, None
+        return None, "guidance id not found or already inactive"
+
+    # --- Sovereign God mode Phase 4: bounded immediate miracles ---
+    # All three are irreversible (docs/plan "Honest reversibility" -- the
+    # default branch of _god_reversibility_class covers them; god_cancel and
+    # _god_apply_revoke_guidance only ever look inside providence/
+    # privateOmens, so an intervention id from one of these three can never
+    # match either and is therefore already refused by construction, with no
+    # extra code needed). Each is public (no private-omen-style visibility
+    # boundary applies to vitals/resources/structures), source-attributed via
+    # source="divine" through the same _push_communication/_push_chronicle
+    # helpers proclamation/providence use, and records one recentInterventions
+    # entry + one divine.jsonl "applied" record via the shared
+    # _next_intervention_id/_god_record_intervention/_log_divine machinery.
+    def _god_apply_agent_vitals(self, payload):
+        """v1 "cannot kill" (Decision #6): a negative healthDelta is clamped
+        to GOD_VITALS_HEALTH_FLOOR, never lower -- see that constant's
+        comment for why 0 (the _update_survival incapacitation threshold) is
+        never reachable through this miracle. Never touches deathFrame,
+        incapacitated, or any lifecycle-succession state."""
+        target_id = payload["targetId"]
+        agent = self._find_agent_by_id(target_id)
+        health_delta, hunger_delta = payload["healthDelta"], payload["hungerDelta"]
+        old_health, old_hunger = agent["health"], agent["hunger"]
+        new_health, new_hunger = old_health, old_hunger
+        if health_delta:
+            new_health = (min(100.0, old_health + health_delta) if health_delta >= 0
+                         else max(GOD_VITALS_HEALTH_FLOOR, old_health + health_delta))
+            agent["health"] = new_health
+        if hunger_delta:
+            new_hunger = max(0.0, min(100.0, old_hunger + hunger_delta))
+            agent["hunger"] = new_hunger
+        intervention_id = self._next_intervention_id()
+        parts = []
+        if health_delta:
+            parts.append(f"health {old_health:g} -> {new_health:g}")
+        if hunger_delta:
+            parts.append(f"hunger {old_hunger:g} -> {new_hunger:g}")
+        detail = ", ".join(parts)
+        verb = "touches" if (health_delta >= 0 and hunger_delta >= 0) else "afflicts"
+        text = f"A divine hand {verb} {agent['name']} ({detail})"
+        self._push_activity(text)
+        self._push_communication("divine_vitals", "divine", agent["name"], text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        self._mark_context_dirty(agent)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "agent_vitals", "frameTick": self.frameTick,
+            "targetId": target_id, "healthDelta": health_delta, "hungerDelta": hunger_delta,
+            "newHealth": new_health, "newHunger": new_hunger, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "agent_vitals", "targetId": target_id,
+                "newHealth": new_health, "newHunger": new_hunger}
+
+    def _god_apply_grant_resource(self, payload):
+        """Storage/carry semantics preserved explicitly (docs/plan Phase 4):
+        a grant to an agent fills their _carry_cap room first, then routes
+        any remainder to the village stockpile -- the SAME two sinks every
+        normal gather/trade/tax path already uses, never a third bypass
+        sink. A grant to "stockpile" always goes straight to the stockpile."""
+        resource_id = payload["resourceId"]
+        amount = payload["amount"]
+        target = payload["target"]
+        target_kind = "stockpile" if target == "stockpile" else "agent"
+        c = self.civilization
+        intervention_id = self._next_intervention_id()
+        target_agent_id = None
+        if target_kind == "stockpile":
+            c["stockpile"][resource_id] = c["stockpile"].get(resource_id, 0) + amount
+            agent_added, stockpile_added = 0, amount
+            target_desc = "the village stockpile"
+            comm_to = "everyone"
+        else:
+            target_agent_id = target["agentId"]
+            agent = self._find_agent_by_id(target_agent_id)
+            cap = self._carry_cap(agent)
+            held = agent["resources"].get(resource_id, 0)
+            room = max(0, cap - held)
+            agent_added = min(amount, room)
+            stockpile_added = amount - agent_added
+            if agent_added:
+                agent["resources"][resource_id] = held + agent_added
+            if stockpile_added:
+                c["stockpile"][resource_id] = c["stockpile"].get(resource_id, 0) + stockpile_added
+            target_desc = agent["name"]
+            comm_to = agent["name"]
+        self._god_grant_session_total += amount
+        text = f"A divine gift of {amount} {resource_id} appears for {target_desc}"
+        if target_kind == "agent" and stockpile_added:
+            text += f" ({agent_added} carried, {stockpile_added} overflow to the village stockpile)"
+        self._push_activity(text)
+        self._push_communication("divine_grant", "divine", comm_to, text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "grant_resource", "frameTick": self.frameTick,
+            "resourceId": resource_id, "amount": amount, "targetKind": target_kind,
+            "targetAgentId": target_agent_id, "agentAdded": agent_added,
+            "stockpileAdded": stockpile_added, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "grant_resource",
+                "resourceId": resource_id, "amount": amount, "targetKind": target_kind,
+                "targetAgentId": target_agent_id, "agentAdded": agent_added,
+                "stockpileAdded": stockpile_added}
+
+    def _god_apply_structure_condition(self, payload):
+        """Repair (delta >= 0) and damage (delta < 0) both go through the
+        SAME _apply_structure_condition_delta helper _tick_structure_decay
+        uses, so a damage delta that crosses the ruin threshold fires the
+        identical disrepair/ruin narration and homeOf homeless handling a
+        natural decay collapse would (docs/plan Phase 4: "damage may
+        legitimately drive a structure to ruin -- if it does, it must go
+        through the same ruin path"). Validation already rejected ruined
+        structures, so repair here can never recreate a destroyed structure
+        (it only ever restores condition on a structure that was never a
+        ruin to begin with)."""
+        structure_id = payload["structureId"]
+        delta = payload["delta"]
+        structure = next((s for s in self.civilization["structures"]
+                          if s.get("id") == structure_id), None)
+        intervention_id = self._next_intervention_id()
+        old_cond = structure.get("condition", 100.0)
+        new_cond = self._apply_structure_condition_delta(structure, delta)
+        name = structure.get("name") or structure.get("type")
+        did = structure.get("districtId") or "the village"
+        verb = "mends" if delta >= 0 else "strikes"
+        text = f"A divine hand {verb} the {name} in {did} (condition {old_cond:g} -> {new_cond:g})"
+        self._push_activity(text)
+        self._push_communication("divine_structure", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        became_ruin = bool(structure.get("isRuin"))
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "structure_condition", "frameTick": self.frameTick,
+            "structureId": structure_id, "delta": delta, "oldCondition": old_cond,
+            "newCondition": new_cond, "becameRuin": became_ruin,
+            "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "structure_condition",
+                "structureId": structure_id, "oldCondition": old_cond, "newCondition": new_cond,
+                "becameRuin": became_ruin}
+
+    # --- Sovereign God mode Phase 6: weather override ---
+    def _god_apply_weather_override(self, payload):
+        """docs/plan Phase 6 Answers 1-4. By the time this runs, god_apply
+        has already revalidated the whole normalized command against current
+        live state under the same lock, so replaceEffectId (if any) still
+        names the active weather override.
+
+        Answer 1 (clock ownership): activeEvents[].expiresFrame is
+        authoritative -- weather["exitFrame"] is set to the SAME absolute
+        frame via _weather_enter_forced, so _tick_weather's early-return
+        (frameTick < exitFrame) defers to the override automatically; no
+        second clock can drift out of sync because there is only ever one
+        frame value, read by both.
+
+        Answer 3 (RNG discipline): enters via _weather_enter_forced, which
+        draws no RNG -- state/districts/exitFrame all come from the already-
+        validated command, never random.randint/random.sample.
+
+        `priorState` is recorded for audit/preview only, per Answer 2 --
+        it is NEVER used to restore anything; ending the override always
+        hands off FORWARD to the natural cycle's successor of the
+        overridden state (see _close_weather_override), not back to
+        priorState."""
+        replace_effect_id = payload.get("replaceEffectId")
+        replaced_event = None
+        if replace_effect_id:
+            replaced_event = self._god_active_weather_override()
+            if replaced_event is not None and replaced_event.get("id") == replace_effect_id:
+                self._close_weather_override(replaced_event, "replaced")
+
+        intervention_id = self._next_intervention_id()
+        now = self.frameTick
+        expires_frame = now + payload["durationFrames"]
+        state, districts = payload["state"], payload["districts"]
+        prior_state = (self.civilization.get("weather") or {}).get("state", "clear")
+
+        self._weather_enter_forced(state, districts, expires_frame)
+
+        event = {
+            "id": intervention_id, "kind": "weather_override",
+            "state": state, "districts": list(districts), "priorState": prior_state,
+            "createdFrame": now, "startFrame": now, "expiresFrame": expires_frame,
+            "status": "active",
+            "replaces": replaced_event.get("id") if replaced_event else None,
+        }
+        self._god_events_insert(event)
+
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "weather_override", "frameTick": self.frameTick,
+            "state": state, "districts": list(districts), "priorState": prior_state,
+            "expiresFrame": expires_frame, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "weather_override",
+                "state": state, "districts": list(districts), "priorState": prior_state,
+                "expiresFrame": expires_frame,
+                "replacedEventId": replaced_event.get("id") if replaced_event else None}
+
+    def _close_weather_override(self, event, status):
+        """Closes one weather_override activeEvents record exactly once and
+        hands off to the natural cycle's successor of the OVERRIDDEN state
+        via _weather_handoff_successor (docs/plan Phase 6 Answer 2 -- never
+        restores `event["priorState"]`, which would desync the cycle).
+        Shared verbatim by expiry (_expire_divine_effects) and cancel
+        (god_cancel) so both paths behave identically -- "cancelling an
+        active override runs the SAME expiry handoff (so the machine never
+        gets stranded mid-override), and says plainly that any damage
+        already dealt stands" (docs/plan Validation)."""
+        if not isinstance(event, dict) or event.get("status") != "active":
+            return
+        event["status"] = status
+        self._weather_handoff_successor(event.get("state", "clear"))
+        self._log_divine(event.get("id"), None, "weather_override", event,
+                         {"status": status}, status, public=True)
+
+    # --- Sovereign God mode Phase 5: storyteller events ---
+    def _god_events_insert(self, event):
+        """Append to the bounded activeEvents ring (cap GOD_ACTIVE_EVENTS_CAP
+        per docs/plan). Evicts the oldest CLOSED (non-"active") entry first
+        so a full ring never displaces something still live; only falls back
+        to evicting the oldest active entry if every slot happens to be
+        active, which the cap (8) plus normal expiry/cancellation makes an
+        edge case rather than the common path."""
+        events = self.civilization["godState"]["activeEvents"]
+        events.append(event)
+        if len(events) > GOD_ACTIVE_EVENTS_CAP:
+            closed_idx = next((i for i, e in enumerate(events) if e.get("status") != "active"), None)
+            del events[closed_idx if closed_idx is not None else 0]
+
+    def _close_story_event(self, event, status):
+        """Closes one activeEvents record exactly once (docs/plan "Expiry
+        ownership" -- shared by cancel and _expire_divine_effects so both
+        paths log identically). Once closed, _divine_modifier can no longer
+        see its modifiers (status != "active"). If the event carried an
+        embedded providence, that providence is closed through the SAME
+        _close_providence path expiry/revocation/replacement use -- but only
+        if it is STILL the active providence (a later divine command may
+        have already replaced it independently, in which case there is
+        nothing left here to touch). Primitives already applied are NOT
+        retracted -- see _god_reversibility_class's "consequential" class."""
+        if not isinstance(event, dict) or event.get("status") != "active":
+            return
+        event["status"] = status
+        god = self.civilization.get("godState") or {}
+        providence_id = event.get("providenceId")
+        if providence_id:
+            prov = god.get("providence")
+            if isinstance(prov, dict) and prov.get("id") == providence_id:
+                self._close_providence(status)
+        self._log_divine(event.get("id"), None, "story_event", event,
+                         {"status": status}, status, public=(event.get("visibility") != "private"))
+
+    def _god_apply_story_event(self, payload):
+        """Atomic multi-effect apply (docs/plan "Storyteller events" --
+        "Events are atomic: preview validates every component; apply
+        accepts all or changes nothing"). By the time this runs, god_apply
+        has already revalidated the WHOLE normalized command against
+        current state under the same lock (a stale replaceEffectId target or
+        a since-occupied modifier key would already have rejected before
+        reaching this method), so every step below always succeeds -- there
+        is no partial-application path to guard against here."""
+        god = self.civilization["godState"]
+        replace_effect_id = payload.get("replaceEffectId")
+        replaced_event = None
+        if replace_effect_id:
+            replaced_event = next(
+                (e for e in god["activeEvents"]
+                 if isinstance(e, dict) and e.get("id") == replace_effect_id
+                 and e.get("status") == "active"), None)
+            if replaced_event is not None:
+                self._close_story_event(replaced_event, "replaced")
+
+        intervention_id = self._next_intervention_id()
+        now = self.frameTick
+        expires_frame = now + payload["durationFrames"]
+        modifiers = dict(payload.get("modifiers") or {})
+        title, narration = payload["title"], payload["narration"]
+        visibility, target_id = payload["visibility"], payload.get("targetId")
+
+        # Immediate primitives reuse the EXACT SAME apply helpers (and
+        # therefore the exact same clamp arithmetic/narration/audit trail)
+        # the standalone agent_vitals/grant_resource/structure_condition
+        # commands use -- each still mints its own intervention id (for its
+        # own recentInterventions/divine.jsonl record), tagged with
+        # parentEventId so every sub-effect stays traceable to this one
+        # story event.
+        primitive_outcomes = []
+        for prim in payload.get("primitives") or []:
+            prim_kind = prim["kind"]
+            if prim_kind == "agent_vitals":
+                prim_outcome = self._god_apply_agent_vitals(prim["payload"])
+            elif prim_kind == "grant_resource":
+                prim_outcome = self._god_apply_grant_resource(prim["payload"])
+            elif prim_kind == "structure_condition":
+                prim_outcome = self._god_apply_structure_condition(prim["payload"])
+            else:
+                continue
+            prim_outcome["parentEventId"] = intervention_id
+            primitive_outcomes.append(prim_outcome)
+
+        providence_id = None
+        if payload.get("providence"):
+            prov_outcome = self._god_apply_providence({
+                "text": payload["providence"]["text"],
+                "durationFrames": payload["durationFrames"],
+            })
+            providence_id = prov_outcome["interventionId"]
+
+        target_name = None
+        if visibility == "private" and target_id is not None:
+            target_agent = self._find_agent_by_id(target_id)
+            target_name = target_agent["name"] if target_agent else None
+
+        event = {
+            "id": intervention_id, "kind": "story_event",
+            "title": title, "narration": narration,
+            "visibility": visibility, "targetId": target_id,
+            "createdFrame": now, "startFrame": now, "expiresFrame": expires_frame,
+            "status": "active",
+            "modifiers": modifiers,
+            "primitiveInterventionIds": [o["interventionId"] for o in primitive_outcomes],
+            "providenceId": providence_id,
+            "replaces": replaced_event.get("id") if replaced_event else None,
+        }
+        self._god_events_insert(event)
+
+        if visibility == "public":
+            self._push_activity(f'A divine story unfolds -- "{title}": {narration}')
+            self._push_communication("divine_story_event", "divine", "everyone", narration, source="divine")
+            self._push_chronicle(f"{title}: {narration}", kind="divine", source="divine")
+        # Private events never touch public activity/communication/Chronicle
+        # (same visibility boundary private_omen already enforces).
+
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "story_event", "frameTick": self.frameTick,
+            "title": title, "narration": narration, "visibility": visibility,
+            "targetId": target_id, "expiresFrame": expires_frame,
+            "modifierKeys": list(modifiers.keys()),
+            "primitiveInterventionIds": event["primitiveInterventionIds"],
+            "providenceId": providence_id,
+            "status": "applied", "public": (visibility == "public"),
+        })
+        return {"interventionId": intervention_id, "kind": "story_event",
+                "title": title, "expiresFrame": expires_frame,
+                "modifiers": modifiers, "primitiveOutcomes": primitive_outcomes,
+                "providenceId": providence_id, "targetId": target_id, "targetName": target_name,
+                "replacedEventId": replaced_event.get("id") if replaced_event else None}
+
+    def god_apply(self, preview_id, request_id):
+        """Apply an exact previewed command. Accepts only {previewId,
+        requestId} -- the client-returned normalizedCommand is NEVER
+        authoritative input; apply resolves the server-held preview by id."""
+        with self.lock:
+            if not GOD_MODE_ENABLED:
+                return {"ok": False, "reason": "god mode disabled"}
+            if not isinstance(request_id, str) or not request_id.strip():
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "requestId is required"}
+            request_id = request_id.strip()
+            if not isinstance(preview_id, str) or not preview_id.strip():
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "previewId is required"}
+            preview_id = preview_id.strip()
+
+            self._god_preview_evict_expired()
+            preview = self._god_preview_cache.get(preview_id)
+            digest = preview["commandDigest"] if preview else None
+
+            existing = self._god_requests.get(request_id)
+            if existing is not None:
+                # Idempotent replay: same requestId returns the ORIGINAL
+                # response without re-applying. Same requestId bound to a
+                # DIFFERENT preview/digest is a conflict -- reject, apply
+                # nothing, return neither the old nor a new response.
+                if existing.get("previewId") != preview_id or (
+                    digest is not None and existing.get("commandDigest") != digest
+                ):
+                    self._god_rejected_count += 1
+                    return {"ok": False, "reason": "requestId already used with a different preview"}
+                return existing.get("response")
+
+            if preview is None:
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "preview missing or expired"}
+            if preview["expiresAt"] <= time.time():
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "preview expired"}
+
+            normalized = preview["normalizedCommand"]
+            # Revalidate atomically against current live state: re-run the
+            # SAME validator over the server-held normalized command (never
+            # fresh client input), recompute and compare the digest, then
+            # recheck the recorded precondition fingerprint. frameTick drift
+            # alone is acceptable; a fingerprint mismatch is not.
+            revalidated, reason = self._validate_god_envelope(normalized)
+            if reason:
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": f"preview no longer valid: {reason}"}
+            fresh_digest = self._god_command_digest(revalidated)
+            if fresh_digest != preview["commandDigest"]:
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "preview digest mismatch"}
+            fp_reason = self._god_check_fingerprint(revalidated, preview["fingerprint"])
+            if fp_reason:
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": fp_reason}
+
+            outcome, apply_reason = self._god_apply_command(revalidated)
+            if apply_reason:
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": apply_reason}
+
+            response = {
+                "ok": True, "interventionId": outcome["interventionId"],
+                "outcome": outcome, "appliedFrame": self.frameTick,
+            }
+            self._god_requests[request_id] = {
+                "previewId": preview_id,
+                "commandDigest": preview["commandDigest"],
+                "interventionId": outcome["interventionId"],
+                "status": "applied",
+                "response": response,
+                "createdAt": time.time(),
+            }
+            self._god_requests_evict()
+            del self._god_preview_cache[preview_id]  # single-use once applied
+            self._log_divine(outcome["interventionId"], request_id, revalidated["kind"],
+                             revalidated, outcome, "applied", public=True)
+            return response
+
+    def god_cancel(self, target_id):
+        """Cancel an active omen, providence, or timed story event by id
+        (docs/plan Phase 5: "wire the /control/god/cancel route properly").
+        A direct, lock-held mutation -- unlike every other applyable command
+        this route intentionally has no preview/apply step (Phase 2 already
+        established that shape for this stub; nothing here changes it).
+        Only ever finds ids inside the three cancellable stores
+        (godState["providence"], godState["privateOmens"], and ACTIVE
+        entries of godState["activeEvents"]) -- an id minted by an
+        irreversible Phase 4 miracle (agent_vitals/grant_resource/
+        structure_condition) or a one-shot proclamation can never appear in
+        any of those, so it is refused by construction, falling straight
+        through to "nothing to cancel" with no special-case code needed."""
+        with self.lock:
+            if not GOD_MODE_ENABLED:
+                return {"ok": False, "reason": "god mode disabled"}
+            if not isinstance(target_id, str) or not target_id.strip():
+                return {"ok": True, "cancelled": False,
+                        "reason": "nothing to cancel", "targetId": target_id}
+            target_id = target_id.strip()
+            god = self.civilization["godState"]
+
+            prov = god.get("providence")
+            if isinstance(prov, dict) and prov.get("id") == target_id:
+                self._close_providence("cancelled")
+                self._push_activity("A divine providence is revoked.")
+                return {"ok": True, "cancelled": True, "targetId": target_id, "targetKind": "providence"}
+
+            for key, omen in list((god.get("privateOmens") or {}).items()):
+                if isinstance(omen, dict) and omen.get("id") == target_id:
+                    self._close_omen(key, "cancelled")
+                    return {"ok": True, "cancelled": True, "targetId": target_id, "targetKind": "private_omen"}
+
+            for event in god.get("activeEvents") or []:
+                if (isinstance(event, dict) and event.get("id") == target_id
+                        and event.get("status") == "active"):
+                    if event.get("kind") == "weather_override":
+                        # Phase 6: cancel runs the SAME handoff expiry uses --
+                        # the machine never gets stranded mid-override -- and
+                        # any storm damage already dealt stands (consequential,
+                        # not undone).
+                        self._close_weather_override(event, "cancelled")
+                        self._push_activity(
+                            "A divine weather override is cancelled -- the sky "
+                            "returns to its natural course. Any damage already "
+                            "dealt stands.")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "weather_override"}
+                    self._close_story_event(event, "cancelled")
+                    if event.get("visibility", "public") == "public":
+                        self._push_activity(f'A divine story is cut short: "{event.get("title")}"')
+                    return {"ok": True, "cancelled": True, "targetId": target_id, "targetKind": "story_event"}
+
+            return {
+                "ok": True, "cancelled": False,
+                "reason": "nothing to cancel", "targetId": target_id,
+            }
+
+    def god_sight(self, filters=None):
+        """Bounded private projection: authenticated inspection beyond what
+        /state exposes publicly. Must NOT include memory-store embeddings,
+        raw unbounded logs, or any auth material."""
+        with self.lock:
+            if not GOD_MODE_ENABLED:
+                return {"ok": False, "reason": "god mode disabled"}
+            god = self.civilization.get("godState") or self._default_god_state()
+            omens = god.get("privateOmens") or {}
+
+            def _omen_status(agent_id):
+                # Phase 3: STATUS only (active + exact remaining frame), not
+                # raw omen content -- the sight comment this replaces already
+                # named that contract; the omen's actual text is still
+                # reachable through recentInterventions ("intervention
+                # outcomes" is explicitly in scope for /control/god/sight per
+                # docs/plan) or by the operator recalling what they wrote.
+                omen = omens.get(str(agent_id))
+                if not isinstance(omen, dict):
+                    return None
+                return {"active": True, "expiresFrame": omen.get("expiresFrame")}
+
+            agents = [{
+                "id": a["id"], "name": a["name"], "role": a["role"],
+                "health": a.get("health"), "hunger": a.get("hunger"),
+                "incapacitated": a.get("incapacitated"),
+                "deceased": bool(a.get("deathFrame") is not None),
+                "resources": dict(a.get("resources") or {}),
+                "relationships": dict(a.get("relationships") or {}),
+                "lastAction": a.get("lastAction"),
+                "lastReasoning": (a.get("lastReasoning") or "")[:240] or None,
+                "currentDistrict": a.get("currentDistrict"),
+                "omen": _omen_status(a["id"]),
+            } for a in self.agents]
+            return {
+                "ok": True,
+                "frameTick": self.frameTick,
+                "intervened": bool(god.get("intervened")),
+                "providence": god.get("providence"),
+                "activeEvents": list(god.get("activeEvents") or [])[:GOD_ACTIVE_EVENTS_CAP],
+                "recentInterventions": list(god.get("recentInterventions") or [])[-GOD_RECENT_INTERVENTIONS_CAP:],
+                "agents": agents,
+            }
 
     # --- control + snapshot (Contract 2) ---
     def pause(self):
@@ -13632,6 +15897,11 @@ class SimEngine:
             self._module_note_ages = []
             self.shipments = []
             self._shipment_seq = 0
+            self._god_preview_cache = {}
+            self._god_requests = {}
+            self._god_rejected_count = 0
+            self._god_grant_session_total = 0
+            self._god_compiler_state = {"lastCompileWallTime": 0.0, "compileCount": 0}
             ms = self.d.get("memory_store")
             if ms is not None:
                 try:
@@ -13868,6 +16138,11 @@ class SimEngine:
                         "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
                         "WEATHER_ENABLED": WEATHER_ENABLED,
                         "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
+                        # Sovereign God mode (Phase 2): ALWAYS echoed, flag-off
+                        # or on, so the viewer/clients can detect the dark
+                        # default without a private route. The "god" key
+                        # below, by contrast, is opt-in ONLY when enabled.
+                        "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
                     },
                 },
             }
@@ -13883,4 +16158,30 @@ class SimEngine:
                 snapshot["shipments"] = self._shipment_snapshot()
             if WEATHER_ENABLED:
                 snapshot["weather"] = self._weather_snapshot()
+            if GOD_MODE_ENABLED:
+                # snapshot() builds civ as an explicit allowlist dict (not a
+                # wholesale civilization copy), so this key is opt-in by
+                # construction -- privateOmens/recentRequests/the token
+                # cannot leak by forgetting to filter them; they are simply
+                # never read here. Phase 3: "providence" is included below
+                # (public per docs/plan Visibility), but recentInterventions
+                # is filtered to `public: True` entries ONLY -- this is the
+                # load-bearing guard against a private_omen apply/expire/
+                # revoke record leaking into public /state; every Phase 3
+                # recentInterventions record MUST set "public" explicitly
+                # (see _god_record_intervention).
+                god = c.get("godState") or self._default_god_state()
+                snapshot["god"] = {
+                    "intervened": bool(god.get("intervened")),
+                    "providence": god.get("providence"),
+                    "activePublicEvents": [
+                        e for e in (god.get("activeEvents") or [])[:GOD_ACTIVE_EVENTS_CAP]
+                        if isinstance(e, dict) and e.get("status") == "active"
+                        and e.get("visibility", "public") == "public"
+                    ],
+                    "recentPublicInterventions": [
+                        r for r in (god.get("recentInterventions") or [])[-GOD_RECENT_INTERVENTIONS_CAP:]
+                        if isinstance(r, dict) and r.get("public", True)
+                    ],
+                }
             return snapshot

@@ -231,10 +231,10 @@ local stocks/terraform targets), flag-gated single lines (`season_line`,
 each renders empty when its owning flag is off so prompts stay byte-identical
 across flag states, per `build_user_prompt` server.py:2787-2904), build state
 (structures/active project/progress), civilization state (directive,
-invention status, commitment, idle agents, known resources/recipes, pending/
-rejected blueprints/recipes/rules, reserved structure ids), social (recent
-conversations, inbox, module reports), a `behavior_nudge` line, and finally
-`available_actions`.
+`divine_lines` — see Sovereign God mode below, invention status, commitment,
+idle agents, known resources/recipes, pending/rejected blueprints/recipes/
+rules, reserved structure ids), social (recent conversations, inbox, module
+reports), a `behavior_nudge` line, and finally `available_actions`.
 
 `weather_line` (living-ecosystem Phase 5, `WEATHER_GOVERNANCE_ENABLED`):
 `_weather_prompt_line()` (sim_engine.py) returns one short "Weather: ..."
@@ -245,6 +245,116 @@ including whenever the flag or `WEATHER_ENABLED` is off. Follows the exact
 server folds it in only when set) and rides the existing think cycle — no new
 LLM call, no new context section, just this one line so agents can reference
 storm conditions in council.
+
+### Sovereign God mode (Phase 3): providence/omen prompt lines
+
+`_build_think_payload` computes `divine_public_line`/`divine_private_line` per
+agent via `_divine_prompt_lines(agent)` (sim_engine.py) — placed immediately
+next to `directive` in the payload but returned by a separate helper and
+carried in **separate keys**, never folded into or read from
+`civilization["directive"]`. `_divine_prompt_lines` re-checks
+`startFrame <= frame_tick < expiresFrame` itself for whichever of
+`godState["providence"]` / `godState["privateOmens"][str(agent["id"])]` is
+present, rather than trusting `_expire_divine_effects` to have already swept
+that exact tick — an expired-but-not-yet-closed record must never reach a
+prompt. Both are `None` outright when `GOD_MODE_ENABLED` is off.
+
+`build_user_prompt` (server.py) folds each into its own line, rendered ONLY
+when set — the same fold-in-only-when-set pattern as `weather_line` above, so
+flag-off / no-active-guidance prompts stay byte-identical to before this
+phase — immediately after the `Civilization directive: {directive}` line via
+a `{divine_lines}` template slot:
+
+```text
+Divine omen: Prepare for a difficult winter. You may interpret or ignore it.
+Private omen: Seek reconciliation with Ash. You may interpret or ignore it.
+```
+
+The fixed "You may interpret or ignore it." suffix is verbatim per the plan's
+"Bounded cognition impact" contract and preserves agent autonomy — nothing
+about accepting a decision governed by a divine line differs from an
+ordinary decision; there is no separate compliance check. At most one public
+line and one private line, each already capped at `GOD_TEXT_MAX_CHARS = 240`
+characters (`GOD_TEXT_MAX_BYTES = 600` bytes) by `_normalize_divine_text` at
+write time (sim_engine.py, [02](02-engine-core.md)), so the two lines add a
+small, precisely bounded amount of prompt text even at maximum omen length —
+no raw intervention history, no Chronicle duplication of private content ever
+enters a prompt. The elder `directive` line is completely unaffected: both
+fields can be active simultaneously, are rendered on separate template lines
+with separate labels, and an agent sees them as two distinct sources of
+guidance (village leadership vs. an unexplained divine signal), never as one
+merged instruction.
+
+**Measurement gate.** The plan calls for a fixed-case cognition comparison
+(no omen / neutral omen / strong omen) confirming agents can both follow and
+ignore guidance without invalid decisions and without context overflow,
+before enabling guidance by default in a live deployment. That comparison is
+Ollama-required and has not been run as part of this phase's deterministic
+delivery — `SIM_GOD_MODE` ships dark (see [01](01-architecture.md)), so no
+default-on run is affected, but treat this as open before recommending an
+always-on god-guided deployment.
+
+### Sovereign God mode (Optional Phase 8): free-prose story compiler
+
+`sim_engine.god_compile_prose(prose)` is a **distinct LLM path**, entirely
+separate from the agent-cognition prompts documented above — it never reads
+`civilization["directive"]`, never appears in `_build_think_payload`, and its
+call never counts as a "decision" or "module" turn in any benchmark. It turns
+operator-authored free prose into a draft `story_event` command that lands in
+the SAME `_god_preview_cache` Phase 2 already established; the operator still
+has to explicitly Preview (again, through the normal Story tab) and Apply.
+The compiler itself never mutates state and never calls `god_apply`.
+
+**Concurrency pool.** A compile is a genuinely blocking `self.d["lm_complete"]`
+call made **while holding `self.lock`** (the engine's `threading.RLock`),
+directly inside `god_compile_prose` — unlike agent decisions (`self._executor`,
+`MAX_CONCURRENT_LLM = 3`) or PIANO modules (`self.piano_workers`,
+`PIANO_CONCURRENT_LLM = 2`), the compiler does **not** use either pool. It is
+routed to `MODEL_SMART` ("sim-smart") via `lm_complete(..., model="sim-smart")`
+— `lm_complete`'s `model` parameter defaults to `None` (which resolves to
+`MODEL_FAST`) for every pre-existing caller; the compiler is the one caller
+that overrides it. This means a compile call temporarily blocks the tick
+thread for up to `GOD_COMPILER_TIMEOUT_SEC = 10.0` seconds (an aggressive
+timeout specifically to bound that exposure) and consumes one of
+`sim-smart`'s own `OLLAMA_NUM_PARALLEL` slots — the same slots agent
+decisions use — for the duration of the call. `GOD_COMPILER_MIN_INTERVAL_SEC
+= 5.0` and `GOD_COMPILER_SESSION_CAP = 60` (module constants, sim_engine.py)
+bound how often this can happen; there is no queue — an over-budget compile
+request is rejected immediately, never buffered.
+
+**Model routing — deliberately NOT `sim-fast`.** `sim-fast` already serves
+`PIANO_MODULES` background cognition, and past `sim-fast` contention has
+measurably increased PIANO module drops (see the Concurrency & context
+sizing section above). The plan is explicit that this compiler must not
+default onto that tier. Routing instead to `sim-smart` avoids reproducing
+that specific regression, but it is a NEW, not-yet-measured source of
+contention on `sim-smart`'s pool (the same pool every agent decision uses) —
+see [specs/12-ops.md](12-ops.md) "Optional Phase 8" for the recommended A/B
+contention protocol and the explicit statement that it has not been run.
+
+**Schema-locked output, not free text.** The prompt built by
+`_god_compiler_prompt` lists every `GOD_MODIFIER_RANGES` key and bound and
+the three `_GOD_PRIMITIVE_KINDS` shapes inline, with two worked few-shot
+examples (a small model needs the shape shown, not merely described). The
+model's raw response must parse as `{"kind": "story_event", "payload": {...}}`
+exactly (`_god_compiler_parse`); the `payload` is then run through the SAME
+`_validate_god_story_event` every other story_event command uses
+([02-engine-core.md](02-engine-core.md)) — an unknown modifier key,
+out-of-range value, or unknown resource/structure/agent id is rejected with
+the SAME error the validator would give a malformed hand-authored command,
+never silently clamped or dropped.
+
+**Dual gate.** `GOD_COMPILER_ENABLED` (env `SIM_GOD_COMPILER`, read once at
+import, module-level, alongside `GOD_MODE_ENABLED`) is a SECOND flag —
+`god_compile_prose` and the `/control/god/compile` route both require
+`GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`. Ships off by default; see
+[specs/12-ops.md](12-ops.md) for why the flag stays off until an A/B
+contention measurement is actually run.
+
+**No god token.** `god_compile_prose(prose)` has no parameter for
+`SIM_GOD_TOKEN` and never reads it — the token gate lives entirely in
+server.py's route handler, checked BEFORE `engine.god_compile_prose` is ever
+called, exactly like every other `/control/god/*` route.
 
 ### Daily Council prompt contract
 

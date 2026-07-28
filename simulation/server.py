@@ -9,6 +9,7 @@
 
 import atexit
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -389,8 +390,23 @@ class SessionLogger:
         # features can be measured (specialization index, rule adherence,
         # meme adoption, memory-store size, module-activation timeline).
         self.benchmark_path = os.path.join(self.dir, "benchmarks.jsonl")
+        # divine.jsonl (Sovereign God mode Phase 2, docs/plan-sovereign-god-
+        # mode-v2.md's "Logging" section): the fifth stream, one record per
+        # applied/cancelled/expired/rejected-after-preview/restore-closed
+        # divine intervention. Preview-only calls are not world events and
+        # never reach this stream. Never receives the token or raw request
+        # headers -- see log_divine below, which only accepts an already-
+        # hashed request_id.
+        self.divine_path = os.path.join(self.dir, "divine.jsonl")
+        # compiler.jsonl (Sovereign God mode Optional Phase 8, docs/plan-
+        # sovereign-god-mode-v2.md "Log separately"): a SIXTH stream, one
+        # record per free-prose compile attempt (draft or rejection). Kept
+        # separate from llm.jsonl (agent cognition) and divine.jsonl
+        # (world-affecting audit) on purpose -- a compile is neither. Never
+        # receives SIM_GOD_TOKEN -- see log_compiler below.
+        self.compiler_path = os.path.join(self.dir, "compiler.jsonl")
         for path in [self.activity_path, self.conversation_path, self.llm_path,
-                     self.benchmark_path]:
+                     self.benchmark_path, self.divine_path, self.compiler_path]:
             open(path, "a", encoding="utf-8").close()
         self.log_conversation(
             "system",
@@ -473,6 +489,43 @@ class SessionLogger:
         if detail is not None:
             record["detail"] = detail
         self._append(self.benchmark_path, record)
+
+    def log_divine(self, intervention_id=None, request_id=None, frame_tick=None,
+                   kind=None, normalized_command=None, outcome=None,
+                   status=None, public=None):
+        """Sovereign God mode Phase 2. `request_id` must already be hashed by
+        the caller (sim_engine._hash_request_id) -- this method never sees
+        (and therefore can never log) the God token or any raw HTTP header."""
+        record = {
+            "type": "divine",
+            "intervention_id": intervention_id,
+            "request_id": request_id,
+            "frame_tick": frame_tick,
+            "kind": kind,
+            "normalized_command": normalized_command,
+            "outcome": outcome,
+            "status": status,
+            "public": public,
+        }
+        self._append(self.divine_path, record)
+
+    def log_compiler(self, prose=None, model=None, latency_ms=None,
+                     status=None, reason=None, preview_id=None):
+        """Sovereign God mode Optional Phase 8. `prose` is the operator's
+        already-normalized free-text input, `status` is "draft" or
+        "rejected", `reason` is set only for rejections. Never accepts or
+        logs SIM_GOD_TOKEN -- sim_engine.god_compile_prose never sees the
+        token in the first place, so there is nothing to redact here."""
+        record = {
+            "type": "compiler",
+            "prose": prose,
+            "model": model,
+            "latency_ms": latency_ms,
+            "status": status,
+            "reason": reason,
+            "preview_id": preview_id,
+        }
+        self._append(self.compiler_path, record)
 
 
 session_logger = SessionLogger(os.path.dirname(os.path.abspath(__file__)))
@@ -1281,7 +1334,7 @@ Terraform projects (start_terraform targets): {known_terraform}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
-Invention status: {invention_status}
+{divine_lines}Invention status: {invention_status}
 Commitment: {commitment_text}
 Idle agents needing a task: {idle_agents}
 Known resources: {known_resources}
@@ -3031,7 +3084,7 @@ def lm_message_text(message):
 
 
 def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
-                timeout=30, raise_timeout=False):
+                timeout=30, raise_timeout=False, model=None):
     """Plain-text Ollama completion for the background cognition loops
     (Summarizer, meta system, PIANO modules / Cognitive Controller). Returns the
     text or None on any failure so every caller can degrade gracefully.
@@ -3041,13 +3094,24 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
     see run_piano_module(). `raise_timeout=True` re-raises
     requests.exceptions.Timeout instead of swallowing it, so a caller that
     wants to log/count timeouts distinctly (run_piano_module) can -- every
-    other caller keeps the original swallow-and-return-None behavior."""
+    other caller keeps the original swallow-and-return-None behavior.
+
+    `model` defaults to None, which resolves to MODEL_FAST -- every existing
+    caller is background cognition and keeps that default unchanged. The ONE
+    exception is the Sovereign God mode Optional Phase 8 free-prose compiler
+    (sim_engine.god_compile_prose), which explicitly passes model="sim-smart"
+    -- see that call site's comment for why it deliberately does NOT use
+    MODEL_FAST (sim-fast contention has previously increased PIANO module
+    drops; this is a distinct LLM path this module's design intentionally
+    keeps off that tier)."""
     payload = {
-        # Background cognition is routine work -- always the fast model. (No
-        # LM-Studio-style "local-model" alias to fall back to in Ollama -- a
-        # missing model id is a setup failure, handled where the call sites
-        # actually see the error, not here.)
-        "model": MODEL_FAST,
+        # Background cognition is routine work -- always the fast model,
+        # unless a caller explicitly names a different model id (see the
+        # `model` docstring paragraph above). (No LM-Studio-style
+        # "local-model" alias to fall back to in Ollama -- a missing model
+        # id is a setup failure, handled where the call sites actually see
+        # the error, not here.)
+        "model": model or MODEL_FAST,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -3354,6 +3418,24 @@ def build_user_prompt(data, slim=False):
     # entry) so flag-off / empty-chronicle prompts stay byte-identical.
     chronicle_line_raw = data.get("chronicle_line")
     chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
+    # Sovereign God mode (Phase 3, docs/plan-sovereign-god-mode-v2.md "Bounded
+    # cognition impact"): at most one public providence line and one private
+    # omen line, each rendered ONLY when the engine's Phase-3 fields are set
+    # (GOD_MODE_ENABLED and an active record within its frame window) --
+    # same fold-in-only-when-set pattern as every other optional line above,
+    # so flag-off / no-active-guidance prompts stay byte-identical. The
+    # fixed "You may interpret or ignore it." wording preserves agent
+    # autonomy per the plan's own example lines. These are SEPARATE from
+    # `directive` (elder leadership) both here and in the payload -- never
+    # folded together in either direction.
+    divine_lines_parts = []
+    divine_public_raw = data.get("divine_public_line")
+    if divine_public_raw:
+        divine_lines_parts.append(f"Divine omen: {divine_public_raw} You may interpret or ignore it.\n")
+    divine_private_raw = data.get("divine_private_line")
+    if divine_private_raw:
+        divine_lines_parts.append(f"Private omen: {divine_private_raw} You may interpret or ignore it.\n")
+    divine_lines = "".join(divine_lines_parts)
     council_digest_raw = data.get("council_digest_line")
     council_digest_line = (
         f"Recent council: {council_digest_raw}\n" if council_digest_raw else ""
@@ -3401,6 +3483,7 @@ def build_user_prompt(data, slim=False):
         active_project=data.get("active_project", "none"),
         project_progress=data.get("project_progress", "none"),
         directive=data.get("directive", "none"),
+        divine_lines=divine_lines,
         invention_status=data.get("invention_status", "not needed"),
         commitment_text=format_commitment(data.get("commitment")),
         idle_agents=format_idle_agents(idle_agents),
@@ -3895,6 +3978,8 @@ _ENGINE_DEPS = {
     "log_activity": session_logger.log_activity,
     "log_conversation": session_logger.log_conversation,
     "log_benchmark": session_logger.log_benchmark,
+    "log_divine": session_logger.log_divine,
+    "log_compiler": session_logger.log_compiler,
     "validate_blueprint": validate_blueprint,
     "validate_sprite_block": validate_sprite_block,
     "sprite_spec_is_degenerate": sprite_spec_is_degenerate,
@@ -4074,6 +4159,272 @@ def control_reset():
         agents = None
     engine.reset(roster_size=agents)
     return jsonify({"ok": True, "agents": engine.roster_size})
+
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
+# GOD_TOKEN is read ONCE at import, exactly like GOD_MODE_ENABLED in
+# sim_engine.py -- no route may change either, and there is no live on/off
+# switch by design. Both must hold for these routes to accept anything: the
+# module flag AND a non-empty token. A flag-on/token-missing combination is a
+# misconfiguration, reported once at startup WITHOUT the secret itself (there
+# is none to reveal -- the token is simply absent), and every /control/god/*
+# route stays disabled until a restart supplies one.
+GOD_TOKEN = os.environ.get("SIM_GOD_TOKEN", "").strip()
+GOD_ROUTES_ACTIVE = _sim_engine.GOD_MODE_ENABLED and bool(GOD_TOKEN)
+if _sim_engine.GOD_MODE_ENABLED and not GOD_TOKEN:
+    print("[server] WARNING: SIM_GOD_MODE is enabled but SIM_GOD_TOKEN is unset/blank -- "
+          "every /control/god/* route stays disabled until a token is configured "
+          "and the server is restarted.")
+
+# A proclamation payload is small; this bounds request bodies well above any
+# legitimate use while still capping abuse. Checked before request.get_json
+# so an oversized body never reaches JSON parsing.
+GOD_MAX_BODY_BYTES = 8192
+
+
+def _god_authorized():
+    """True only when the flag AND token are both configured AND the
+    request's X-God-Token header matches via constant-time comparison."""
+    if not GOD_ROUTES_ACTIVE:
+        return False
+    supplied = request.headers.get("X-God-Token", "")
+    return hmac.compare_digest(supplied, GOD_TOKEN)
+
+
+def _god_unauthorized_response():
+    """ONE uniform shape for every authorization failure -- disabled flag,
+    missing token config, missing header, and wrong token are all
+    indistinguishable from the outside, and no God route ever reveals
+    whether a target/event exists to an unauthorized caller."""
+    return jsonify({"error": "unauthorized"}), 401
+
+
+def _god_body_too_large():
+    length = request.content_length
+    return isinstance(length, int) and length > GOD_MAX_BODY_BYTES
+
+
+@app.route("/control/god/capabilities", methods=["GET"])
+def control_god_capabilities():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    return jsonify({
+        "ok": True,
+        "godModeEnabled": _sim_engine.GOD_MODE_ENABLED,
+        "tokenConfigured": bool(GOD_TOKEN),
+        "kinds": {
+            "proclamation": {
+                "applyable": True,
+                "payload": {"text": {"type": "string",
+                                     "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                     "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES}},
+                "reversibilityClass": "irreversible",
+            },
+            # Sovereign God mode Phase 3 (docs/plan-sovereign-god-mode-v2.md
+            # "Voice and providence").
+            "providence": {
+                "applyable": True,
+                "payload": {
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+            },
+            "private_omen": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+            },
+            "revoke_guidance": {
+                "applyable": True,
+                "payload": {"id": {"type": "string"}},
+                "reversibilityClass": "irreversible",
+            },
+            # Sovereign God mode Phase 4 (docs/plan-sovereign-god-mode-v2.md
+            # "Immediate miracles"). All three are irreversible.
+            "agent_vitals": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "healthDelta": {"type": "number", "optional": True,
+                                    "min": -_sim_engine.GOD_VITALS_DELTA_MAX,
+                                    "max": _sim_engine.GOD_VITALS_DELTA_MAX},
+                    "hungerDelta": {"type": "number", "optional": True,
+                                    "min": -_sim_engine.GOD_VITALS_DELTA_MAX,
+                                    "max": _sim_engine.GOD_VITALS_DELTA_MAX},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": ("cannot kill: a negative healthDelta is clamped to stop at "
+                          f"{_sim_engine.GOD_VITALS_HEALTH_FLOOR} (never reaching the "
+                          "incapacitation threshold), never touches deathFrame."),
+            },
+            "grant_resource": {
+                "applyable": True,
+                "payload": {
+                    "resourceId": {"type": "string"},
+                    "amount": {"type": "integer", "min": 1,
+                              "max": _sim_engine.GOD_GRANT_PER_COMMAND_CAP},
+                    "target": {"type": "object", "optional": True,
+                              "description": '"stockpile" (default) or {"agentId": <int>}'},
+                },
+                "reversibilityClass": "irreversible",
+                "sessionCap": _sim_engine.GOD_GRANT_SESSION_CAP,
+            },
+            "structure_condition": {
+                "applyable": True,
+                "payload": {
+                    "structureId": {"type": "integer"},
+                    "delta": {"type": "number",
+                             "min": -_sim_engine.GOD_STRUCTURE_DELTA_MAX,
+                             "max": _sim_engine.GOD_STRUCTURE_DELTA_MAX},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "positive delta repairs, negative delta damages (may reach ruin).",
+            },
+            # Sovereign God mode Phase 5 (docs/plan-sovereign-god-mode-v2.md
+            # "Storyteller events" + "Timed lawgiver modifiers"). Reversibility
+            # is "cancellable" with no primitives, "consequential" once any
+            # primitive is included (see _god_reversibility_class).
+            "story_event": {
+                "applyable": True,
+                "payload": {
+                    "title": {"type": "string", "maxChars": _sim_engine.GOD_EVENT_TITLE_MAX_CHARS},
+                    "narration": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                 "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "visibility": {"type": "string", "optional": True,
+                                  "enum": ["public", "private"], "default": "public"},
+                    "targetId": {"type": "integer", "optional": True,
+                                "description": "required when visibility is 'private'"},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                    "modifiers": {"type": "object", "optional": True,
+                                 "keys": _sim_engine.GOD_MODIFIER_RANGES},
+                    "primitives": {"type": "array", "optional": True,
+                                  "maxItems": _sim_engine.GOD_STORY_EVENT_MAX_PRIMITIVES,
+                                  "itemKinds": ["agent_vitals", "grant_resource", "structure_condition"]},
+                    "providence": {"type": "object", "optional": True,
+                                  "description": "{text} -- reuses this event's own durationFrames"},
+                    "replaceEffectId": {"type": "string", "optional": True,
+                                        "description": "required to reuse a modifier key already active"},
+                },
+                "reversibilityClass": "cancellable | consequential (with primitives)",
+                "notes": "atomic: preview validates every component; apply accepts all or changes nothing.",
+            },
+            # Sovereign God mode Phase 6 (docs/plan-sovereign-god-mode-v2.md
+            # "Weather override"). Always "consequential": entering "storm"
+            # can permanently damage structures in the named districts, and
+            # neither cancelling nor natural expiry undoes that damage.
+            "weather_override": {
+                "applyable": True,
+                "requires": "WEATHER_ENABLED",
+                "payload": {
+                    "state": {"type": "string", "enum": list(_sim_engine.WEATHER_STATES)},
+                    "districts": {"type": "array", "optional": True,
+                                 "description": ('district ids; empty ONLY for state="clear"; '
+                                                 "at least one required for every other state")},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                    "replaceEffectId": {"type": "string", "optional": True,
+                                        "description": "required to replace the already-active weather override"},
+                },
+                "reversibilityClass": "consequential",
+                "notes": ('clock ownership: activeEvents[].expiresFrame == weather["exitFrame"] '
+                         "(the divine event owns duration). Cancelling or expiry hands off to the "
+                         "natural cycle's next state -- never restores the prior state. Entering "
+                         "'storm' can permanently damage structures in the named districts."),
+            },
+        },
+        "modifierRanges": _sim_engine.GOD_MODIFIER_RANGES,
+        "previewTtlSeconds": _sim_engine.GOD_PREVIEW_TTL_SECONDS,
+        "activeEventsCap": _sim_engine.GOD_ACTIVE_EVENTS_CAP,
+        "weatherEnabled": _sim_engine.WEATHER_ENABLED,
+        # Sovereign God mode Optional Phase 8 (docs/plan-sovereign-god-mode-
+        # v2.md "Free-prose story compiler"): dual-gated on GOD_MODE_ENABLED
+        # (already true to reach this route) AND the SEPARATE
+        # GOD_COMPILER_ENABLED dark flag -- so the viewer can render or hide
+        # the Compile tab correctly without probing /control/god/compile.
+        "compiler": {
+            "enabled": _sim_engine.GOD_MODE_ENABLED and _sim_engine.GOD_COMPILER_ENABLED,
+            "minIntervalSec": _sim_engine.GOD_COMPILER_MIN_INTERVAL_SEC,
+            "sessionCap": _sim_engine.GOD_COMPILER_SESSION_CAP,
+            "promptMaxChars": _sim_engine.GOD_COMPILER_PROSE_MAX_CHARS,
+        },
+    })
+
+
+@app.route("/control/god/sight", methods=["GET"])
+def control_god_sight():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    return jsonify(engine.god_sight())
+
+
+@app.route("/control/god/preview", methods=["POST"])
+def control_god_preview():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    if _god_body_too_large():
+        return jsonify({"error": "payload_too_large"}), 413
+    envelope = request.get_json(force=True, silent=True) or {}
+    return jsonify(engine.god_preview(envelope))
+
+
+@app.route("/control/god/compile", methods=["POST"])
+def control_god_compile():
+    """Sovereign God mode Optional Phase 8 (docs/plan-sovereign-god-mode-
+    v2.md "Free-prose story compiler"). Token-gated exactly like every other
+    God route, but the token itself is NEVER forwarded to
+    engine.god_compile_prose -- that method has no parameter for it and
+    never reads SIM_GOD_TOKEN. This route only ever produces a PREVIEW; it
+    never applies anything (there is no god_apply call anywhere on this
+    path)."""
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    if _god_body_too_large():
+        return jsonify({"error": "payload_too_large"}), 413
+    body = request.get_json(force=True, silent=True) or {}
+    prose = body.get("prose")
+    if not isinstance(prose, str) or len(prose) > _sim_engine.GOD_COMPILER_PROSE_MAX_CHARS:
+        return jsonify({"compileOk": False,
+                        "reason": f"prose must be a string of at most "
+                                  f"{_sim_engine.GOD_COMPILER_PROSE_MAX_CHARS} characters"})
+    return jsonify(engine.god_compile_prose(prose))
+
+
+@app.route("/control/god/apply", methods=["POST"])
+def control_god_apply():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    if _god_body_too_large():
+        return jsonify({"error": "payload_too_large"}), 413
+    body = request.get_json(force=True, silent=True) or {}
+    return jsonify(engine.god_apply(body.get("previewId"), body.get("requestId")))
+
+
+@app.route("/control/god/cancel", methods=["POST"])
+def control_god_cancel():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    if _god_body_too_large():
+        return jsonify({"error": "payload_too_large"}), 413
+    body = request.get_json(force=True, silent=True) or {}
+    return jsonify(engine.god_cancel(body.get("targetId")))
 
 
 if __name__ == "__main__":

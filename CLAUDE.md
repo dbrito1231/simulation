@@ -55,7 +55,7 @@ Data flow: tick thread advances world → think timer fires → `_build_think_pa
 
 ## Logs
 
-Each server run writes to `simulation/logs/<timestamp>/` (gitignored): `activity.jsonl` (world events), `conversation.jsonl` (agent dialogue), `llm.jsonl` (full LLM request/response/decision per call; sessions predating the Ollama migration used `lm_studio.jsonl`). Primary debugging surface — read `llm.jsonl` to see what the model actually returned and which fallback fired. Ollama's own log (token usage, per-request checkpoints) lives outside the repo at `%LOCALAPPDATA%\Ollama\server.log`.
+Each server run writes to `simulation/logs/<timestamp>/` (gitignored): `activity.jsonl` (world events), `conversation.jsonl` (agent dialogue), `llm.jsonl` (full LLM request/response/decision per call; sessions predating the Ollama migration used `lm_studio.jsonl`), `benchmarks.jsonl` (Sid-parity metrics: specialization index, rule adherence, meme adoption, memory-store size, module-activation timeline), `divine.jsonl` (Sovereign God mode intervention audit trail — dark by default, see `specs/12-ops.md`), and `compiler.jsonl` (Sovereign God mode Optional Phase 8 free-prose compiler attempts — draft/rejection, dark by default behind its own `GOD_COMPILER_ENABLED` flag, see `specs/12-ops.md`). Primary debugging surface — read `llm.jsonl` to see what the model actually returned and which fallback fired. Ollama's own log (token usage, per-request checkpoints) lives outside the repo at `%LOCALAPPDATA%\Ollama\server.log`.
 
 ## Docs map
 

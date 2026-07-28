@@ -13,8 +13,12 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 
 ## Route table
 
-18 routes total (`@app.route` count in `simulation/server.py`; no other
-route-registration mechanism is used).
+23 routes total (`@app.route` count in `simulation/server.py`; no other
+route-registration mechanism is used) — 18 always-registered routes plus the
+5 `/control/god/*` routes added in Phase 2, which are registered
+unconditionally but only ever *answer* requests when both `GOD_MODE_ENABLED`
+(sim_engine.py) and a non-empty `SIM_GOD_TOKEN` (server.py) are configured at
+startup; see "Sovereign God mode" below.
 
 | Path | Method | Purpose | Request | Response |
 |---|---|---|---|---|
@@ -36,6 +40,12 @@ route-registration mechanism is used).
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
 | `/control/resume` | POST | Resume the tick loop | — | `{ok: true, paused: false}` |
 | `/control/reset` | POST | Reset the world, optionally with a new roster size | `{agents?: int}` (optional; omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` |
+| `/control/god/capabilities` | GET | Enabled command/effect names, bounds, duration caps, token status (requires the God token) | — | `{ok, godModeEnabled, tokenConfigured, kinds: {...}, previewTtlSeconds, activeEventsCap, compiler: {enabled, minIntervalSec, sessionCap, promptMaxChars}}` |
+| `/control/god/sight` | GET | Authenticated private inspection, bounded and filterable (requires the God token) | — | `engine.god_sight()` |
+| `/control/god/preview` | POST | Validate and normalize a god command without mutation (requires the God token) | `{kind, payload, expectedFrame?}` | `engine.god_preview(envelope)` |
+| `/control/god/apply` | POST | Apply an exact previewed command (requires the God token) | `{previewId, requestId}` | `engine.god_apply(previewId, requestId)` |
+| `/control/god/cancel` | POST | Cancel an active omen/providence/timed event (requires the God token) | `{targetId}` | `engine.god_cancel(targetId)` |
+| `/control/god/compile` | POST | Optional Phase 8: compile free operator prose into a DRAFT `story_event` preview (requires the God token; also requires `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`, otherwise a clean rejection) | `{prose}` (string, up to `GOD_COMPILER_PROSE_MAX_CHARS = 800` chars) | `engine.god_compile_prose(prose)` — `{compileOk, previewId, commandDigest, previewOutcome, normalizedCommand, reversibilityClass, expiresAt}` or `{compileOk: false, reason}` |
 
 `/agent/think` is legacy: the server-authoritative engine never calls it over
 HTTP. Instead, `_ENGINE_DEPS["llm_decide"]` (server.py:3233-3254) is wired
@@ -68,6 +78,7 @@ engine lock for a consistent read:
 | `activity` | recent activity log entries |
 | `conversation` | last 30 conversation log entries |
 | `config` | `{WORLD_W, WORLD_H, flags: {...}}` — the full flag-value snapshot echoed to the viewer, see specs/01-architecture.md's flag index |
+| `god` | **Present only when `GOD_MODE_ENABLED`.** `{intervened, providence, activePublicEvents, recentPublicInterventions}` (Phase 3 adds `providence`, public by design — [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-and-providence)) — `snapshot()` builds `civ` as an explicit allowlist dict, so this key is opt-in by construction; `privateOmens`, the in-memory idempotency store, and the token can never leak by omission, and `recentPublicInterventions` is additionally filtered to `"public": True` records so a private omen's outcome can never appear here either. See "Sovereign God mode" below. |
 
 ## Server startup/shutdown
 
@@ -96,6 +107,107 @@ When transit is enabled, `/state` includes `civilization.physicalProps`, a
 read-only list of `{resource, count}` hints for the thin viewer. It derives up
 to three boats from village stockpile quantity; the viewer places them at fixed
 moorings in the starter ocean, rather than beside ordinary structures.
+
+## Sovereign God mode
+
+The five `/control/god/*` routes (docs/plan-sovereign-god-mode-v2.md) form a
+deliberately separate, optional control plane. All five share one gate and
+one uniform failure shape:
+
+- **Gate:** `GOD_MODE_ENABLED` (sim_engine.py, env-backed `SIM_GOD_MODE`,
+  read once at import — see [01-architecture.md](01-architecture.md)) AND a
+  non-empty `SIM_GOD_TOKEN` (server.py, also read once at import) must both
+  be configured. If the flag is on but the token is missing, server.py
+  prints one startup warning that contains no secret (there is none to
+  reveal) and every route below stays disabled until a restart supplies a
+  token.
+- **Auth:** clients send `X-God-Token`; compared against `SIM_GOD_TOKEN` with
+  `hmac.compare_digest`. Neither header contents nor the token are ever
+  logged, persisted, or echoed back.
+- **Uniform failure:** a disabled flag, unset token, missing header, or wrong
+  token are all indistinguishable from the outside — every case returns the
+  identical `401 {"error": "unauthorized"}`. No God response ever reveals
+  whether a target or event exists to an unauthorized caller.
+- **Body size limit:** POST bodies over `GOD_MAX_BODY_BYTES = 8192` bytes are
+  rejected with `413 {"error": "payload_too_large"}` before JSON parsing.
+- **Never client-authoritative:** `/control/god/apply` accepts only
+  `{previewId, requestId}` — the normalized command itself is never accepted
+  from the client at apply time; the engine resolves its own server-held
+  preview. See [02-engine-core.md](02-engine-core.md) for the full
+  preview/idempotency/expiry contract these routes front.
+
+Phase 2 shipped exactly one applyable command kind, `proclamation`; Phase 3
+added `providence`/`private_omen`/`revoke_guidance`; Phase 4 added
+`agent_vitals`/`grant_resource`/`structure_condition`; Phase 5 adds
+`story_event` (timed modifiers + zero or more Phase 4 primitives + optional
+providence, composed atomically). `/control/god/capabilities` echoes the
+full current catalog — payload shape, bounds, and `reversibilityClass` per
+kind (`story_event`'s is `"cancellable"` with no primitives, `"consequential"`
+with any) — plus `modifierRanges` for the seven timed-lawgiver keys. See
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel)
+for the command catalog and stored-text contract, and
+[12-ops.md](12-ops.md) for `divine.jsonl`.
+
+**`/control/god/cancel`** is a direct, lock-held mutation with no
+preview/apply step (unlike every other mutating God route). It searches, in
+order, the active `providence` slot, every `privateOmens` record, then every
+`"active"` `activeEvents` entry for a matching `id`, closing whichever it
+finds through that record's normal closure path (also closing a
+`story_event`'s linked providence, if any, in the same step) and returning
+`{"ok": true, "cancelled": true, "targetId", "targetKind"}`. No match —
+including an id minted by an irreversible Phase 4 miracle or a one-shot
+`proclamation`, neither of which is ever stored in any of the three searched
+stores — returns `{"ok": true, "cancelled": false, "reason": "nothing to
+cancel", "targetId"}`, so miracle ids are refused by construction rather than
+through a special-cased error. See
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
+for the full Phase 5 contract.
+
+**Viewer consumer (Phase 7).** The Divine Console (`simulation/index.html`,
+see [11-viewer.md](11-viewer.md#divine-console-sovereign-god-mode-phase-7))
+is the first and only client of all five routes. It reads
+`previewOutcome`/`fingerprint.outgoingId`/`reversibilityClass` straight off
+`god_preview()`'s response (documented in
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel))
+to drive its preview→apply flow, and reads `god_sight()`'s `agents`/
+`activeEvents`/`recentInterventions` for its Sight tab. No new response shape
+was needed for the viewer — every field it reads was already documented by
+Phases 2–6.
+
+### Optional Phase 8: `/control/god/compile`
+
+Token-gated exactly like the other five routes above, with one additional
+gate: it also requires the SECOND, independent `GOD_COMPILER_ENABLED` dark
+flag (env `SIM_GOD_COMPILER`, read once at import — see
+[01-architecture.md](01-architecture.md) and
+[12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler)). The
+token itself is **never forwarded** to `engine.god_compile_prose` — the
+route handler checks `X-God-Token` before calling the engine method, and
+that method has no parameter to receive it.
+
+This route **never mutates and never applies**. A successful compile
+produces a normal preview record in the SAME `_god_preview_cache` slot
+`/control/god/preview` uses — `previewId` is applyable through the ordinary
+`/control/god/apply` route exactly like a hand-authored `story_event`, with
+the same revalidation. There is no `/control/god/compile-and-apply`
+shortcut.
+
+Body: `{"prose": "<string, up to GOD_COMPILER_PROSE_MAX_CHARS=800 chars>"}`.
+A missing/non-string/oversized `prose` field is rejected by the route itself
+before reaching the engine. Rejection reasons (rate limit, session cap,
+schema mismatch, unknown modifier key, non-JSON model output, timeout) are
+short and secret-free — the same "clear error naming the offending field"
+contract every other God validator follows. See
+[02-engine-core.md](02-engine-core.md) for `_validate_god_story_event`,
+which every compiled draft is revalidated against before it reaches the
+preview cache, and [03-cognition.md](03-cognition.md#sovereign-god-mode-optional-phase-8-free-prose-story-compiler)
+for the model-routing and concurrency-pool contract.
+
+`/control/god/capabilities`'s response additionally carries a `compiler` key
+—`{enabled, minIntervalSec, sessionCap, promptMaxChars}` — so the viewer can
+render or hide its Compile tab without probing `/control/god/compile`
+directly; `enabled` already folds both `GOD_MODE_ENABLED` and
+`GOD_COMPILER_ENABLED` together.
 
 ## Logging endpoints: fire-and-forget contract
 

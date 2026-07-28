@@ -493,6 +493,27 @@ small compatible food-contribution tilt. `meme_adoption` benchmarks include
 all live beliefs with a per-belief holder breakdown, including authored
 beliefs.
 
+A successful adoption, gated additionally by `CULTURE_ENABLED`, also rolls a
+chance to drift the spreading belief's wording. `_maybe_mutate_meme` fires
+after the recipient adopts and before the adoption is logged/messaged/
+remembered, so the recipient's own memory of the belief already carries any
+drifted text — the mutation is one probability roll (`MEME_MUTATION_PROB`)
+against a hard, process-lifetime `MEME_MUTATION_SESSION_CAP = 30`, the same
+budget discipline as the pitch-scoring cap above, and each attempt makes at
+most one `lm_complete` call to reword the current text. A failed, empty, or
+rejected (meta-commentary, echoed instructions, no real change) rewrite is a
+silent no-op; the belief keeps its prior text. A successful mutation rewrites
+the live `beliefRegistry` entry's `tenet` in place — preserving the
+pre-mutation wording once in `originalTenet` via `setdefault`, so repeated
+drift never loses the true original and authorship (`authoredBy`) is left
+untouched — and only falls back to writing `civilization["memeTexts"]` when
+the belief has no registry entry at all. `_belief_text` still resolves a
+registry `tenet` first; `memeTexts` is read only as a legacy fallback for
+entries with no tenet, e.g. when restoring an old save. Each successful
+mutation is logged as activity and recorded in the chronicle under the
+`meme_mutation` kind, and increments `civilization["memeMutations"]`, which
+also feeds the `meme_mutations` benchmark.
+
 ## CULTURE_ENABLED
 
 **Skills:** `SKILL_KINDS = ("gather", "craft", "build", "heal", "reflection")`, one float
@@ -523,17 +544,57 @@ events, folded into prompts as one "Village history: ..." line
 ring. It never creates a second event store and never changes prompt history.
 The projection admits only the named milestone kinds `death`, `burial`,
 `election`, `belief_founded`, `belief_adoption`, `meme_mutation`,
-`knowledge_preserved`, `disaster`, and `district_founded`; routine gather,
-talk, craft, and build activity remains exclusively in `activity`. `disaster`
-entries are pushed unconditionally from `_maybe_disaster` (see
-[08](08-systems-economy.md)); `district_founded` entries are pushed from
-`_found_district` only when `FOUNDING_EVENTS_ENABLED` is True (see
-[05](05-world.md)). `CHRONICLE_CAP` was raised from 20 to 100 (living-ecosystem
-Phase 2, item 0) after live verification showed a storm-heavy stretch
-(`DISASTER_PROB` fires roughly every 100 simulated minutes) evicting real
-history (deaths/elections/beliefs) within about a day at the old cap; 100
-entries absorbs many more disasters before crowding out anything else, at a
-negligible cost (~80 extra short strings in `/state` and `state.db`).
+`knowledge_preserved`, `disaster`, `district_founded`, `emergency_measure`,
+and `divine`; routine gather, talk, craft, and build activity remains
+exclusively in `activity`. `disaster` entries are pushed unconditionally from
+`_maybe_disaster` (see [08](08-systems-economy.md)); `district_founded`
+entries are pushed from `_found_district` only when `FOUNDING_EVENTS_ENABLED`
+is True (see [05](05-world.md)). `CHRONICLE_CAP` was raised from 20 to 100
+(living-ecosystem Phase 2, item 0) after live verification showed a
+storm-heavy stretch (`DISASTER_PROB` fires roughly every 100 simulated
+minutes) evicting real history (deaths/elections/beliefs) within about a day
+at the old cap; 100 entries absorbs many more disasters before crowding out
+anything else, at a negligible cost (~80 extra short strings in `/state` and
+`state.db`).
+
+**Divine communication (Sovereign God mode, `GOD_MODE_ENABLED`):** an applied
+`proclamation` or `providence` command pushes to all three of `activity`,
+`conversationLog` (`kind="divine_proclamation"`/`"divine_providence"`), and
+Chronicle (`kind="divine"`) in one call, each entry carrying explicit
+`source="divine"` attribution so it never masquerades as emergent agent
+speech. `providence`'s expiry and `revoke_guidance` targeting it additionally
+push one plain `activity` line ("fades"/"is revoked") with no matching
+Chronicle/communication duplication. **Private omens are the deliberate
+opposite:** a `private_omen` apply, replace, expiry, or revocation never
+writes to `activity`, `conversationLog`, or the Chronicle under any
+circumstance — the only place its content is ever readable outside the
+target's own (eventual, exactly-once) memory is the authenticated
+`/control/god/sight` route (see [02](02-engine-core.md#sovereign-god-mode-phase-3--voice-and-providence)
+and [06](06-agents.md)). `snapshot()`'s `god.recentPublicInterventions` is
+filtered to `"public": True` records for the same reason — a private omen's
+outcome record is written with `"public": False` and is excluded from
+`/state` by that filter, not merely by omission.
+
+**Storyteller events (Sovereign God mode Phase 5, `story_event`):** a
+**public** event pushes the same `activity`/`conversationLog`
+(`kind="divine_story_event"`)/Chronicle trio, `source="divine"`, using its
+title and narration (`"{title}: {narration}"` in the Chronicle entry); a
+**private** event (bound to one living `targetId`) writes none of those,
+matching the private-omen visibility boundary exactly — its title/narration
+never reach public `activity`, `conversationLog`, `/state`, or the
+Chronicle, only the authenticated `/control/god/sight` route. Any embedded
+`agent_vitals`/`grant_resource`/`structure_condition` primitive still writes
+its own **public** activity/communication/Chronicle line regardless of the
+parent event's visibility — Phase 4 miracles have no private-visibility
+concept of their own — so a "private" story event's narrative framing can
+stay hidden while a primitive it triggers remains an observable public
+event, same as it would applied standalone. Expiry and cancellation each
+push one plain `activity` line ("A divine story fades: ..." /
+"A divine story is cut short: ...") for public events only, with no matching
+Chronicle/communication duplication, mirroring providence's own
+expiry/revocation narration. See
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
+for the full command/composition/closure contract.
 
 **Social ties:** `SOCIAL_LAYER_ENABLED` (default True) is another read-only
 viewer gate. `/state.socialTies` is a compact, deduplicated list of non-neutral

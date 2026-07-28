@@ -216,6 +216,20 @@ sim_engine.py:3786-3808). Structure *types* are declared once via two registries
   supply their own `function` block at proposal time (see
   [07-actions.md](07-actions.md#the-build-pipeline)).
 
+**Condition/ruin transitions** (decay, disrepair, ruin — the `condition`,
+`isRuin`, and `homeOf`/`homeStructureId` fields above) go through one shared
+helper, `_apply_structure_condition_delta(structure, delta)`, extracted
+specifically so the passive per-goods-tick decay (`_tick_structure_decay`,
+always a negative delta) and the Sovereign God mode `structure_condition`
+miracle (repair with a positive delta, damage with a negative one) fire
+identical `STRUCTURE_DISREPAIR_THRESHOLD`-crossing and ruin-transition
+narration — including clearing `homeOf`/`homeStructureId` and the
+"left homeless" line when a structure someone lives in collapses into a
+ruin — rather than the miracle taking a parallel shortcut. See
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-4--bounded-immediate-miracles)
+and [08-systems-economy.md](08-systems-economy.md) (the "Structure decay"
+row) for the full decay-rate/threshold/repair-cost contract this reuses.
+
 **Levels/upgrades:** gated by `STRUCTURE_UPGRADES_ENABLED` (default True).
 `MAX_STRUCTURE_LEVEL = 100` (sim_engine.py:277); `LEVEL_STEP = 1` per
 `upgrade_structure` call (sim_engine.py:278). `structure["visualTier"]` (1-3,
@@ -299,6 +313,65 @@ structure decay, and the disaster roll. **No new timer.**
   no-op (the `weather` key is never read or mutated further after cold
   start/restore), `/state` omits `weather`, and `_maybe_disaster` reverts to
   its pre-Phase-4 behavior (see 08).
+
+### Divine weather override (Sovereign God mode Phase 6, `weather_override`)
+
+A `god_mode` intervention kind (see [03-cognition.md](03-cognition.md) for the
+preview/apply/cancel envelope shared by every divine command) that forces the
+natural weather machine above into an operator-chosen `state` + `districts`
+for a bounded duration, then hands control back to the natural cycle. Four
+behaviors, all enforced in `sim_engine.py`:
+
+- **Event-authoritative clock.** `godState["activeEvents"][].expiresFrame` is
+  the single source of truth for when the override ends.
+  `_god_apply_weather_override` sets `civilization["weather"]["exitFrame"]`
+  to that **same** absolute frame, so `_tick_weather`'s existing
+  `frameTick < exitFrame` early-return defers to the override automatically —
+  there is only one clock value, read by both the natural machine and the
+  override, so it cannot drift out of sync.
+- **RNG-free forced entry.** `_weather_enter_forced(state, districts,
+  exit_frame)` sets `state`/`since`/`exitFrame`/`districts` directly from the
+  already-validated command and draws no RNG at all — no `random.randint`,
+  no `random.sample` — and emits the same narration `_weather_enter` emits
+  for that state, so a forced storm/clearing reads identically to a natural
+  one in activity. `_weather_enter` itself (the RNG-driven natural-cycle
+  entry point) is untouched and only ever called from the natural
+  `_tick_weather` cycle or from the handoff below.
+- **Handoff to the natural cycle's successor, not back to the pre-override
+  state.** Ending an override — via expiry (`_expire_divine_effects`), cancel
+  (`god_cancel`), or a `replaceEffectId` replacement — always calls
+  `_close_weather_override(event, status)`, which closes the
+  `weather_override` `activeEvents` record exactly once and then calls
+  `_weather_handoff_successor(event["state"])`: the natural-cycle successor
+  of the **overridden** state (`clear -> gathering`, `gathering -> storm` or
+  `clear` per the normal probability roll, `storm -> clearing`, `clearing ->
+  clear`), entered through the same RNG-drawing `_weather_enter`. The
+  override's `priorState` is recorded on the event for audit only and is
+  never restored — restoring it would double back and desync the strict
+  cycle.
+- **Consequential reversibility.** `_god_reversibility_class` reports
+  `weather_override` as `"consequential"`, not merely `"cancellable"`:
+  entering `"storm"` can trigger real, permanent structure damage through the
+  normal `_maybe_disaster` path, and neither cancelling the override nor
+  letting it expire retracts that damage. `_god_preview_outcome` discloses
+  this explicitly — the target `state`/`districts`, the count of currently
+  non-ruined structures at risk in those districts, and (for `state ==
+  "storm"`) a warning that any damage dealt stands regardless of how the
+  override ends.
+
+Validation (`_validate_god_weather_override`) requires `WEATHER_ENABLED`,
+`state` to be one of `WEATHER_STATES`, real district ids (empty only for
+`"clear"`, at least one required for every other state — matching what
+`_weather_enter` itself does for each), and enforces "one active weather
+override at a time" unless `replaceEffectId` names the currently active one
+(`_god_active_weather_override`) — the same one-active-per-slot discipline
+`story_event`'s `replaceEffectId` uses for a modifier key. Replacing closes
+the previous override's `activeEvents` record with status `"replaced"` (see
+[12-ops.md](12-ops.md) for the full status vocabulary). An active override's
+`expiresFrame` is absolute and round-trips `save_state`/`restore_state`
+unchanged; a save captured after an override's clock ran out but before the
+next `_expire_divine_effects` sweep closes it, and hands off, exactly once on
+restore (status `"restore-closed"`).
 
 ## Cemetery + grave grid
 
