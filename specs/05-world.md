@@ -83,6 +83,15 @@ must be built in (falls back to `village` for unlisted/custom-blueprint types).
   space of that kind. `_maybe_found_district` (sim_engine.py:7582-7596+) also checks
   `len(districts) < MAX_TOTAL_DISTRICTS` and a per-village cooldown
   (`lastDistrictFoundFrame`).
+- `FOUNDING_EVENTS_ENABLED` (default True): when True, `_found_district()` pushes a
+  `district_founded`-kind chronicle milestone ("`{label}` was founded on the
+  frontier.") alongside the existing unconditional `_push_activity` line. Gates only
+  this chronicle call — district creation itself, the road-graph extension, and
+  `districtStocks` init are unaffected by the flag. No new district field was
+  added: the viewer derives its founding banner (see
+  [11-viewer.md](11-viewer.md)) by diffing newly-appeared `district_founded`
+  chronicle entries against ones already seen, rather than from a per-district
+  `foundedFrame` timestamp.
 
 ## Road network
 
@@ -124,6 +133,26 @@ Gated by `ECOLOGY_ENABLED` (default True). Each district carries a
   the amount is multiplied by season via `SEASON_REGROW_MULT = {"spring": 2,
   "summer": 1, "autumn": 1, "winter": 0}` (sim_engine.py:526) — winter regrowth is
   fully suppressed. Season mechanics themselves: [02-engine-core.md](02-engine-core.md).
+  **Weather term (`WEATHER_GOVERNANCE_ENABLED`, living-ecosystem Phase 5):**
+  extends this SAME multiplier chain per-district — never a second, parallel
+  regrowth mechanism. For whichever district(s) `civilization["weather"]["districts"]`
+  currently names, the (already season-scaled) per-tick amount is further
+  multiplied by `WEATHER_STORM_REGROW_MULT = 0.3` while weather state is
+  `"storm"` (suppression) or `WEATHER_CLEARING_REGROW_MULT = 1.5` while
+  `"clearing"` (a partial rain-boosted recovery right after the storm passes,
+  so weather isn't purely punitive). Every other district, and every district
+  while weather is `"clear"`/`"gathering"`, is unaffected (multiplier 1). The
+  multiplier is deliberately fractional and never floored to exactly 0:
+  combined with `WEATHER_DWELL_TICKS` already bounding how long `"storm"`/
+  `"clearing"` can last (a few minutes, see the Weather section below), a
+  district always keeps inching toward recovery even mid-storm — the
+  plan-mandated floor against an unrecoverable starvation spiral, achieved
+  without a second bespoke duration/cap mechanism. `WEATHER_GOVERNANCE_ENABLED`
+  off is byte-identical to Phase 4 alone. Reuses the exact scarcity/recovery
+  narration lines above (no new logging code) — see
+  [09-systems-society.md](09-systems-society.md) for the emergency-rule
+  branch this same threshold check also feeds, and
+  [03-cognition.md](03-cognition.md) for the one-line prompt surface.
 - **Terraform:** `TERRAFORM_TEMPLATES` (sim_engine.py:820-858) — three templates,
   each funded like a build project (`needs`) and restricted to a district `kind`:
   `plant_grove` (forest; boosts wood/herbs stock ratio to 0.85), `clear_field`
@@ -133,6 +162,42 @@ Gated by `ECOLOGY_ENABLED` (default True). Each district carries a
   `_complete_terraform` (sim_engine.py:2469+), which calls
   `_apply_terraform_modifiers` to mutate district stocks per the template's
   `function.modifies` list.
+
+**Ecology visibility projection (`districtEcology`, living-ecosystem Phase 2):**
+`districtStocks` is engine-internal and never exposed to `/state` directly. When
+`CROP_GROWTH_ENABLED` or `WILDLIFE_ENABLED` is True (both default True),
+`snapshot()` adds a compact read-only top-level `districtEcology` list —
+`[{districtId, stage, ratio}]` — the same placement as `socialTies`/`chronicle`
+(a sibling of `civilization`, not nested inside it). One entry per district
+that has ecology stocks: farm/forest/beach/cave kinds (their primary gathered
+resource) **and village kinds** (the `water` resource's `gatherZone` is
+`"village"`); market/workshop/cemetery/ocean kinds have no gatherable
+resource and are omitted. Omitted entirely when both flags are off.
+
+- `ratio` (`_district_ecology_ratio`, sim_engine.py) is the average
+  `min(1.0, stock/STOCK_DEFAULT_MAX)` across that district's gatherable
+  resources — the same per-resource ratio `_resource_price` and
+  `_ecology_scarcity_index` already compute, just scoped to one district.
+- `stage` quantizes `ratio` into `barren` / `sparse` / `healthy` / `lush`
+  (`DISTRICT_ECOLOGY_STAGES`), reusing the exact boundaries
+  `_format_district_stocks_for_prompt` already narrates to agents
+  (`ratio <= 0` → barren/depleted, `< STOCK_LOW_RATIO` → sparse/low, `< 0.5` →
+  healthy/fair, else lush/ok) — the viewer's stage always matches what the
+  engine tells the LLM.
+- **Hysteresis:** `DISTRICT_ECOLOGY_HYSTERESIS = 0.05`. The previous stage
+  index is persisted per district in `civilization["districtEcologyStage"]`
+  (survives restore); a stage only moves one step, and only once `ratio`
+  clears the relevant boundary by the hysteresis margin
+  (`_district_ecology_stage_with_hysteresis`). This exists because the viewer
+  keys its terrain-cache rebuild off `stage` (see
+  [11-viewer.md](11-viewer.md)) — without the margin, a ratio sitting exactly
+  on a boundary could rebuild the cache every ~100ms poll.
+- The projection is computed inside `snapshot()` itself (no new engine tick);
+  it is cheap (one pass over already-in-memory `districtStocks`) and safe to
+  recompute on every poll since hysteresis state is idempotent between calls.
+- Consumers: viewer crop/tree growth-stage terrain and ambient-wildlife
+  density both key off this same `stage`, per district — see
+  [11-viewer.md](11-viewer.md).
 
 ## Structures
 
@@ -182,6 +247,58 @@ are owned by [10-path1.md](10-path1.md).
   refund the block's resource cost and reject on unknown type, out-of-district,
   tile-cap, or occupied-cell. Shelter blocks count toward night-exposure protection
   (`NIGHT_EXPOSURE_DAMAGE`) alongside houses — see [10-path1.md](10-path1.md).
+
+## Weather (`WEATHER_ENABLED`, living-ecosystem Phase 4)
+
+A deterministic, LLM-free state machine advanced on the existing
+`GOODS_TICK_FRAMES = 900` (~30s) cadence, called from `_tick_goods()`
+(`_tick_weather`, sim_engine.py) — the same tick that already hosts spoilage,
+structure decay, and the disaster roll. **No new timer.**
+
+- **States** (`WEATHER_STATES`): `clear -> gathering -> storm -> clearing ->
+  clear`. `clear` always advances to `gathering`; `gathering` resolves to
+  either `storm` or straight back to `clear` (a storm that didn't
+  materialize); `storm` always advances to `clearing`; `clearing` always
+  advances to `clear`.
+- **Dwell durations** (`WEATHER_DWELL_TICKS`, in `GOODS_TICK_FRAMES` units,
+  drawn via `random.randint` when a state is entered): `clear` 40-160
+  (season-scaled, see below), `gathering` 2-5, `storm` 2-6, `clearing` 2-4.
+  The drawn dwell is stored as an absolute `exitFrame`; `_tick_weather` only
+  checks `frameTick >= exitFrame` and transitions at most once per call — no
+  per-tick probability roll for "are we still in this state."
+- **Season-weighted:** `WEATHER_SEASON_STORMINESS = {spring: 1.1, summer:
+  0.6, autumn: 1.3, winter: 1.0}` (reuses `_current_season()`). For `clear`,
+  the dwell range is divided by storminess (stormier season -> shorter gap
+  between storm attempts). The `gathering -> storm` probability is
+  `clip(WEATHER_BASE_STORM_CHANCE(=0.5) * storminess, 0.05, 0.95)`. The four
+  multipliers are chosen to average exactly 1.0 across the four
+  equal-length seasons, which is what keeps the long-run damage rate (see
+  [08-systems-economy.md](08-systems-economy.md)) close to the legacy
+  baseline without per-season recalibration.
+- **Locality:** entering `storm` picks 1 (usually) or 2 districts at random
+  (`civilization["weather"]["districts"]`) and narrates "Storm clouds break
+  over {districts}." `_maybe_disaster` (see 08) prefers a structure inside
+  those districts, so the fiction and the damage target agree. The sky tint
+  and particle effects (see [11-viewer.md](11-viewer.md)) are, for v1,
+  world-wide rather than clipped to those districts — a documented
+  simplification, not an oversight.
+- **Persistence + restore:** `civilization["weather"] = {state, since,
+  exitFrame, districts}`. Cold start seeds it via `_weather_default(0)`
+  (`"clear"` from frame 0). `restore_state()` backfills a missing key with
+  the same default via `civ.setdefault("weather", ...)` — the precedent used
+  by `lastRuleAttemptFrame`/`priorityRuleSeq`/`taxRuleSeq` — which means an
+  old (pre-Phase-4) save starts at `"clear"` on its first post-restore goods
+  tick, but a save that **already has** real weather state is left
+  completely untouched (no re-roll of in-progress weather on load).
+- **`/state` projection:** when `WEATHER_ENABLED`, `snapshot()` adds a
+  top-level `weather: {state, since, districts}` (a sibling of
+  `civilization`, same placement as `socialTies`/`districtEcology`/
+  `shipments`). `since`/`districts` are exposed for the viewer's narration
+  and locality use; `exitFrame` (an internal scheduling detail) is not.
+- **Gate:** `WEATHER_ENABLED = False` — `_tick_weather()` is a complete
+  no-op (the `weather` key is never read or mutated further after cold
+  start/restore), `/state` omits `weather`, and `_maybe_disaster` reverts to
+  its pre-Phase-4 behavior (see 08).
 
 ## Cemetery + grave grid
 

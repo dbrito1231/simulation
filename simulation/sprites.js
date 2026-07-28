@@ -282,13 +282,16 @@ const TILE_CAVE = makeTile(["cv1", "cv2", "cv3"]);
 const TILE_WORKSHOP = makeTile(["wk1", "wk2", "wk3", "wk4"]);
 const TILE_CEMETERY = makeTile(["cm1", "cm2", "cm3"]);
 
-// Season-keyed cache of built tree grids -- built once per season on first
-// use, never rebuilt per draw call (drawTree is called many times per
-// terrain-cache build). "summer" rows are byte-identical to the original
-// (pre-seasonal) tree art.
+// Season+stage-keyed cache of built tree grids -- built once per key on
+// first use, never rebuilt per draw call (drawTree is called many times per
+// terrain-cache build). "summer"/"lush" rows are byte-identical to the
+// original (pre-seasonal, pre-ecology-stage) tree art. Stage is the Phase 2
+// living-ecosystem addition (CROP_GROWTH_ENABLED): keying the cache by
+// `${season}|${stage}` means a stage change invalidates only the tree grids,
+// same mechanism the pre-existing season keying already used.
 const TREE_GRIDS = {};
 
-function buildTreeGrid(season) {
+function buildTreeGrid(season, stage = "lush") {
   let rows;
   if (season === "autumn") {
     rows = [
@@ -339,12 +342,31 @@ function buildTreeGrid(season) {
       "....trtrtrtr....",
     ];
   }
+  if (stage === "sparse") {
+    // Thinned canopy for a stock-starved forest: drop the widest top rows
+    // so the remaining trees read visibly smaller than a healthy/lush
+    // canopy of the same season. "healthy" and "lush" both use the
+    // unmodified rows above -- only "sparse" gets a distinct grid.
+    rows = rows.slice(2);
+  }
   return tileFromStrings(rows, C);
 }
 
-function drawTree(ctx, x, y, season = "summer") {
-  const grid = TREE_GRIDS[season] || (TREE_GRIDS[season] = buildTreeGrid(season));
+function drawTree(ctx, x, y, season = "summer", stage = "lush") {
+  const key = season + "|" + stage;
+  const grid = TREE_GRIDS[key] || (TREE_GRIDS[key] = buildTreeGrid(season, stage));
   drawPixelGrid(ctx, x - 12, y - 12, grid, 3, false);
+}
+
+// Barren-forest marker (Phase 2 living-ecosystem, CROP_GROWTH_ENABLED): a
+// small stump/sapling in place of a full canopy tree when a forest cell's
+// stage is "barren" or is thinned out at "sparse". Deliberately tiny/plain
+// so it reads as "not grown back yet" rather than a new prop type.
+function drawTreeStump(ctx, x, y) {
+  ctx.fillStyle = C.tr || "#5D4037";
+  ctx.fillRect(x - 3, y + 4, 6, 5);
+  ctx.fillStyle = C.lf2 || "#66BB6A";
+  ctx.fillRect(x - 1, y, 2, 5);
 }
 
 function drawHouse(ctx, x, y, season = "summer") {
@@ -394,7 +416,12 @@ function drawCaveEntrance(ctx, x, y) {
   ctx.stroke();
 }
 
-function drawCrop(ctx, x, y, season = "summer") {
+// stage is the Phase 2 living-ecosystem addition (CROP_GROWTH_ENABLED):
+// "lush" (default) reproduces the original season-only art byte-for-byte, so
+// flag-off / unspecified-stage callers are unaffected. Winter stubble and
+// spring shoots are left as-is regardless of stage -- both already read as
+// "not full growth", and layering stage on top would be visually redundant.
+function drawCrop(ctx, x, y, season = "summer", stage = "lush") {
   if (season === "winter") {
     // Stubble: short, shortened brown rows -- no live green top.
     ctx.fillStyle = C.st;
@@ -411,10 +438,39 @@ function drawCrop(ctx, x, y, season = "summer") {
     ctx.fillRect(x - 2, y - 1, 6, 3);
     return;
   }
+  if (stage === "barren") {
+    // Bare soil: a small dirt clod, no live growth at all.
+    ctx.fillStyle = C.st;
+    ctx.fillRect(x - 1, y + 3, 3, 2);
+    return;
+  }
+  if (stage === "sparse") {
+    // A single thin blade -- visibly smaller than the mature crop below.
+    ctx.fillStyle = C.fd;
+    ctx.fillRect(x, y + 2, 1, 3);
+    ctx.fillStyle = C.f1;
+    ctx.fillRect(x - 1, y + 1, 2, 2);
+    return;
+  }
   ctx.fillStyle = C.fd;
   ctx.fillRect(x, y, 2, 6);
   ctx.fillStyle = C.f1;
   ctx.fillRect(x - 2, y - 2, 6, 4);
+}
+
+// Density scaler shared by both starter farm patches: at "lush" (default)
+// this reproduces the original per-site modulo exactly (byte-identical
+// rendering when CROP_GROWTH_ENABLED is off, since callers always pass
+// stage="lush" in that case). Lower stages thin the crop grid out; "barren"
+// draws no crop cells at all -- the bare farm tile fill alone reads as
+// empty soil, so drawCrop's own "barren" clod branch above is reachable
+// only via direct calls, not through this density gate.
+const CROP_STAGE_DENSITY_SCALE = { barren: null, sparse: 2.5, healthy: 1.5, lush: 1 };
+function shouldDrawCrop(fx, fy, stage, baseMod) {
+  const scale = CROP_STAGE_DENSITY_SCALE[stage];
+  if (scale == null) return false;
+  const mod = Math.max(1, Math.round(baseMod * scale));
+  return (fx + fy) % mod === 0;
 }
 
 // --- World props ---
@@ -902,6 +958,29 @@ function drawStructureSmoke(ctx, structure, frameTick) {
     ctx.fillStyle = "#d8d2c5";
     ctx.fillRect(Math.round(baseX + ((seed >>> (i * 4)) % 7) - age * 0.35),
                  Math.round(baseY - age * 2.2), Math.ceil(size), Math.ceil(size));
+  }
+  ctx.restore();
+}
+
+// Weather particles (living-ecosystem Phase 4, WEATHER_ENABLED): a single
+// rain streak or snow dot. Pure per-call draw, no retained state -- the
+// caller (drawWeatherParticles, index.html) derives x/y deterministically
+// from frameTick each frame.
+function drawWeatherParticle(ctx, kind, x, y, index) {
+  ctx.save();
+  if (kind === "snow") {
+    const drift = Math.sin((x + index) * 0.05) * 1.5;
+    ctx.fillStyle = "rgba(235, 245, 255, 0.75)";
+    ctx.beginPath();
+    ctx.arc(Math.round(x + drift), Math.round(y), 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    ctx.strokeStyle = "rgba(190, 210, 230, 0.55)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(Math.round(x), Math.round(y));
+    ctx.lineTo(Math.round(x - 2), Math.round(y + 10));
+    ctx.stroke();
   }
   ctx.restore();
 }
@@ -1611,22 +1690,38 @@ const STARTER_DISTRICTS_JS = [
 // generalized -- see world_expansion plan section 5: "inherently artistic
 // placement, not worth generalizing"). A district founded at runtime renders
 // with just its data-driven tile fill + label, no bespoke props here.
-function drawStarterProps(ctx, season = "summer") {
+//
+// ecologyStages (Phase 2 living-ecosystem, CROP_GROWTH_ENABLED): an optional
+// {districtId: stage} map. Omitted/null (the flag-off / no-data case) makes
+// every stage lookup below default to "lush", which reproduces the original
+// unconditional crop/tree rendering byte-for-byte.
+function drawStarterProps(ctx, season = "summer", ecologyStages = null) {
+  const stageOf = (did) => (ecologyStages && ecologyStages[did]) || "lush";
+
   // Farm (north): crops + southern fence.
+  const farmNorthStage = stageOf("farm_north");
   for (let fx = 500; fx < 920; fx += 34) {
     for (let fy = 110; fy < 280; fy += 30) {
-      if ((fx + fy) % 3 === 0) drawCrop(ctx, fx, fy, season);
+      if (shouldDrawCrop(fx, fy, farmNorthStage, 3)) drawCrop(ctx, fx, fy, season, farmNorthStage);
     }
   }
   for (let fx = 480; fx < 940; fx += 16) drawFence(ctx, fx, 424, season);
 
-  // Forest trees.
+  // Forest trees. Stage thins the canopy: "lush"/"healthy" draw every spot
+  // (byte-identical to the original at "lush"), "sparse" draws roughly a
+  // third as full trees (the rest as stumps), "barren" draws stumps only.
+  const forestStage = stageOf("forest");
   const treeSpots = [
     [1060, 170], [1150, 130], [1240, 190], [1330, 140], [1420, 200], [1510, 150],
     [1090, 290], [1190, 340], [1290, 270], [1390, 350], [1490, 300], [1540, 410],
     [1130, 420], [1320, 430], [1480, 440],
   ];
-  for (const [tx, ty] of treeSpots) drawTree(ctx, tx, ty, season);
+  const TREE_STAGE_MOD = { barren: 0, sparse: 3, healthy: 1, lush: 1 };
+  const treeMod = TREE_STAGE_MOD[forestStage] ?? 1;
+  treeSpots.forEach(([tx, ty], i) => {
+    if (treeMod > 0 && i % treeMod === 0) drawTree(ctx, tx, ty, season, forestStage);
+    else drawTreeStump(ctx, tx, ty);
+  });
 
   // Beach jetty straddling the beach/ocean line so it reads as a pier over water.
   drawDock(ctx, 150, 470);
@@ -1643,9 +1738,10 @@ function drawStarterProps(ctx, season = "summer") {
   drawMarketStall(ctx, 975, 1015);
 
   // Farm (south): a lighter second crop patch + fence, mirroring farm_north.
+  const farmSouthStage = stageOf("farm_south");
   for (let fx = 1650; fx < 2050; fx += 40) {
     for (let fy = 110; fy < 260; fy += 34) {
-      if ((fx + fy) % 4 === 0) drawCrop(ctx, fx, fy, season);
+      if (shouldDrawCrop(fx, fy, farmSouthStage, 4)) drawCrop(ctx, fx, fy, season, farmSouthStage);
     }
   }
   for (let fx = 1650; fx < 2050; fx += 16) drawFence(ctx, fx, 424, season);
@@ -1710,7 +1806,7 @@ function drawDistrictTiles(ctx, district, season = "summer") {
   }
 }
 
-function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges, season = "summer") {
+function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges, season = "summer", ecologyStages = null) {
   const foamOffset = Math.floor(frameTick / 8) % 16;
   const activeDistricts = (districts && districts.length) ? districts : STARTER_DISTRICTS_JS;
   CURRENT_DISTRICTS_FOR_BLEND = activeDistricts;
@@ -1740,7 +1836,7 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
     drawDistrictTiles(ctx, d, season);
   }
 
-  drawStarterProps(ctx, season);
+  drawStarterProps(ctx, season, ecologyStages);
 
   for (const d of activeDistricts) {
     if (!d.label) continue;
@@ -1754,4 +1850,110 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
       drawStructure(ctx, s);
     }
   }
+}
+
+// =====================================================================
+// Ambient wildlife (Phase 2 living-ecosystem, WILDLIFE_ENABLED). Pure
+// decoration derived from the districtEcology stage projection -- same
+// precedent as the physicalProps boats (index.html): deterministic
+// positions/counts from server-derived data, animated only by frameTick.
+// No pathfinding, no per-creature state, not huntable, does not feed the
+// food supply. index.html computes positions/culling; these are just the
+// stateless draw calls for each creature kind.
+// =====================================================================
+function drawFishRipple(ctx, x, y, frameTick) {
+  const wobble = Math.sin(frameTick / 12) * 2;
+  ctx.fillStyle = "#4FC3F7";
+  ctx.beginPath();
+  ctx.ellipse(x + wobble, y, 5, 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#0288D1";
+  ctx.beginPath();
+  ctx.moveTo(x - 5 + wobble, y);
+  ctx.lineTo(x - 8 + wobble, y - 2);
+  ctx.lineTo(x - 8 + wobble, y + 2);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawBird(ctx, x, y, frameTick) {
+  const flap = Math.abs(Math.sin(frameTick / 8)) * 4;
+  ctx.strokeStyle = "#3E3226";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x - 5, y - flap);
+  ctx.lineTo(x, y);
+  ctx.lineTo(x + 5, y - flap);
+  ctx.stroke();
+}
+
+function drawGrazer(ctx, x, y) {
+  ctx.fillStyle = "#EFEBE0";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 5, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#3E3226";
+  ctx.fillRect(x - 5, y + 2, 2, 2);
+  ctx.fillRect(x + 3, y + 2, 2, 2);
+}
+
+function drawWildlifeCreature(ctx, kind, x, y, frameTick) {
+  if (kind === "fish") drawFishRipple(ctx, x, y, frameTick);
+  else if (kind === "bird") drawBird(ctx, x, y, frameTick);
+  else if (kind === "grazer") drawGrazer(ctx, x, y);
+}
+
+// =====================================================================
+// Goods-in-motion shipments (Phase 3 living-ecosystem, CARAVAN_VISUALS_
+// ENABLED). Purely cosmetic: index.html computes the position by
+// interpolating along the road-graph path the engine already embedded in
+// the shipment record, and passes it in here. These are stateless draw
+// calls only -- no simulation state lives in this file. `cargoColor` comes
+// from the same resource -> colour registry drawResourceDots already uses.
+// =====================================================================
+function drawCart(ctx, x, y, cargoColor) {
+  ctx.fillStyle = "#5A321B";
+  ctx.fillRect(x - 6, y - 4, 12, 7);
+  ctx.fillStyle = "#3E3226";
+  ctx.beginPath();
+  ctx.arc(x - 4, y + 4, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x + 4, y + 4, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  if (cargoColor) {
+    ctx.fillStyle = cargoColor;
+    ctx.fillRect(x - 3, y - 7, 6, 3);
+  }
+}
+
+function drawShipmentBoat(ctx, x, y, cargoColor) {
+  // Small moving vessel -- a scaled-down echo of the moored physicalProps
+  // boat art (index.html), not a copy of the DOM/state wiring around it.
+  ctx.fillStyle = "#4A2714";
+  ctx.beginPath();
+  ctx.moveTo(x - 9, y - 2);
+  ctx.lineTo(x + 9, y - 2);
+  ctx.lineTo(x + 6, y + 5);
+  ctx.lineTo(x - 6, y + 5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#5A321B";
+  ctx.fillRect(x - 1, y - 12, 2, 11);
+  ctx.fillStyle = "#F4E2B5";
+  ctx.beginPath();
+  ctx.moveTo(x + 1, y - 11);
+  ctx.lineTo(x + 8, y - 1);
+  ctx.lineTo(x + 1, y - 1);
+  ctx.closePath();
+  ctx.fill();
+  if (cargoColor) {
+    ctx.fillStyle = cargoColor;
+    ctx.fillRect(x - 3, y, 4, 3);
+  }
+}
+
+function drawShipment(ctx, mode, x, y, cargoColor) {
+  if (mode === "boat") drawShipmentBoat(ctx, x, y, cargoColor);
+  else drawCart(ctx, x, y, cargoColor);
 }

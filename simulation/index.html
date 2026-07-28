@@ -647,6 +647,13 @@
     border: 1px solid #c8a24a; border-radius: 4px;
     z-index: 11; display: none; pointer-events: none;
   }
+  #foundingBanner {
+    position: fixed; top: 48px; left: 50%; transform: translateX(-50%);
+    padding: 6px 18px; font: 600 13px system-ui, sans-serif;
+    background: rgba(30, 66, 46, 0.92); color: #c9f5d6;
+    border: 1px solid #4ac882; border-radius: 4px;
+    z-index: 11; display: none; pointer-events: none;
+  }
   #councilPanel summary {
     cursor: pointer; font-size: 13px; font-weight: 600; color: #fff;
     margin-bottom: 6px; outline: none;
@@ -790,6 +797,7 @@
     <div id="worldClockHud" aria-live="polite"></div>
     <canvas id="minimap" width="220" height="160"></canvas>
     <div id="councilBanner"></div>
+    <div id="foundingBanner"></div>
   </div>
   <aside id="sidebar">
     <h1>AI Simulation World</h1>
@@ -922,6 +930,10 @@ let terrainCanvas = null;   // full static terrain (zones, crops, trees, dock…
 let oceanFrames = null;     // { bounds, frames:[16 pre-rendered foam phases] } for the ocean district
 let terrainBuildScheduled = false;
 let lastSeasonRendered = null; // season the terrain cache was last tinted for; drives cache invalidation on season change
+// Living-ecosystem Phase 2 (CROP_GROWTH_ENABLED): the districtEcology stage
+// key the terrain cache was last built with -- same invalidation mechanism
+// as lastSeasonRendered above, just keyed on stage instead of season.
+let lastEcologyStageKeyRendered = null;
 const worldLoadingEl = document.getElementById("worldLoading");
 
 // Seasonal color grading applied once to the terrain cache (and ocean foam
@@ -1076,9 +1088,14 @@ let STRUCTURE_WEAR_ENABLED = true;
 let ACTIVITY_CUES_ENABLED = true;
 let SOCIAL_LAYER_ENABLED = true;
 let CHRONICLE_ENABLED = true;
+let FOUNDING_EVENTS_ENABLED = true;
 let ENV_EFFECTS_ENABLED = true;
 let WORLD_CLOCK_HUD_ENABLED = true;
 let SEASONAL_AGENTS_ENABLED = true;
+let CROP_GROWTH_ENABLED = true;
+let WILDLIFE_ENABLED = true;
+let CARAVAN_VISUALS_ENABLED = true;
+let WEATHER_ENABLED = true;
 
 // --- Viewer-only display toggles (client-side, not server flags). Flipping
 // either to true fully restores that section with no other edits. ---
@@ -1224,12 +1241,29 @@ function resourceRegistry() { return getCiv().resourceRegistry || {}; }
 // Drawing — terrain cache + agents + structures (reuses sprites.js unchanged).
 // =====================================================================
 
+// Living-ecosystem Phase 2 (CROP_GROWTH_ENABLED): districtEcology's per-
+// district stage, reduced to just the {districtId: stage} map drawStarterProps
+// consumes, and a stable string key for cache-invalidation comparison (same
+// role lastSeasonRendered plays for season). Returns (null, null) when the
+// flag is off or the server hasn't sent the projection yet, so the terrain
+// cache renders exactly as it did before this feature existed.
+function ecologyStagesForTerrain() {
+  if (!CROP_GROWTH_ENABLED) return [null, null];
+  const eco = world.districtEcology;
+  if (!eco || !eco.length) return [null, null];
+  const stages = {};
+  for (const e of eco) stages[e.districtId] = e.stage;
+  const key = eco.map((e) => e.districtId + ":" + e.stage).sort().join(",");
+  return [stages, key];
+}
+
 // Render the static terrain once into offscreen canvases. drawTiledWorld paints
 // in logical coordinates, so a WORLD_W×WORLD_H buffer (no DPR transform) is
 // blitted under the main ctx's DPR transform and stays crisp (imageSmoothing
 // off). The animated ocean strip is pre-rendered as 16 foam phases so animation
 // costs one drawImage/frame instead of re-tiling the strip. Rebuilt whenever
-// districtsKey changes (a district was founded) via pollDistricts().
+// districtsKey changes (a district was founded) via pollDistricts(), the
+// season changes, or (CROP_GROWTH_ENABLED) a district's ecology stage changes.
 function buildTerrainCache() {
   const districts = getDistricts();
   terrainCanvas = document.createElement("canvas");
@@ -1238,9 +1272,11 @@ function buildTerrainCache() {
   const tctx = terrainCanvas.getContext("2d");
   tctx.imageSmoothingEnabled = false;
   const season = world.calendar && world.calendar.season;
+  const [ecologyStages, ecologyStageKey] = ecologyStagesForTerrain();
   drawTiledWorld(tctx, WORLD_W, WORLD_H, 0, null, districts,
-                 districtsData.roadNodes, districtsData.roadEdges, season || "summer");
+                 districtsData.roadNodes, districtsData.roadEdges, season || "summer", ecologyStages);
   applySeasonTint(terrainCanvas, season);
+  lastEcologyStageKeyRendered = ecologyStageKey;
 
   // The ocean's animated foam strip is scoped to the ocean district's own
   // bounds (not the full world height) -- with the much larger world, a
@@ -1293,6 +1329,67 @@ function goldenHourAlpha(cal) {
     return Math.sin(((f - start) / (end - start)) * Math.PI);
   };
   return 0.13 * Math.max(band(0.70, 0.80), band(0.95, 1.00));
+}
+
+// Weather sky tint (WEATHER_ENABLED, living-ecosystem Phase 4): darkens the
+// same full-canvas overlay stage as the night overlay/golden-hour band as
+// weather.state worsens -- clear/gathering/storm/clearing map to a fixed
+// per-state alpha (a step ramp across the state machine, not a within-state
+// animation; weather.state is all the server sends). World-wide, not
+// clipped to weather.districts, even though storm damage targeting IS
+// localized (see specs/08's _maybe_disaster) -- splitting the sky tint
+// itself per-district would fight the also-global night overlay for little
+// visual payoff, a deliberate v1 tradeoff (see specs/11-viewer.md).
+const WEATHER_SKY_ALPHA = { clear: 0, gathering: 0.10, storm: 0.26, clearing: 0.14 };
+const WEATHER_SKY_COLOR = "18, 26, 34"; // slate-teal storm sky, distinct from night's navy
+// Clamp on night-overlay-alpha + weather-sky-alpha together so a winter
+// storm at deep night in an unlit district can never compound into an
+// unreadable screen.
+const MAX_NIGHT_PLUS_WEATHER_ALPHA = 0.68;
+function weatherSkyAlpha(weather, nightA) {
+  if (!WEATHER_ENABLED || !weather) return 0;
+  const raw = WEATHER_SKY_ALPHA[weather.state] || 0;
+  return Math.max(0, Math.min(raw, MAX_NIGHT_PLUS_WEATHER_ALPHA - nightA));
+}
+
+// Rain/snow particles (WEATHER_ENABLED): deterministic from frameTick + a
+// per-particle index hash, same no-retained-state discipline as the shipped
+// smoke/dust/wildlife cues. Snow instead of rain when the current season
+// (calendar.season) is winter. Particle count is capped by the CURRENT
+// VISIBLE viewport area (scroll/zoom-derived, same helper drawWildlife/
+// drawShipments use), not world area -- the world is much larger than any
+// one screen, especially fully zoomed out.
+const WEATHER_STATE_INTENSITY = { clear: 0, gathering: 0, storm: 1, clearing: 0.45 };
+const WEATHER_PARTICLE_DENSITY_DIVISOR = 14000; // visible px^2 per particle at intensity 1
+const WEATHER_PARTICLE_CAP = 260;
+function weatherParticleHash(i) {
+  let h = (2166136261 ^ i) >>> 0;
+  h = Math.imul(h, 16777619);
+  h ^= h >>> 13;
+  h = Math.imul(h, 2654435761);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967295;
+}
+function drawWeatherParticles(ctx, frameTick, weather, cal) {
+  if (!WEATHER_ENABLED || !weather) return;
+  const intensity = WEATHER_STATE_INTENSITY[weather.state] || 0;
+  if (intensity <= 0) return;
+  const left = canvasWrapEl.scrollLeft / zoomLevel;
+  const top = canvasWrapEl.scrollTop / zoomLevel;
+  const w = canvasWrapEl.clientWidth / zoomLevel;
+  const h = canvasWrapEl.clientHeight / zoomLevel;
+  if (w <= 0 || h <= 0) return;
+  const isSnow = !!(cal && cal.season === "winter");
+  const count = Math.min(WEATHER_PARTICLE_CAP, Math.floor((w * h / WEATHER_PARTICLE_DENSITY_DIVISOR) * intensity));
+  const fallPeriod = isSnow ? 500 : 130; // frames for one particle to cross the visible band
+  for (let i = 0; i < count; i++) {
+    const hx = weatherParticleHash(i * 2 + 1);
+    const hy = weatherParticleHash(i * 2 + 2);
+    const x = left + hx * w;
+    const yFrac = ((frameTick + hy * fallPeriod) % fallPeriod) / fallPeriod;
+    const y = top + yFrac * h;
+    drawWeatherParticle(ctx, isSnow ? "snow" : "rain", x, y, i);
+  }
 }
 
 // Light glow (ENV_EFFECTS_ENABLED): warm radial glow over lit structures while
@@ -1597,6 +1694,7 @@ const civProjectSprite = document.getElementById("civProjectSprite");
 const civProjectSpriteCtx = civProjectSprite.getContext("2d");
 const civLevelLabelEl = document.getElementById("civLevelLabel");
 const councilBannerEl = document.getElementById("councilBanner");
+const foundingBannerEl = document.getElementById("foundingBanner");
 const councilSectionEl = document.getElementById("councilSection");
 const councilMetaEl = document.getElementById("councilMeta");
 const councilCardsEl = document.getElementById("councilCards");
@@ -1819,6 +1917,8 @@ let lastAgentPanelKey = "";
 let lastAgentDetailKey = "";
 let lastLogKey = "";
 let lastChronicleKey = "";
+let foundingFramesSeen = null; // null until first snapshot processed (see founding-banner logic)
+let foundingBannerTimer = null;
 
 // --- Client-only per-agent activity history (Plan B1: no server endpoint,
 // resets on reload). Newest entry is last in the array; capped per agent. ---
@@ -2350,6 +2450,41 @@ function renderSidebar() {
       }).join("") || `<li class="civ-label">No village milestones yet</li>`;
       chronicleListEl.scrollTop = scrollTop;
     }
+  }
+
+  // Founding banner: derived by diffing newly-appeared "district_founded"
+  // chronicle entries rather than a dedicated server field (foundedFrame).
+  // The client already parses the full chronicle array every poll (see
+  // chronicleKey above), so remembering which frames have already been
+  // banner-ed needs no new /state shape and no extra server-side state --
+  // the simpler option per the phase brief.
+  if (FOUNDING_EVENTS_ENABLED) {
+    const foundingEntries = (world.chronicle || []).filter((e) => e.kind === "district_founded");
+    if (foundingFramesSeen === null) {
+      // First snapshot after page load/refresh: remember whatever foundings
+      // already happened without banner-ing them, so resuming a long-running
+      // village doesn't replay its whole settlement history as banners.
+      foundingFramesSeen = new Set(foundingEntries.map((e) => e.frame));
+    } else {
+      const fresh = foundingEntries.find((e) => !foundingFramesSeen.has(e.frame));
+      if (fresh) {
+        foundingFramesSeen.add(fresh.frame);
+        foundingBannerEl.textContent = fresh.text;
+        foundingBannerEl.style.display = "block";
+        if (foundingBannerTimer) clearTimeout(foundingBannerTimer);
+        foundingBannerTimer = setTimeout(() => {
+          foundingBannerEl.style.display = "none";
+          foundingBannerTimer = null;
+        }, 6000);
+      }
+      // Chronicle is a capped ring (CHRONICLE_CAP) -- drop frames that have
+      // aged out so this set doesn't grow unboundedly across a long session.
+      for (const f of Array.from(foundingFramesSeen)) {
+        if (!foundingEntries.some((e) => e.frame === f)) foundingFramesSeen.delete(f);
+      }
+    }
+  } else {
+    foundingBannerEl.style.display = "none";
   }
 }
 
@@ -2930,9 +3065,14 @@ function applyFlags(flags) {
   if ("ACTIVITY_CUES_ENABLED" in flags) ACTIVITY_CUES_ENABLED = !!flags.ACTIVITY_CUES_ENABLED;
   if ("SOCIAL_LAYER_ENABLED" in flags) SOCIAL_LAYER_ENABLED = !!flags.SOCIAL_LAYER_ENABLED;
   if ("CHRONICLE_ENABLED" in flags) CHRONICLE_ENABLED = !!flags.CHRONICLE_ENABLED;
+  if ("FOUNDING_EVENTS_ENABLED" in flags) FOUNDING_EVENTS_ENABLED = !!flags.FOUNDING_EVENTS_ENABLED;
   if ("ENV_EFFECTS_ENABLED" in flags) ENV_EFFECTS_ENABLED = !!flags.ENV_EFFECTS_ENABLED;
   if ("WORLD_CLOCK_HUD_ENABLED" in flags) WORLD_CLOCK_HUD_ENABLED = !!flags.WORLD_CLOCK_HUD_ENABLED;
   if ("SEASONAL_AGENTS_ENABLED" in flags) SEASONAL_AGENTS_ENABLED = !!flags.SEASONAL_AGENTS_ENABLED;
+  if ("CROP_GROWTH_ENABLED" in flags) CROP_GROWTH_ENABLED = !!flags.CROP_GROWTH_ENABLED;
+  if ("WILDLIFE_ENABLED" in flags) WILDLIFE_ENABLED = !!flags.WILDLIFE_ENABLED;
+  if ("CARAVAN_VISUALS_ENABLED" in flags) CARAVAN_VISUALS_ENABLED = !!flags.CARAVAN_VISUALS_ENABLED;
+  if ("WEATHER_ENABLED" in flags) WEATHER_ENABLED = !!flags.WEATHER_ENABLED;
 }
 
 // Bounded viewer-only social pass. The engine has already filtered and
@@ -2972,6 +3112,109 @@ function drawSocialTies(ctx) {
   }
 }
 
+// Ambient wildlife (Phase 2 living-ecosystem, WILDLIFE_ENABLED): density per
+// district follows the same districtEcology stage the terrain-growth pass
+// reads, so wildlife visibly thins as a district is over-harvested and
+// returns as it recovers. Follows the physicalProps precedent (boats,
+// below): deterministic positions from district bounds + a seed, animated
+// only by frameTick -- no pathfinding, no per-creature state, not huntable,
+// does not feed the food supply. This is per-frame (not terrain), so it
+// draws every tick rather than going through the static terrain cache.
+const WILDLIFE_STAGE_COUNT = { barren: 0, sparse: 1, healthy: 2, lush: 4 };
+const WILDLIFE_KIND_BY_DISTRICT_KIND = { forest: "bird", farm: "grazer", beach: "fish" };
+const WILDLIFE_CAP_PER_DISTRICT = 4;
+
+function wildlifeHashSeed(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+
+function drawWildlife(ctx, frameTick) {
+  if (!WILDLIFE_ENABLED) return;
+  const eco = world.districtEcology;
+  if (!eco || !eco.length) return;
+  const stageByDistrict = new Map(eco.map((e) => [e.districtId, e.stage]));
+  const left = canvasWrapEl.scrollLeft / zoomLevel;
+  const top = canvasWrapEl.scrollTop / zoomLevel;
+  const right = left + canvasWrapEl.clientWidth / zoomLevel;
+  const bottom = top + canvasWrapEl.clientHeight / zoomLevel;
+  for (const d of getDistricts()) {
+    const kind = WILDLIFE_KIND_BY_DISTRICT_KIND[d.kind];
+    if (!kind) continue;
+    const b = d.bounds;
+    // Cull the whole district before spending any per-creature work.
+    if (b.x2 < left || b.x1 > right || b.y2 < top || b.y1 > bottom) continue;
+    const stage = stageByDistrict.get(d.id);
+    const count = Math.min(WILDLIFE_STAGE_COUNT[stage] || 0, WILDLIFE_CAP_PER_DISTRICT);
+    if (count <= 0) continue;
+    const seed = wildlifeHashSeed(d.id);
+    // Fish read best near the shore edge (the beach district's x1 side, the
+    // boundary against the adjacent ocean district) rather than scattered
+    // across dry sand.
+    const spanW = kind === "fish" ? Math.min(70, b.x2 - b.x1) : (b.x2 - b.x1);
+    for (let i = 0; i < count; i++) {
+      const rx = ((seed * (i + 7) * 48271) % 2147483647) / 2147483647;
+      const ry = ((seed * (i + 13) * 16807) % 2147483647) / 2147483647;
+      const x = b.x1 + rx * spanW;
+      const y = b.y1 + ry * (b.y2 - b.y1);
+      if (x < left || x > right || y < top || y > bottom) continue;
+      const bob = Math.sin((frameTick + i * 17) / 20) * 3;
+      drawWildlifeCreature(ctx, kind, x, y + bob, frameTick);
+    }
+  }
+}
+
+// Goods-in-motion (Phase 3 living-ecosystem, CARAVAN_VISUALS_ENABLED). The
+// engine emits a shipment AFTER a transfer already completed and moved the
+// authoritative resource counts -- this pass never touches simulation
+// state, it only interpolates the already-resolved road-graph `path` the
+// server embedded (same helper agent travel uses, _road_path_between_
+// districts) between startFrame/endFrame. Route resolution failures are
+// handled server-side (no shipment emitted at all); the viewer only ever
+// sees valid, drawable records. Viewport-culled + capped, same pattern as
+// drawSocialTies/drawWildlife.
+const SHIPMENT_DRAW_CAP = 8;
+function shipmentPosition(shipment, frameTick) {
+  const path = shipment.path;
+  if (!path || path.length < 2) return null;
+  const span = shipment.endFrame - shipment.startFrame;
+  const t = span > 0 ? (frameTick - shipment.startFrame) / span : 1;
+  const clamped = Math.max(0, Math.min(1, t));
+  const segCount = path.length - 1;
+  const scaled = clamped * segCount;
+  const segIndex = Math.min(segCount - 1, Math.floor(scaled));
+  const segT = scaled - segIndex;
+  const a = path[segIndex];
+  const b = path[segIndex + 1];
+  return { x: a.x + (b.x - a.x) * segT, y: a.y + (b.y - a.y) * segT };
+}
+
+function drawShipments(ctx, frameTick) {
+  if (!CARAVAN_VISUALS_ENABLED) return;
+  const shipments = world.shipments || [];
+  if (!shipments.length) return;
+  const reg = resourceRegistry();
+  const left = canvasWrapEl.scrollLeft / zoomLevel;
+  const top = canvasWrapEl.scrollTop / zoomLevel;
+  const right = left + canvasWrapEl.clientWidth / zoomLevel;
+  const bottom = top + canvasWrapEl.clientHeight / zoomLevel;
+  let drawn = 0;
+  for (const shipment of shipments) {
+    if (drawn >= SHIPMENT_DRAW_CAP) break;
+    if (frameTick < shipment.startFrame || frameTick > shipment.endFrame) continue;
+    const pos = shipmentPosition(shipment, frameTick);
+    if (!pos) continue;
+    if (pos.x < left || pos.x > right || pos.y < top || pos.y > bottom) continue;
+    const cargoColor = (reg[shipment.resource] && reg[shipment.resource].color) || null;
+    drawShipment(ctx, shipment.mode, pos.x, pos.y, cargoColor);
+    drawn++;
+  }
+}
+
 async function pollState() {
   if (polling) return;
   polling = true;
@@ -2988,6 +3231,18 @@ async function pollState() {
       terrainCanvas = null;
       terrainBuildScheduled = false;
       scheduleTerrainCacheBuild();
+    }
+    // Living-ecosystem Phase 2: a district's ecology stage changed since the
+    // terrain cache was last built -- rebuild exactly once, same mechanism
+    // as the season check above. No-op (both keys stay null) when
+    // CROP_GROWTH_ENABLED is off or the server hasn't sent districtEcology.
+    if (terrainCanvas && !terrainBuildScheduled) {
+      const [, ecologyStageKey] = ecologyStagesForTerrain();
+      if (ecologyStageKey !== lastEcologyStageKeyRendered) {
+        terrainCanvas = null;
+        terrainBuildScheduled = false;
+        scheduleTerrainCacheBuild();
+      }
     }
     applyFlags(snapshot.config && snapshot.config.flags);
     setSeasonalAgentAccentsEnabled(SEASONAL_AGENTS_ENABLED);
@@ -3078,6 +3333,8 @@ function tickBody() {
   ctx.clearRect(0, 0, WORLD_W, WORLD_H);
   drawWorld(ctx, renderFrame);
   drawSocialTies(ctx);
+  drawWildlife(ctx, renderFrame);
+  drawShipments(ctx, world.frameTick);
 
   const agents = getAgents();
   // Derive facing/walk direction from last frame's positions (the server snapshot
@@ -3140,12 +3397,23 @@ function tickBody() {
     ctx.fillStyle = `rgba(10, 16, 48, ${na.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
+  // Weather sky tint (WEATHER_ENABLED): same full-canvas overlay stage as
+  // the night overlay above, alpha clamped against it (weatherSkyAlpha) so
+  // the two combine coherently instead of stacking into an unreadable
+  // screen -- see the worst case (winter storm, deep night, unlit
+  // district) verified in the Phase 4 report.
+  const wa = weatherSkyAlpha(world.weather, na);
+  if (wa > 0) {
+    ctx.fillStyle = `rgba(${WEATHER_SKY_COLOR}, ${wa.toFixed(3)})`;
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+  }
   const gha = goldenHourAlpha(world.calendar);
   if (gha > 0) {
     ctx.fillStyle = `rgba(255, 177, 78, ${gha.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
   drawLightGlows(world.calendar);
+  drawWeatherParticles(ctx, world.frameTick, world.weather, world.calendar);
 
   // C5 follow-cam: re-center every frame on the followed agent while active;
   // release the lock once they're deselected or no longer living.

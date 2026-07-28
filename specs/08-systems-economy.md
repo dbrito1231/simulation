@@ -189,7 +189,7 @@ sub-systems, all deterministic (no LLM).
 |---|---|---|
 | **Spoilage** | `SPOILAGE_RATIO = 0.25` | `_tick_spoilage`: edible overflow beyond `_storage_capacity` rots at 25% (min 1) per tick — stockpile first, then largest holders, never below `EDIBLE_RESERVE` per agent. Escape: build storage (granary `stores`), eat, or contribute. |
 | **Structure decay** | `STRUCTURE_DECAY_PER_GOODS_TICK = 0.05`, `STRUCTURE_DISREPAIR_THRESHOLD = 30`, `REPAIR_CONDITION_RESTORE = 50` | `condition` starts at 100, decays 0.05/tick (~11.7h to disrepair, ~16.7h to full ruin at 0). Below the disrepair threshold a structure stops "working" (no produce/boost/houses/stores); at 0 it becomes a ruin. `repair_structure` restores `REPAIR_CONDITION_RESTORE`; rebuilding a ruin costs half the original needs (min 1 each). `/state` surfaces the raw `condition`/`isRuin` plus server-derived `conditionTier`: `pristine` (>=60), `worn` (>=30 and <60), `crumbling` (<30), or `ruin` (`isRuin` or <=0). |
-| **Disasters** | `DISASTER_PROB = 0.005`, `DISASTER_DAMAGE = (40, 70)` | ~0.5% chance per goods tick (≈once/100 real min) of random structure damage in that range. |
+| **Disasters** | `DISASTER_PROB = 0.005`, `DISASTER_DAMAGE = (40, 70)`, `STORM_DISASTER_PROB = 0.32` | See below — storm-gated when `WEATHER_ENABLED`, legacy random roll otherwise. |
 | **Shelter** | `DAY_FRAMES = 13500`, `HOUSE_SHELTER_OCCUPANTS = 2`, `SHELTER_HUNGER_PENALTY = 6`, `SHELTER_HUNGER_FLOOR = 20` | `_tick_shelter()` once per day-frame: each working house shelters up to 2 occupants (homeowners guaranteed their own home under `ECONOMY_ENABLED`, else nearest-first); unsheltered agents lose `SHELTER_HUNGER_PENALTY` hunger, floored at 20 (never into the `STARVING_HUNGER` band). |
 | **Seasons** | `YEAR_FRAMES = 324,000`, `SEASON_FRAMES = 81,000` (4 seasons), `SEASON_REGROW_MULT = {spring: 2, summer: 1, autumn: 1, winter: 0}` | Pure function of `frameTick`; multiplies district ecology stock regrowth (winter halts it) — see [05-world.md](05-world.md). |
 | **Vehicles/carry** | `CART_CARRY_BONUS = 20` (cart), `WAGON_CARRY_BONUS = 40`/`WAGON_SPEED_MULT = 1.4` (wagon, tier-2, `TECH_TREE_ENABLED`) | `_carry_cap`/`_vehicle_speed_mult` add query-time bonuses on top of `COLLECT_CAP` for the holder. |
@@ -197,6 +197,56 @@ sub-systems, all deterministic (no LLM).
 Composable-build blocks with `shelter: True` (`wall`, `fence` — see
 [10-path1.md](10-path1.md)) also count toward night shelter capacity via
 `_composable_shelter_count`.
+
+**Disasters, storm-gated (`WEATHER_ENABLED`, living-ecosystem Phase 4).**
+`_maybe_disaster` (sim_engine.py) has two mutually exclusive branches:
+
+- **`WEATHER_ENABLED = False`:** byte-identical to the pre-Phase-4 behavior
+  — `DISASTER_PROB = 0.005` chance per goods tick (≈once/100 real min) of
+  damage (`DISASTER_DAMAGE = (40, 70)`) to a random structure anywhere.
+- **`WEATHER_ENABLED = True`:** damage only fires while
+  `civilization["weather"]["state"] == "storm"` (see the weather state
+  machine, [05-world.md](05-world.md)), at `STORM_DISASTER_PROB = 0.32` per
+  goods tick while storming, preferring a structure inside one of the
+  storm's `districts` (falls back to any structure if none qualify there).
+
+Either branch writes the same `activity` line ("DISASTER! A storm tears
+through…") and a `disaster`-kind chronicle milestone
+(`"A storm damaged/ruined the {name} in {district}."`) — unconditional, no
+flag, folded into the `CHRONICLE_MILESTONE_KINDS` set documented in
+[09-systems-society.md](09-systems-society.md).
+
+**Rate-calibration arithmetic (the top risk of Phase 4).** Model one
+`clear -> gathering -> (storm -> clearing | nothing) -> clear` cycle per
+season, with `P_storm = clip(WEATHER_BASE_STORM_CHANCE(0.5) *
+WEATHER_SEASON_STORMINESS[season], 0.05, 0.95)` and a season-scaled `clear`
+dwell (see 05). Expected cycle length:
+
+```
+E[cycle] = E[clear] + E[gathering] + P_storm * (E[storm] + E[clearing])
+```
+
+using the midpoints of `WEATHER_DWELL_TICKS` (`E[gathering]=3.5`,
+`E[storm]=4`, `E[clearing]=3`). The storm-time fraction of that cycle is
+`P_storm * E[storm] / E[cycle]` (the `P_storm` factor on the numerator
+matters — only `P_storm` of cycles pass through a storm at all). With the
+shipped constants this comes out to **~2.2% (spring), ~0.7% (summer), ~3.1%
+(autumn), ~1.9% (winter)** of goods ticks, averaging **~1.97%** across the
+four equal-length seasons (equal weighting is valid since `SEASON_FRAMES`
+is identical for all four). The naive analytic pick from that number
+(`0.005 / 0.0197 ≈ 0.25`) undershot in a 200,000-goods-tick empirical
+harness run — a single-seed measurement came in around 0.0040 against a
+measured legacy baseline of ~0.0051, likely because the independent-cycle
+model doesn't capture correlated timing effects (e.g. transitions
+clustering near season boundaries). `STORM_DISASTER_PROB` was therefore
+tuned empirically to **0.32**, which lands a 5-seed mean on-rate of
+**~0.0051 events/goods-tick** against a 5-seed mean off-rate of **~0.0051
+events/goods-tick** (measured via a standalone `SimEngine`, `random.seed`
+per run, `WEATHER_ENABLED` toggled, 200,000 goods ticks/seed with damaged
+structures repaired between checks so the candidate pool never runs dry) —
+i.e. turning weather on does **not** measurably change the long-run damage
+rate. See the Phase 4 implementation report for the full seed-by-seed
+numbers.
 
 **Critical-structure repair backstop.** `_maybe_repair_critical` (sim_engine.py,
 called unconditionally once per RULES_TICK gate, [02-engine-core.md](02-engine-core.md))
@@ -343,3 +393,65 @@ minted; the elder's role in provisioning the treasury is upstream, via the
 coin yet — the mechanism is ready the moment one does.
 
 Related actions: `trade_resource` — [07-actions.md](07-actions.md).
+
+## CARAVAN_VISUALS_ENABLED
+
+`CARAVAN_VISUALS_ENABLED` defaults to True. Living-ecosystem Phase 3
+("goods in motion"): a short-lived, **purely cosmetic** in-flight shipment
+record, emitted so the viewer has something to animate along the road
+graph when goods move between districts.
+
+**Hard constraint — shipments never gate the economy.** `_emit_shipment`
+is called strictly *after* the authoritative transfer has already mutated
+agent inventories / district-project `contributed` / the village stockpile
+— trade, contributions, and market settlement remain exactly as
+instantaneous as they were before this flag existed. A shipment is an
+animation receipt of a transfer that already happened, never a precondition
+for one. If any code path were made to wait on a shipment, that would be a
+regression of this invariant.
+
+**Emission sites** (all existing transfer paths — no new tick, no new LLM
+call):
+- `apply_decision`'s `trade_resource` barter branch (agent → agent, no
+  market).
+- `_priced_trade`'s two success paths (the barter-fallback when the buyer
+  is short on the active currency, and the paid purchase) — the
+  `ECONOMY_ENABLED` market-settlement path.
+- `_try_contribute_resource` — an agent contributing carried resources to a
+  district project, which can target a district other than the one the
+  agent currently stands in (`_resolve_contribution_district`'s
+  most-stalled-district fallback), i.e. a genuine stockpile transfer
+  between districts.
+
+**Shape**: `{id, fromDistrict, toDistrict, resource, path, startFrame,
+endFrame, mode}`. `path` is the list of `{x, y}` road-graph waypoints
+between the two districts' `entryNode`s, resolved once at emission time by
+`_road_path_between_districts` (same `ROAD_PATH_CACHE` agent travel already
+populates via `_recompute_road_paths` — no second pathfinder). `mode` is
+`"boat"` when the shipment crosses a settlement boundary
+(`districts[*].settlementId`, `PATH1_DIPLOMACY_ENABLED`) and
+`_has_ocean_transit()` is true (reusing the existing ocean-caravan
+foothold — `_has_ocean_transit`/`_consume_ocean_transit`,
+[10-path1.md](10-path1.md)), else `"cart"`.
+
+**Skips cleanly, never fabricates a straight line**: `_emit_shipment` is a
+no-op when `fromDistrict == toDistrict`, when either district or its
+`entryNode` is missing, or when no cached road path connects them (fewer
+than 2 resolved waypoints). The economic transfer itself is unaffected
+either way — only the cosmetic receipt is skipped.
+
+**Bounded, not persisted**: shipments live in `self.shipments` on the
+engine instance — deliberately **not** part of `self.civilization`, so they
+are never written to `state.db` and simply vanish (harmlessly) across a
+restore/restart. `_emit_shipment` caps the list at `SHIPMENT_RING_CAP = 8`
+(oldest dropped first); `_prune_shipments` (called from the existing
+`_tick_goods` `GOODS_TICK_FRAMES` cadence — no new timer) additionally
+drops any shipment whose `endFrame` has passed. `SHIPMENT_TRAVEL_FRAMES =
+240` (~8s at 30 ticks/s) sets how long a shipment animates.
+
+**`/state` exposure**: `snapshot["shipments"]` (only still-live records,
+via `_shipment_snapshot`) is present only when the flag is on; the flag
+itself is echoed in `config.flags.CARAVAN_VISUALS_ENABLED`. Off means the
+key is simply absent and the viewer draws nothing extra — the moored
+`physicalProps` boats (`TRANSIT_ENABLED`, [11](11-viewer.md)) are entirely
+unaffected by this flag either way.

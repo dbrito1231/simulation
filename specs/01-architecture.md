@@ -80,7 +80,7 @@ their instructions are in `SYSTEM_PROMPT`, and the engine filters them when
 maps; server startup maps remain seed-only conveniences and are not a second role
 registry.
 
-## Flag index (complete — 43 module-level flags, sim_engine.py)
+## Flag index (complete — 49 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -108,6 +108,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `ACTIVITY_CUES_ENABLED` | True | yes | [11](11-viewer.md) |
 | `SOCIAL_LAYER_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `CHRONICLE_ENABLED` | True | yes | [09](09-systems-society.md) |
+| `FOUNDING_EVENTS_ENABLED` | True | yes | [05](05-world.md) |
 | `WORLD_CLOCK_HUD_ENABLED` | True | yes | [11](11-viewer.md) |
 | `SEASONAL_AGENTS_ENABLED` | True | yes | [11](11-viewer.md) |
 | `GOODS_ENABLED` | True | yes | [08](08-systems-economy.md) |
@@ -131,3 +132,8 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `TRANSIT_ENABLED` | True | yes | [10](10-path1.md) |
 | `ECONOMY_SINKS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WIKI_MEMORY` | False | yes | [03](03-cognition.md) |
+| `CROP_GROWTH_ENABLED` | True | yes | [05](05-world.md) |
+| `WILDLIFE_ENABLED` | True | yes | [05](05-world.md) |
+| `CARAVAN_VISUALS_ENABLED` | True | yes | [08](08-systems-economy.md) |
+| `WEATHER_ENABLED` | True | yes | [05](05-world.md) |
+| `WEATHER_GOVERNANCE_ENABLED` | True | yes | [05](05-world.md) |
