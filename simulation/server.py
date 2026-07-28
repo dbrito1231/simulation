@@ -1277,7 +1277,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-{season_line}{prices_line}{chronicle_line}{council_digest_line}{library_lessons_line}{path1_lines}{level_line}Structures built: {structures_built}
+{season_line}{prices_line}{weather_line}{chronicle_line}{council_digest_line}{library_lessons_line}{path1_lines}{level_line}Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
@@ -3325,6 +3325,13 @@ def build_user_prompt(data, slim=False):
     # stay byte-identical to Phase D.
     prices_raw = data.get("prices_line")
     prices_line = f"Prices: {prices_raw}\n" if prices_raw else ""
+    # Living-ecosystem Phase 5: one short line, rendered ONLY while the
+    # engine's weather state is "storm"/"clearing" (WEATHER_GOVERNANCE_ENABLED
+    # and WEATHER_ENABLED both on) -- same fold-in-only-when-set pattern as
+    # prices_line/chronicle_line, so flag-off / clear-weather prompts stay
+    # byte-identical to Phase 4 alone.
+    weather_raw = data.get("weather_line")
+    weather_line = f"Weather: {weather_raw}\n" if weather_raw else ""
     # Phase F: one-word life stage folded into the existing personality line
     # (no new template line -- near-zero token cost, and with the flag off
     # the engine sends life_stage=None so this renders byte-identical to
@@ -3413,6 +3420,7 @@ def build_user_prompt(data, slim=False):
         constitution=format_constitution(data.get("constitution") or []),
         season_line=season_line,
         prices_line=prices_line,
+        weather_line=weather_line,
         chronicle_line=chronicle_line,
         council_digest_line=council_digest_line,
         library_lessons_line=library_lessons_line,

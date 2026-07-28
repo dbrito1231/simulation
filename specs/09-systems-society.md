@@ -301,6 +301,48 @@ candidate before proposing, mirroring the priority-rule branch exactly.
 this is safe for every consumer (belief-affinity sets, `RULE_KINDS`, the
 vote-bias heuristic, etc. all key off `kind`, not the literal id).
 
+**A third auto-proposal branch — emergency storm rationing
+(`WEATHER_GOVERNANCE_ENABLED`, living-ecosystem Phase 5).** Checked first in
+`_maybe_advance_rules` (ahead of the priority/tax branches above), but only
+ever acts when the condition is real: while `civilization["weather"]["state"]`
+is `"storm"` or `"clearing"` AND at least one of the storm's named districts
+(`weather["districts"]`) has an ecology ratio (`_district_ecology_ratio`)
+below `STOCK_LOW_RATIO`. Reuses an **existing** `RULE_KINDS` entry —
+`"rationing"` (already gated `LIFECYCLE_ENABLED`, default True) — never a new
+kind; enacting it caps stockpile withdrawals via the same
+`_apply_governance_rule`/`rationingActive` mechanism an LLM-proposed
+rationing rule would use. Mints a unique per-enactment id,
+`emerg_<token>`, via the same shared `_next_rule_seq_token(counter_key)`
+helper and its own persisted counter field, `civilization["emergencyRuleSeq"]`
+— identical rationale to `priorityRuleSeq`/`taxRuleSeq`: rule ids are
+globally non-reusable, so a deterministic id would recreate the exact
+permanently-blocked-id loop fixed in `6a78162` the first time this rationing
+rule is ever repealed. Pre-validates (`_validate_rule`) before proposing and
+advances `lastRuleAttemptFrame` on a known-invalid candidate instead of
+knowingly emitting an invalid action, mirroring the priority/tax branches
+exactly. Governed by the **same** `RULE_PROPOSE_COOLDOWN`/
+`lastRuleAttemptFrame` gate as every other branch in this function (checked
+once, above all three branches) — the emergency branch cannot fire more often
+than the ordinary ones. A dedicated `_active_or_pending_rationing()` guard
+additionally skips the branch entirely while a rationing rule (auto-proposed
+or LLM-authored) is already active or awaiting a vote, so a storm that
+lingers for its full `WEATHER_DWELL_TICKS` window proposes at most **one**
+emergency measure rather than re-proposing every cooldown window — the
+governance-churn safeguard the plan calls for (`MAX_PENDING_RULES = 4` is
+shared budget with ordinary priority/tax proposals). On enactment, the
+`emerg_` id prefix is detected in `_tally_and_maybe_enact` (the pendingRules
+entry `_propose_rule` builds only whitelists
+id/name/kind/value/description/proposedBy/enacted/votes(+effect/supersedes),
+so an arbitrary extra key on the input rule dict would not itself have
+survived to the enacted copy) and pushes a `"emergency_measure"` chronicle
+milestone (added to `CHRONICLE_MILESTONE_KINDS`) — the village's disaster
+response becomes recorded history, same pattern as the Phase 1
+disaster/district_founded milestones. `civilization["emergencyRuleSeq"]` is
+restore-safe (`setdefault`-backfilled to `0`), same precedent as
+`priorityRuleSeq`/`taxRuleSeq`. `WEATHER_GOVERNANCE_ENABLED` off (or
+`WEATHER_ENABLED`/`LIFECYCLE_ENABLED` off): the branch is a complete no-op —
+`_maybe_advance_rules` behaves exactly as Phase 4 alone.
+
 **Constitution history cap.** Unlike the live `MAX_ACTIVE_RULES` (8) budget,
 `civilization["constitution"]` is an append-only historical ledger with no
 cap of its own; unique priority-rule instance ids mean long soaks of
@@ -472,15 +514,26 @@ agent's best skill (capped `LIBRARY_KNOWLEDGE_CAP = 12` entries, oldest
 retires first) so studying agents can still learn it
 (`LIBRARY_STUDY_GAIN = 0.4` per session, via `_maybe_study_at_library`).
 
-**Chronicle:** a capped ring (`CHRONICLE_CAP = 20`) of major village
+**Chronicle:** a capped ring (`CHRONICLE_CAP = 100`) of major village
 events, folded into prompts as one "Village history: ..." line
-(`CHRONICLE_PROMPT_ENTRIES = 3` most recent). `CHRONICLE_ENABLED` is a
-viewer-projection gate (default True): when enabled, `/state` adds a bounded
-top-level `chronicle` projection of that existing ring. It never creates a
-second event store and never changes prompt history. The projection admits only
-the named milestone kinds `death`, `burial`, `election`, `belief_founded`,
-`belief_adoption`, `meme_mutation`, and `knowledge_preserved`; routine gather,
-talk, craft, and build activity remains exclusively in `activity`.
+(`CHRONICLE_PROMPT_ENTRIES = 3` most recent, sliced independently of
+`CHRONICLE_CAP` — raising the ring size never changes prompt length).
+`CHRONICLE_ENABLED` is a viewer-projection gate (default True): when enabled,
+`/state` adds a bounded top-level `chronicle` projection of that existing
+ring. It never creates a second event store and never changes prompt history.
+The projection admits only the named milestone kinds `death`, `burial`,
+`election`, `belief_founded`, `belief_adoption`, `meme_mutation`,
+`knowledge_preserved`, `disaster`, and `district_founded`; routine gather,
+talk, craft, and build activity remains exclusively in `activity`. `disaster`
+entries are pushed unconditionally from `_maybe_disaster` (see
+[08](08-systems-economy.md)); `district_founded` entries are pushed from
+`_found_district` only when `FOUNDING_EVENTS_ENABLED` is True (see
+[05](05-world.md)). `CHRONICLE_CAP` was raised from 20 to 100 (living-ecosystem
+Phase 2, item 0) after live verification showed a storm-heavy stretch
+(`DISASTER_PROB` fires roughly every 100 simulated minutes) evicting real
+history (deaths/elections/beliefs) within about a day at the old cap; 100
+entries absorbs many more disasters before crowding out anything else, at a
+negligible cost (~80 extra short strings in `/state` and `state.db`).
 
 **Social ties:** `SOCIAL_LAYER_ENABLED` (default True) is another read-only
 viewer gate. `/state.socialTies` is a compact, deduplicated list of non-neutral

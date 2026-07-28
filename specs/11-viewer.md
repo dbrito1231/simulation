@@ -68,8 +68,53 @@ world state beyond a cached palette/season key.
   ocean) is rendered once into an offscreen `terrainCanvas` and blitted each
   frame instead of re-tiling per frame (`buildTerrainCache`/
   `scheduleTerrainCacheBuild`, index.html:740-756), invalidated on resize, a
-  season change (index.html:2173-2178), or a district-list change
-  (index.html:1079-1081).
+  season change (index.html:2173-2178), a district-list change
+  (index.html:1079-1081), or (`CROP_GROWTH_ENABLED`, living-ecosystem Phase 2)
+  a district's `districtEcology` stage change — see below.
+
+**Crop/tree growth stages (`CROP_GROWTH_ENABLED`, living-ecosystem Phase 2):**
+terrain — including crops and trees — is baked into the static
+`terrainCanvas` above, so growth is **not** animated per frame; it is instead
+a small number of discrete stages that key into the same cache-invalidation
+mechanism the season tint already uses.
+
+- `ecologyStagesForTerrain()` (index.html) reduces the top-level
+  `world.districtEcology` list (a sibling of `civilization`, see
+  [05-world.md](05-world.md)) to a `{districtId: stage}` map plus a
+  stable string key. `buildTerrainCache()` passes the map through
+  `drawTiledWorld` → `drawStarterProps` (sprites.js) and records the key in
+  `lastEcologyStageKeyRendered`, mirroring `lastSeasonRendered`.
+  `pollState()` compares the freshly computed key against
+  `lastEcologyStageKeyRendered` each poll and rebuilds the cache exactly once
+  on a mismatch — the same edge-triggered pattern as the season check, not a
+  new timer.
+- `drawStarterProps`/`drawCrop`/`drawTree` (sprites.js) all default their new
+  `stage` parameter to `"lush"`, and the density/appearance logic at `"lush"`
+  reproduces the pre-Phase-2 output exactly — so `CROP_GROWTH_ENABLED = false`
+  (or an older snapshot with no `districtEcology`) renders byte-identical to
+  before this phase.
+- **Farm districts** (`farm_north`, `farm_south`): `shouldDrawCrop(fx, fy,
+  stage, baseMod)` scales each site's original placement modulo by
+  `CROP_STAGE_DENSITY_SCALE` (`lush: 1` = unchanged, `healthy: 1.5`,
+  `sparse: 2.5` = thinner, `barren: null` = no crop cells drawn — the bare
+  farm tile alone reads as empty soil). `drawCrop` additionally varies
+  per-cell appearance: `winter`/`spring` seasons are unchanged (they already
+  read as "not full growth"); otherwise `barren` draws a small dirt clod,
+  `sparse` a single thin blade, `healthy`/`lush` the original mature crop.
+- **Forest district** (`forest`): the 15 hand-placed `treeSpots` are always
+  iterated (count never changes), but `TREE_STAGE_MOD` decides whether spot
+  `i` gets a full canopy tree (`drawTree`) or a stump/sapling marker
+  (`drawTreeStump`) — `lush`/`healthy` draw every spot as a full tree (mod 1,
+  byte-identical to the original unconditional loop), `sparse` draws roughly
+  one full tree per three spots (mod 3), `barren` draws stumps only (mod 0).
+  `drawTree` also takes `stage`; `TREE_GRIDS` (sprites.js) is keyed by
+  `` `${season}|${stage}` `` (was season-only) and only `"sparse"` produces a
+  visually distinct (shorter) canopy grid — `"healthy"`/`"lush"` reuse the
+  unmodified per-season rows.
+- **Hysteresis** lives entirely in the server-side projection (see
+  [05-world.md](05-world.md)) — the viewer just reads whatever `stage` string
+  it's given, so a ratio hovering on a boundary can't thrash the terrain
+  cache multiple times per second.
 - **Seasonal color grading** (`applySeasonTint`, index.html:704-733) is baked
   into the terrain cache once at build time: autumn = warm multiply+overlay,
   winter = desaturate then cool overlay+lighter passes, spring = faint green
@@ -92,6 +137,8 @@ world state beyond a cached palette/season key.
   ~140 world px) composited over the night overlay so lit districts visibly
   push back the dark. No glow by day or for unfueled lights (they simply
   lack the flag/district entry that night).
+- **Weather sky tint + particles** (`WEATHER_ENABLED`, living-ecosystem
+  Phase 4): see the dedicated section below.
 - **Structure wear** (`STRUCTURE_WEAR_ENABLED`): the server snapshot's
   `conditionTier` selects a deterministic visual pass over every structure:
   pristine has no treatment, worn adds subtle desaturation and edge gaps,
@@ -156,6 +203,37 @@ world state beyond a cached palette/season key.
   [07-actions.md](07-actions.md)); per the action-sync invariant in
   [01-architecture.md](01-architecture.md), a new action should get an entry
   but nothing breaks if briefly missing.
+
+## Founding banner (`FOUNDING_EVENTS_ENABLED`)
+
+`#foundingBanner` is a fixed, centered, non-modal banner (same positioning
+family as `#councilBanner`, offset 30px lower so the two never overlap) that
+names a newly founded district. Gated client-side by `FOUNDING_EVENTS_ENABLED`
+(mirrors `config.flags.FOUNDING_EVENTS_ENABLED`, wired in `applyFlags` the same
+way as `CHRONICLE_ENABLED`); when off, the element is force-hidden.
+
+Unlike `#councilBanner` (which is level-triggered off `civ.councilActive.active`
+every render), founding is a one-off event with no ongoing "active" state to
+poll, so the trigger is edge-detected client-side: each render diffs
+`world.chronicle` for `district_founded`-kind entries not yet seen (tracked in
+a small in-memory `Set` of chronicle `frame` values, pruned as the
+`CHRONICLE_CAP`-capped ring evicts old entries) and, on a fresh one, shows the
+banner with that entry's text for 6s via `setTimeout`. On first snapshot after
+a page load/refresh, existing foundings are recorded as "already seen" without
+banner-ing them, so resuming a view of a long-running village does not replay
+its whole settlement history as a burst of banners.
+
+This client-diff approach was chosen over adding a per-district `foundedFrame`
+field to avoid a new `/state` shape and new server-side bookkeeping — the
+client already parses the full `chronicle` array every poll for the Chronicle
+panel (see above), so no additional data is needed to detect a new founding.
+
+No terrain-cache tint/highlight for newly founded districts was added (the
+plan's stretch item): the static `terrainCanvas` cache (index.html ~921/1233)
+is invalidated only on season change and districts-list change, and adding a
+time-limited "under construction" visual state would require either a new
+per-frame cache-bust condition or extra state tracked outside that cache —
+deferred as out of scope for this phase.
 
 ## Daily Council Assembly window
 
@@ -256,6 +334,152 @@ heading are chosen per the same classification.
 expanded starter ocean beside the beach. Their positions are fixed coastal
 moorings, not structure positions; they remain server-derived decoration and
 do not create client-side resource or pathing state.
+
+## Weather sky tint + particles (`WEATHER_ENABLED`, living-ecosystem Phase 4)
+
+Reads the top-level `world.weather` projection (`{state, since, districts}`,
+see [05-world.md](05-world.md)) — a sibling of `civilization`, same
+placement as `socialTies`/`districtEcology`/`shipments`.
+
+- **Sky tint** (`weatherSkyAlpha(weather, nightAlpha)`, index.html):
+  composited in the **same full-canvas overlay stage** as the existing
+  night overlay — drawn immediately after it, before the golden-hour band —
+  so the two stack coherently instead of fighting. `WEATHER_SKY_ALPHA =
+  {clear: 0, gathering: 0.10, storm: 0.26, clearing: 0.14}` is a step ramp
+  keyed by `weather.state` (the server sends only the current state, not a
+  within-state progress fraction, so this is a discrete ramp across state
+  transitions rather than a continuous animation). Color is a slate-teal
+  (`rgba(18, 26, 34, …)`), distinct from the night overlay's navy, so a
+  storm during the day is still visually legible as weather rather than
+  dusk.
+- **Darkness clamp:** `MAX_NIGHT_PLUS_WEATHER_ALPHA = 0.68`. The weather
+  alpha actually drawn is `min(rawWeatherAlpha, 0.68 - nightAlpha)`, so
+  night + storm can never exceed a combined 0.68 before sequential
+  `fillRect` alpha compounding (`1 - (1-night)*(1-weather)`). Worst case
+  (winter storm, deep night `nightAlpha = MAX_NIGHT_ALPHA = 0.45`, no golden
+  hour since deep night falls outside the golden-hour dawn/dusk bands, no
+  light glow since the district is unlit): `weatherAlpha` clamps from a raw
+  0.26 down to 0.23, combined visible darkening ≈ 0.577 — noticeably
+  stormier than a plain night but still well short of opaque; verified by
+  inspection in the Phase 4 report (agents/structures/terrain remain
+  identifiable underneath the tint).
+- **Locality tradeoff:** the tint (and particles, below) are **world-wide**,
+  not clipped to `weather.districts`, even though `_maybe_disaster`'s damage
+  targeting *is* localized to those districts (see
+  [08-systems-economy.md](08-systems-economy.md)). Per-district clipping of
+  a full-canvas overlay would fight the also-global night overlay for
+  little visual payoff — a deliberate v1 simplification, not an oversight.
+- **Particles** (`drawWeatherParticles`, index.html; `drawWeatherParticle`,
+  sprites.js): drawn every frame (not baked into `terrainCanvas` — motion
+  can't live in a static cache, same reasoning as `drawWildlife`). Active
+  only during `storm` (full intensity) and `clearing` (45% intensity,
+  tapering off); `clear`/`gathering` draw nothing (`WEATHER_STATE_INTENSITY`).
+  Snow (`drawWeatherParticle(ctx, "snow", …)`, small drifting dot) replaces
+  rain (a short diagonal streak) when `calendar.season === "winter"`.
+  Positions are deterministic from `frameTick` and a per-particle-index hash
+  (`weatherParticleHash`, FNV-1a-style) — no retained state, same discipline
+  as `drawStructureSmoke`/`drawActivityDust`: `x` is a hashed fraction of
+  the visible width, `y` is `frameTick` modulo a per-kind fall period
+  (`130` frames for rain, `500` for the slower-drifting snow) mapped into
+  the visible height, so particles continuously "fall" through the visible
+  band without ever being stored between frames.
+- **Cap by visible area, not world area:** particle count is
+  `min(WEATHER_PARTICLE_CAP(260), floor(visibleW * visibleH /
+  WEATHER_PARTICLE_DENSITY_DIVISOR(14000) * intensity))`, where
+  `visibleW`/`visibleH` come from the same `canvasWrapEl.scrollLeft/scrollTop
+  / zoomLevel` viewport math `drawWildlife`/`drawShipments` already use.
+  Zooming out shrinks the effective per-particle screen size but the *count*
+  is bounded by the actual visible pixel area, so a fully-zoomed-out view of
+  the whole (5200x5400) world never spends time computing or drawing
+  hundreds of off-screen or redundant particles.
+- **Lightning:** intentionally **not implemented** in Phase 4 — the plan
+  allowed skipping it ("keep it subtle and rate-limited... skip if unsure")
+  and a flash tied to individual (per-goods-tick, server-side-only) damage
+  events would need either new `/state` signal plumbing or client-side
+  activity-log diffing to trigger correctly without becoming either a
+  seizure risk or visually decoupled from the actual damage event: left out
+  of scope rather than shipped half-verified.
+- **Gate:** `WEATHER_ENABLED = false` — `weatherSkyAlpha` returns 0 (no sky
+  change) and `drawWeatherParticles` returns immediately (nothing drawn),
+  regardless of `world.weather`'s presence/content.
+
+## Ambient wildlife (`WILDLIFE_ENABLED`, living-ecosystem Phase 2)
+
+Follows the same physicalProps precedent above: server-derived decoration
+with deterministic positions, not a new entity type. Unlike terrain/crops,
+wildlife is **not** baked into `terrainCanvas` — it is drawn every frame in
+`tickBody()` (`drawWildlife(ctx, renderFrame)`, called right after
+`drawSocialTies`) since animating it via the static cache isn't possible.
+
+- **Density** reuses the exact same top-level `world.districtEcology` stage as
+  the crop/tree growth pass (see above and [05-world.md](05-world.md)):
+  `WILDLIFE_STAGE_COUNT = {barren: 0, sparse: 1, healthy: 2, lush: 4}`,
+  capped at `WILDLIFE_CAP_PER_DISTRICT = 4`. Only forest/farm/beach district
+  kinds are mapped to a wildlife kind at all (`WILDLIFE_KIND_BY_DISTRICT_KIND`)
+  regardless of whether other kinds have a `districtEcology` entry.
+- **Which creature per district kind:** `WILDLIFE_KIND_BY_DISTRICT_KIND =
+  {forest: "bird", farm: "grazer", beach: "fish"}`. Fish are placed within
+  the first ~70px of the beach district's bounds (the shore edge against the
+  adjacent ocean district) rather than scattered across dry sand.
+- **Positions** are deterministic per district+slot: `wildlifeHashSeed(districtId)`
+  (FNV-1a-style string hash) seeds a simple integer PRNG so a given creature
+  slot always lands at the same point in the district's bounds — no
+  per-creature state is persisted, and nothing repositions between polls.
+  `frameTick` only drives a small animation (a sine-wave vertical bob shared
+  by all kinds, plus wing-flap/fin-wiggle detail in the sprite draw calls in
+  sprites.js: `drawFishRipple`, `drawBird`, `drawGrazer`).
+- **Viewport culling** mirrors the shipped `drawSocialTies` pattern: the
+  whole district's bounds are culled against the scroll/zoom-derived
+  viewport before any per-creature work, then each creature position is
+  culled individually.
+- **Limitation (intentional):** wildlife is decoration only. They cannot be
+  hunted, gathered, or interacted with in any way, and do not feed the food
+  supply or any other resource. Making them huntable would require a new
+  agent action and a new resource path — explicitly out of scope for this
+  phase (see [plan-living-ecosystem-2-ecology-visible.md](../docs/plan-living-ecosystem-2-ecology-visible.md)).
+- **Gate:** `WILDLIFE_ENABLED = false` → `drawWildlife` returns immediately;
+  nothing is drawn, no cost beyond the flag check.
+
+## Goods-in-motion shipments (`CARAVAN_VISUALS_ENABLED`, living-ecosystem Phase 3)
+
+Purely cosmetic render pass over `world.shipments`, the read-only projection
+of the engine's `self.shipments` ring (see
+[08-systems-economy.md](08-systems-economy.md#caravan_visuals_enabled) for
+the emission side and the hard non-gating constraint). Drawn in `tickBody()`
+via `drawShipments(ctx, world.frameTick)`, called right after
+`drawWildlife`, so it composites above terrain/wildlife and below agents.
+
+- **Interpolation, not pathfinding:** each shipment already carries its
+  resolved road-graph `path` (`{x, y}` waypoints between the two districts'
+  `entryNode`s), computed once server-side by the same helper agent travel
+  uses (`_road_path_between_districts`, backed by `ROAD_PATH_CACHE`). The
+  viewer never re-derives a route — `shipmentPosition()` walks the polyline
+  proportionally to `(frameTick - startFrame) / (endFrame - startFrame)`,
+  clamped to `[0, 1]` and distributed across the path's segments. This is
+  why the shape includes `path`: it lets the client stay a thin, stateless
+  interpolator instead of duplicating the engine's BFS road-resolution
+  logic in JS.
+- **Sprite:** `drawShipment(ctx, mode, x, y, cargoColor)` (sprites.js) picks
+  `drawCart` (land) or `drawShipmentBoat` (ocean, a smaller echo of the
+  moored `physicalProps` boat art, not a shared code path with it) by
+  `shipment.mode`. An optional small cargo-colored square is drawn using
+  the resource → colour registry `drawResourceDots` already reads
+  (`resourceRegistry()[shipment.resource].color`) — no separate colour
+  table.
+- **Viewport-culled + capped**, same pattern as `drawSocialTies`/
+  `drawWildlife`: the current scroll/zoom viewport is computed once, each
+  shipment's interpolated position is culled against it, and draws stop at
+  `SHIPMENT_DRAW_CAP = 8` regardless of how many live shipments exist
+  (the server-side ring is already capped at the same order of magnitude,
+  so this is a second, independent bound).
+- **Gate:** `CARAVAN_VISUALS_ENABLED = false` → `drawShipments` returns
+  immediately; nothing is drawn. The moored `physicalProps` boats render
+  through their own, entirely separate code path
+  (`civilization.physicalProps`, gated by `TRANSIT_ENABLED`) and are
+  unaffected either way — this flag never touches that block.
+- **Restore safety:** shipments are not persisted (see 08); after a
+  server restart `world.shipments` is simply absent/empty until new
+  transfers occur, so there is nothing to orphan visually.
 
 ## Active viewer work
 

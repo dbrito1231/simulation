@@ -204,6 +204,11 @@ ACTIVITY_CUES_ENABLED = True
 # chronicle. These never alter social/culture simulation state or prompts.
 SOCIAL_LAYER_ENABLED = True
 CHRONICLE_ENABLED = True
+# Read-only viewer projection: announces a newly founded district as a
+# chronicle milestone + a brief banner (index.html). Gates only the
+# _found_district chronicle call and the banner trigger -- district founding
+# itself (_maybe_found_district) is unconditional and unaffected.
+FOUNDING_EVENTS_ENABLED = True
 # Viewer-only projections of the existing calendar and sprite season mirror.
 # They do not alter simulation time, terrain, or agent state.
 WORLD_CLOCK_HUD_ENABLED = True
@@ -234,6 +239,91 @@ ECOLOGY_ENABLED = True
 # _set_agent_target to the old straight-to-random-interior-point behavior so
 # routing can be A/B compared.
 ROADS_ENABLED = True
+# Living-ecosystem Phase 2: viewer-only projections of the existing
+# districtStocks ecology (see DISTRICT_ECOLOGY_* above). Neither flag alters
+# gather yields, regrowth, or any simulation mechanic -- they only gate
+# whether /state includes the districtEcology projection and whether the
+# viewer renders growth-stage terrain / ambient wildlife from it.
+CROP_GROWTH_ENABLED = True
+WILDLIFE_ENABLED = True
+# Living-ecosystem Phase 3: purely cosmetic in-flight "shipment" records
+# emitted AFTER an existing transfer (trade_resource, the priced-trade
+# market path, district-project contributions) has already mutated the
+# authoritative stockpile/inventory. The transfer itself is never delayed
+# or gated by this -- see _emit_shipment. Shipments live only in
+# self.shipments (NOT civilization state), so they are never persisted to
+# state.db and simply vanish on restore, which is harmless. Off means
+# /state omits "shipments" and the viewer draws nothing extra; the static
+# physicalProps moored boats are unaffected either way.
+CARAVAN_VISUALS_ENABLED = True
+SHIPMENT_TRAVEL_FRAMES = 240   # ~8s at 30 ticks/s: how long a shipment animates across the road graph
+SHIPMENT_RING_CAP = 8          # bounded ring -- oldest live shipments drop first
+
+# Living-ecosystem Phase 4: deterministic clear -> gathering -> storm ->
+# clearing -> clear weather state machine on the EXISTING GOODS_TICK_FRAMES
+# cadence (_tick_weather, called from _tick_goods) -- no new timer. The
+# dwell duration for whichever state is currently active is drawn (in
+# goods-ticks) when that state is entered and stored as an exit frame in
+# civilization["weather"], so the machine is restore-safe without a
+# persisted counter (see restore_state's setdefault) and NEVER re-rolls
+# already-persisted weather on load. _maybe_disaster (below) is rewired,
+# WEATHER_ENABLED only, to require the "storm" state -- see its docstring
+# for the rate-calibration arithmetic that keeps the long-run damage rate
+# matching the pre-Phase-4 DISASTER_PROB baseline (also see
+# specs/08-systems-economy.md).
+WEATHER_ENABLED = True
+WEATHER_STATES = ("clear", "gathering", "storm", "clearing")
+# (min, max) dwell duration in GOODS_TICK_FRAMES units, drawn on state entry.
+# clear's range is season-scaled (divided by storminess) in _weather_enter;
+# the others are season-independent so storm/clearing "weather" itself
+# always reads the same length once it starts.
+WEATHER_DWELL_TICKS = {
+    "clear": (40, 160),      # ~20-80 goods ticks (~10-80 min) between storm attempts
+    "gathering": (2, 5),     # clouds building, ~1-2.5 min
+    "storm": (2, 6),         # active storm, ~1-3 min
+    "clearing": (2, 4),      # tapering off, ~1-2 min
+}
+# Season-weighted "storminess" multiplier: >1 shortens the clear dwell and
+# raises the gathering->storm chance for that season; <1 does the opposite.
+# Deliberately averages to 1.0 across the four (equal-length) seasons so the
+# long-run damage rate (see _maybe_disaster) matches the legacy baseline
+# without needing per-season recalibration.
+WEATHER_SEASON_STORMINESS = {"spring": 1.1, "summer": 0.6, "autumn": 1.3, "winter": 1.0}
+WEATHER_BASE_STORM_CHANCE = 0.5   # gathering -> storm probability at storminess 1.0
+# In-storm probability (per goods tick, while WEATHER_ENABLED) that
+# _maybe_disaster fires damage -- calibrated (see its docstring) so the
+# long-run rate stays close to the legacy DISASTER_PROB.
+STORM_DISASTER_PROB = 0.32
+
+# Living-ecosystem Phase 5: weather -> ecology -> governance feedback.
+# WEATHER_GOVERNANCE_ENABLED off is byte-identical to Phase 4 alone --
+# regrowth, prompts, and the rule backstop all behave exactly as if this
+# phase didn't exist. On, it does three things, all deterministic and all
+# riding EXISTING cadences (no new timer, no new LLM call):
+#   1. _tick_ecology_regrow multiplies its per-district regrow amount by
+#      WEATHER_STORM_REGROW_MULT/WEATHER_CLEARING_REGROW_MULT for whichever
+#      district(s) civilization["weather"]["districts"] names, while that
+#      storm/clearing state lasts -- suppression during "storm", a partial
+#      "rain" boost during "clearing" so weather isn't purely punitive.
+#      Deliberately a fractional multiplier, never floored to 0: since
+#      WEATHER_DWELL_TICKS bounds storm/clearing to a few minutes and the
+#      multiplier is never exactly 0, a district always keeps inching toward
+#      recovery even mid-storm -- no unbounded starvation spiral is possible
+#      from this term alone (see _tick_ecology_regrow's docstring).
+#   2. _weather_prompt_line() adds ONE short line to the think payload, and
+#      only while state is "storm"/"clearing" (silent the rest of the time)
+#      -- see _build_think_payload.
+#   3. _maybe_advance_rules gets a third auto-proposal branch: if a
+#      storm-affected district's ecology ratio drops below STOCK_LOW_RATIO,
+#      propose an emergency "rationing" rule (existing RULE_KINDS entry,
+#      LIFECYCLE_ENABLED already default True) with a unique per-enactment
+#      id (see emergencyRuleSeq) -- never a second parallel governance
+#      mechanism, and gated by the SAME RULE_PROPOSE_COOLDOWN/
+#      lastRuleAttemptFrame discipline as the priority/tax branches (see
+#      plan-rule-loop-fix.md).
+WEATHER_GOVERNANCE_ENABLED = True
+WEATHER_STORM_REGROW_MULT = 0.3     # suppression multiplier for storm-affected districts
+WEATHER_CLEARING_REGROW_MULT = 1.5  # post-storm "rain" boost for the same districts while clearing
 
 # --- World geometry ---
 # WORLD_H was 1000, then 2700 (to stop the village/farm build-out grids from
@@ -494,6 +584,18 @@ STOCK_REGROW_PER_TICK = 1
 STOCK_DEPLETE_MULTIPLIER = 2   # each gather removes 2× the units collected
 STOCK_LOW_RATIO = 0.25
 STOCK_MIN_YIELD_RATIO = 0.25  # lowest gather yield multiplier when stock is low but > 0
+# Phase 2 (living ecosystem): quantize a district's average stock ratio into a
+# small number of stages for crop/tree growth (CROP_GROWTH_ENABLED) and
+# wildlife density (WILDLIFE_ENABLED). Boundaries mirror the depleted/low/
+# fair/ok categories _format_district_stocks_for_prompt already narrates
+# (STOCK_LOW_RATIO=0.25, then 0.5) so the visual matches the scarcity the
+# engine already tells agents about -- no new thresholds invented.
+DISTRICT_ECOLOGY_STAGES = ["barren", "sparse", "healthy", "lush"]
+DISTRICT_ECOLOGY_THRESHOLDS = [0.0, STOCK_LOW_RATIO, 0.5]  # boundary ratio between consecutive stages
+# Hysteresis margin: a ratio must clear a boundary by this much before the
+# stage flips, so a stock hovering on a boundary can't thrash the stage (and
+# the terrain-cache rebuild it triggers in the viewer) every /state poll.
+DISTRICT_ECOLOGY_HYSTERESIS = 0.05
 
 COLLECT_CAP = 20
 STALL_THRESHOLD = 600
@@ -982,14 +1084,15 @@ LIBRARY_STUDY_WEIGHT_CAP = 5         # study-gain upgrade-weight cap (knowledge-
 # Chronicle: a capped ring of major village-level events, summarized into one
 # prompt line ("Village history: ...") so a long-running village develops a
 # legible past without growing the prompt unboundedly.
-CHRONICLE_CAP = 20
+CHRONICLE_CAP = 100
 CHRONICLE_PROMPT_ENTRIES = 3         # how many recent entries to fold into the prompt line
 COUNCIL_DIGEST_PROMPT_ENTRIES = 2    # newest compact Daily Council records per think payload
 # The viewer chronicle is deliberately narrower than the prompt-facing ring:
 # only named historical milestones belong beside the raw Activity feed.
 CHRONICLE_MILESTONE_KINDS = frozenset({
     "death", "burial", "election", "belief_founded", "belief_adoption",
-    "meme_mutation", "knowledge_preserved",
+    "meme_mutation", "knowledge_preserved", "disaster", "district_founded",
+    "emergency_measure",
 })
 # Memes: mutation is capped and event-driven -- at most one lm_complete call
 # per mutation ATTEMPT (itself gated to a low probability on ordinary
@@ -1680,6 +1783,11 @@ class SimEngine:
         self._module_note_ages = []
         self._meta_agent_index = 0
         self.ROAD_PATH_CACHE = {}   # (nodeA, nodeB) -> [node ids]; see _recompute_road_paths
+        # Living-ecosystem Phase 3: cosmetic shipment ring. Deliberately kept
+        # off the civilization dict (see CARAVAN_VISUALS_ENABLED) so it is
+        # never written to state.db.
+        self.shipments = []
+        self._shipment_seq = 0
         self._reset_world(roster_size)
 
     # --- roster + cold start ---
@@ -1880,6 +1988,12 @@ class SimEngine:
             # compatibility with existing saves that only know about
             # priorityRuleSeq.
             "taxRuleSeq": 0,
+            # Living-ecosystem Phase 5: same rationale as priorityRuleSeq/
+            # taxRuleSeq, but for the auto-proposed storm-emergency
+            # "rationing" rule (see _maybe_advance_rules' emergency branch,
+            # WEATHER_GOVERNANCE_ENABLED). A dedicated counter/field so an
+            # old save missing it simply setdefault-backfills to 0.
+            "emergencyRuleSeq": 0,
             "lastRoleSwitchFrame": 0,
             # Phase 1 Sid-parity: frame when a role need first appeared; used
             # for role_rebalance_latency. Cleared when the need resolves or a
@@ -1957,6 +2071,11 @@ class SimEngine:
             "lastReorgFrame": 0,
             "lastReorgCheckFrame": 0,
             "lastReorgNoRoomFrame": 0,
+            # Living-ecosystem Phase 4: weather state machine (see
+            # WEATHER_ENABLED above). Set to a real value below (after
+            # districts exist, since "storm" picks from them); restore_state
+            # setdefaults this for old saves without re-rolling an existing one.
+            "weather": None,
         }
         self._effect_period_fired = 0
         self._module_period_runs = 0
@@ -1967,6 +2086,7 @@ class SimEngine:
         self._last_season = None     # Phase C: season-turn activity logging
         if ECOLOGY_ENABLED:
             self.civilization["districtStocks"] = self._init_district_stocks(self.civilization["districts"])
+        self.civilization["weather"] = self._weather_default(0)
         if path1_on():
             for d in self.civilization["districts"].values():
                 d.setdefault("tiles", {})
@@ -2246,6 +2366,25 @@ class SimEngine:
             origin_node = self._nearest_road_node(agent["x"], agent["y"])
         if not dest_node:
             dest_node = self._nearest_road_node(agent["x"], agent["y"])
+        if not origin_node or not dest_node or origin_node == dest_node:
+            return []
+        return self.ROAD_PATH_CACHE.get((origin_node, dest_node)) or []
+
+    def _road_path_between_districts(self, from_district_id, to_district_id):
+        """Like _road_path_between, but resolved purely from two district
+        ids (no agent needed) -- reuses the same ROAD_PATH_CACHE agent
+        movement already populates via _recompute_road_paths. Used by the
+        cosmetic shipment system (CARAVAN_VISUALS_ENABLED) to interpolate
+        goods along the existing road graph. Returns [] (never a fabricated
+        straight line) when either district or its entryNode is missing, or
+        no cached path connects them."""
+        c = self.civilization
+        d_from = c["districts"].get(from_district_id)
+        d_to = c["districts"].get(to_district_id)
+        if not d_from or not d_to:
+            return []
+        origin_node = d_from.get("entryNode")
+        dest_node = d_to.get("entryNode")
         if not origin_node or not dest_node or origin_node == dest_node:
             return []
         return self.ROAD_PATH_CACHE.get((origin_node, dest_node)) or []
@@ -2737,13 +2876,38 @@ class SimEngine:
             regrow *= SEASON_REGROW_MULT.get(self._current_season(), 1)
             if regrow <= 0:
                 return
+        # Living-ecosystem Phase 5 (WEATHER_GOVERNANCE_ENABLED): extend this
+        # SAME multiplier chain -- never a second parallel mechanism -- with
+        # a per-district weather term. Only districts civilization["weather"]
+        # names are affected, and only while weather is "storm" (suppress)
+        # or "clearing" (partial rain-boost recovery right after). Off, or
+        # weather clear/gathering, or a district not currently named: the
+        # multiplier is exactly 1 and this is byte-identical to Phase 4.
+        weather_state = None
+        weather_districts = ()
+        if WEATHER_GOVERNANCE_ENABLED and WEATHER_ENABLED:
+            w = c.get("weather") or {}
+            weather_state = w.get("state")
+            weather_districts = w.get("districts") or ()
         for did, stocks in c["districtStocks"].items():
             kind = c["districts"].get(did, {}).get("kind", "land")
+            district_regrow = regrow
+            if weather_state and did in weather_districts:
+                # Fractional, never floored to 0: WEATHER_DWELL_TICKS already
+                # bounds how long "storm"/"clearing" lasts (a few minutes),
+                # so a nonzero multiplier is enough to guarantee a district
+                # always keeps inching toward recovery even mid-storm --
+                # the starvation-spiral floor the plan calls for, without a
+                # second bespoke duration/cap mechanism.
+                if weather_state == "storm":
+                    district_regrow = regrow * WEATHER_STORM_REGROW_MULT
+                elif weather_state == "clearing":
+                    district_regrow = regrow * WEATHER_CLEARING_REGROW_MULT
             for rid, val in list(stocks.items()):
                 max_s = self._stock_max(rid)
                 if val >= max_s:
                     continue
-                new_val = min(max_s, val + regrow)
+                new_val = min(max_s, val + district_regrow)
                 if new_val == val:
                     continue
                 stocks[rid] = new_val
@@ -2752,6 +2916,84 @@ class SimEngine:
                         f"The {kind} in {did} is recovering — {rid} stock is growing again")
                 elif val < max_s * STOCK_LOW_RATIO <= new_val:
                     self._push_activity(f"{rid} stock in {did} has regrown to fair levels")
+
+    def _district_ecology_ratio(self, district_id):
+        """Average stock ratio (0..1) across a district's gatherable
+        resources -- the same ratio _resource_price/_ecology_scarcity_index
+        already compute, just scoped to one district. None for districts with
+        no ecology stocks (market/workshop/cemetery/ocean kinds have no
+        gatherable resource; village kinds DO have one -- "water")."""
+        stocks = self.civilization.get("districtStocks", {}).get(district_id)
+        if not stocks:
+            return None
+        total, count = 0.0, 0
+        for rid, val in stocks.items():
+            max_s = self._stock_max(rid)
+            total += min(1.0, val / max_s) if max_s else 0.0
+            count += 1
+        return total / count if count else None
+
+    @staticmethod
+    def _district_ecology_stage_raw(ratio):
+        """Stage index with no hysteresis, mirroring the depleted/low/fair/ok
+        boundaries _format_district_stocks_for_prompt already narrates."""
+        if ratio <= 0:
+            return 0   # barren
+        if ratio < STOCK_LOW_RATIO:
+            return 1   # sparse
+        if ratio < 0.5:
+            return 2   # healthy
+        return 3       # lush
+
+    @staticmethod
+    def _district_ecology_stage_with_hysteresis(ratio, prev_idx):
+        """Applies DISTRICT_ECOLOGY_HYSTERESIS so a ratio hovering on a
+        boundary can't flip the stage (and the terrain-cache rebuild it
+        triggers) every /state poll. Moves at most one stage per call --
+        harmless for a decorative projection; a large jump just settles over
+        a couple of polls instead of one."""
+        raw = SimEngine._district_ecology_stage_raw(ratio)
+        if prev_idx is None:
+            return raw
+        if raw > prev_idx:
+            boundary = DISTRICT_ECOLOGY_THRESHOLDS[prev_idx]
+            if ratio > boundary + DISTRICT_ECOLOGY_HYSTERESIS:
+                return prev_idx + 1
+            return prev_idx
+        if raw < prev_idx:
+            target_boundary = DISTRICT_ECOLOGY_THRESHOLDS[prev_idx - 1]
+            if target_boundary <= 0:
+                # Barren's floor is ratio<=0 itself (ratio can never go
+                # negative), so there is nothing to subtract a margin from --
+                # require the exact raw condition instead.
+                if ratio <= 0:
+                    return prev_idx - 1
+                return prev_idx
+            if ratio < target_boundary - DISTRICT_ECOLOGY_HYSTERESIS:
+                return prev_idx - 1
+            return prev_idx
+        return prev_idx
+
+    def _district_ecology_snapshot(self):
+        """Read-only /state projection of per-district ecology health, e.g.
+        {"districtId": "forest", "stage": "lush", "ratio": 0.87}. Derived
+        server-side from districtStocks (never exposed directly) so
+        thresholds stay authoritative -- same pattern as conditionTier/
+        socialTies/chronicle. Stage carries hysteresis state in
+        civilization["districtEcologyStage"] across polls."""
+        if not ECOLOGY_ENABLED:
+            return []
+        self._ensure_district_stocks()
+        stage_state = self.civilization.setdefault("districtEcologyStage", {})
+        out = []
+        for did in self.civilization["districts"]:
+            ratio = self._district_ecology_ratio(did)
+            if ratio is None:
+                continue
+            idx = self._district_ecology_stage_with_hysteresis(ratio, stage_state.get(did))
+            stage_state[did] = idx
+            out.append({"districtId": did, "stage": DISTRICT_ECOLOGY_STAGES[idx], "ratio": round(ratio, 3)})
+        return out
 
     def _ecology_scarcity_index(self):
         if not ECOLOGY_ENABLED:
@@ -3067,6 +3309,7 @@ class SimEngine:
         self._enforce_resource_tax(agent, res)
         if CULTURE_ENABLED:
             self._practice_skill(agent, "build")
+        self._emit_shipment(agent.get("currentDistrict"), district_id, res)
         bonus_note = " (skilled builder)" if amount > 1 else ""
         return f"{agent['name']} contributed {res} x{amount}{bonus_note} to {p['name']} ({district_id})" \
             if amount > 1 else f"{agent['name']} contributed {res} to {p['name']} ({district_id})"
@@ -3335,6 +3578,103 @@ class SimEngine:
             "dayFraction": (self.frameTick % DAY_FRAMES) / DAY_FRAMES,
         }
 
+    # --- Living-ecosystem Phase 4: weather state machine ---
+    def _weather_default(self, frame=0):
+        """Cold-start / restore-backfill weather value -- always "clear",
+        never re-rolled from a real prior state (that only happens via
+        setdefault, which leaves an already-persisted value untouched)."""
+        return {"state": "clear", "since": frame, "exitFrame": frame, "districts": []}
+
+    def _weather_enter(self, state):
+        """Draw a dwell duration (in GOODS_TICK_FRAMES units) for `state` and
+        record it as civilization["weather"]. Called only from
+        _tick_weather, itself only reached on the GOODS_TICK_FRAMES cadence
+        -- no new timer."""
+        c = self.civilization
+        w = c["weather"]
+        lo, hi = WEATHER_DWELL_TICKS[state]
+        storminess = WEATHER_SEASON_STORMINESS.get(self._current_season(), 1.0)
+        if state == "clear":
+            # Stormier seasons shorten the gap between storm attempts.
+            lo = max(4, round(lo / storminess))
+            hi = max(lo + 1, round(hi / storminess))
+        dwell = random.randint(lo, hi)
+        w["state"] = state
+        w["since"] = self.frameTick
+        w["exitFrame"] = self.frameTick + dwell * GOODS_TICK_FRAMES
+        if state == "storm":
+            districts = sorted(c["districts"].keys())
+            pick_n = min(len(districts), random.choice((1, 1, 2)))
+            w["districts"] = random.sample(districts, k=pick_n) if districts else []
+            where = ", ".join(w["districts"]) if w["districts"] else "the village"
+            self._push_activity(f"Storm clouds break over {where} -- structures may take damage")
+        elif state == "clearing":
+            where = ", ".join(w.get("districts") or []) or "the village"
+            self._push_activity(f"The storm passes; skies begin to clear over {where}")
+        elif state == "clear":
+            w["districts"] = []
+
+    def _tick_weather(self):
+        """Living-ecosystem Phase 4: deterministic clear -> gathering ->
+        storm -> clearing -> clear cycle, advanced on the existing
+        GOODS_TICK_FRAMES cadence (called from _tick_goods) -- no new timer.
+        The current state's dwell duration was drawn (in goods-ticks) when
+        it was entered and stored as civilization["weather"]["exitFrame"];
+        this only checks whether that frame has been reached and, if so,
+        transitions once. Season-weighted via WEATHER_SEASON_STORMINESS so
+        storms cluster in stormier seasons -- see _maybe_disaster for how
+        this is calibrated against the legacy disaster rate."""
+        if not WEATHER_ENABLED:
+            return
+        c = self.civilization
+        w = c.setdefault("weather", self._weather_default(self.frameTick))
+        if self.frameTick < w.get("exitFrame", 0):
+            return
+        state = w.get("state", "clear")
+        if state == "clear":
+            self._weather_enter("gathering")
+        elif state == "gathering":
+            storminess = WEATHER_SEASON_STORMINESS.get(self._current_season(), 1.0)
+            p_storm = min(0.95, max(0.05, WEATHER_BASE_STORM_CHANCE * storminess))
+            self._weather_enter("storm" if random.random() < p_storm else "clear")
+        elif state == "storm":
+            self._weather_enter("clearing")
+        else:  # "clearing" (or any unknown legacy value) -> clear
+            self._weather_enter("clear")
+
+    def _weather_snapshot(self):
+        """Read-only /state projection of the weather state machine -- same
+        placement pattern (sibling of civilization) as socialTies/
+        districtEcology/shipments."""
+        w = self.civilization.get("weather") or {}
+        return {
+            "state": w.get("state", "clear"),
+            "since": w.get("since", 0),
+            "districts": list(w.get("districts") or []),
+        }
+
+    def _weather_prompt_line(self):
+        """Living-ecosystem Phase 5 (WEATHER_GOVERNANCE_ENABLED): one short
+        think-payload line surfacing storm/clearing conditions so agents can
+        actually reference them in council -- follows the exact
+        chronicle_line/council_digest_line pattern (server renders it ONLY
+        when this returns non-None, so flag-off/clear-weather prompts stay
+        byte-identical to Phase 4 alone). Deliberately silent during "clear"
+        and "gathering" (nothing worth a line yet) to keep this the ONE short
+        line the plan calls for, not a running weather ticker. No new LLM
+        call -- rides the existing think cycle."""
+        if not WEATHER_GOVERNANCE_ENABLED or not WEATHER_ENABLED:
+            return None
+        w = self.civilization.get("weather") or {}
+        state = w.get("state", "clear")
+        if state not in ("storm", "clearing"):
+            return None
+        districts = w.get("districts") or []
+        where = ", ".join(districts) if districts else "the village"
+        if state == "storm":
+            return f"a storm is battering {where} -- gathering there is suppressed"
+        return f"skies are clearing over {where} -- stocks there are recovering faster than usual"
+
     def _gather_yield_bonus(self, agent, resource):
         if not STRUCTURE_EFFECTS_ENABLED:
             return 0
@@ -3562,6 +3902,7 @@ class SimEngine:
             self._nudge_ally(target, agent["name"])
             self._push_memory(target, f"Received {resource_id} from {agent['name']} (bartered, short on {currency})")
             agent["lastTradeRejection"] = None
+            self._emit_shipment(agent.get("currentDistrict"), target.get("currentDistrict"), resource_id)
             return f"{agent['name']} bartered {resource_id} to {target['name']} (short on {currency})"
         agent["resources"][resource_id] -= 1
         target["resources"][resource_id] = target["resources"].get(resource_id, 0) + 1
@@ -3571,6 +3912,7 @@ class SimEngine:
         self._nudge_ally(target, agent["name"])
         self._push_memory(target, f"Bought {resource_id} from {agent['name']} for {price}{suffix}")
         agent["lastTradeRejection"] = None
+        self._emit_shipment(agent.get("currentDistrict"), target.get("currentDistrict"), resource_id)
         term = f" ({rel} price)" if rel != "neutral" else ""
         self._push_activity(
             f"{target['name']} bought {resource_id} from {agent['name']} for {price}{suffix}{term}")
@@ -3731,8 +4073,10 @@ class SimEngine:
             self._mark_all_context_dirty()
         self._tick_spoilage()
         self._tick_structure_decay()
+        self._tick_weather()
         self._maybe_disaster()
         self._tick_comfort_consumption()
+        self._prune_shipments()
 
     def _tick_comfort_consumption(self):
         if not ECONOMY_SINKS_ENABLED:
@@ -3849,27 +4193,74 @@ class SimEngine:
         )
 
     def _maybe_disaster(self):
-        """Rare random structure damage (DISASTER_PROB per goods tick), so
-        decay isn't perfectly predictable and repair stays relevant even in a
-        well-kept village. Logged dramatically; the standard escape applies
-        (repair, or rebuild from the ruin)."""
+        """Rare random structure damage, so decay isn't perfectly predictable
+        and repair stays relevant even in a well-kept village. Logged
+        dramatically; the standard escape applies (repair, or rebuild from
+        the ruin).
+
+        WEATHER_ENABLED off: byte-identical to the pre-Phase-4 behavior --
+        DISASTER_PROB per goods tick, any structure anywhere.
+
+        WEATHER_ENABLED on: damage only fires while civilization["weather"]
+        is in the "storm" state (STORM_DISASTER_PROB per goods tick while
+        storming), preferring a structure inside one of the storm's
+        districts (falling back to any structure if none qualify there) --
+        so the sky effect and the damage event agree on where the storm is.
+
+        Rate calibration (also documented in specs/08-systems-economy.md):
+        model one clear->gathering->(storm->clearing | nothing)->clear cycle
+        per season with P_storm = clip(WEATHER_BASE_STORM_CHANCE *
+        WEATHER_SEASON_STORMINESS[season], 0.05, 0.95) and season-scaled
+        clear dwell. Expected cycle length
+        E[cycle] = E[clear] + E[gathering] + P_storm*(E[storm]+E[clearing]),
+        and the storm-time fraction of that cycle is
+        P_storm*E[storm] / E[cycle] (note the P_storm factor on the
+        numerator too -- only P_storm of cycles pass through storm at all).
+        With the shipped constants this comes out to ~2.2% (spring), ~0.7%
+        (summer), ~3.1% (autumn), ~1.9% (winter) of goods ticks -- averaging
+        ~1.97% across the four equal-length seasons (equal weight is valid
+        since SEASON_FRAMES is the same for all four). The naive analytic
+        pick (STORM_DISASTER_PROB = 0.0049/0.0197 ~= 0.25) undershot in a
+        200k-goods-tick empirical run (mean on-rate ~0.0040 vs the measured
+        legacy off-rate ~0.0051 -- likely correlated-timing effects the
+        independent-cycle model doesn't capture), so the constant was tuned
+        empirically to STORM_DISASTER_PROB = 0.32, which lands the 5-seed
+        mean on-rate at ~0.0051 -- matching the mean off-rate to within ~1%.
+        See the Phase 4 report for the measured on/off rates."""
         c = self.civilization
         candidates = [s for s in c["structures"] if s.get("condition", 100) > 0]
-        if not candidates or random.random() >= DISASTER_PROB:
+        if not candidates:
             return
-        s = random.choice(candidates)
+        if WEATHER_ENABLED:
+            w = c.get("weather") or {}
+            if w.get("state") != "storm":
+                return
+            if random.random() >= STORM_DISASTER_PROB:
+                return
+            storm_districts = set(w.get("districts") or [])
+            localized = [s for s in candidates if s.get("districtId") in storm_districts]
+            pool = localized or candidates
+        else:
+            if random.random() >= DISASTER_PROB:
+                return
+            pool = candidates
+        s = random.choice(pool)
         dmg = random.randint(*DISASTER_DAMAGE)
         s["condition"] = max(0.0, s.get("condition", 100.0) - dmg)
         name = s.get("name") or s.get("type")
         did = s.get("districtId") or "the village"
         line = (f"DISASTER! A storm tears through the {name} in {did} -- "
                 f"{dmg} damage (condition {int(s['condition'])})")
-        if s["condition"] <= 0:
+        ruined = s["condition"] <= 0
+        if ruined:
             s["isRuin"] = True
             line += "; it lies in ruins"
         self._push_activity(line)
         self._log_benchmark("disaster_damage", dmg,
                             {"structure": s.get("type"), "district": did})
+        chron = f"A storm ruined the {name} in {did}." if ruined \
+            else f"A storm damaged the {name} in {did}."
+        self._push_chronicle(chron, kind="disaster")
 
     def _env_shelter_capacity(self):
         """ENV_EFFECTS_ENABLED: sum of `shelter.capacity` across every working
@@ -5020,6 +5411,75 @@ class SimEngine:
         self._push_activity("An ocean caravan launches, consuming " + ", ".join(f"{n} {r}" for r, n in costs.items()))
         return True
 
+    # --- Living-ecosystem Phase 3: cosmetic shipment records ---
+    def _shipment_mode(self, from_district_id, to_district_id):
+        """boat when the shipment crosses a settlement boundary and ocean
+        transit is unlocked (reuses _has_ocean_transit -- the existing
+        caravan foothold), else cart. Purely a display choice; never
+        affects the underlying transfer."""
+        c = self.civilization
+        from_sid = (c["districts"].get(from_district_id) or {}).get("settlementId")
+        to_sid = (c["districts"].get(to_district_id) or {}).get("settlementId")
+        if from_sid and to_sid and from_sid != to_sid and self._has_ocean_transit():
+            return "boat"
+        return "cart"
+
+    def _emit_shipment(self, from_district_id, to_district_id, resource):
+        """Append a short-lived, purely cosmetic in-flight record for the
+        viewer to animate along the road graph (CARAVAN_VISUALS_ENABLED).
+
+        HARD CONSTRAINT: this is called AFTER the resource has already
+        moved between its authoritative owners (agent inventories /
+        district project contributions / stockpile) -- it never gates,
+        delays, or reverses that transfer. Silently skips (no visual, never
+        a fabricated straight line) when the districts match or no road
+        path connects them. Kept off civilization state (self.shipments,
+        not self.civilization) so it is never written to state.db.
+
+        The resolved node path is embedded as `path` ({x,y} waypoints) so
+        the viewer interpolates the exact same route the engine's own
+        road-resolution helper (_road_path_between_districts, backed by the
+        shared ROAD_PATH_CACHE) computed -- no second pathfinder in JS."""
+        if not CARAVAN_VISUALS_ENABLED:
+            return
+        if not from_district_id or not to_district_id or from_district_id == to_district_id:
+            return
+        node_path = self._road_path_between_districts(from_district_id, to_district_id)
+        if not node_path:
+            return
+        c = self.civilization
+        waypoints = [{"x": c["roadNodes"][n]["x"], "y": c["roadNodes"][n]["y"]}
+                     for n in node_path if n in c["roadNodes"]]
+        if len(waypoints) < 2:
+            return
+        self._shipment_seq += 1
+        self.shipments.append({
+            "id": f"ship-{self._shipment_seq}",
+            "fromDistrict": from_district_id,
+            "toDistrict": to_district_id,
+            "resource": resource,
+            "path": waypoints,
+            "startFrame": self.frameTick,
+            "endFrame": self.frameTick + SHIPMENT_TRAVEL_FRAMES,
+            "mode": self._shipment_mode(from_district_id, to_district_id),
+        })
+        if len(self.shipments) > SHIPMENT_RING_CAP:
+            del self.shipments[: len(self.shipments) - SHIPMENT_RING_CAP]
+
+    def _prune_shipments(self):
+        """Age out expired shipments. Called from the existing goods tick
+        (_tick_goods, GOODS_TICK_FRAMES cadence) -- no new timer. The ring
+        cap in _emit_shipment already bounds worst-case size between prunes,
+        so this is hygiene, not a correctness requirement."""
+        if self.shipments:
+            self.shipments = [s for s in self.shipments if s["endFrame"] >= self.frameTick]
+
+    def _shipment_snapshot(self):
+        """Read-only /state projection: only still-live shipments."""
+        if not CARAVAN_VISUALS_ENABLED or not self.shipments:
+            return []
+        return [s for s in self.shipments if s["endFrame"] >= self.frameTick]
+
     def _propose_treaty(self, agent, decision):
         if not path1_on("PATH1_DIPLOMACY_ENABLED"):
             return f"{agent['name']} cannot propose treaties"
@@ -6011,6 +6471,19 @@ class SimEngine:
                 self._log_benchmark("rule_enacted", len(c["rules"]), {
                     "id": rule["id"], "yes": yes, "no": no, "kind": rule.get("kind")})
                 self._apply_governance_rule(rule)
+                # Living-ecosystem Phase 5: the emergency storm-rationing
+                # auto-proposal (see _maybe_advance_rules) mints ids prefixed
+                # "emerg_" -- id-prefix detection because _propose_rule's
+                # pendingRules entry only whitelists id/name/kind/value/
+                # description/proposedBy/enacted/votes(+effect/supersedes),
+                # so an arbitrary extra key on the input rule dict would not
+                # have survived to this enacted copy. Chronicle milestone so
+                # the village's disaster response becomes recorded history,
+                # same pattern as the Phase 1 disaster/district_founded kinds.
+                if isinstance(rule.get("id"), str) and rule["id"].startswith("emerg_"):
+                    self._push_chronicle(
+                        f'The village enacted "{rule["name"]}" in response to storm-driven scarcity.',
+                        kind="emergency_measure")
             return "enacted"
         if no >= quorum:
             c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
@@ -6202,6 +6675,21 @@ class SimEngine:
         rule = next((r for r in self.civilization["rules"]
                      if r["kind"] == "resource_tax" and r.get("enacted")), None)
         return (rule.get("value") or 0) if rule else 0
+
+    def _active_or_pending_rationing(self):
+        """Living-ecosystem Phase 5: True if a "rationing" rule is already
+        active or already awaiting a vote, LLM-driven or auto-proposed alike.
+        Governance-churn guard for the emergency branch in
+        _maybe_advance_rules -- without this, a storm that lingers for its
+        full WEATHER_DWELL_TICKS window would re-propose a fresh emergency
+        rationing rule every RULE_PROPOSE_COOLDOWN, crowding out ordinary
+        priority/tax governance and pressuring MAX_PENDING_RULES."""
+        c = self.civilization
+        if any(r.get("kind") == "rationing" for r in c["rules"]):
+            return True
+        if any(r.get("kind") == "rationing" for r in c["pendingRules"]):
+            return True
+        return False
 
     def _enforce_resource_tax(self, agent, res):
         tax = self._active_resource_tax()
@@ -9962,6 +10450,9 @@ class SimEngine:
         _validate_road_graph(c["roadNodes"], c["roadEdges"])
         self._push_activity(f"The village claims new land in the frontier for a {kind} district ({did}).")
         self._log_benchmark("district_founded", len(c["districts"]), {"id": did, "kind": kind})
+        if FOUNDING_EVENTS_ENABLED:
+            label = c["districts"][did]["label"]
+            self._push_chronicle(f"{label} was founded on the frontier.", kind="district_founded")
         if ECOLOGY_ENABLED:
             self._ensure_district_stocks()
             new_stocks = self._init_district_stocks({did: c["districts"][did]}, c["resourceRegistry"])
@@ -10072,6 +10563,56 @@ class SimEngine:
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
         if not elder:
             return
+        # Living-ecosystem Phase 5 (WEATHER_GOVERNANCE_ENABLED): a storm
+        # driving an affected district's ecology below STOCK_LOW_RATIO gets a
+        # deterministic emergency response -- an auto-proposed "rationing"
+        # rule (an EXISTING RULE_KIND, LIFECYCLE_ENABLED already default
+        # True; never a new kind). Checked first (ahead of the routine
+        # tax/priority churn below) so a real emergency preempts ordinary
+        # governance for this cooldown window, but it only ever fires when
+        # the condition is real -- same shared RULE_PROPOSE_COOLDOWN/
+        # lastRuleAttemptFrame gate above applies to every branch here, so
+        # this cannot out-cadence the others. _active_or_pending_rationing
+        # additionally stops it from re-proposing every cooldown window while
+        # a lingering storm keeps the condition true (governance-churn
+        # guard -- see plan-living-ecosystem-5's "governance churn" risk).
+        if WEATHER_GOVERNANCE_ENABLED and WEATHER_ENABLED and LIFECYCLE_ENABLED:
+            w = c.get("weather") or {}
+            if w.get("state") in ("storm", "clearing") and not self._active_or_pending_rationing():
+                storm_districts = w.get("districts") or []
+                scarce = any(
+                    (ratio := self._district_ecology_ratio(did)) is not None and ratio < STOCK_LOW_RATIO
+                    for did in storm_districts
+                )
+                if scarce:
+                    # Rule ids are globally non-reusable (see
+                    # _ensure_constitution) -- mint a unique per-enactment
+                    # instance id via the same shared counter helper as the
+                    # priority/tax branches, NEVER a deterministic id (that
+                    # would recreate the permanently-blocked-id loop fixed in
+                    # 6a78162 the moment this rationing rule is ever
+                    # repealed).
+                    rule = {
+                        "id": f"emerg_{self._next_rule_seq_token('emergencyRuleSeq')}",
+                        "name": "Storm Emergency Rationing",
+                        "kind": "rationing",
+                        "value": max(1, RATIONING_WITHDRAW_CAP - 1),
+                        "description": "Storm-driven scarcity: cap stockpile withdrawals until supplies recover.",
+                    }
+                    if self._validate_rule(rule):
+                        self.apply_decision(elder, {
+                            "action": "propose_rule",
+                            "rule": rule,
+                            "reasoning": "The storm has driven local stocks critically low -- "
+                                         "proposing emergency rationing.",
+                        })
+                        return
+                    # Defensive: known-invalid (e.g. pending/active rule queue
+                    # full) -- don't knowingly emit an invalid action; still
+                    # mark this as an attempt so the cooldown advances
+                    # normally (same discipline as every other branch here).
+                    c["lastRuleAttemptFrame"] = self.frameTick
+                    return
         # Sid-parity Phase 2: once a tax exists, propose a priority rule for
         # the scarcest unmet build resource (or wood) so governance diversifies.
         if self._active_resource_tax() > 0 and not self._active_priority_resource():
@@ -10564,6 +11105,7 @@ class SimEngine:
                 self._push_memory(target, f"Received {give} from {agent['name']}")
                 summary = f"{agent['name']} traded {give} to {target['name']}"
                 resource_acted = give
+                self._emit_shipment(agent.get("currentDistrict"), target.get("currentDistrict"), give)
                 if ECONOMY_ENABLED:
                     agent["lastTradeRejection"] = None
             elif target:
@@ -11981,6 +12523,7 @@ class SimEngine:
             "skills": {k: round(v, 1) for k, v in agent["skills"].items()} if CULTURE_ENABLED else None,
             "chronicle_line": self._chronicle_prompt_line() if CULTURE_ENABLED else None,
             "council_digest_line": self._council_digest_prompt_line(),
+            "weather_line": self._weather_prompt_line(),
             "library_lessons": (self._library_lessons(agent.get("currentDistrict"))
                                 if CULTURE_ENABLED and LIBRARY_SCALING_ENABLED else None),
             "path1_tool_line": tool_line,
@@ -12729,10 +13272,20 @@ class SimEngine:
                 civ.setdefault("lastReorgFrame", 0)
                 civ.setdefault("lastReorgCheckFrame", 0)
                 civ.setdefault("lastReorgNoRoomFrame", 0)
+                # Living-ecosystem Phase 4: weather state machine. Purely
+                # additive/setdefault-only back-compat like every other
+                # phase -- an old save simply starts at "clear" (frame 0
+                # backfill; _tick_weather advances it on the next goods
+                # tick using the real, post-restore frameTick). Critically,
+                # this setdefault NEVER overwrites an already-persisted
+                # weather value, so a save that already has real weather
+                # state resumes it unchanged (no re-roll on load).
+                civ.setdefault("weather", self._weather_default(0))
                 civ.setdefault("lastRoleSwitchFrame", 0)
                 civ.setdefault("lastRuleAttemptFrame", 0)
                 civ.setdefault("priorityRuleSeq", 0)
                 civ.setdefault("taxRuleSeq", 0)
+                civ.setdefault("emergencyRuleSeq", 0)
                 civ.setdefault("roleNeedSinceFrame", None)
                 civ.setdefault("lastRoleRebalanceLatency", None)
                 # Phase 2 role registry migration: older saves only know the
@@ -13077,6 +13630,8 @@ class SimEngine:
             self._module_pulse_work = []
             self._module_refresh_failures = 0
             self._module_note_ages = []
+            self.shipments = []
+            self._shipment_seq = 0
             ms = self.d.get("memory_store")
             if ms is not None:
                 try:
@@ -13292,6 +13847,7 @@ class SimEngine:
                         "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
                         "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
                         "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
+                        "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
                         "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
                         "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
                         "PATH1_ENABLED": PATH1_ENABLED,
@@ -13307,6 +13863,11 @@ class SimEngine:
                         "TRANSIT_ENABLED": TRANSIT_ENABLED,
                         "ECONOMY_SINKS_ENABLED": ECONOMY_SINKS_ENABLED,
                         "WIKI_MEMORY": WIKI_MEMORY,
+                        "CROP_GROWTH_ENABLED": CROP_GROWTH_ENABLED,
+                        "WILDLIFE_ENABLED": WILDLIFE_ENABLED,
+                        "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
+                        "WEATHER_ENABLED": WEATHER_ENABLED,
+                        "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
                     },
                 },
             }
@@ -13314,4 +13875,12 @@ class SimEngine:
                 snapshot["socialTies"] = self._social_ties_snapshot()
             if CHRONICLE_ENABLED and CULTURE_ENABLED:
                 snapshot["chronicle"] = self._chronicle_snapshot()
+            if CROP_GROWTH_ENABLED or WILDLIFE_ENABLED:
+                # Shared prerequisite for both consumers (2A) -- omitted
+                # entirely when neither viewer feature is on.
+                snapshot["districtEcology"] = self._district_ecology_snapshot()
+            if CARAVAN_VISUALS_ENABLED:
+                snapshot["shipments"] = self._shipment_snapshot()
+            if WEATHER_ENABLED:
+                snapshot["weather"] = self._weather_snapshot()
             return snapshot

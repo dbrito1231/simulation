@@ -227,14 +227,24 @@ sprite-design-only turn that follows a blueprint's mechanical approval.
 (name/role/skill/personality/memory), vitals (resources/hunger/health/
 relationships/beliefs), spatial (nearby agents/zone/district/known districts/
 local stocks/terraform targets), flag-gated single lines (`season_line`,
-`prices_line`, `chronicle_line`, `path1_lines`, `level_line` — each renders
-empty when its owning flag is off so prompts stay byte-identical across flag
-states, per `build_user_prompt` server.py:2787-2904), build state
+`prices_line`, `weather_line`, `chronicle_line`, `path1_lines`, `level_line` —
+each renders empty when its owning flag is off so prompts stay byte-identical
+across flag states, per `build_user_prompt` server.py:2787-2904), build state
 (structures/active project/progress), civilization state (directive,
 invention status, commitment, idle agents, known resources/recipes, pending/
 rejected blueprints/recipes/rules, reserved structure ids), social (recent
 conversations, inbox, module reports), a `behavior_nudge` line, and finally
 `available_actions`.
+
+`weather_line` (living-ecosystem Phase 5, `WEATHER_GOVERNANCE_ENABLED`):
+`_weather_prompt_line()` (sim_engine.py) returns one short "Weather: ..."
+line — but only while `civilization["weather"]["state"]` is `"storm"` or
+`"clearing"`; `None` (and so an empty template slot) the rest of the time,
+including whenever the flag or `WEATHER_ENABLED` is off. Follows the exact
+`chronicle_line`/`council_digest_line` pattern (engine computes the string,
+server folds it in only when set) and rides the existing think cycle — no new
+LLM call, no new context section, just this one line so agents can reference
+storm conditions in council.
 
 ### Daily Council prompt contract
 
