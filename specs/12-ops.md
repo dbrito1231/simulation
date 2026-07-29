@@ -131,7 +131,14 @@ folder for its lifetime.
     Phase 4's `agent_vitals`/`grant_resource`/`structure_condition` write only
     the `applied` status (they are irreversible, one-shot, and `public: True`
     — there is no timed/pending state of theirs for `replaced`/`revoked`/
-    `restore-closed` to apply to). Phase 6's `weather_override` reuses this
+    `restore-closed` to apply to). Huntable-wildlife god kinds
+    (`wildlife_spawn` / `wildlife_despawn` / `wildlife_set_hp` —
+    [02-engine-core.md](02-engine-core.md#sovereign-god-mode-wildlife-kinds))
+    follow the same irreversible one-shot pattern: each successful apply
+    writes exactly one `divine.jsonl` `"applied"` record (`public: True`)
+    with `kind` and `normalized_command`/`outcome` describing the spawn,
+    despawn, or HP mutation; they never write `replaced`/`revoked`/
+    `restore-closed`/`cancelled`. Phase 6's `weather_override` reuses this
     same status vocabulary rather than adding new values: `applied` on entry,
     `expired`/`restore-closed`/`cancelled` on close (all three routed through
     `_close_weather_override`, which — unlike `_close_story_event` — always

@@ -88,7 +88,10 @@ agent think cycle above: `/control/god/*` (server.py), gated by
 enters `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT`/`apply_decision`/
 `available_actions`/`ACTION_LABELS` — the action-sync invariant above does not
 apply to it, by design (a future agent-facing action, e.g. `pray`, would be a
-separate change that does).
+separate change that does). God wildlife kinds (`wildlife_spawn`,
+`wildlife_despawn`, `wildlife_set_hp` — [02-engine-core.md](02-engine-core.md))
+are control-plane interventions under this same rule: they never join the
+decision action-sync set.
 
 - server.py checks `X-God-Token` (constant-time compare) and the module flag
   before a request ever reaches the engine; every God route acquires
@@ -166,7 +169,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `ECONOMY_SINKS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WIKI_MEMORY` | False | yes | [03](03-cognition.md) |
 | `CROP_GROWTH_ENABLED` | True | yes | [05](05-world.md) |
-| `WILDLIFE_ENABLED` | True | yes | [05](05-world.md) |
+| `WILDLIFE_ENABLED` | True | yes | [05](05-world.md) (authoritative fauna + hunt + motion; also [02](02-engine-core.md), [07](07-actions.md), [08](08-systems-economy.md), [11](11-viewer.md)) |
 | `CARAVAN_VISUALS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WEATHER_ENABLED` | True | yes | [05](05-world.md) |
 | `WEATHER_GOVERNANCE_ENABLED` | True | yes | [05](05-world.md) |
