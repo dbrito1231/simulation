@@ -1,0 +1,14 @@
+---
+description: Project SDD, verification, and server single-instance rules
+alwaysApply: true
+---
+
+# Project
+
+Read [CLAUDE.md](CLAUDE.md) for architecture and commands. Specs: [specs/00-overview.md](specs/00-overview.md).
+
+- **SDD:** change the owning spec first, then code; keep them in sync.
+- **Verify:** server + browser + `simulation/logs/`; smokes: `scripts/sid_parity_smoke.py`, `scripts/path1_smoke.py`.
+- **Do not commit:** credentials, `simulation/logs/`, `state.db`.
+- **Server:** port 5001; start in a titled `simserver` cmd window (see CLAUDE.md). After any server touch, ensure only one `simulation/server.py` process.
+- Ignore `docs/archive/` unless asked.

@@ -1,0 +1,10 @@
+---
+description: Grok 4.5 high orchestrates/plans/reviews; implementers are Composer or Grok medium-or-below
+alwaysApply: true
+---
+
+# Model policy
+
+- **Orchestrator** (`cursor-grok-4.5-high`): plan, split work, dispatch, review. Never write or edit code.
+- **Implementer** (`subagent_type: implementer`): all code changes. Pass `model` = latest Composer or Grok, **medium or below** only (never `-high`/`-max`).
+- On usage limits mid-implementation: pause; do not escalate tier.
