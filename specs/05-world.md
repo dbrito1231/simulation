@@ -7,10 +7,11 @@ zone kinds, ecology stocks/regrow/terraform, structure registry/levels/upgrades,
 terrain grid + composable blocks (mechanics), cemetery/grave grid.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index (semantics of
 `ECOLOGY_ENABLED`/`ROADS_ENABLED`/`STRUCTURE_UPGRADES_ENABLED`/`CEMETERY_ENABLED`/
-`TERRAIN_TILES_ENABLED`/`COMPOSABLE_BUILD_ENABLED` live in their owning specs);
-[10-path1.md](10-path1.md) for Path-1 flag semantics (industry, tool tiers, diplomacy);
-[07-actions.md](07-actions.md) for the build/terraform/block/dig actions;
-[08-systems-economy.md](08-systems-economy.md) for structure decay/repair/upkeep detail.
+`TERRAIN_TILES_ENABLED`/`COMPOSABLE_BUILD_ENABLED`/`WILDLIFE_ENABLED` live in their
+owning specs); [10-path1.md](10-path1.md) for Path-1 flag semantics (industry, tool
+tiers, diplomacy); [07-actions.md](07-actions.md) for the build/terraform/block/dig/
+hunt actions; [08-systems-economy.md](08-systems-economy.md) for structure
+decay/repair/upkeep detail and hunt yields.
 
 ## World geometry
 
@@ -195,9 +196,35 @@ resource and are omitted. Omitted entirely when both flags are off.
 - The projection is computed inside `snapshot()` itself (no new engine tick);
   it is cheap (one pass over already-in-memory `districtStocks`) and safe to
   recompute on every poll since hysteresis state is idempotent between calls.
-- Consumers: viewer crop/tree growth-stage terrain and ambient-wildlife
-  density both key off this same `stage`, per district — see
+- Consumers: viewer crop/tree growth-stage terrain and huntable-wildlife
+  spawn density both key off this same `stage`, per district — see
   [11-viewer.md](11-viewer.md).
+
+## Huntable wildlife (`WILDLIFE_ENABLED`)
+
+`WILDLIFE_ENABLED` (default True; flag index [01-architecture.md](01-architecture.md))
+gates the **server-authoritative** fauna subsystem: engine-owned creature
+state in `civilization["wildlife"]`, every-tick motion (`_move_wildlife`),
+slower spawn/respawn/migration (`_tick_huntable_wildlife`), the agent action
+`hunt_wildlife`, hunter specialty yields (`meat` / `fish`), and the viewer
+`/state` `wildlife[]` projection. Off → no fauna state, no hunt in
+`available_actions`, viewer draw no-ops.
+
+This is **not** Path-1's `_tick_wildlife` forest-attack pressure event
+(gated by `PRESSURE_LOOP_ENABLED` — [10-path1.md](10-path1.md)); the names
+are adjacent but the systems are unrelated.
+
+Full tick/combat/migration/god-kind detail:
+[02-engine-core.md](02-engine-core.md#huntable-wildlife-wildlife_enabled).
+Yield table and `meat` edible:
+[08-systems-economy.md](08-systems-economy.md#huntable-wildlife-yields-wildlife_enabled).
+Viewer contract: [11-viewer.md](11-viewer.md#ambient-wildlife-wildlife_enabled).
+Action: [07-actions.md](07-actions.md). Role: [06-agents.md](06-agents.md).
+
+`districtEcology` stage still drives per-district spawn caps
+(`WILDLIFE_STAGE_COUNT` / `WILDLIFE_CAP_PER_DISTRICT = 4`); fauna population
+itself is separate from `districtStocks` (killing a creature does not
+decrement ecology gather stocks).
 
 ## Structures
 

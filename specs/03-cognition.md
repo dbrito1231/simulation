@@ -159,7 +159,7 @@ the mode were `"json_object"`, or `None` if `"off"` or auto-disabled.
 
 `DECISION_SCHEMA` (server.py:780-839): `additionalProperties: False`;
 `required: ["action", "reasoning"]`. Key properties: `action` (enum =
-`DECISION_ACTIONS`, 42 entries — see specs/07-actions.md, not repeated here),
+`DECISION_ACTIONS`, 43 entries — see specs/07-actions.md, not repeated here),
 `target`/`target_district`/`message`/`new_role` (nullable strings),
 `relationship_update` (nullable object, values constrained to
 ally/neutral/rival), `blueprint` (nullable object: id/name/needs/new_resources/
