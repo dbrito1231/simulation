@@ -84,8 +84,16 @@ for movement and the viewer.
 
 The session agenda always covers current world status, ongoing/stalled projects,
 resource limitations, active rules, ideas/proposals, and agents' feelings about
-the village's evolution. If `_invention_required()` is true, the demand appears
-as an agenda item. A succession emergency adds `leadership_vacancy`, explicitly
+the village's evolution. The **limitations** topic reports a resource as low
+stores only when it is *obtainable* (gather zone, recipe or pending recipe,
+structure function that produces it, or — for `coin` only — an active mint) and
+**village-wide holdings** (stockpile plus every agent inventory, deliberately
+excluding `districtStocks` in-ground deposits, which have their own prompt
+channel) are at or below `DAILY_COUNCIL_SCARCITY_THRESHOLD` (default 3). Up to
+`DAILY_COUNCIL_SCARCITY_TOPICS` (default 8) scarce ids and active projects are
+listed. `EDIBLE_RESERVE` is **not** used for this agenda scan. If
+`_invention_required()` is true, the demand appears as an agenda item. A
+succession emergency adds `leadership_vacancy`, explicitly
 naming every current candidate and directing discussion to compare their
 suitability; it does not replace any normal topic. With this flag on,
 `_maybe_invention_backstop()` does not
@@ -166,7 +174,8 @@ retention keeps the newest 30 meeting ids, as specified in [02](02-engine-core.m
 | Guard | Constant | Behavior |
 |---|---|---|
 | Approval ceiling | `MAX_APPROVED_CUSTOM = 15` | `_maybe_retire_blueprint`: once reached, retires the oldest *built* custom type from the registry to free a slot. Retirement means the recipe is forgotten; standing structures keep their name/visuals. Code that attaches semantics to a registry entry must tolerate its absence or recreate a minimal entry from a standing instance before attaching them. |
-| Resource/recipe ceilings | `MAX_CUSTOM_RESOURCES = 10`, `MAX_CUSTOM_RECIPES = 12` | `_validate_blueprint`/`_validate_recipe` reject new proposals past these. |
+| Resource/recipe ceilings | `MAX_CUSTOM_RECIPES = 12` | `_validate_recipe` rejects new recipe proposals past this. `MAX_CUSTOM_RESOURCES = 10` is **not enforced** — `validate_blueprint` (server.py) ignores the cap by policy; invention is unlimited. |
+| Orphan resource retirement | `CUSTOM_RESOURCE_RETIRE_FRAMES = STALL_THRESHOLD * 120` (~40 min) | `_maybe_retire_custom_resource`: prunes `resourceRegistry` + `stockpile` + `districtStocks` for any custom resource unreferenced for the full window; no cap, stamp-on-first-sight clock (ids restored from old saves start their clock at first tick after deploy), retired ids re-inventable (no tombstone). Predicate: `_custom_resource_referenced` (shared obtainability spine via `_resource_is_obtainable`). See approval-ceiling row above for blueprint retirement — standing structures still protect their produce ids even after registry archival. |
 | Rejection amnesty | `BLUEPRINT_AMNESTY_FRAMES = STALL_THRESHOLD * 60` (~20 min) | `_maybe_amnesty_rejected_blueprints`: a rejected id is no longer a permanent blacklist — it expires and can be re-proposed. |
 | Sage review timeout | `SAGE_REVIEW_TIMEOUT_FRAMES = STALL_THRESHOLD * 20` (~6.7 min) | `_maybe_skip_sage_review`: if no living, non-incapacitated elder exists, a pending review auto-skips rather than blocking forever. |
 | Denied-review amnesty | same `BLUEPRINT_AMNESTY_FRAMES` | `_maybe_amnesty_denied_sage_reviews`: a sage-denied proposal is withdrawn and blacklisted (subject to the same rejection amnesty) after the window. |

@@ -1981,20 +1981,16 @@ function customProjectIds() {
 }
 
 function totalVillageResources() {
-  const reg = resourceRegistry();
-  let total = 0;
-  for (const agent of getAgents()) {
-    const res = agent.resources || {};
-    for (const key of Object.keys(reg)) total += res[key] || 0;
-  }
-  return total;
+  const breakdown = villageResourceBreakdown();
+  return Object.values(breakdown).reduce((sum, n) => sum + n, 0);
 }
 
 function villageResourceBreakdown() {
   const reg = resourceRegistry();
+  const stockpile = getCiv().stockpile || {};
   const out = {};
   for (const key of Object.keys(reg)) {
-    let n = 0;
+    let n = (stockpile[key] || 0);
     for (const agent of getAgents()) n += (agent.resources || {})[key] || 0;
     if (n > 0) out[key] = n;
   }
@@ -2580,6 +2576,7 @@ function renderSidebar() {
 
   // --- Civilization detail rows (change-detected) ---
   const sidebarKey = JSON.stringify([
+    // villageResourceBreakdown() is stockpile's proxy in this key (stockpile omitted — ~40 keys, changes every poll)
     civ.resourceRegistry, villageResourceBreakdown(), customProjectIds(),
     civ.recipes, civ.rules, civ.constitution, civ.pendingRules, civ.pendingBlueprints,
     world.benchmarks, civ.collectAttempts, civ.collectSuccesses,

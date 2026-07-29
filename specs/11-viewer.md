@@ -190,7 +190,18 @@ mechanism the season tint already uses.
     (`#activityLog`, the world-event feed, `#actList`). Civilization and
     Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (index.html
     ~142-153), so they split the space remaining after Time equally and each
-    scrolls independently. A third scrollable **Chronicle** panel is a curated
+    scrolls independently. The Civilization panel's **Village resources**
+    row (`#civResources` headline + `#civResourceList` chips) shows
+    `civ.stockpile` **plus** every agent inventory, keyed through
+    `resourceRegistry`, filtered to `n > 0` (retired or zero holdings never
+    render), with chip colours from `resourceRegistry`. The headline count
+    (`totalVillageResources()`) is the sum of `villageResourceBreakdown()` so
+    the number and chips cannot disagree. Sidebar change detection includes
+    `villageResourceBreakdown()` inside `sidebarKey` (index.html ~2582); the
+    raw `civ.stockpile` dict is intentionally **not** in the key — it is a
+    ~40-key map that changes nearly every tick and would force a sidebar
+    re-render on every poll; the breakdown is the stockpile's proxy in this
+    key. A third scrollable **Chronicle** panel is a curated
     projection of top-level `world.chronicle`, distinct from the raw Activity
     feed. It preserves its scroll position across snapshot updates and is
     hidden cleanly when `CHRONICLE_ENABLED` is off.
