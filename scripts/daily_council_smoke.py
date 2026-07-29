@@ -97,6 +97,42 @@ def seat_everyone(engine):
         agent["targetX"], agent["targetY"] = seat["x"], seat["y"]
 
 
+def exercise_scarcity_filtering(checks):
+    """Part A: obtainable-only scarce list and village-wide holdings."""
+    engine = make_engine()
+    c = engine.civilization
+    c["resourceRegistry"]["ghost_fish"] = {
+        "name": "Ghost Fish", "gatherZone": None, "color": "#607D8B", "crafted": True,
+    }
+    c["stockpile"]["ghost_fish"] = 0
+    c["stockpile"]["gold"] = 0
+    engine._invention_required = lambda: False
+    engine._maybe_welcome_newcomer = lambda: None
+    engine.frameTick = se.DAY_FRAMES - 1
+    engine._tick_once()
+    council = engine.civilization.get("dailyCouncil")
+    checks.check(council is not None, "scarcity_filter_convenes")
+    limitations = next(
+        item["detail"] for item in council["agenda"] if item["topic"] == "limitations")
+    checks.check("gold" in limitations, "obtainable_zero_stockpile_reports", limitations)
+    checks.check("ghost_fish" not in limitations, "orphan_resource_excluded", limitations)
+
+    engine2 = make_engine()
+    c2 = engine2.civilization
+    c2["stockpile"]["gold"] = 0
+    engine2.agents[0]["resources"]["gold"] = 50
+    engine2._invention_required = lambda: False
+    engine2._maybe_welcome_newcomer = lambda: None
+    engine2.frameTick = se.DAY_FRAMES - 1
+    engine2._tick_once()
+    council2 = engine2.civilization.get("dailyCouncil")
+    checks.check(council2 is not None, "village_holdings_convenes")
+    limitations2 = next(
+        item["detail"] for item in council2["agenda"] if item["topic"] == "limitations")
+    checks.check("gold" not in limitations2,
+                 "agent_inventory_counts_toward_holdings", limitations2)
+
+
 def exercise_main_session(checks, db_path):
     engine = make_engine()
     dead = engine.agents[0]
@@ -576,7 +612,7 @@ def exercise_digest_prompt_and_sync(checks):
             action_names = ast.literal_eval(node.value)
             break
     actions = {"council_speak", "council_propose", "council_vote"}
-    checks.check(action_names is not None and len(action_names) == 42
+    checks.check(action_names is not None and len(action_names) == 43
                  and actions.issubset(action_names),
                  "action_sync_decision_actions_and_count", len(action_names or []))
     checks.check(all(action in prompts.SYSTEM_PROMPT and action in prompts.COUNCIL_SYSTEM_PROMPT
@@ -685,6 +721,7 @@ def main():
         }
     try:
         if se.DAILY_COUNCIL_ENABLED:
+            exercise_scarcity_filtering(checks)
             exercise_main_session(checks, temp_dir / "state.db")
             exercise_ttls(checks)
             exercise_invention_suppression(checks)

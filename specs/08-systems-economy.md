@@ -27,7 +27,7 @@ Runs every tick via `_update_survival(agent)` (sim_engine.py:1837), gated
 | `COLLAPSE_REGEN` | 0.5/tick | health regen while incapacitated |
 | `COLLAPSE_REVIVE_HEALTH` | 15 | health at which a collapsed agent revives |
 | `REVIVE_HUNGER` | 35 | hunger floor on revival (else 0-hunger re-collapse in ~8s) |
-| `EDIBLE_RESERVE` | 3 | food/fish/meat an agent keeps back from builds/auto-share |
+| `EDIBLE_RESERVE` | 3 | per-agent carry reserve for `EDIBLE_RESOURCES` only — food/fish/meat an agent keeps back from builds/auto-share; not used for village-wide scarcity or Daily Council agenda |
 | `SHARE_RADIUS` | 120px | range for the anti-hoarding auto-share backstop |
 | `STARVING_HUNGER` | 10 | below this a foodless agent deterministically seeks food |
 
@@ -320,10 +320,13 @@ can reconstruct the full picture, not just the ratio.
 
 `ECONOMY_SINKS_ENABLED` defaults to True. Repairs prefer one plank when
 available; tier-2+ projects add one crafted material (planks, then bricks,
-then tools); and comfort consumption drains one pottery or dried fish per
-living agent every `COMFORT_EVERY_N_GOODS_TICKS = 4` goods ticks (i.e. every
-~2 real minutes), giving a small hunger (+2) and health (+1) benefit, capped
-at one unit per agent per firing.
+then tools); and comfort consumption *opportunistically* drains one `pottery`
+or `dried_fish` per living agent every `COMFORT_EVERY_N_GOODS_TICKS = 4`
+goods ticks (i.e. every ~2 real minutes) when stock is available — neither id
+is seeded with a producer; the sink fires only if an invention supplies them,
+and either id may be pruned by the orphan GC (`_maybe_retire_custom_resource`).
+Each firing gives a small hunger (+2) and health (+1) benefit, capped at one
+unit per agent per firing.
 
 Drain arithmetic (why every 4th tick): a goods tick fires every 30 real
 seconds, so per-tick consumption would drain ~1,080 goods/hour at ~9 living
@@ -499,7 +502,8 @@ crafting, invention, and cognition's `known_resource_ids` all read from
 (seeded from `BASE_RESOURCES`/`CRAFTED_RESOURCES` plus any invented custom
 resources). There is no separate "known resource" allowlist for God mode; a
 `resourceId` that has never been seeded or invented is rejected as "unknown
-resource id" before any other check.
+resource id" before any other check. A retired custom resource id fails this
+gate until it is re-invented.
 
 **Caps.** `amount` is a positive integer, capped per command at
 `GOD_GRANT_PER_COMMAND_CAP = 200`. A second, cumulative cap,

@@ -816,6 +816,10 @@ MAX_CUSTOM_RECIPES = 12
 # elder's verdict means something across many think cycles, short enough that
 # a 9h soak sees several amnesty waves).
 BLUEPRINT_AMNESTY_FRAMES = STALL_THRESHOLD * 60
+# Orphan custom resources (registry entry with no references) retire after this
+# window (~40 min at 30 ticks/s: ~2× the blueprint amnesty, so a resource can
+# sit unused between approval and first build without being pruned prematurely).
+CUSTOM_RESOURCE_RETIRE_FRAMES = STALL_THRESHOLD * 120
 # A pending blueprint whose sage review never lands (elder offline/incapacitated
 # the whole window) auto-skips the review after this many frames rather than
 # blocking approval forever -- same deadlock-avoidance shape as the amnesty
@@ -1090,6 +1094,9 @@ DAILY_COUNCIL_SESSION_TTL_FRAMES = STALL_THRESHOLD * 30
 DAILY_COUNCIL_LOG_CAP = 12
 DAILY_COUNCIL_DIGEST_CAP = 5
 DAILY_COUNCIL_TRANSCRIPT_RETENTION_MEETINGS = 30
+# Inherited from EDIBLE_RESERVE misuse at the agenda scan; now independently tunable.
+DAILY_COUNCIL_SCARCITY_THRESHOLD = 3   # village-wide holdings at/below this read as "low stores"
+DAILY_COUNCIL_SCARCITY_TOPICS = 8      # caps scarce ids and active_projects slices in _daily_council_agenda
 # A council with no verdict dissolves after this many frames (STALL_THRESHOLD=600
 # frames = 20s at 30fps, so x20 = ~6.7 min). Sized for THINKING_TIMEOUT_S=75s
 # per member (server.py) queued behind MAX_CONCURRENT_LLM=2 workers, plus the
@@ -2960,6 +2967,31 @@ class SimEngine:
         d = self.civilization["resourceRegistry"].get(rid)
         return d.get("gatherZone") if d else None
 
+    def _resource_is_obtainable(self, rid):
+        if self._gather_zone_for_resource(rid):
+            return True
+        c = self.civilization
+        if rid in self.RECIPES or any(p["id"] == rid for p in c.get("pendingRecipes") or []):
+            return True
+        type_ids = set(c.get("projectRegistry") or {})
+        type_ids.update(s.get("type") for s in c.get("structures") or [] if s.get("type"))
+        for type_id in type_ids:
+            if self._resource_in_function(rid, self._structure_function_for_type(type_id)):
+                return True
+        # The one exception to "producers must be declarative": coin is minted
+        # deterministically while a working Mint exists (see _maybe_mint_coin).
+        if ECONOMY_ENABLED and rid == "coin" and self._mint_active():
+            return True
+        return False
+
+    def _village_holdings(self, rid):
+        """Stockpile plus every agent inventory; excludes districtStocks (in-ground
+        deposits, not village stores — those feed _format_district_stocks_for_prompt)."""
+        c = self.civilization
+        total = (c.get("stockpile") or {}).get(rid, 0)
+        total += sum(a["resources"].get(rid, 0) for a in self.agents)
+        return total
+
     def _get_zone_resources(self, zone):
         return [rid for rid, d in self.civilization["resourceRegistry"].items()
                 if d.get("gatherZone") == zone]
@@ -3563,9 +3595,7 @@ class SimEngine:
                    for s in self.civilization["structures"])
 
     # --- structure function registry (Phase A consequence engine) ---
-    def _get_structure_function(self, type_):
-        if not STRUCTURE_EFFECTS_ENABLED:
-            return {}
+    def _structure_function_for_type(self, type_):
         c = self.civilization
         tmpl = c["projectRegistry"].get(type_) or PROJECT_TEMPLATES.get(type_) or {}
         fn = tmpl.get("function")
@@ -3576,6 +3606,30 @@ class SimEngine:
         if tmpl.get("custom"):
             return {"produces": [dict(LEGACY_CUSTOM_PRODUCE)]}
         return {}
+
+    def _resource_in_function(self, rid, fn):
+        if not fn:
+            return False
+        for prod in fn.get("produces") or []:
+            if prod.get("resource") == rid:
+                return True
+        for boost in fn.get("boosts") or []:
+            if rid in (boost.get("resources") or []):
+                return True
+        for store in fn.get("stores") or []:
+            if store.get("resource") == rid:
+                return True
+        upkeep = fn.get("upkeep")
+        if isinstance(upkeep, dict) and upkeep.get("resource") == rid:
+            return True
+        for unlock in fn.get("unlocks") or []:
+            if unlock.get("kind") == "transit":
+                if rid in (unlock.get("consumes") or {}):
+                    return True
+        return False
+
+    def _get_structure_function(self, type_):
+        return self._structure_function_for_type(type_) if STRUCTURE_EFFECTS_ENABLED else {}
 
     def _canonical_effect_vector(self, function):
         return self.d["canonical_effect_vector"](function)
@@ -7043,6 +7097,7 @@ class SimEngine:
             return f"{agent['name']} rejected the {rc['name']} recipe"
         c["resourceRegistry"][rc["id"]] = {"name": rc["name"], "gatherZone": None,
                                            "color": rc["color"], "crafted": True}
+        c.setdefault("customResourceAddedFrame", {})[rc["id"]] = self.frameTick
         self.RECIPES[rc["id"]] = {"name": rc["name"], "inputs": dict(rc["inputs"]), "station": rc["station"],
                                   **({"tier": rc.get("tier") or 1} if TECH_TREE_ENABLED else {})}
         c["lastCraftActivityFrame"] = self.frameTick
@@ -9895,12 +9950,16 @@ class SimEngine:
             return False, f"a project is already active in {district_id}"
         return True, None
 
-    # --- custom-resource retirement (C3: the resource cap gets an expiry too) ---
+    # --- custom-resource retirement (orphan GC; no cap — invention unlimited) ---
     def _custom_resource_referenced(self, rid):
-        """True while anything still uses the custom resource: a structure
-        function that produces/boosts it, a project (registry or active) that
-        needs it, a recipe that inputs or outputs it (pending included), or a
-        remaining balance in the stockpile / any agent's inventory."""
+        """True while anything still uses the custom resource: obtainable via
+        gather/recipe/structure/mint, a structure function (produces/boosts/
+        stores/upkeep/unlocks), a project (registry, standing, or active) that
+        needs or contributed it, a recipe that inputs or outputs it (pending
+        included), a harvest-quota rule target, or a remaining balance in the
+        stockpile / any agent's inventory."""
+        if self._resource_is_obtainable(rid):
+            return True
         c = self.civilization
         if c["stockpile"].get(rid, 0) > 0:
             return True
@@ -9910,34 +9969,59 @@ class SimEngine:
             return True
         if any(p["id"] == rid or rid in p.get("inputs", {}) for p in c["pendingRecipes"]):
             return True
-        for pid, tmpl in c["projectRegistry"].items():
+        type_ids = set(c.get("projectRegistry") or {})
+        type_ids.update(s.get("type") for s in c.get("structures") or [] if s.get("type"))
+        for pid in type_ids:
+            tmpl = c["projectRegistry"].get(pid) or {}
             if rid in (tmpl.get("needs") or {}):
                 return True
-            fn = self._get_structure_function(pid)
-            if any(prod.get("resource") == rid for prod in fn.get("produces") or []):
-                return True
-            if any(rid in (boost.get("resources") or []) for boost in fn.get("boosts") or []):
+            if self._resource_in_function(rid, self._structure_function_for_type(pid)):
                 return True
         for bp in c["pendingBlueprints"]:
             if rid in (bp.get("needs") or {}):
                 return True
-            fn = bp.get("function") or {}
-            if any(prod.get("resource") == rid for prod in fn.get("produces") or []):
-                return True
-            if any(rid in (boost.get("resources") or []) for boost in fn.get("boosts") or []):
+            if self._resource_in_function(rid, bp.get("function") or {}):
                 return True
         for p in c["districtProjects"].values():
-            if p and rid in (p.get("needs") or {}):
+            if not p:
+                continue
+            if rid in (p.get("needs") or {}):
+                return True
+            if rid in (p.get("contributed") or {}):
+                return True
+        for q in c.get("harvestQuotas", {}).values():
+            if q.get("resource") == rid:
                 return True
         return False
 
     def _maybe_retire_custom_resource(self):
-        """Retain all invented resources; invention is intentionally unlimited.
+        """Prune orphan custom resources after CUSTOM_RESOURCE_RETIRE_FRAMES.
 
-        This hook remains as a compatibility no-op because older saves and the
-        tick loop still reference it.
-        """
-        return
+        No cap — invention stays unlimited by policy. Ids with no references
+        get a stamp-on-first-sight clock; once the window elapses the registry
+        entry plus stockpile and districtStocks keys are removed. Retired ids
+        are re-inventable (no tombstone)."""
+        c = self.civilization
+        frames = c.setdefault("customResourceAddedFrame", {})
+        for rid in list(c["resourceRegistry"]):
+            if rid in BASE_RESOURCES or rid in CRAFTED_RESOURCES:
+                continue
+            if self._custom_resource_referenced(rid):
+                continue
+            added = frames.get(rid)
+            if added is None:
+                frames[rid] = self.frameTick
+                continue
+            if self.frameTick - added < CUSTOM_RESOURCE_RETIRE_FRAMES:
+                continue
+            name = c["resourceRegistry"][rid].get("name", rid)
+            del c["resourceRegistry"][rid]
+            c["stockpile"].pop(rid, None)
+            for stocks in c["districtStocks"].values():
+                stocks.pop(rid, None)
+            frames.pop(rid, None)
+            self._push_activity(
+                f"The idea of {name} has faded from the village — nothing made or used it")
 
     # --- Daily Council Assembly (scheduled, whole-village council) ---
     def _daily_council_living(self):
@@ -9956,8 +10040,11 @@ class SimEngine:
             if self.frameTick - int((c.get("districtLastContribution") or {}).get(
                 item.split(":", 1)[0], self.frameTick)) >= STALL_THRESHOLD
         ]
-        stockpile = c.get("stockpile") or {}
-        scarce = sorted(rid for rid, amount in stockpile.items() if amount <= EDIBLE_RESERVE)
+        scarce = sorted(
+            rid for rid in (c.get("stockpile") or {})
+            if self._resource_is_obtainable(rid)
+            and self._village_holdings(rid) <= DAILY_COUNCIL_SCARCITY_THRESHOLD
+        )
         agenda = [
             {
                 "topic": "world_status",
@@ -9967,14 +10054,14 @@ class SimEngine:
             },
             {
                 "topic": "projects",
-                "detail": ("Ongoing: " + ", ".join(active_projects[:8]))
+                "detail": ("Ongoing: " + ", ".join(active_projects[:DAILY_COUNCIL_SCARCITY_TOPICS]))
                 if active_projects else "No ongoing district projects",
             },
             {
                 "topic": "limitations",
                 "detail": (
                     ("Stalled: " + ", ".join(stalled[:4]) + ". ") if stalled else ""
-                ) + (("Low village stores: " + ", ".join(scarce[:8]))
+                ) + (("Low village stores: " + ", ".join(scarce[:DAILY_COUNCIL_SCARCITY_TOPICS]))
                      if scarce else "No acute village-store shortage recorded"),
             },
             {
@@ -12255,8 +12342,7 @@ class SimEngine:
                         if r["id"] not in c["resourceRegistry"]:
                             c["resourceRegistry"][r["id"]] = {"name": r["name"],
                                                               "gatherZone": r["gatherZone"], "color": r["color"]}
-                            # Age record for the custom-resource retirement gate
-                            # (_maybe_retire_custom_resource picks the oldest).
+                            # Stamp for orphan custom-resource retirement (CUSTOM_RESOURCE_RETIRE_FRAMES).
                             c.setdefault("customResourceAddedFrame", {})[r["id"]] = self.frameTick
                     c["projectRegistry"][bp["id"]] = {
                         "name": bp["name"], "needs": dict(bp["needs"]),

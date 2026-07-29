@@ -254,6 +254,58 @@ def main():
           "sage review geography context helper returned nothing")
 
     # 12. Regression: existing council/TTL assertions above still passed to reach this point.
+
+    # --- Part B: orphan custom-resource GC ---
+    b = make_engine(roster_size=2)
+    sage_b = next(a for a in b.agents if a["role"] == "elder")
+    zara_b = next(a for a in b.agents if a["role"] != "elder")
+    ghost_res = [{"id": "ghost_fiber", "name": "Ghost Fiber", "gather_zone": None}]
+    bp_ghost = blueprint(
+        "ghost_hut",
+        new_resources=ghost_res,
+        function={"produces": [{"resource": "ghost_fiber", "amount": 1,
+                                "every_ticks": 900, "scope": "village"}]},
+    )
+    b.apply_decision(zara_b, {"action": "propose_blueprint", "blueprint": bp_ghost})
+    b.apply_decision(sage_b, {"action": "sage_review_blueprint", "target": "ghost_hut",
+                              "sage_decision": "approve"})
+    b.apply_decision(sage_b, {"action": "approve_blueprint", "target": "ghost_hut"})
+    check("ghost_fiber" in b.civilization["resourceRegistry"],
+          "new resource not registered on blueprint approval")
+    check("ghost_hut" in b.civilization["projectRegistry"],
+          "ghost hut not in projectRegistry after approval")
+    check(b._custom_resource_referenced("ghost_fiber"),
+          "ghost_fiber not referenced while projectRegistry entry exists")
+
+    del b.civilization["projectRegistry"]["ghost_hut"]
+    b.civilization["stockpile"]["ghost_fiber"] = 0
+    for stocks in b.civilization["districtStocks"].values():
+        stocks["ghost_fiber"] = 0
+    b.civilization.get("customResourceAddedFrame", {}).pop("ghost_fiber", None)
+    b._maybe_retire_custom_resource()
+    check("ghost_fiber" in b.civilization["resourceRegistry"],
+          "ghost_fiber retired before stamp-on-first-sight window")
+    b.frameTick += se.CUSTOM_RESOURCE_RETIRE_FRAMES + 1
+    b._maybe_retire_custom_resource()
+    check("ghost_fiber" not in b.civilization["resourceRegistry"],
+          "ghost_fiber still in resourceRegistry after retirement")
+    check("ghost_fiber" not in b.civilization["stockpile"],
+          "ghost_fiber still in stockpile after retirement")
+    check(all("ghost_fiber" not in stocks
+              for stocks in b.civilization["districtStocks"].values()),
+          "ghost_fiber still in districtStocks after retirement")
+
+    b.civilization["resourceRegistry"]["gatherable_ghost"] = {
+        "name": "Gatherable Ghost", "gatherZone": "forest", "color": "#000000"}
+    b.civilization["stockpile"]["gatherable_ghost"] = 0
+    b.civilization.get("customResourceAddedFrame", {}).pop("gatherable_ghost", None)
+    saved_tick = b.frameTick
+    b.frameTick += se.CUSTOM_RESOURCE_RETIRE_FRAMES * 2 + 1
+    b._maybe_retire_custom_resource()
+    check("gatherable_ghost" in b.civilization["resourceRegistry"],
+          "gatherable resource was incorrectly retired")
+    b.frameTick = saved_tick
+
     print("blueprint smoke: OK")
 
 
