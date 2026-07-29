@@ -1,0 +1,14 @@
+---
+description: Python engine lock, roles, and think-cycle invariants
+globs: simulation/**/*.py
+alwaysApply: false
+---
+
+# Engine / server
+
+- `sim_engine.py` owns all world state; mutate only under `self.lock`. LLM calls stay outside the lock.
+- `server.py` = Flask + cognition (`normalize_decision`). `roles.json` = sole role source of truth.
+- Think cycle: snapshot under lock → `run_agent_decision` → `apply_decision` under lock.
+- `MAX_CONCURRENT_LLM = 3`. Keep `WORLD_W`/`WORLD_H` matched with `index.html`.
+- God routes (`/control/god/*`) are not decision actions; audit via `divine.jsonl`.
+- New/changed actions: see action-sync rule / [specs/07-actions.md](specs/07-actions.md).

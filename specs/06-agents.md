@@ -15,8 +15,11 @@ detail beyond the summary here; [07-actions.md](07-actions.md) for `switch_role`
 
 ## AGENT_DEFS vs ROSTER
 
-`AGENT_DEFS` (sim_engine.py:1093-1106) is the fixed pool of 12 possible agents:
-`{id, name, role, personality, color, zone}`. Verified roster:
+`AGENT_DEFS` (sim_engine.py:1093-1106) is the fixed pool of hand-written agents
+(12 legacy defs plus at least one `hunter` seed — see roles below):
+`{id, name, role, personality, color, zone}`. Verified roster (legacy twelve;
+hunter inclusion is an additional seed def with role `hunter` and a forest or
+farm starting zone):
 
 | id | name | role | starting zone |
 |---|---|---|---|
@@ -32,31 +35,34 @@ detail beyond the summary here; [07-actions.md](07-actions.md) for `switch_role`
 | 10 | Dex | blacksmith | market |
 | 11 | Nova | explorer | beach |
 | 12 | Sage | elder | village_core |
+| 13 | Kane | hunter | forest |
 
-`ROSTER = ["Zara", "Sage", "Aria", "Luna", "Marco", "Colt", "Finn", "Mia"]`
-(sim_engine.py:1107) is the ordered default-8 subset used at cold start.
+`ROSTER` remains an ordered default-8 subset of the hand-written pool
+(sim_engine.py); at least one hunter participates via `AGENT_DEFS` and the
+generated-roster role rotation (below), even when the cold-start 8 omits them.
 
 `MAX_ROSTER_SIZE = 20` (sim_engine.py, Sid-parity Phase 6) is the hard ceiling
-on `roster_size` — headroom past the 12 hand-written `AGENT_DEFS` so emergent
+on `roster_size` — headroom past the hand-written `AGENT_DEFS` so emergent
 roles/belief factions have room to differentiate, deliberately not a bid at
 Project Sid's ~500-agent scale (non-goal, specs/00-overview.md).
 
 `_select_active_defs(roster_size)`: clamps `roster_size` to `[1,
 MAX_ROSTER_SIZE]`.
-- `roster_size <= len(AGENT_DEFS)` (today's 8-12 default/range, unchanged
-  behavior): if the request is the full 12 it returns `AGENT_DEFS` unchanged.
+- `roster_size <= len(AGENT_DEFS)` (today's 8-12+ default/range): if the
+  request is the full hand-written pool it returns `AGENT_DEFS` unchanged.
   Otherwise it fills names from `ROSTER` in order up to `roster_size`, then
   backfills from `AGENT_DEFS` order for any remainder, and **forces Sage in**
   — if Sage isn't already selected, she overwrites the last slot. This
   guarantees an elder always exists regardless of roster size.
-- `roster_size > len(AGENT_DEFS)`: all 12 hand-written defs plus
+- `roster_size > len(AGENT_DEFS)`: all hand-written defs plus
   `_generated_agent_defs(roster_size - len(AGENT_DEFS))` for the remaining
-  slots (indices 12..roster_size-1). Generation is deterministic: name and
+  slots. Generation is deterministic: name and
   personality cycle through small fixed pools (`_GENERATED_AGENT_NAMES`,
-  `_GENERATED_AGENT_PERSONALITIES`, 8 entries each — exactly covering
-  `MAX_ROSTER_SIZE - len(AGENT_DEFS)`), role rotates across the 11 non-elder
-  seed roles (one generated agent per role before any repeats — no generated
-  agent is ever seeded into the singular elder role), and starting zone is
+  `_GENERATED_AGENT_PERSONALITIES`, 8 entries each — covering
+  `MAX_ROSTER_SIZE - len(AGENT_DEFS)` headroom), role rotates across the
+  non-elder seed roles (one generated agent per role before any repeats — no
+  generated agent is ever seeded into the singular elder role; `hunter` is
+  included in that rotation), and starting zone is
   copied from the hand-written def sharing that role. Generated agents are
   built by the same `_make_agents` as hand-written ones and are
   indistinguishable to every other system (roles, beliefs, relationships,
@@ -72,12 +78,13 @@ MAX_ROSTER_SIZE]`.
 
 ## roles.json schema
 
-`simulation/roles.json` is the single source of truth for the 12 **seed** role
-definitions (one per `AGENT_DEFS` role). Edit seed role data there, never in code
-maps. At cold start, the engine copies those entries into the persistent live
-`civilization["roleRegistry"]`; approved emergent roles are added only to that
-per-world registry and therefore persist in `state.db` without modifying the
-authoring file. Schema per seed entry (role name -> object):
+`simulation/roles.json` is the single source of truth for the **seed** role
+definitions (one per `AGENT_DEFS` role, including `hunter`). Edit seed role
+data there, never in code maps. At cold start, the engine copies those entries
+into the persistent live `civilization["roleRegistry"]`; approved emergent
+roles are added only to that per-world registry and therefore persist in
+`state.db` without modifying the authoring file. Schema per seed entry (role
+name -> object):
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -86,7 +93,16 @@ authoring file. Schema per seed entry (role name -> object):
 | `preferredProject` | string \| string[] | Project type(s) this role tends to start/lead |
 | `leader` | bool (optional) | Present and `true` only for `elder` — marks the sole leader role |
 
-Data itself (all 12 roles' values) is not restated here — read `roles.json`.
+Data itself (all seed roles' values) is not restated here — read `roles.json`.
+
+**`hunter` seed role.** Specialty `["meat"]`; skill prose describes hunting
+wildlife for meat and fish; preferred project is typically `"wall"` (or
+similar non-farm structure). Any living agent may still choose
+`hunt_wildlife` when prey is in range ([07-actions.md](07-actions.md)); the
+hunter role specializes via prompt mention, `role_fallback_action` bias toward
+`hunt_wildlife` when prey is near, and higher per-hit damage
+(`HUNT_DAMAGE_HUNTER` vs base `HUNT_DAMAGE`). Kill yields feed
+`meat`/`fish` per [08-systems-economy.md](08-systems-economy.md).
 
 An emergent registry entry is keyed by its validated slug and additionally stores
 its display `name`. Its `skill`, `specialty`, and `preferredProject` fields use
@@ -163,7 +179,8 @@ generation.
 
 Births need housing headroom, the food surplus above, and two ally adults sharing
 a district; capped at one per `BIRTH_MIN_INTERVAL_FRAMES`. Newly-generated agents
-beyond the 12-def pool get synthetic ids starting at `nextGeneratedAgentId = 1000`
+beyond the hand-written `AGENT_DEFS` pool get synthetic ids starting at
+`nextGeneratedAgentId = 1000`
 (sim_engine.py:1465, 5759). Natural death rolls apply once past
 `DEATH_CHANCE_START_AGE`, deferred by `POPULATION_FLOOR`. On the elder's death, a
 succession election runs on the `propose_rule`/`vote_rule` machinery (kind

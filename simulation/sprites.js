@@ -1853,13 +1853,10 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
 }
 
 // =====================================================================
-// Ambient wildlife (Phase 2 living-ecosystem, WILDLIFE_ENABLED). Pure
-// decoration derived from the districtEcology stage projection -- same
-// precedent as the physicalProps boats (index.html): deterministic
-// positions/counts from server-derived data, animated only by frameTick.
-// No pathfinding, no per-creature state, not huntable, does not feed the
-// food supply. index.html computes positions/culling; these are just the
-// stateless draw calls for each creature kind.
+// Ambient wildlife (WILDLIFE_ENABLED). Server-authoritative huntable fauna
+// projected via world.wildlife; index.html culls and applies cosmetic bob.
+// These are stateless ~8–12px pixel silhouettes per kind (15 kinds total).
+// Butterfly is decorative (not huntable); all other kinds are hunt targets.
 // =====================================================================
 function drawFishRipple(ctx, x, y, frameTick) {
   const wobble = Math.sin(frameTick / 12) * 2;
@@ -1897,10 +1894,269 @@ function drawGrazer(ctx, x, y) {
   ctx.fillRect(x + 3, y + 2, 2, 2);
 }
 
+function drawSquirrel(ctx, x, y, frameTick) {
+  const flick = Math.sin(frameTick / 10) * 1.5;
+  ctx.fillStyle = "#8D6E63";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 3.5, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 3, y - 2, 2, 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#6D4C41";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x - 3, y);
+  ctx.quadraticCurveTo(x - 7, y - 5 + flick, x - 2, y - 6);
+  ctx.stroke();
+}
+
+function drawDeer(ctx, x, y) {
+  ctx.fillStyle = "#A1887F";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 6, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 5, y - 3, 2.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#6D4C41";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(x + 4, y - 5);
+  ctx.lineTo(x + 3, y - 8);
+  ctx.moveTo(x + 6, y - 5);
+  ctx.lineTo(x + 7, y - 8);
+  ctx.stroke();
+  ctx.fillStyle = "#5D4037";
+  ctx.fillRect(x - 4, y + 2, 1.5, 3);
+  ctx.fillRect(x + 2, y + 2, 1.5, 3);
+}
+
+function drawFox(ctx, x, y) {
+  ctx.fillStyle = "#E67E22";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 5, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x + 4, y - 1);
+  ctx.lineTo(x + 7, y - 3);
+  ctx.lineTo(x + 7, y + 1);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#F5D6A8";
+  ctx.beginPath();
+  ctx.ellipse(x - 4, y, 2, 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#3E3226";
+  ctx.fillRect(x - 3, y + 2, 1.5, 2);
+  ctx.fillRect(x + 2, y + 2, 1.5, 2);
+}
+
+function drawBoar(ctx, x, y) {
+  ctx.fillStyle = "#5D4037";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 5.5, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 4, y - 1, 2.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#EFEBE0";
+  ctx.fillRect(x + 5, y + 1, 2, 1.5);
+  ctx.fillStyle = "#3E2723";
+  ctx.fillRect(x - 3, y + 2, 2, 2);
+  ctx.fillRect(x + 1, y + 2, 2, 2);
+}
+
+function drawOwl(ctx, x, y, frameTick) {
+  const blink = Math.abs(Math.sin(frameTick / 40)) > 0.95 ? 0.5 : 1.5;
+  ctx.fillStyle = "#795548";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 4, 4.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#EFEBE0";
+  ctx.beginPath();
+  ctx.ellipse(x - 1.5, y - 1, 1.5, blink, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 1.5, y - 1, 1.5, blink, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#F4A261";
+  ctx.beginPath();
+  ctx.moveTo(x, y + 0.5);
+  ctx.lineTo(x - 1.5, y + 2);
+  ctx.lineTo(x + 1.5, y + 2);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawRabbit(ctx, x, y, frameTick) {
+  const ear = Math.sin(frameTick / 15) * 0.5;
+  ctx.fillStyle = "#D7CCC8";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 3.5, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x - 1.5, y - 5 + ear, 1.2, 3, -0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 1.5, y - 5 - ear, 1.2, 3, 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#3E3226";
+  ctx.fillRect(x - 1, y - 0.5, 1, 1);
+}
+
+function drawChicken(ctx, x, y, frameTick) {
+  const peck = Math.sin(frameTick / 12) * 1.5;
+  ctx.fillStyle = "#FFF8E1";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 4, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 3, y - 2 + peck * 0.3, 2.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#E53935";
+  ctx.beginPath();
+  ctx.moveTo(x + 3, y - 4 + peck * 0.3);
+  ctx.lineTo(x + 2, y - 6);
+  ctx.lineTo(x + 4, y - 6);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#FF9800";
+  ctx.beginPath();
+  ctx.moveTo(x + 5, y - 2 + peck);
+  ctx.lineTo(x + 8, y - 1.5 + peck);
+  ctx.lineTo(x + 5, y - 1 + peck);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#F4A261";
+  ctx.fillRect(x - 1, y + 3, 1.5, 2);
+  ctx.fillRect(x + 1, y + 3, 1.5, 2);
+}
+
+function drawMouse(ctx, x, y, frameTick) {
+  const twitch = Math.sin(frameTick / 8) * 1;
+  ctx.fillStyle = "#9E9E9E";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 3, 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 2.5, y - 0.5, 1.5, 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#757575";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x - 3, y);
+  ctx.quadraticCurveTo(x - 6, y + twitch, x - 5, y - 3);
+  ctx.stroke();
+  ctx.fillStyle = "#3E3226";
+  ctx.fillRect(x + 3, y - 0.5, 1, 1);
+}
+
+function drawButterfly(ctx, x, y, frameTick) {
+  const flap = Math.abs(Math.sin(frameTick / 6)) * 3;
+  ctx.fillStyle = "#AB47BC";
+  ctx.beginPath();
+  ctx.ellipse(x - 3 - flap * 0.3, y - 1, 3 + flap * 0.2, 4, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#7E57C2";
+  ctx.beginPath();
+  ctx.ellipse(x + 3 + flap * 0.3, y - 1, 3 + flap * 0.2, 4, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#3E3226";
+  ctx.fillRect(x - 0.5, y - 3, 1, 6);
+}
+
+function drawCrab(ctx, x, y, frameTick) {
+  const scuttle = Math.sin(frameTick / 10) * 1;
+  ctx.fillStyle = "#EF5350";
+  ctx.beginPath();
+  ctx.ellipse(x + scuttle, y, 4, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#C62828";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(x - 3 + scuttle, y - 1);
+  ctx.lineTo(x - 6 + scuttle, y - 3);
+  ctx.moveTo(x + 3 + scuttle, y - 1);
+  ctx.lineTo(x + 6 + scuttle, y - 3);
+  ctx.stroke();
+  ctx.fillStyle = "#B71C1C";
+  ctx.fillRect(x - 4 + scuttle, y + 2, 1.5, 2);
+  ctx.fillRect(x + 2 + scuttle, y + 2, 1.5, 2);
+}
+
+function drawGull(ctx, x, y, frameTick) {
+  const flap = Math.abs(Math.sin(frameTick / 9)) * 3.5;
+  ctx.strokeStyle = "#ECEFF1";
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.moveTo(x - 6, y - flap);
+  ctx.lineTo(x, y);
+  ctx.lineTo(x + 6, y - flap);
+  ctx.stroke();
+  ctx.fillStyle = "#FFB74D";
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + 3, y + 1);
+  ctx.lineTo(x, y + 2);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawTurtle(ctx, x, y) {
+  ctx.fillStyle = "#558B2F";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 5, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#33691E";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 3.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#7CB342";
+  ctx.beginPath();
+  ctx.ellipse(x + 5, y, 2, 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(x - 5, y + 1, 2, 2);
+  ctx.fillRect(x + 1, y + 2, 2, 2);
+}
+
+function drawSeal(ctx, x, y, frameTick) {
+  const glide = Math.sin(frameTick / 14) * 1.5;
+  ctx.fillStyle = "#607D8B";
+  ctx.beginPath();
+  ctx.ellipse(x + glide, y, 6, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 5 + glide, y - 1, 2.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#455A64";
+  ctx.beginPath();
+  ctx.moveTo(x - 5 + glide, y);
+  ctx.lineTo(x - 8 + glide, y - 2);
+  ctx.lineTo(x - 7 + glide, y + 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#263238";
+  ctx.fillRect(x + 6 + glide, y - 1.5, 1, 1);
+}
+
 function drawWildlifeCreature(ctx, kind, x, y, frameTick) {
   if (kind === "fish") drawFishRipple(ctx, x, y, frameTick);
   else if (kind === "bird") drawBird(ctx, x, y, frameTick);
   else if (kind === "grazer") drawGrazer(ctx, x, y);
+  else if (kind === "squirrel") drawSquirrel(ctx, x, y, frameTick);
+  else if (kind === "deer") drawDeer(ctx, x, y);
+  else if (kind === "fox") drawFox(ctx, x, y);
+  else if (kind === "boar") drawBoar(ctx, x, y);
+  else if (kind === "owl") drawOwl(ctx, x, y, frameTick);
+  else if (kind === "rabbit") drawRabbit(ctx, x, y, frameTick);
+  else if (kind === "chicken") drawChicken(ctx, x, y, frameTick);
+  else if (kind === "mouse") drawMouse(ctx, x, y, frameTick);
+  else if (kind === "butterfly") drawButterfly(ctx, x, y, frameTick);
+  else if (kind === "crab") drawCrab(ctx, x, y, frameTick);
+  else if (kind === "gull") drawGull(ctx, x, y, frameTick);
+  else if (kind === "turtle") drawTurtle(ctx, x, y);
+  else if (kind === "seal") drawSeal(ctx, x, y, frameTick);
 }
 
 // =====================================================================

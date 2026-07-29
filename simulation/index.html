@@ -1419,6 +1419,7 @@ const MOCK_STATE = {
       gold:  { name: "Gold",  gatherZone: "cave",    color: "#FFC107" },
       stone: { name: "Stone", gatherZone: "cave",    color: "#9E9E9E" },
       fish:  { name: "Fish",  gatherZone: "beach",   color: "#4FC3F7" },
+      meat:  { name: "Meat",  gatherZone: null,      color: "#C62828" },
       herbs: { name: "Herbs", gatherZone: "forest",  color: "#8BC34A" },
       water: { name: "Water", gatherZone: "village", color: "#03A9F4" },
       planks:{ name: "Planks",gatherZone: null,      color: "#C19A6B", crafted: true },
@@ -2046,6 +2047,7 @@ const ACTION_LABELS = {
   council_speak: "speaking at council",
   council_propose: "proposing at council",
   council_vote: "voting at council",
+  hunt_wildlife: "hunting",
   rest: "resting"
 };
 function humanizeAction(agent) {
@@ -3380,59 +3382,25 @@ function drawSocialTies(ctx) {
   }
 }
 
-// Ambient wildlife (Phase 2 living-ecosystem, WILDLIFE_ENABLED): density per
-// district follows the same districtEcology stage the terrain-growth pass
-// reads, so wildlife visibly thins as a district is over-harvested and
-// returns as it recovers. Follows the physicalProps precedent (boats,
-// below): deterministic positions from district bounds + a seed, animated
-// only by frameTick -- no pathfinding, no per-creature state, not huntable,
-// does not feed the food supply. This is per-frame (not terrain), so it
-// draws every tick rather than going through the static terrain cache.
-const WILDLIFE_STAGE_COUNT = { barren: 0, sparse: 1, healthy: 2, lush: 4 };
-const WILDLIFE_KIND_BY_DISTRICT_KIND = { forest: "bird", farm: "grazer", beach: "fish" };
-const WILDLIFE_CAP_PER_DISTRICT = 4;
-
-function wildlifeHashSeed(str) {
-  let h = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619) >>> 0;
-  }
-  return h >>> 0;
-}
-
+// Ambient wildlife (WILDLIFE_ENABLED): server-authoritative huntable fauna.
+// Positions/kinds come from world.wildlife (alive creatures only); the viewer
+// does not spawn or pathfind. Cosmetic bob from frameTick; drawn every tick
+// (not baked into terrainCanvas).
 function drawWildlife(ctx, frameTick) {
   if (!WILDLIFE_ENABLED) return;
-  const eco = world.districtEcology;
-  if (!eco || !eco.length) return;
-  const stageByDistrict = new Map(eco.map((e) => [e.districtId, e.stage]));
+  const fauna = world.wildlife;
+  if (!fauna || !fauna.length) return;
   const left = canvasWrapEl.scrollLeft / zoomLevel;
   const top = canvasWrapEl.scrollTop / zoomLevel;
   const right = left + canvasWrapEl.clientWidth / zoomLevel;
   const bottom = top + canvasWrapEl.clientHeight / zoomLevel;
-  for (const d of getDistricts()) {
-    const kind = WILDLIFE_KIND_BY_DISTRICT_KIND[d.kind];
-    if (!kind) continue;
-    const b = d.bounds;
-    // Cull the whole district before spending any per-creature work.
-    if (b.x2 < left || b.x1 > right || b.y2 < top || b.y1 > bottom) continue;
-    const stage = stageByDistrict.get(d.id);
-    const count = Math.min(WILDLIFE_STAGE_COUNT[stage] || 0, WILDLIFE_CAP_PER_DISTRICT);
-    if (count <= 0) continue;
-    const seed = wildlifeHashSeed(d.id);
-    // Fish read best near the shore edge (the beach district's x1 side, the
-    // boundary against the adjacent ocean district) rather than scattered
-    // across dry sand.
-    const spanW = kind === "fish" ? Math.min(70, b.x2 - b.x1) : (b.x2 - b.x1);
-    for (let i = 0; i < count; i++) {
-      const rx = ((seed * (i + 7) * 48271) % 2147483647) / 2147483647;
-      const ry = ((seed * (i + 13) * 16807) % 2147483647) / 2147483647;
-      const x = b.x1 + rx * spanW;
-      const y = b.y1 + ry * (b.y2 - b.y1);
-      if (x < left || x > right || y < top || y > bottom) continue;
-      const bob = Math.sin((frameTick + i * 17) / 20) * 3;
-      drawWildlifeCreature(ctx, kind, x, y + bob, frameTick);
-    }
+  for (let i = 0; i < fauna.length; i++) {
+    const creature = fauna[i];
+    const x = creature.x;
+    const y = creature.y;
+    if (x < left || x > right || y < top || y > bottom) continue;
+    const bob = Math.sin((frameTick + i * 17) / 20) * 3;
+    drawWildlifeCreature(ctx, creature.kind, x, y + bob, frameTick);
   }
 }
 

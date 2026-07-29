@@ -21,13 +21,13 @@ Runs every tick via `_update_survival(agent)` (sim_engine.py:1837), gated
 | `HUNGER_RATE` | 0.3/tick | passive hunger drain |
 | `EAT_THRESHOLD` | 65 | auto-eats a held edible once hunger drops below this |
 | `FOOD_RESTORE` | 45 | hunger restored per meal/heal-donation |
-| `EDIBLE_RESOURCES` | `["food", "fish"]` | auto-eat candidates, checked in order |
+| `EDIBLE_RESOURCES` | `["food", "fish", "meat"]` | auto-eat candidates, checked in order |
 | `HEALTH_RATE` | 2/tick | health lost while hunger is at 0 |
 | `HEALTH_REGEN` | 1.5/tick | health regained while fed (hunger > 0) |
 | `COLLAPSE_REGEN` | 0.5/tick | health regen while incapacitated |
 | `COLLAPSE_REVIVE_HEALTH` | 15 | health at which a collapsed agent revives |
 | `REVIVE_HUNGER` | 35 | hunger floor on revival (else 0-hunger re-collapse in ~8s) |
-| `EDIBLE_RESERVE` | 3 | per-agent carry reserve for `EDIBLE_RESOURCES` only — food/fish an agent keeps back from builds/auto-share; not used for village-wide scarcity or Daily Council agenda |
+| `EDIBLE_RESERVE` | 3 | per-agent carry reserve for `EDIBLE_RESOURCES` only — food/fish/meat an agent keeps back from builds/auto-share; not used for village-wide scarcity or Daily Council agenda |
 | `SHARE_RADIUS` | 120px | range for the anti-hoarding auto-share backstop |
 | `STARVING_HUNGER` | 10 | below this a foodless agent deterministically seeks food |
 
@@ -54,6 +54,35 @@ non-heal choice can never land mid-emergency.
 Related actions: `heal_agent` (`HEAL_AMOUNT = 25` base, boosted by
 `SKILL_HEAL_BONUS_PER_LEVEL` under `CULTURE_ENABLED`) — see
 [07-actions.md](07-actions.md).
+
+## Huntable wildlife yields (`WILDLIFE_ENABLED`)
+
+Fauna population lives in `civilization["wildlife"]` (engine-owned creature
+records — see [02-engine-core.md](02-engine-core.md)). It is **not** part of
+`districtStocks` and does not deplete ecology gather stocks when a creature
+is killed; ecology stage still gates spawn density only
+([05-world.md](05-world.md)).
+
+**`meat` good.** A base edible resource (in `BASE_RESOURCES` /
+`resourceRegistry` alongside `food`/`fish`). Flows through the same
+survival auto-eat, share, spoilage, storage-cap, contribute, trade, and
+priced-market paths as the other edibles. `BASE_PRICE` treats `meat` like
+`food`/`fish` (base 1). Kill grants never map land game into `food`.
+
+**Kill yield table** (`WILDLIFE_YIELD` / kind pools; +1 unit on kill via
+`hunt_wildlife`):
+
+| District pool | Kinds | Yield resource |
+|---|---|---|
+| forest | `bird`, `squirrel`, `deer`, `fox`, `boar`, `owl` | `meat` |
+| farm | `grazer`, `rabbit`, `chicken`, `mouse` | `meat` |
+| farm | `butterfly` | none — decorative; not a valid hunt target |
+| beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
+
+Grant uses the same carry-cap / overflow-to-stockpile split every other
+resource-gain path uses. Related action: `hunt_wildlife`
+([07-actions.md](07-actions.md)); hunter specialty `meat`
+([06-agents.md](06-agents.md)).
 
 ## CRAFTING_ENABLED
 
@@ -313,7 +342,7 @@ Activates once a market structure exists and is working
 `pricing` kind).
 
 **Pricing** (`_resource_price`): `base * multiplier`,
-no persisted state. `base` from `BASE_PRICE` (food/fish/water/wood/herbs=1,
+no persisted state. `base` from `BASE_PRICE` (food/fish/meat/water/wood/herbs=1,
 stone/planks/bricks=2, tools=3, cart=4, wagon=6; gold and coin are always 1
 — a currency never prices itself, whichever one is the active trade medium).
 `multiplier = 1 + (1 - scarcity) * (PRICE_SCARCITY_MULT - 1)`,

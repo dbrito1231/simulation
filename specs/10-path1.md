@@ -182,13 +182,17 @@ first night-pressure tick of the day) is exempt from the exposure damage.
 The `night_shelter_rate` benchmark payload gains a `lit` count when any
 agent was spared by light.
 
-**Wildlife:** `_tick_wildlife()` runs on the `GOODS_TICK_FRAMES` gate
-(900 ticks) with `WILDLIFE_EVENT_PROB = 0.02` chance per check
-(only when `SURVIVAL_ENABLED`). Picks a random living, non-incapacitated
-forest-district agent as a candidate victim; if any non-incapacitated guard
-is within `WILDLIFE_GUARD_RADIUS = 120` of the victim, the attack is
-deterred (activity log only); otherwise the victim takes 5 health damage
-(floored at 5).
+**Wildlife (pressure event):** `_tick_wildlife()` runs on the
+`GOODS_TICK_FRAMES` gate (900 ticks) with `WILDLIFE_EVENT_PROB = 0.02` chance
+per check (only when `SURVIVAL_ENABLED`). Picks a random living,
+non-incapacitated forest-district agent as a candidate victim; if any
+non-incapacitated guard is within `WILDLIFE_GUARD_RADIUS = 120` of the
+victim, the attack is deterred (activity log only); otherwise the victim
+takes 5 health damage (floored at 5). **Name disambiguation:** this Path-1
+pressure helper is unrelated to huntable fauna
+(`_move_wildlife` / `_tick_huntable_wildlife` under `WILDLIFE_ENABLED` —
+[02-engine-core.md](02-engine-core.md), [05-world.md](05-world.md)); do not
+reuse or conflate them.
 
 **Shelter-seeking:** `_maybe_seek_shelter(agent)` (sim_engine.py:4387) — at night, an
 unsheltered agent with no active goal is assigned a `seek_shelter` goal

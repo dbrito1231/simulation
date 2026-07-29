@@ -414,42 +414,52 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   change) and `drawWeatherParticles` returns immediately (nothing drawn),
   regardless of `world.weather`'s presence/content.
 
-## Ambient wildlife (`WILDLIFE_ENABLED`, living-ecosystem Phase 2)
+## Ambient wildlife (`WILDLIFE_ENABLED`)
 
-Follows the same physicalProps precedent above: server-derived decoration
-with deterministic positions, not a new entity type. Unlike terrain/crops,
-wildlife is **not** baked into `terrainCanvas` — it is drawn every frame in
-`tickBody()` (`drawWildlife(ctx, renderFrame)`, called right after
-`drawSocialTies`) since animating it via the static cache isn't possible.
+Server-authoritative huntable fauna. Unlike terrain/crops, wildlife is
+**not** baked into `terrainCanvas` — it is drawn every frame in `tickBody()`
+(`drawWildlife(ctx, renderFrame)`, called right after `drawSocialTies`)
+from the live `/state` projection. The viewer holds no fauna state of its
+own and does **not** pathfind, spawn, or reposition creatures.
 
-- **Density** reuses the exact same top-level `world.districtEcology` stage as
-  the crop/tree growth pass (see above and [05-world.md](05-world.md)):
+- **`/state` projection:** when `WILDLIFE_ENABLED`, `snapshot()` exposes a
+  top-level `wildlife` list — `[{id, kind, districtId, x, y, hp, maxHp}]` —
+  one entry per **alive** creature (same sibling placement as
+  `districtEcology`/`socialTies`). Dead / pending-respawn creatures are
+  omitted. Engine ownership, spawn/respawn, wander/flee, migration, and
+  combat live in [02-engine-core.md](02-engine-core.md); hunt yield in
+  [07-actions.md](07-actions.md) / [08-systems-economy.md](08-systems-economy.md).
+- **Density (engine):** spawn caps still key off `world.districtEcology`
+  stage per district ([05-world.md](05-world.md)):
   `WILDLIFE_STAGE_COUNT = {barren: 0, sparse: 1, healthy: 2, lush: 4}`,
   capped at `WILDLIFE_CAP_PER_DISTRICT = 4`. Only forest/farm/beach district
-  kinds are mapped to a wildlife kind at all (`WILDLIFE_KIND_BY_DISTRICT_KIND`)
-  regardless of whether other kinds have a `districtEcology` entry.
-- **Which creature per district kind:** `WILDLIFE_KIND_BY_DISTRICT_KIND =
-  {forest: "bird", farm: "grazer", beach: "fish"}`. Fish are placed within
-  the first ~70px of the beach district's bounds (the shore edge against the
-  adjacent ocean district) rather than scattered across dry sand.
-- **Positions** are deterministic per district+slot: `wildlifeHashSeed(districtId)`
-  (FNV-1a-style string hash) seeds a simple integer PRNG so a given creature
-  slot always lands at the same point in the district's bounds — no
-  per-creature state is persisted, and nothing repositions between polls.
-  `frameTick` only drives a small animation (a sine-wave vertical bob shared
-  by all kinds, plus wing-flap/fin-wiggle detail in the sprite draw calls in
-  sprites.js: `drawFishRipple`, `drawBird`, `drawGrazer`).
-- **Viewport culling** mirrors the shipped `drawSocialTies` pattern: the
-  whole district's bounds are culled against the scroll/zoom-derived
-  viewport before any per-creature work, then each creature position is
-  culled individually.
-- **Limitation (intentional):** wildlife is decoration only. They cannot be
-  hunted, gathered, or interacted with in any way, and do not feed the food
-  supply or any other resource. Making them huntable would require a new
-  agent action and a new resource path — explicitly out of scope for this
-  phase (see [plan-living-ecosystem-2-ecology-visible.md](../docs/plan-living-ecosystem-2-ecology-visible.md)).
-- **Gate:** `WILDLIFE_ENABLED = false` → `drawWildlife` returns immediately;
-  nothing is drawn, no cost beyond the flag check.
+  kinds host fauna pools.
+- **Kind pools (15 kinds):**
+
+  | District | Kinds | Kill yield |
+  |---|---|---|
+  | forest | `bird`, `squirrel`, `deer`, `fox`, `boar`, `owl` | `meat` |
+  | farm | `grazer`, `rabbit`, `chicken`, `mouse` | `meat` |
+  | farm | `butterfly` | none — decorative, not huntable |
+  | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
+
+- **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
+  (and `districtId`). The viewer does not seed positions client-side and
+  does not run a road pathfinder for fauna — motion and cross-district
+  migration are already resolved server-side between polls. `frameTick`
+  may still drive cosmetic sprite animation (bob, wing-flap, fin-wiggle)
+  in `sprites.js` (`drawWildlifeCreature` dispatching per-kind helpers)
+  without inventing a second position.
+- **Viewport culling** mirrors `drawSocialTies`: cull by district bounds
+  against the scroll/zoom viewport, then per-creature `(x, y)`.
+- **Interaction:** fauna are huntable via the agent action `hunt_wildlife`
+  (multi-hit HP; land kills grant `meat`, beach kills grant `fish`;
+  `butterfly` is never a valid target) — see [07-actions.md](07-actions.md).
+  The viewer does not resolve hunt hits; it only renders the projected
+  alive set (optional cheap HP cue is allowed but not required).
+- **Gate:** `WILDLIFE_ENABLED = false` → no `wildlife` key (or empty) and
+  `drawWildlife` returns immediately; nothing is drawn beyond the flag
+  check.
 
 ## Goods-in-motion shipments (`CARAVAN_VISUALS_ENABLED`, living-ecosystem Phase 3)
 

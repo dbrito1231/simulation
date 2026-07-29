@@ -1037,6 +1037,8 @@ DECISION_ACTIONS = [
     # Path 1: composable tiles, terrain mutation, diplomacy treaties.
     "place_block", "remove_block", "dig_terrain", "plant_terrain",
     "propose_treaty", "vote_treaty",
+    # Huntable wildlife (WILDLIFE_ENABLED): engine offers only when prey is in range.
+    "hunt_wildlife",
     # Daily Council Assembly. Offered only to a seated attendee in-session.
     "council_speak", "council_propose", "council_vote",
 ]
@@ -1325,7 +1327,7 @@ Known beliefs (id/name/tenet): {belief_registry}
 Belief authoring exemplars: {belief_examples}
 Nearby agents' belief ids: {nearby_beliefs}
 Agents near you: {nearby_agents}
-Current zone: {world_zone}
+{nearby_wildlife_line}Current zone: {world_zone}
 Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
@@ -2296,6 +2298,11 @@ def role_fallback_action(role, agent_data):
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Contributing a held resource the project needs."}
 
+    if role == "hunter" and agent_data.get("prey_in_range"):
+        return {"action": "hunt_wildlife", "target": None, "message": None,
+                "new_role": None, "relationship_update": None,
+                "reasoning": "Hunting nearby wildlife for meat or fish."}
+
     if role in ("farmer", "fisher", "gatherer"):
         zone = agent_data.get("world_zone", "")
         if role == "farmer" and zone != "farm":
@@ -2325,6 +2332,16 @@ def role_fallback_action(role, agent_data):
         return {"action": "collect_resource", "target": needed, "message": None,
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Mining gold for civilization."}
+
+    if role == "hunter":
+        zone = agent_data.get("world_zone", "")
+        if zone not in ("forest", "farm", "beach"):
+            return {"action": "move_to_district", "target": "forest", "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Heading to hunting grounds for wildlife."}
+        return {"action": "collect_resource", "target": None, "message": None,
+                "new_role": None, "relationship_update": None,
+                "reasoning": "No prey in range; gathering while scouting for wildlife."}
 
     if role == "builder":
         needed = first_shortfall_resource(agent_data) or "wood"
@@ -3396,6 +3413,10 @@ def build_user_prompt(data, slim=False):
     # byte-identical to Phase 4 alone.
     weather_raw = data.get("weather_line")
     weather_line = f"Weather: {weather_raw}\n" if weather_raw else ""
+    # Huntable wildlife hint: rendered ONLY when the engine reports prey in
+    # HUNT_RADIUS (WILDLIFE_ENABLED), same fold-in-only-when-set pattern.
+    wildlife_raw = data.get("nearby_wildlife_line")
+    nearby_wildlife_line = f"{wildlife_raw}\n" if wildlife_raw else ""
     # Phase F: one-word life stage folded into the existing personality line
     # (no new template line -- near-zero token cost, and with the flag off
     # the engine sends life_stage=None so this renders byte-identical to
@@ -3473,6 +3494,7 @@ def build_user_prompt(data, slim=False):
         ) or "none",
         nearby_beliefs=data.get("nearby_beliefs") or "none",
         nearby_agents=nearby_formatted,
+        nearby_wildlife_line=nearby_wildlife_line,
         world_zone=data.get("world_zone"),
         current_district=data.get("current_district", "none"),
         known_districts=format_known_districts(data.get("known_districts") or []),
@@ -4349,11 +4371,50 @@ def control_god_capabilities():
                          "natural cycle's next state -- never restores the prior state. Entering "
                          "'storm' can permanently damage structures in the named districts."),
             },
+            # Huntable wildlife god kinds (specs/02-engine-core.md
+            # "Sovereign God mode: wildlife kinds"). Irreversible one-shots
+            # like grant_resource; gated on WILDLIFE_ENABLED.
+            "wildlife_spawn": {
+                "applyable": True,
+                "requires": "WILDLIFE_ENABLED",
+                "payload": {
+                    "districtId": {"type": "string"},
+                    "kind": {"type": "string",
+                             "description": "must be valid for that district's habitat pool"},
+                },
+                "reversibilityClass": "irreversible",
+                "kindPools": dict(_sim_engine.WILDLIFE_KIND_POOLS),
+                "capPerDistrict": _sim_engine.WILDLIFE_CAP_PER_DISTRICT,
+                "notes": "respects WILDLIFE_CAP_PER_DISTRICT; rejects unknown district/kind or full cap.",
+            },
+            "wildlife_despawn": {
+                "applyable": True,
+                "requires": "WILDLIFE_ENABLED",
+                "payload": {
+                    "id": {"type": "string", "optional": True,
+                           "description": "creature id (mutually exclusive with districtId)"},
+                    "districtId": {"type": "string", "optional": True,
+                                   "description": "clear all alive fauna in district (mutually exclusive with id)"},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "exactly one of id or districtId required; marks target(s) dead with ordinary respawn bookkeeping.",
+            },
+            "wildlife_set_hp": {
+                "applyable": True,
+                "requires": "WILDLIFE_ENABLED",
+                "payload": {
+                    "id": {"type": "string"},
+                    "hp": {"type": "integer", "min": 0,
+                           "description": "clamped to [0, maxHp]; hp<=0 kills with ordinary respawn bookkeeping"},
+                },
+                "reversibilityClass": "irreversible",
+            },
         },
         "modifierRanges": _sim_engine.GOD_MODIFIER_RANGES,
         "previewTtlSeconds": _sim_engine.GOD_PREVIEW_TTL_SECONDS,
         "activeEventsCap": _sim_engine.GOD_ACTIVE_EVENTS_CAP,
         "weatherEnabled": _sim_engine.WEATHER_ENABLED,
+        "wildlifeEnabled": _sim_engine.WILDLIFE_ENABLED,
         # Sovereign God mode Optional Phase 8 (docs/plan-sovereign-god-mode-
         # v2.md "Free-prose story compiler"): dual-gated on GOD_MODE_ENABLED
         # (already true to reach this route) AND the SEPARATE

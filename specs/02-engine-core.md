@@ -35,7 +35,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | within the 150-batch, `CEMETERY_ENABLED` | 150 | `_maybe_handle_burials` |
 | within the 150-batch, `ECONOMY_ENABLED` | 150 | `_maybe_mint_coin`, `_maybe_fund_project_coin` |
 | within the 150-batch, `path1_on()` | 150 | `_maybe_found_settlement`, `_path1_industry_benchmark` |
-| `path1_on("PRESSURE_LOOP_ENABLED")` | 900 | `_tick_wildlife` |
+| `path1_on("PRESSURE_LOOP_ENABLED")` | 900 | `_tick_wildlife` (Path-1 forest attack pressure — **not** huntable fauna) |
 | `path1_on("PRESSURE_LOOP_ENABLED")` and `_is_night()` | 30 | `_tick_night_pressure` |
 | `STRUCTURE_EFFECTS_ENABLED` | 150 | `_tick_structure_effects` |
 | `ECOLOGY_ENABLED` | 600 | `_tick_ecology_regrow` |
@@ -44,8 +44,11 @@ their own cadence (all frame counts are ticks at 30/s):
 | `MEMES_ENABLED` | 90 | `_spread_beliefs_by_proximity` |
 | `ALWAYS_ON_MODULES` | `MODULE_PULSE_INTERVAL_S * TICKS_PER_SEC` (45 s; dark default) | `_pulse_piano_modules`: a bounded, non-blocking, event-gated PIANO refresh pulse |
 | `BENCHMARKS_ENABLED` | 600, or frame 60 (`FIRST_BENCHMARK_FRAME`) | `_sample_benchmarks` |
+| `WILDLIFE_ENABLED` | every tick (with agent move) | `_move_wildlife` |
+| `WILDLIFE_ENABLED` | slower cadence (`WILDLIFE_POP_TICK_FRAMES` / migrate check) | `_tick_huntable_wildlife` (spawn/respawn/migrate) |
 
 After the gated systems: every non-incapacitated agent moves (`_move_agent`);
+when `WILDLIFE_ENABLED`, `_move_wildlife()` advances fauna the same tick;
 `_sage_emergency()` computes an emergency target (see below); message timers
 decrement; and, for each non-incapacitated agent not currently a designated
 emergency responder, either a reorg task steps, a goal steps, or the agent's
@@ -727,3 +730,77 @@ this section only notes its participation in the shared plumbing above:
   (or handed-off-twice) intermediate state, and a second restore-time sweep
   against the same now-closed record is a verified no-op (the `status !=
   "active"` guard `_close_weather_override` shares with `_close_story_event`).
+
+## Huntable wildlife (`WILDLIFE_ENABLED`)
+
+Server-authoritative fauna subsystem, distinct from Path-1's
+`_tick_wildlife` pressure event ([10-path1.md](10-path1.md)). Gate
+`WILDLIFE_ENABLED` (default True; semantics also in
+[05-world.md](05-world.md)): off → no fauna state, no `_move_wildlife` /
+`_tick_huntable_wildlife`, `hunt_wildlife` omitted from `available_actions`,
+viewer draw no-ops.
+
+**State.** `civilization["wildlife"]` is a list of creature records owned
+under the engine lock and persisted with the rest of civilization state
+(cold-start seed + `restore_state` rehydrate). Per-creature fields include
+at least: `id`, `kind`, `districtId`, `x`, `y`, `targetX`/`targetY`,
+optional `waypoints`, `hp`, `maxHp`, `alive`, `respawnAt`. `maxHp` is set
+on spawn from `WILDLIFE_MAX_HP[kind]` (HP tiers: low kinds ≈1–2 hits; mid
+≈3–4; high `boar`/`seal` ≈5–6; decorative `butterfly` is not a combat
+target). Kind pools and kill yields live in
+[08-systems-economy.md](08-systems-economy.md); density caps
+(`WILDLIFE_STAGE_COUNT` / `WILDLIFE_CAP_PER_DISTRICT = 4`) key off
+`districtEcology` stage ([05-world.md](05-world.md)).
+
+**Habitat clamp.** Forest/farm: district bounds (inset). Beach water kinds
+(`fish`, `crab`, `turtle`, `seal`): shore strip (~70px). `gull`: full beach
+bounds.
+
+**`_move_wildlife()`** — every tick when the flag is on (alongside agent
+move). In-district idle wander via simple steering at `WILDLIFE_SPEED[kind]`
+(no road required). When an agent is within `WILDLIFE_FLEE_RADIUS`, or after
+a combat hit, retarget away (flee). Creatures with migration / long-range
+waypoints follow those waypoints at the same step logic.
+
+**`_tick_huntable_wildlife()`** — slower cadence
+(`WILDLIFE_POP_TICK_FRAMES`, migrate check frames). Spawn into under-cap
+habitat districts from the kind pool; respawn dead creatures whose
+`respawnAt` has elapsed; cull / hold density to stage cap; run migration
+checks (below).
+
+**Cross-district migration.** Alive non-decorative creatures may, with small
+probability on the pop tick, pick another district whose kind pool includes
+their `kind` (forest↔forest, farm↔farm, beach↔beach only). Destination must
+be under the stage cap. Path: reuse the **agent road pathfinder** / road
+waypoint machinery when a road path exists between districts; else
+straight-line toward the destination district center, then clamp into
+habitat on arrival. On arrival update `districtId`, clear waypoints, resume
+wander.
+
+**Combat.** `hunt_wildlife` ([07-actions.md](07-actions.md)) damages under
+the lock; kill grants `meat` or `fish` per the yield table. No separate
+weapon inventory — damage is role-based only (`HUNT_DAMAGE_HUNTER` vs
+`HUNT_DAMAGE`).
+
+**`/state` projection.** Alive creatures only:
+`wildlife: [{id, kind, districtId, x, y, hp, maxHp}]` — see
+[11-viewer.md](11-viewer.md). The viewer does not pathfind fauna.
+
+### Sovereign God mode: wildlife kinds
+
+Three additional irreversible, public god apply kinds mutate
+`civilization["wildlife"]` under the lock via the existing
+`god_preview` / `god_apply` pipeline (outside `DECISION_ACTIONS` —
+[01-architecture.md](01-architecture.md)). Field schemas are advertised in
+`/control/god/capabilities`. Each applied intervention writes one
+`divine.jsonl` `"applied"` record like other miracles
+([12-ops.md](12-ops.md)):
+
+| Kind | Payload (conceptual) | Effect |
+|---|---|---|
+| `wildlife_spawn` | `districtId`, `kind` (must be valid for that district's pool) | Spawns an alive creature at a habitat-legal position (respects cap when practicable; reject unknown kind/district) |
+| `wildlife_despawn` | creature `id`, or a district clear | Marks target(s) dead / removes from the alive set |
+| `wildlife_set_hp` | creature `id`, `hp` | Clamps and sets `hp` (and may kill if `hp <= 0`, with ordinary dead/respawn bookkeeping) |
+
+None of the three is cancellable via `god_cancel` (same irreversible class as
+`grant_resource` / Phase 4 miracles).

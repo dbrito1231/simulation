@@ -242,13 +242,52 @@ ECOLOGY_ENABLED = True
 # _set_agent_target to the old straight-to-random-interior-point behavior so
 # routing can be A/B compared.
 ROADS_ENABLED = True
-# Living-ecosystem Phase 2: viewer-only projections of the existing
-# districtStocks ecology (see DISTRICT_ECOLOGY_* above). Neither flag alters
-# gather yields, regrowth, or any simulation mechanic -- they only gate
-# whether /state includes the districtEcology projection and whether the
-# viewer renders growth-stage terrain / ambient wildlife from it.
+# Living-ecosystem Phase 2: districtEcology projection (CROP_GROWTH_ENABLED)
+# plus server-authoritative huntable fauna (WILDLIFE_ENABLED). Crop growth is
+# still viewer-facing only; WILDLIFE_ENABLED now also gates engine fauna
+# state, motion, spawn/respawn/migration, hunt helpers, and /state wildlife[].
+# Off → no fauna mutation and an empty wildlife projection.
 CROP_GROWTH_ENABLED = True
 WILDLIFE_ENABLED = True
+# Huntable wildlife (distinct from Path-1 _tick_wildlife forest-attack pressure).
+WILDLIFE_KIND_POOLS = {
+    "forest": ["bird", "squirrel", "deer", "fox", "boar", "owl"],
+    "farm": ["grazer", "rabbit", "chicken", "mouse", "butterfly"],
+    "beach": ["fish", "crab", "gull", "turtle", "seal"],
+}
+WILDLIFE_DECORATIVE_KINDS = {"butterfly"}
+WILDLIFE_YIELD = {
+    "bird": "meat", "squirrel": "meat", "deer": "meat", "fox": "meat",
+    "boar": "meat", "owl": "meat",
+    "grazer": "meat", "rabbit": "meat", "chicken": "meat", "mouse": "meat",
+    "fish": "fish", "crab": "fish", "gull": "fish", "turtle": "fish", "seal": "fish",
+}
+# HP tiers: low ≈1–2, mid ≈3–4, high boar/seal ≈5–6; butterfly decorative.
+WILDLIFE_MAX_HP = {
+    "bird": 1, "squirrel": 1, "rabbit": 1, "chicken": 2, "mouse": 1,
+    "fish": 1, "crab": 1, "gull": 1, "butterfly": 1,
+    "deer": 4, "fox": 3, "owl": 3, "grazer": 4, "turtle": 4,
+    "boar": 6, "seal": 5,
+}
+WILDLIFE_SPEED = {
+    "bird": 3.2, "squirrel": 2.8, "deer": 3.0, "fox": 3.4, "boar": 2.0, "owl": 2.6,
+    "grazer": 1.8, "rabbit": 3.5, "chicken": 2.2, "mouse": 2.4, "butterfly": 2.0,
+    "fish": 2.5, "crab": 1.4, "gull": 3.0, "turtle": 1.2, "seal": 2.2,
+}
+HUNT_RADIUS = 90
+WILDLIFE_FLEE_RADIUS = 120
+HUNT_DAMAGE = 1
+HUNT_DAMAGE_HUNTER = 2
+WILDLIFE_RESPAWN_FRAMES = 600
+WILDLIFE_POP_TICK_FRAMES = 600
+WILDLIFE_MIGRATE_CHECK_FRAMES = 600
+WILDLIFE_MIGRATE_CHANCE = 0.05
+WILDLIFE_STAGE_COUNT = {"barren": 0, "sparse": 1, "healthy": 2, "lush": 4}
+WILDLIFE_CAP_PER_DISTRICT = 4
+WILDLIFE_SHORE_STRIP = 70
+WILDLIFE_HABITAT_INSET = 16
+WILDLIFE_BEACH_WATER_KINDS = {"fish", "crab", "turtle", "seal"}
+WILDLIFE_HABITAT_KINDS = set(WILDLIFE_KIND_POOLS.keys())
 # Living-ecosystem Phase 3: purely cosmetic in-flight "shipment" records
 # emitted AFTER an existing transfer (trade_resource, the priced-trade
 # market path, district-project contributions) has already mutated the
@@ -635,12 +674,12 @@ HEALTH_RATE = 2
 HEALTH_REGEN = 1.5
 EAT_THRESHOLD = 65
 FOOD_RESTORE = 45
-EDIBLE_RESOURCES = ["food", "fish"]
+EDIBLE_RESOURCES = ["food", "fish", "meat"]
 HEAL_AMOUNT = 25
 COLLAPSE_REGEN = 0.5
 COLLAPSE_REVIVE_HEALTH = 15
 REVIVE_HUNGER = 35          # hunger floor on revival, else 0-hunger re-collapse in ~8s
-EDIBLE_RESERVE = 3          # food/fish an agent keeps back from builds/sharing
+EDIBLE_RESERVE = 3          # food/fish/meat an agent keeps back from builds/sharing
 SHARE_RADIUS = 120          # auto-share edibles with a starving neighbour within this range
 STARVING_HUNGER = 10        # below this, a foodless agent deterministically seeks the nearest food zone
 
@@ -1091,7 +1130,7 @@ ECONOMY_ENABLED = True
 # caps at BASE_PRICE * PRICE_SCARCITY_MULT, so no resource can ever demand more
 # gold than a villager could plausibly gather toward across a few turns
 # (COLLECT_CAP=20, so a 4x spike on a BASE_PRICE=1-3 good tops out under 12g).
-BASE_PRICE = {"food": 1, "fish": 1, "water": 1, "wood": 1, "herbs": 1,
+BASE_PRICE = {"food": 1, "fish": 1, "meat": 1, "water": 1, "wood": 1, "herbs": 1,
               "stone": 2, "planks": 2, "bricks": 2, "tools": 3, "cart": 4, "wagon": 6}
 PRICE_SCARCITY_MULT = 4.0
 PRICE_MIN = 1
@@ -1396,6 +1435,7 @@ BASE_RESOURCES = {
     "gold": {"name": "Gold", "gatherZone": "cave", "color": "#FFC107"},
     "stone": {"name": "Stone", "gatherZone": "cave", "color": "#9E9E9E"},
     "fish": {"name": "Fish", "gatherZone": "beach", "color": "#4FC3F7"},
+    "meat": {"name": "Meat", "gatherZone": None, "color": "#C62828"},
     "herbs": {"name": "Herbs", "gatherZone": "forest", "color": "#8BC34A"},
     "water": {"name": "Water", "gatherZone": "village", "color": "#03A9F4"},
 }
@@ -1664,10 +1704,11 @@ AGENT_DEFS = [
     {"id": 10, "name": "Dex", "role": "blacksmith", "personality": "focused and proud", "color": "#607D8B", "zone": "market"},
     {"id": 11, "name": "Nova", "role": "explorer", "personality": "bold and impulsive", "color": "#FF5722", "zone": "beach"},
     {"id": 12, "name": "Sage", "role": "elder", "personality": "wise and slow-moving", "color": "#FFC107", "zone": "village_core"},
+    {"id": 13, "name": "Kane", "role": "hunter", "personality": "quiet and relentless", "color": "#A1887F", "zone": "forest"},
 ]
 ROSTER = ["Zara", "Sage", "Aria", "Luna", "Marco", "Colt", "Finn", "Mia"]
 
-# Sid-parity Phase 6: scale headroom past the 12 hand-written AGENT_DEFS.
+# Sid-parity Phase 6: scale headroom past the hand-written AGENT_DEFS.
 # Not a bid for Project Sid's ~500-agent scale (explicit non-goal, see
 # specs/00-overview.md) -- just enough room that emergent roles (Phase 2) and
 # belief factions (Phase 3) can differentiate into more than a 2-3 person
@@ -1677,9 +1718,9 @@ MAX_ROSTER_SIZE = 20
 
 # Fixed pools for procedurally generated agents (roster indices
 # len(AGENT_DEFS)..MAX_ROSTER_SIZE-1) -- see _generated_agent_defs. Sized to
-# exactly cover MAX_ROSTER_SIZE - len(AGENT_DEFS) = 8 slots; if MAX_ROSTER_SIZE
-# ever grows past that, _generated_agent_defs appends a numeric suffix rather
-# than silently duplicating a name.
+# cover MAX_ROSTER_SIZE - len(AGENT_DEFS) headroom; if MAX_ROSTER_SIZE
+# ever grows past the name pool, _generated_agent_defs appends a numeric
+# suffix rather than silently duplicating a name.
 _GENERATED_AGENT_NAMES = ["Wren", "Ash", "Briar", "Juno", "Rowan", "Sable", "Tarn", "Vesper"]
 _GENERATED_AGENT_PERSONALITIES = [
     "steady and dependable", "watchful and reserved", "eager and talkative",
@@ -1691,11 +1732,11 @@ _GENERATED_AGENT_COLORS = ["#3F51B5", "#009688", "#CDDC39", "#673AB7",
 
 
 def _generated_agent_defs(count):
-    """AGENT_DEFS-shaped entries for roster slots beyond the 12 hand-written
+    """AGENT_DEFS-shaped entries for roster slots beyond the hand-written
     ones. Deterministic in `count` (no randomness) so a given roster_size
     always yields the same generated roster, which every other system --
     roles, beliefs, relationships, think scheduling -- treats identically to
-    a hand-written def. Role/zone rotate across the seed's 11 non-elder
+    a hand-written def. Role/zone rotate across the seed's non-elder
     roles.json roles (one generated agent per role before any role repeats),
     reusing the zone the matching hand-written def already spawns into, so
     generated agents spread across specialties instead of clustering into
@@ -2186,6 +2227,8 @@ class SimEngine:
             "births": 0,
             "deaths": 0,
             "nextGeneratedAgentId": 1000,  # synthetic ids for generated villagers once AGENT_DEFS is exhausted
+            "nextWildlifeId": 1,           # huntable fauna creature ids (WILDLIFE_ENABLED)
+            "wildlife": [],                # civilization["wildlife"] fauna records
             "pendingSuccession": None,     # {electionId, candidates:[names], startFrame, deadline}
             "lastSuccessionActivityFrame": 0,
             "harvestQuotas": {},            # rule id -> {"district": id|None, "resource": id|None, "value": n}
@@ -2255,6 +2298,8 @@ class SimEngine:
         self.agents = self._make_agents(active_defs)
         self.frameTick = 0
         self._seed_beliefs()
+        if WILDLIFE_ENABLED:
+            self._seed_wildlife_population()
 
     # --- logging helpers (mirror pushActivity / pushCommunication) ---
     def _push_activity(self, line):
@@ -6006,6 +6051,539 @@ class SimEngine:
         self._log_benchmark("night_shelter_rate", round(rate, 2), benchmark_payload)
         if exposed:
             self._push_activity(f"Night exposure — {exposed} villager(s) took cold damage")
+
+    # --- Huntable wildlife (WILDLIFE_ENABLED; not Path-1 _tick_wildlife) ---
+
+    @staticmethod
+    def _wildlife_hash_seed(text):
+        """FNV-1a 32-bit — mirrors index.html wildlifeHashSeed for placement."""
+        h = 2166136261
+        for ch in text:
+            h ^= ord(ch)
+            h = (h * 16777619) & 0xFFFFFFFF
+        return h
+
+    def _wildlife_stage_for_district(self, district_id):
+        """Ecology stage name for a district (barren/sparse/healthy/lush)."""
+        if not ECOLOGY_ENABLED:
+            return "healthy"
+        ratio = self._district_ecology_ratio(district_id)
+        if ratio is None:
+            return None
+        stage_state = self.civilization.setdefault("districtEcologyStage", {})
+        idx = self._district_ecology_stage_with_hysteresis(ratio, stage_state.get(district_id))
+        stage_state[district_id] = idx
+        return DISTRICT_ECOLOGY_STAGES[idx]
+
+    def _wildlife_stage_target(self, district_id):
+        stage = self._wildlife_stage_for_district(district_id)
+        if stage is None:
+            return 0
+        return min(WILDLIFE_STAGE_COUNT.get(stage, 0), WILDLIFE_CAP_PER_DISTRICT)
+
+    def _wildlife_district_kind(self, district_id):
+        d = self.civilization["districts"].get(district_id)
+        if not d:
+            return None
+        kind = d.get("kind")
+        return kind if kind in WILDLIFE_KIND_POOLS else None
+
+    def _wildlife_habitat_rect(self, district_id, kind):
+        """Return (x1, y1, x2, y2) clamp rect for a creature kind in a district."""
+        d = self.civilization["districts"].get(district_id)
+        if not d:
+            return None
+        b = d["bounds"]
+        x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
+        dkind = d.get("kind")
+        if dkind in ("forest", "farm"):
+            inset = WILDLIFE_HABITAT_INSET
+            return (x1 + inset, y1 + inset, max(x1 + inset + 1, x2 - inset),
+                    max(y1 + inset + 1, y2 - inset))
+        if dkind == "beach":
+            if kind in WILDLIFE_BEACH_WATER_KINDS:
+                strip = min(WILDLIFE_SHORE_STRIP, max(1, x2 - x1))
+                return (x1, y1, x1 + strip, y2)
+            # gull (and any non-water beach kind): full beach bounds
+            return (x1, y1, x2, y2)
+        return (x1, y1, x2, y2)
+
+    def _wildlife_clamp_pos(self, district_id, kind, x, y):
+        rect = self._wildlife_habitat_rect(district_id, kind)
+        if not rect:
+            return x, y
+        x1, y1, x2, y2 = rect
+        return (max(x1, min(x2, x)), max(y1, min(y2, y)))
+
+    def _wildlife_hash_point(self, district_id, kind, index):
+        """Deterministic habitat point — ports drawWildlife hash placement."""
+        d = self.civilization["districts"].get(district_id)
+        if not d:
+            return 0.0, 0.0
+        b = d["bounds"]
+        seed = self._wildlife_hash_seed(str(district_id))
+        rx = ((seed * (index + 7) * 48271) % 2147483647) / 2147483647
+        ry = ((seed * (index + 13) * 16807) % 2147483647) / 2147483647
+        if kind in WILDLIFE_BEACH_WATER_KINDS and d.get("kind") == "beach":
+            span_w = min(WILDLIFE_SHORE_STRIP, max(1, b["x2"] - b["x1"]))
+            x = b["x1"] + rx * span_w
+            y = b["y1"] + ry * (b["y2"] - b["y1"])
+        else:
+            rect = self._wildlife_habitat_rect(district_id, kind)
+            if not rect:
+                return (b["x1"] + b["x2"]) / 2, (b["y1"] + b["y2"]) / 2
+            x1, y1, x2, y2 = rect
+            x = x1 + rx * max(1, x2 - x1)
+            y = y1 + ry * max(1, y2 - y1)
+        return self._wildlife_clamp_pos(district_id, kind, x, y)
+
+    def _wildlife_random_point(self, district_id, kind):
+        rect = self._wildlife_habitat_rect(district_id, kind)
+        if not rect:
+            return 0.0, 0.0
+        x1, y1, x2, y2 = rect
+        x = x1 + random.random() * max(1, x2 - x1)
+        y = y1 + random.random() * max(1, y2 - y1)
+        return self._wildlife_clamp_pos(district_id, kind, x, y)
+
+    def _next_wildlife_id(self):
+        c = self.civilization
+        wid = int(c.get("nextWildlifeId") or 1)
+        c["nextWildlifeId"] = wid + 1
+        return f"w{wid}"
+
+    def _make_wildlife_creature(self, district_id, kind, x=None, y=None, index=0):
+        max_hp = int(WILDLIFE_MAX_HP.get(kind, 1))
+        if x is None or y is None:
+            x, y = self._wildlife_hash_point(district_id, kind, index)
+        else:
+            x, y = self._wildlife_clamp_pos(district_id, kind, x, y)
+        tx, ty = self._wildlife_random_point(district_id, kind)
+        return {
+            "id": self._next_wildlife_id(),
+            "kind": kind,
+            "districtId": district_id,
+            "x": x, "y": y,
+            "targetX": tx, "targetY": ty,
+            "waypoints": [],
+            "hp": max_hp,
+            "maxHp": max_hp,
+            "alive": True,
+            "respawnAt": None,
+            "migrateDest": None,
+        }
+
+    def _normalize_wildlife_records(self):
+        """Restore-time shape fill for persisted fauna (never re-seeds)."""
+        fauna = self.civilization.setdefault("wildlife", [])
+        if not isinstance(fauna, list):
+            self.civilization["wildlife"] = []
+            return
+        for i, cre in enumerate(list(fauna)):
+            if not isinstance(cre, dict):
+                continue
+            kind = cre.get("kind") or "bird"
+            did = cre.get("districtId")
+            cre.setdefault("id", self._next_wildlife_id())
+            cre.setdefault("kind", kind)
+            cre.setdefault("districtId", did)
+            cre.setdefault("alive", True)
+            cre.setdefault("respawnAt", None)
+            cre.setdefault("waypoints", [])
+            max_hp = int(cre.get("maxHp") or WILDLIFE_MAX_HP.get(kind, 1))
+            cre["maxHp"] = max_hp
+            cre.setdefault("hp", max_hp)
+            if cre.get("x") is None or cre.get("y") is None:
+                x, y = self._wildlife_hash_point(did, kind, i) if did else (0.0, 0.0)
+                cre["x"], cre["y"] = x, y
+            if cre.get("targetX") is None or cre.get("targetY") is None:
+                if did:
+                    cre["targetX"], cre["targetY"] = self._wildlife_random_point(did, kind)
+                else:
+                    cre["targetX"], cre["targetY"] = cre["x"], cre["y"]
+
+    def _seed_wildlife_population(self):
+        """Cold-start / empty-restore: fill each habitat district to stage target."""
+        if not WILDLIFE_ENABLED:
+            return
+        c = self.civilization
+        c.setdefault("wildlife", [])
+        c.setdefault("nextWildlifeId", 1)
+        if c["wildlife"]:
+            return
+        for did, d in c["districts"].items():
+            dkind = d.get("kind")
+            pool = WILDLIFE_KIND_POOLS.get(dkind)
+            if not pool:
+                continue
+            target = self._wildlife_stage_target(did)
+            for i in range(target):
+                kind = pool[i % len(pool)]
+                # Prefer a stable hash pick so cold-start mixes kinds, not only
+                # the first N of the pool list.
+                seed = self._wildlife_hash_seed(f"{did}:{i}")
+                kind = pool[seed % len(pool)]
+                c["wildlife"].append(self._make_wildlife_creature(did, kind, index=i))
+
+    def _wildlife_alive_in_district(self, district_id):
+        return [w for w in (self.civilization.get("wildlife") or [])
+                if w.get("alive") and w.get("districtId") == district_id]
+
+    def _wildlife_road_waypoints(self, from_district_id, to_district_id, dest_x, dest_y):
+        """Reuse agent road cache between districts; [] if no road path."""
+        if not ROADS_ENABLED:
+            return []
+        path_nodes = self._road_path_between_districts(from_district_id, to_district_id)
+        if not path_nodes:
+            return []
+        nodes = self.civilization.get("roadNodes") or {}
+        waypoints = [{"x": nodes[n]["x"], "y": nodes[n]["y"]}
+                     for n in path_nodes if n in nodes]
+        waypoints.append({"x": dest_x, "y": dest_y})
+        return waypoints
+
+    def _wildlife_begin_migration(self, creature, dest_district_id):
+        kind = creature["kind"]
+        dest_x, dest_y = self._wildlife_random_point(dest_district_id, kind)
+        src = creature.get("districtId")
+        waypoints = self._wildlife_road_waypoints(src, dest_district_id, dest_x, dest_y)
+        if waypoints:
+            creature["waypoints"] = waypoints[1:]
+            first = waypoints[0]
+            creature["targetX"] = first["x"]
+            creature["targetY"] = first["y"]
+        else:
+            # Straight-line toward destination habitat, then clamp on arrival.
+            creature["waypoints"] = []
+            creature["targetX"] = dest_x
+            creature["targetY"] = dest_y
+        creature["migrateDest"] = dest_district_id
+
+    def _wildlife_pick_wander_target(self, creature):
+        did = creature.get("districtId")
+        kind = creature.get("kind")
+        if not did or not kind:
+            return
+        creature["targetX"], creature["targetY"] = self._wildlife_random_point(did, kind)
+        creature["waypoints"] = []
+
+    def _wildlife_force_flee(self, creature, from_x, from_y):
+        """Retarget away from a threat; used by proximity flee and hunt hits."""
+        dx = creature["x"] - from_x
+        dy = creature["y"] - from_y
+        dist = math.sqrt(dx * dx + dy * dy) or 1.0
+        flee_dist = 80 + random.random() * 40
+        tx = creature["x"] + (dx / dist) * flee_dist
+        ty = creature["y"] + (dy / dist) * flee_dist
+        did = creature.get("districtId")
+        kind = creature.get("kind")
+        if did and kind and not creature.get("migrateDest"):
+            tx, ty = self._wildlife_clamp_pos(did, kind, tx, ty)
+        creature["targetX"] = tx
+        creature["targetY"] = ty
+        creature["waypoints"] = []
+
+    def _move_wildlife(self):
+        """Every-tick fauna motion: wander, flee, follow migration waypoints."""
+        if not WILDLIFE_ENABLED:
+            return
+        fauna = self.civilization.get("wildlife") or []
+        living_agents = [a for a in self.agents
+                         if not a.get("incapacitated")
+                         and not (LIFECYCLE_ENABLED and a.get("deathFrame") is not None)]
+        for cre in fauna:
+            if not cre.get("alive"):
+                continue
+            kind = cre.get("kind")
+            speed = WILDLIFE_SPEED.get(kind, 2.0) * MOVE_SCALE
+            # Flee if a living agent is within radius (skip while mid-migration
+            # along roads so long-range travel isn't constantly cancelled).
+            if not cre.get("migrateDest") and living_agents:
+                nearest = None
+                nearest_d = WILDLIFE_FLEE_RADIUS + 1
+                for a in living_agents:
+                    dd = _dist(cre["x"], cre["y"], a["x"], a["y"])
+                    if dd < nearest_d:
+                        nearest_d, nearest = dd, a
+                if nearest is not None and nearest_d <= WILDLIFE_FLEE_RADIUS:
+                    self._wildlife_force_flee(cre, nearest["x"], nearest["y"])
+            dx = cre["targetX"] - cre["x"]
+            dy = cre["targetY"] - cre["y"]
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= speed:
+                cre["x"] = cre["targetX"]
+                cre["y"] = cre["targetY"]
+                waypoints = cre.get("waypoints") or []
+                if waypoints:
+                    nxt = waypoints.pop(0)
+                    cre["targetX"] = nxt["x"]
+                    cre["targetY"] = nxt["y"]
+                elif cre.get("migrateDest"):
+                    dest = cre.pop("migrateDest", None)
+                    if dest and dest in self.civilization["districts"]:
+                        cre["districtId"] = dest
+                    cre["waypoints"] = []
+                    if cre.get("districtId") and kind:
+                        cre["x"], cre["y"] = self._wildlife_clamp_pos(
+                            cre["districtId"], kind, cre["x"], cre["y"])
+                    self._wildlife_pick_wander_target(cre)
+                else:
+                    self._wildlife_pick_wander_target(cre)
+            else:
+                cre["x"] += (dx / dist) * speed
+                cre["y"] += (dy / dist) * speed
+            # In-district habitat clamp (migration waypoints may leave habitat).
+            if not cre.get("migrateDest") and cre.get("districtId") and kind:
+                cre["x"], cre["y"] = self._wildlife_clamp_pos(
+                    cre["districtId"], kind, cre["x"], cre["y"])
+
+    def _tick_huntable_wildlife(self):
+        """Slower cadence: respawn, spawn to stage target, cull excess, migrate."""
+        if not WILDLIFE_ENABLED:
+            return
+        c = self.civilization
+        fauna = c.setdefault("wildlife", [])
+        ft = self.frameTick
+        # --- revive / spawn / cull per habitat district ---
+        for did, d in list(c["districts"].items()):
+            dkind = d.get("kind")
+            pool = WILDLIFE_KIND_POOLS.get(dkind)
+            if not pool:
+                continue
+            target = self._wildlife_stage_target(did)
+            alive = self._wildlife_alive_in_district(did)
+            # Cull excess above stage cap (mark dead; schedule ordinary respawn).
+            if len(alive) > target:
+                excess = sorted(alive, key=lambda w: w.get("id") or "")[target:]
+                for cre in excess:
+                    cre["alive"] = False
+                    cre["hp"] = 0
+                    cre["respawnAt"] = ft + WILDLIFE_RESPAWN_FRAMES
+                    cre["waypoints"] = []
+                    cre.pop("migrateDest", None)
+                alive = self._wildlife_alive_in_district(did)
+            # Respawn dead creatures for this district whose timer elapsed.
+            for cre in fauna:
+                if cre.get("alive") or cre.get("districtId") != did:
+                    continue
+                respawn_at = cre.get("respawnAt")
+                if respawn_at is None or ft < respawn_at:
+                    continue
+                if len(self._wildlife_alive_in_district(did)) >= target:
+                    continue
+                kind = cre.get("kind")
+                if kind not in pool:
+                    kind = pool[self._wildlife_hash_seed(cre.get("id") or did) % len(pool)]
+                    cre["kind"] = kind
+                max_hp = int(WILDLIFE_MAX_HP.get(kind, 1))
+                x, y = self._wildlife_random_point(did, kind)
+                cre["x"], cre["y"] = x, y
+                cre["hp"] = max_hp
+                cre["maxHp"] = max_hp
+                cre["alive"] = True
+                cre["respawnAt"] = None
+                cre["waypoints"] = []
+                cre.pop("migrateDest", None)
+                self._wildlife_pick_wander_target(cre)
+            # Spawn fresh creatures if still under target.
+            while len(self._wildlife_alive_in_district(did)) < target:
+                idx = len(self._wildlife_alive_in_district(did))
+                seed = self._wildlife_hash_seed(f"{did}:spawn:{ft}:{idx}")
+                kind = pool[seed % len(pool)]
+                fauna.append(self._make_wildlife_creature(did, kind, index=idx))
+        # --- migration checks ---
+        if WILDLIFE_MIGRATE_CHECK_FRAMES and ft % WILDLIFE_MIGRATE_CHECK_FRAMES == 0:
+            for cre in list(fauna):
+                if not cre.get("alive") or cre.get("kind") in WILDLIFE_DECORATIVE_KINDS:
+                    continue
+                if cre.get("migrateDest") or (cre.get("waypoints") or []):
+                    continue
+                if random.random() > WILDLIFE_MIGRATE_CHANCE:
+                    continue
+                kind = cre.get("kind")
+                src = cre.get("districtId")
+                src_kind = self._wildlife_district_kind(src)
+                if not src_kind or kind not in WILDLIFE_KIND_POOLS.get(src_kind, []):
+                    continue
+                candidates = []
+                for did, d in c["districts"].items():
+                    if did == src or d.get("kind") != src_kind:
+                        continue
+                    if len(self._wildlife_alive_in_district(did)) >= self._wildlife_stage_target(did):
+                        continue
+                    candidates.append(did)
+                if not candidates:
+                    continue
+                dest = random.choice(candidates)
+                self._wildlife_begin_migration(cre, dest)
+
+    def _nearest_huntable_wildlife(self, agent, radius=None):
+        """Nearest living non-decorative creature within HUNT_RADIUS of agent."""
+        if not WILDLIFE_ENABLED or agent is None:
+            return None
+        r = HUNT_RADIUS if radius is None else radius
+        best, best_d = None, r + 1
+        for cre in (self.civilization.get("wildlife") or []):
+            if not cre.get("alive"):
+                continue
+            if cre.get("kind") in WILDLIFE_DECORATIVE_KINDS:
+                continue
+            if cre.get("kind") not in WILDLIFE_YIELD:
+                continue
+            dd = _dist(agent["x"], agent["y"], cre["x"], cre["y"])
+            if dd <= r and dd < best_d:
+                best, best_d = cre, dd
+        return best
+
+    def _find_wildlife_by_id(self, creature_id):
+        if creature_id is None or creature_id == "":
+            return None
+        # LLM targets often arrive as digit strings; ids are ints.
+        cid = creature_id
+        if isinstance(creature_id, str) and creature_id.isdigit():
+            cid = int(creature_id)
+        for cre in (self.civilization.get("wildlife") or []):
+            if cre.get("id") == cid or cre.get("id") == creature_id:
+                return cre
+        return None
+
+    def _grant_hunt_yield(self, agent, kind):
+        """Grant +1 meat/fish with carry-cap room first, overflow to stockpile."""
+        resource = WILDLIFE_YIELD.get(kind)
+        if not resource or not agent:
+            return 0, 0, None
+        amount = 1
+        cap = self._carry_cap(agent)
+        held = agent["resources"].get(resource, 0)
+        room = max(0, cap - held)
+        agent_added = min(amount, room)
+        stockpile_added = amount - agent_added
+        if agent_added:
+            agent["resources"][resource] = held + agent_added
+        if stockpile_added:
+            c = self.civilization
+            c["stockpile"][resource] = c["stockpile"].get(resource, 0) + stockpile_added
+        return agent_added, stockpile_added, resource
+
+    def _apply_hunt_damage(self, agent, creature, damage=None):
+        """Apply hunt damage under the lock. Returns a result dict for apply_decision."""
+        if not WILDLIFE_ENABLED:
+            return {"ok": False, "reason": "wildlife disabled"}
+        if not creature or not creature.get("alive"):
+            return {"ok": False, "reason": "no living prey"}
+        kind = creature.get("kind")
+        if kind in WILDLIFE_DECORATIVE_KINDS or kind not in WILDLIFE_YIELD:
+            return {"ok": False, "reason": "not huntable"}
+        if damage is None:
+            damage = (HUNT_DAMAGE_HUNTER if agent and agent.get("role") == "hunter"
+                      else HUNT_DAMAGE)
+        damage = max(1, int(damage))
+        creature["hp"] = max(0, int(creature.get("hp") or 0) - damage)
+        self._wildlife_force_flee(creature, agent["x"], agent["y"])
+        if creature["hp"] > 0:
+            self._push_activity(
+                f"{agent['name']} strikes a {kind} ({creature['hp']}/{creature.get('maxHp', '?')} hp)")
+            return {"ok": True, "killed": False, "creature": creature, "damage": damage,
+                    "hp": creature["hp"], "kind": kind}
+        creature["alive"] = False
+        creature["respawnAt"] = self.frameTick + WILDLIFE_RESPAWN_FRAMES
+        creature["waypoints"] = []
+        creature.pop("migrateDest", None)
+        agent_added, stockpile_added, resource = self._grant_hunt_yield(agent, kind)
+        note = f"{agent['name']} hunted a {kind}"
+        if resource:
+            note += f" (+{agent_added + stockpile_added} {resource}"
+            if stockpile_added:
+                note += f"; {stockpile_added} overflow to stockpile"
+            note += ")"
+        self._push_activity(note)
+        return {"ok": True, "killed": True, "creature": creature, "damage": damage,
+                "kind": kind, "resource": resource, "agentAdded": agent_added,
+                "stockpileAdded": stockpile_added}
+
+    def god_wildlife_spawn(self, district_id, kind, respect_cap=True):
+        """Spawn an alive creature at a habitat-legal position. Caller holds lock.
+        Returns the creature dict, or None on reject."""
+        if not WILDLIFE_ENABLED:
+            return None
+        dkind = self._wildlife_district_kind(district_id)
+        pool = WILDLIFE_KIND_POOLS.get(dkind or "", [])
+        if not dkind or kind not in pool:
+            return None
+        if respect_cap:
+            if len(self._wildlife_alive_in_district(district_id)) >= WILDLIFE_CAP_PER_DISTRICT:
+                return None
+        idx = len(self._wildlife_alive_in_district(district_id))
+        cre = self._make_wildlife_creature(district_id, kind, index=idx)
+        self.civilization.setdefault("wildlife", []).append(cre)
+        return cre
+
+    def god_wildlife_despawn(self, creature_id=None, district_id=None):
+        """Mark target(s) dead. Pass creature id, or district_id to clear a district.
+        Returns count despawned. Caller holds lock."""
+        if not WILDLIFE_ENABLED:
+            return 0
+        fauna = self.civilization.get("wildlife") or []
+        count = 0
+        for cre in fauna:
+            if not cre.get("alive"):
+                continue
+            if creature_id is not None and cre.get("id") != creature_id:
+                continue
+            if district_id is not None and cre.get("districtId") != district_id:
+                continue
+            if creature_id is None and district_id is None:
+                continue
+            cre["alive"] = False
+            cre["hp"] = 0
+            cre["respawnAt"] = self.frameTick + WILDLIFE_RESPAWN_FRAMES
+            cre["waypoints"] = []
+            cre.pop("migrateDest", None)
+            count += 1
+            if creature_id is not None:
+                break
+        return count
+
+    def god_wildlife_set_hp(self, creature_id, hp):
+        """Clamp and set hp; kill with ordinary respawn bookkeeping if hp <= 0.
+        Returns the creature or None. Caller holds lock."""
+        if not WILDLIFE_ENABLED:
+            return None
+        cre = self._find_wildlife_by_id(creature_id)
+        if not cre:
+            return None
+        max_hp = int(cre.get("maxHp") or WILDLIFE_MAX_HP.get(cre.get("kind"), 1))
+        cre["maxHp"] = max_hp
+        new_hp = max(0, min(max_hp, int(hp)))
+        cre["hp"] = new_hp
+        if new_hp <= 0:
+            cre["alive"] = False
+            cre["respawnAt"] = self.frameTick + WILDLIFE_RESPAWN_FRAMES
+            cre["waypoints"] = []
+            cre.pop("migrateDest", None)
+        else:
+            cre["alive"] = True
+            cre["respawnAt"] = None
+        return cre
+
+    def _wildlife_snapshot(self):
+        """Alive-only /state projection."""
+        if not WILDLIFE_ENABLED:
+            return []
+        out = []
+        for cre in (self.civilization.get("wildlife") or []):
+            if not cre.get("alive"):
+                continue
+            out.append({
+                "id": cre.get("id"),
+                "kind": cre.get("kind"),
+                "districtId": cre.get("districtId"),
+                "x": round(float(cre.get("x") or 0), 1),
+                "y": round(float(cre.get("y") or 0), 1),
+                "hp": int(cre.get("hp") or 0),
+                "maxHp": int(cre.get("maxHp") or 0),
+            })
+        return out
 
     def _tick_wildlife(self):
         if not path1_on("PRESSURE_LOOP_ENABLED") or not SURVIVAL_ENABLED:
@@ -11499,6 +12077,37 @@ class SimEngine:
                     else:
                         summary = f"{agent['name']} found nothing to collect"
 
+        elif action == "hunt_wildlife":
+            if not WILDLIFE_ENABLED:
+                summary = f"{agent['name']} cannot hunt — wildlife is disabled"
+            else:
+                target_raw = decision.get("target")
+                creature = self._find_wildlife_by_id(target_raw) if target_raw not in (None, "") else None
+                if creature is None:
+                    creature = self._nearest_huntable_wildlife(agent)
+                if creature is None:
+                    summary = f"{agent['name']} found no wildlife to hunt"
+                elif (creature.get("kind") in WILDLIFE_DECORATIVE_KINDS
+                      or creature.get("kind") not in WILDLIFE_YIELD
+                      or not creature.get("alive")):
+                    summary = f"{agent['name']} cannot hunt that creature"
+                elif _dist(agent["x"], agent["y"], creature["x"], creature["y"]) > HUNT_RADIUS:
+                    summary = f"{agent['name']} is too far to hunt that {creature.get('kind')}"
+                else:
+                    result = self._apply_hunt_damage(agent, creature)
+                    if not result.get("ok"):
+                        summary = f"{agent['name']} failed to hunt ({result.get('reason') or 'unknown'})"
+                    elif result.get("killed"):
+                        resource = result.get("resource")
+                        gained = (result.get("agentAdded") or 0) + (result.get("stockpileAdded") or 0)
+                        summary = f"{agent['name']} hunted a {result.get('kind')}"
+                        if resource and gained:
+                            summary += f" (+{gained} {resource})"
+                        resource_acted = resource
+                    else:
+                        summary = (f"{agent['name']} strikes a {result.get('kind')} "
+                                   f"({result.get('hp')}/{creature.get('maxHp', '?')} hp)")
+
         elif action == "talk_to_nearby":
             recipient = self._resolve_talk_target(agent, decision)
             self._auto_move_toward_target(agent, recipient if recipient != "everyone" else decision.get("target"))
@@ -12826,11 +13435,40 @@ class SimEngine:
                  or path1_on("TERRAIN_TILES_ENABLED"))
             and (action_name not in ("propose_treaty", "vote_treaty")
                  or path1_on("PATH1_DIPLOMACY_ENABLED"))
+            and (action_name != "hunt_wildlife"
+                 or (WILDLIFE_ENABLED and self._nearest_huntable_wildlife(agent) is not None))
         ]
 
         # Sovereign God mode (Phase 3): computed once per think payload,
         # separate from directive above -- see _divine_prompt_lines.
         divine_public_line, divine_private_line = self._divine_prompt_lines(agent)
+
+        # Nearby huntable fauna hint for the LLM / role_fallback (WILDLIFE_ENABLED).
+        nearby_wildlife = []
+        nearby_wildlife_line = None
+        prey_in_range = False
+        if WILDLIFE_ENABLED:
+            for cre in (self.civilization.get("wildlife") or []):
+                if not cre.get("alive"):
+                    continue
+                kind = cre.get("kind")
+                if kind in WILDLIFE_DECORATIVE_KINDS or kind not in WILDLIFE_YIELD:
+                    continue
+                dd = _dist(agent["x"], agent["y"], cre["x"], cre["y"])
+                if dd > HUNT_RADIUS:
+                    continue
+                nearby_wildlife.append({
+                    "id": cre.get("id"), "kind": kind,
+                    "hp": cre.get("hp"), "maxHp": cre.get("maxHp"),
+                })
+            if nearby_wildlife:
+                prey_in_range = True
+                parts = ", ".join(
+                    f"{w['kind']}#{w['id']} ({w['hp']}/{w['maxHp']} hp)"
+                    for w in nearby_wildlife[:5])
+                nearby_wildlife_line = (
+                    f"Nearby wildlife (hunt_wildlife target=id): {parts}"
+                )
 
         return {
             "agent_name": agent["name"],
@@ -12851,6 +13489,9 @@ class SimEngine:
             "nearby_beliefs": nearby_beliefs if MEMES_ENABLED else {},
             "belief_pitch_budget_remaining": max(0, BELIEF_PITCH_SESSION_CAP - c.get("beliefPitchCalls", 0)),
             "nearby_agents": nearby_detailed,
+            "nearby_wildlife": nearby_wildlife,
+            "nearby_wildlife_line": nearby_wildlife_line,
+            "prey_in_range": prey_in_range,
             "world_zone": agent["currentZone"],
             "current_district": agent.get("currentDistrict") or "none",
             "civilization_level": c["level"],
@@ -13505,6 +14146,10 @@ class SimEngine:
             for a in self.agents:
                 if not a["incapacitated"]:
                     self._move_agent(a, MOVE_SCALE)
+            if WILDLIFE_ENABLED:
+                self._move_wildlife()
+            if WILDLIFE_ENABLED and ft % WILDLIFE_POP_TICK_FRAMES == 0:
+                self._tick_huntable_wildlife()
 
             # The dark-gated whiteboard scheduler runs on the world clock,
             # never from a decision worker. An empty due-list only appends a
@@ -13865,6 +14510,11 @@ class SimEngine:
                     civ.setdefault("harvestQuotas", {})
                     civ.setdefault("rationingActive", {})
                     civ.setdefault("populationFloorHeld", False)
+                # Huntable wildlife: additive setdefault for old saves; seed
+                # only when the list is still empty so a persisted population
+                # never re-rolls on load.
+                civ.setdefault("nextWildlifeId", 1)
+                civ.setdefault("wildlife", [])
                 if CULTURE_ENABLED:
                     # Phase G: knowledge/culture state. Purely additive --
                     # matches every prior phase's setdefault-only back-compat
@@ -14062,6 +14712,13 @@ class SimEngine:
                 self._god_compiler_state = {"lastCompileWallTime": 0.0, "compileCount": 0}
                 self._expire_divine_effects(restore=True)
                 self._recompute_road_paths()
+                if WILDLIFE_ENABLED:
+                    # Old saves get a seeded population once; existing fauna
+                    # lists are only shape-normalized (never re-rolled).
+                    if not self.civilization.get("wildlife"):
+                        self._seed_wildlife_population()
+                    else:
+                        self._normalize_wildlife_records()
                 if CEMETERY_ENABLED:
                     self._ensure_cemetery_district()
                     self._migrate_cemetery_structure()
@@ -14628,6 +15285,83 @@ class SimEngine:
         if kind == "story_event":
             return self._validate_god_story_event(payload)
 
+        # --- Huntable wildlife god kinds (specs/02-engine-core.md) ---
+        if kind == "wildlife_spawn":
+            if not WILDLIFE_ENABLED:
+                return None, "wildlife is disabled"
+            district_id = payload.get("districtId")
+            if not isinstance(district_id, str) or not district_id.strip():
+                return None, "districtId is required"
+            district_id = district_id.strip()
+            if district_id not in self.civilization.get("districts", {}):
+                return None, "unknown district"
+            dkind = self._wildlife_district_kind(district_id)
+            if not dkind:
+                return None, "district is not a wildlife habitat"
+            creature_kind = payload.get("kind")
+            if not isinstance(creature_kind, str) or not creature_kind.strip():
+                return None, "kind is required"
+            creature_kind = creature_kind.strip()
+            pool = WILDLIFE_KIND_POOLS.get(dkind, [])
+            if creature_kind not in pool:
+                return None, f"kind '{creature_kind}' is not valid for {dkind} habitat"
+            if len(self._wildlife_alive_in_district(district_id)) >= WILDLIFE_CAP_PER_DISTRICT:
+                return None, f"district is at wildlife cap ({WILDLIFE_CAP_PER_DISTRICT})"
+            return {"kind": "wildlife_spawn",
+                    "payload": {"districtId": district_id, "kind": creature_kind}}, None
+
+        if kind == "wildlife_despawn":
+            if not WILDLIFE_ENABLED:
+                return None, "wildlife is disabled"
+            creature_id = payload.get("id")
+            district_id = payload.get("districtId")
+            has_id = creature_id is not None
+            has_district = district_id is not None
+            if has_id == has_district:
+                return None, "exactly one of id or districtId is required"
+            if has_id:
+                if not isinstance(creature_id, str) or not creature_id.strip():
+                    return None, "id must be a non-empty string"
+                creature_id = creature_id.strip()
+                cre = self._find_wildlife_by_id(creature_id)
+                if cre is None:
+                    return None, "unknown wildlife id"
+                if not cre.get("alive"):
+                    return None, "wildlife is already dead"
+                return {"kind": "wildlife_despawn",
+                        "payload": {"id": creature_id}}, None
+            if not isinstance(district_id, str) or not district_id.strip():
+                return None, "districtId must be a non-empty string"
+            district_id = district_id.strip()
+            if district_id not in self.civilization.get("districts", {}):
+                return None, "unknown district"
+            if not self._wildlife_alive_in_district(district_id):
+                return None, "no living wildlife in district"
+            return {"kind": "wildlife_despawn",
+                    "payload": {"districtId": district_id}}, None
+
+        if kind == "wildlife_set_hp":
+            if not WILDLIFE_ENABLED:
+                return None, "wildlife is disabled"
+            creature_id = payload.get("id")
+            if not isinstance(creature_id, str) or not creature_id.strip():
+                return None, "id is required"
+            creature_id = creature_id.strip()
+            cre = self._find_wildlife_by_id(creature_id)
+            if cre is None:
+                return None, "unknown wildlife id"
+            hp = payload.get("hp")
+            if isinstance(hp, bool) or not isinstance(hp, int):
+                return None, "hp must be an integer"
+            if hp < 0:
+                return None, "hp must be non-negative"
+            max_hp = int(cre.get("maxHp") or WILDLIFE_MAX_HP.get(cre.get("kind"), 1))
+            # Normalize to the clamped value so revalidation is idempotent
+            # (same discipline as grant_resource's normalized shape).
+            clamped_hp = max(0, min(max_hp, hp))
+            return {"kind": "wildlife_set_hp",
+                    "payload": {"id": creature_id, "hp": clamped_hp}}, None
+
         if kind in self._GOD_FUTURE_KINDS:
             return None, f"kind '{kind}' is not implemented in this phase"
         return None, f"unknown kind '{kind}'"
@@ -14744,6 +15478,51 @@ class SimEngine:
                 "priorState": w.get("state", "clear"),
                 "atRiskStructureCount": at_risk,
                 "warning": warning,
+            }
+        if kind == "wildlife_spawn":
+            district_id = payload["districtId"]
+            creature_kind = payload["kind"]
+            alive = self._wildlife_alive_in_district(district_id)
+            return {
+                "districtId": district_id,
+                "kind": creature_kind,
+                "aliveCount": len(alive),
+                "cap": WILDLIFE_CAP_PER_DISTRICT,
+                "wouldSpawn": len(alive) < WILDLIFE_CAP_PER_DISTRICT,
+            }
+        if kind == "wildlife_despawn":
+            if "id" in payload:
+                cre = self._find_wildlife_by_id(payload["id"])
+                if cre is None:
+                    return None
+                return {
+                    "id": payload["id"],
+                    "kind": cre.get("kind"),
+                    "districtId": cre.get("districtId"),
+                    "despawnCount": 1 if cre.get("alive") else 0,
+                }
+            district_id = payload["districtId"]
+            alive = self._wildlife_alive_in_district(district_id)
+            return {
+                "districtId": district_id,
+                "despawnCount": len(alive),
+                "ids": [c.get("id") for c in alive],
+            }
+        if kind == "wildlife_set_hp":
+            cre = self._find_wildlife_by_id(payload["id"])
+            if cre is None:
+                return None
+            max_hp = int(cre.get("maxHp") or WILDLIFE_MAX_HP.get(cre.get("kind"), 1))
+            new_hp = max(0, min(max_hp, int(payload["hp"])))
+            return {
+                "id": payload["id"],
+                "kind": cre.get("kind"),
+                "districtId": cre.get("districtId"),
+                "oldHp": int(cre.get("hp") or 0),
+                "newHp": new_hp,
+                "maxHp": max_hp,
+                "wouldKill": new_hp <= 0,
+                "wasAlive": bool(cre.get("alive")),
             }
         return None
 
@@ -15321,6 +16100,12 @@ class SimEngine:
             return self._god_apply_story_event(normalized["payload"]), None
         if kind == "weather_override":
             return self._god_apply_weather_override(normalized["payload"]), None
+        if kind == "wildlife_spawn":
+            return self._god_apply_wildlife_spawn(normalized["payload"])
+        if kind == "wildlife_despawn":
+            return self._god_apply_wildlife_despawn(normalized["payload"])
+        if kind == "wildlife_set_hp":
+            return self._god_apply_wildlife_set_hp(normalized["payload"])
         return None, f"kind '{kind}' is not implemented in this phase"
 
     def _god_apply_proclamation(self, text):
@@ -15563,6 +16348,94 @@ class SimEngine:
         return {"interventionId": intervention_id, "kind": "structure_condition",
                 "structureId": structure_id, "oldCondition": old_cond, "newCondition": new_cond,
                 "becameRuin": became_ruin}
+
+    # --- Huntable wildlife god kinds (irreversible; same public audit path) ---
+    def _god_apply_wildlife_spawn(self, payload):
+        """Spawn via god_wildlife_spawn under the lock. Returns (outcome, reason)."""
+        district_id = payload["districtId"]
+        creature_kind = payload["kind"]
+        cre = self.god_wildlife_spawn(district_id, creature_kind, respect_cap=True)
+        if cre is None:
+            return None, "wildlife spawn rejected"
+        intervention_id = self._next_intervention_id()
+        text = (f"A divine hand releases a {creature_kind} into {district_id} "
+                f"({cre.get('id')})")
+        self._push_activity(text)
+        self._push_communication("divine_wildlife", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        outcome = {
+            "interventionId": intervention_id, "kind": "wildlife_spawn",
+            "id": cre.get("id"), "creatureKind": creature_kind,
+            "districtId": district_id, "hp": cre.get("hp"), "maxHp": cre.get("maxHp"),
+            "x": cre.get("x"), "y": cre.get("y"),
+        }
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "wildlife_spawn", "frameTick": self.frameTick,
+            "wildlifeId": cre.get("id"), "creatureKind": creature_kind,
+            "districtId": district_id, "status": "applied", "public": True,
+        })
+        return outcome, None
+
+    def _god_apply_wildlife_despawn(self, payload):
+        """Despawn via god_wildlife_despawn under the lock. Returns (outcome, reason)."""
+        creature_id = payload.get("id")
+        district_id = payload.get("districtId")
+        count = self.god_wildlife_despawn(
+            creature_id=creature_id, district_id=district_id)
+        if count <= 0:
+            return None, "wildlife despawn rejected"
+        intervention_id = self._next_intervention_id()
+        if creature_id is not None:
+            text = f"A divine hand banishes wildlife {creature_id}"
+        else:
+            text = f"A divine hand clears wildlife from {district_id} ({count} removed)"
+        self._push_activity(text)
+        self._push_communication("divine_wildlife", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        outcome = {
+            "interventionId": intervention_id, "kind": "wildlife_despawn",
+            "id": creature_id, "districtId": district_id, "despawnCount": count,
+        }
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "wildlife_despawn", "frameTick": self.frameTick,
+            "wildlifeId": creature_id, "districtId": district_id,
+            "despawnCount": count, "status": "applied", "public": True,
+        })
+        return outcome, None
+
+    def _god_apply_wildlife_set_hp(self, payload):
+        """Set HP via god_wildlife_set_hp under the lock. Returns (outcome, reason)."""
+        creature_id = payload["id"]
+        hp = payload["hp"]
+        cre = self.god_wildlife_set_hp(creature_id, hp)
+        if cre is None:
+            return None, "wildlife set_hp rejected"
+        intervention_id = self._next_intervention_id()
+        new_hp = int(cre.get("hp") or 0)
+        max_hp = int(cre.get("maxHp") or 1)
+        killed = not cre.get("alive")
+        kind_name = cre.get("kind") or "creature"
+        if killed:
+            text = (f"A divine hand strikes down a {kind_name} "
+                    f"({creature_id}, hp {new_hp}/{max_hp})")
+        else:
+            text = (f"A divine hand reshapes a {kind_name} "
+                    f"({creature_id}, hp {new_hp}/{max_hp})")
+        self._push_activity(text)
+        self._push_communication("divine_wildlife", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        outcome = {
+            "interventionId": intervention_id, "kind": "wildlife_set_hp",
+            "id": creature_id, "creatureKind": kind_name,
+            "districtId": cre.get("districtId"), "hp": new_hp, "maxHp": max_hp,
+            "alive": bool(cre.get("alive")), "killed": killed,
+        }
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "wildlife_set_hp", "frameTick": self.frameTick,
+            "wildlifeId": creature_id, "hp": new_hp, "maxHp": max_hp,
+            "alive": bool(cre.get("alive")), "status": "applied", "public": True,
+        })
+        return outcome, None
 
     # --- Sovereign God mode Phase 6: weather override ---
     def _god_apply_weather_override(self, payload):
@@ -16240,6 +17113,10 @@ class SimEngine:
                 # Shared prerequisite for both consumers (2A) -- omitted
                 # entirely when neither viewer feature is on.
                 snapshot["districtEcology"] = self._district_ecology_snapshot()
+            if WILDLIFE_ENABLED:
+                snapshot["wildlife"] = self._wildlife_snapshot()
+            else:
+                snapshot["wildlife"] = []
             if CARAVAN_VISUALS_ENABLED:
                 snapshot["shipments"] = self._shipment_snapshot()
             if WEATHER_ENABLED:
