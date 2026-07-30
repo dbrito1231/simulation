@@ -466,7 +466,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
     and every kind uses procedural art. When ready **and** the kind has an
     entry in `WILDLIFE_SHEET_FRAMES`, `tryDrawWildlifeFromSheet` blits via
     `ctx.drawImage` with `imageSmoothingEnabled = false`, using optional
-    `destW`/`destH` overrides (large **32×32**, mid **24×24**, small **14×14**)
+    `destW`/`destH` overrides (large **32×32**, mid **28×28**, small **14×14**)
     or default `sw`/`sh` × tier scale. Extracted
     frame regions are cached in `_wildlifeSheetBlitCache` keyed by source
     rect (same module-level cache idiom as `_tileSourceCanvasCache`). Frame
@@ -491,7 +491,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | Tier | Sheet dest | Procedural scale | On-screen | Kinds |
   |---|---|---|---|---|
   | large | 32×32 | 2 | ~32 px | `deer`, `boar`, `grazer`, `seal` |
-  | mid | 24×24 | 2 | ~32 px fallback | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
+  | mid | 28×28 | 2 | ~32 px fallback | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
   | small | 14×14 | 1 | ~16 px fallback | `mouse`, `squirrel`, `fish`, `crab`, `butterfly` |
 
   All hand-authored sheet cells are dense ~16×16 Tiny Farm-style grids

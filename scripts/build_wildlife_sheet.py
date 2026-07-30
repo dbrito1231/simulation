@@ -28,7 +28,7 @@ COLS = 8
 ROWS = 4
 CELL = 16
 
-# Tiny Farm idiom palette (outline RGB ≈ 63,38,49)
+# Tiny Farm idiom palette (outline k = 63,38,49 — always)
 OUT = (63, 38, 49, 255)
 CLR = {
     ".": (0, 0, 0, 0),
@@ -38,33 +38,38 @@ CLR = {
     "m": (139, 155, 180, 255),
     "d": (82, 96, 124, 255),
     "h": (90, 105, 136, 255),
-    "b": (192, 203, 220, 255),  # bird/gull body
-    "j": (160, 120, 90, 255),  # deer tan
-    "J": (200, 160, 120, 255),  # deer light belly
-    "K": (120, 85, 60, 255),  # deer dark legs
+    "b": (160, 120, 90, 255),  # bird brown body
+    "j": (196, 154, 108, 255),  # deer tan body
+    "A": (170, 120, 80, 255),  # deer shade
+    "J": (220, 190, 150, 255),  # deer/belly light
+    "H": (90, 70, 55, 255),  # deer/boar dark face
+    "B": (220, 200, 170, 255),  # antler bone
     "S": (180, 120, 70, 255),  # squirrel fur
     "T": (180, 100, 50, 255),  # fox bushy tail
     "F": (100, 130, 160, 255),  # seal flipper
     "W": (139, 115, 85, 255),  # owl brown
     "U": (180, 160, 130, 255),  # owl face cream
+    "R": (180, 180, 180, 255),  # mouse grey body
+    "L": (150, 150, 150, 255),  # mouse tail
     "n": (62, 78, 110, 255),  # nose dark
     "o": (225, 154, 101, 255),  # fox orange
     "p": (247, 194, 130, 255),  # fox light belly
-    "r": (195, 75, 53, 255),  # red comb / crab
     "y": (227, 134, 40, 255),  # beak / feet
     "g": (120, 145, 85, 255),  # turtle shell
     "s": (85, 115, 60, 255),  # turtle dark shell
-    "e": (140, 175, 95, 255),  # turtle head
+    "e": (140, 175, 95, 255),  # turtle head / fish eye accent
     "f": (100, 180, 220, 255),  # fish blue
-    "t": (60, 130, 180, 255),  # fish tail
+    "t": (60, 130, 180, 255),  # fish tail fin
     "c": (220, 90, 80, 255),  # crab red
     "u": (180, 60, 55, 255),  # crab dark
+    "E": (40, 40, 40, 255),  # crab eye dots
     "a": (170, 100, 210, 255),  # butterfly wing A
     "v": (130, 70, 180, 255),  # butterfly wing B
-    "i": (255, 112, 109, 255),  # pink nose / accents
-    "q": (38, 43, 68, 255),  # deep shadow
-    "x": (110, 85, 65, 255),  # boar dark brown
-    "z": (240, 230, 210, 255),  # tusk / highlight
+    "i": (255, 180, 180, 255),  # pink ears / nose
+    "q": (38, 43, 68, 255),  # deep wool shadow (sheep idiom)
+    "x": (110, 85, 65, 255),  # boar body
+    "Q": (90, 70, 50, 255),  # boar dark shade
+    "z": (240, 230, 210, 255),  # tusks / highlights
 }
 
 
@@ -141,53 +146,54 @@ def make_chicken_peck_alt(stand: Image.Image) -> Image.Image:
 # ---------------------------------------------------------------------------
 
 HAND_SPRITES: dict[str, list[str]] = {
+    # Sheep skeleton: side view facing RIGHT, dark head on right, 4 short legs.
     "deer": [
         "................",
-        "....k.kk........",
-        "...k.k.k.k......",
-        "....k.k.k.......",
-        ".....k.k........",
-        "....kjjjjjjjk...",
-        "...kjjJjjjJjjk..",
-        "..kjjjjjjjjjjjk.",
-        ".kjjjjjjjjjjjjjk",
-        "kjjjjjjjjjjjjjjk",
-        "kjjjjjhhnjjjjjjk",
-        ".kjjjjjjjjjjjjk.",
-        "..kK......Kk....",
-        "...K......K.....",
-        "...K......K.....",
-        "................",
+        "....k..B..k.....",
+        "...k.Bk.k.Bk....",
+        "..k..B...B..k...",
+        "........kkkkkk..",
+        "......kkkkkkkkk.",
+        "..kkkkkkkjjjjkkk",
+        ".kkkkkkHHHHHHkkk",
+        "kkkjjjjHHHHHHkkk",
+        "kkjJJjjjHHHHHkkk",
+        "kkjAAjjjHHHHkkk.",
+        "kkjJJjjjjjjjkkk.",
+        "kkjAAjjjAAjjkkk.",
+        "kkkjjjjjjjjjkk..",
+        ".kkHkHkkHkHkkk..",
+        ".kkHkHkkHkHkkk..",
     ],
     "boar": [
         "................",
         "....k.k......k.k",
         "...k.k.k....k.k.",
         "....k.k......k.k",
-        "....kxxxxxxxxk..",
-        "...kxxxxxxxyxxk.",
-        "..kxxxxxxxxxxxk.",
-        ".kxxxxxxxxxxxxxk",
-        "kxxxxxxxxxxxxxxk",
-        "kxxxxxxhnxxxxxxk",
-        ".kxxxxxxxxxxxxk.",
-        "..kxx......xxk..",
-        "...xx......xx...",
-        "................",
-        "................",
+        "........kkkkkk..",
+        "......kkkkkkkkk.",
+        "..kkkkkkkxxxxkkk",
+        ".kkkkkkxxxxxxyxk",
+        "kkkxxxxxxxxxxyxk",
+        "kkxxxxxxxxxHHzkk",
+        "kkxxxxxxxxxHHzkk",
+        "kkxxxxxxxxxxkkk.",
+        "kkkxxxxxxxxkkk..",
+        ".kxxkxxkxxkk....",
+        "...xx...xx......",
         "................",
     ],
     "seal": [
         "................",
-        ".....kkkkkkk....",
-        "....klllllllk...",
-        "...klllllllllk..",
-        "..klllllllllllk.",
-        ".klllllllllllllk",
-        "kllllllllllllllk",
-        "klllllllnllllllk",
-        "kllllllFlllllllk",
-        ".kllllllllllllk.",
+        "................",
+        "....kkkkkkkkk...",
+        "...kmmmmmmmmmk..",
+        "..kmmmmmmmmmmmk.",
+        ".kmmmmmmmmmmmmmk",
+        "kmmmmmmmmmmmmmmk",
+        "kmmmmmmmmmnmmmmk",
+        "kmmmmmmmmFmmmmmk",
+        ".kmmmmmmmmmmmmk.",
         "..kkkkkkkkkkkk..",
         "................",
         "................",
@@ -199,18 +205,18 @@ HAND_SPRITES: dict[str, list[str]] = {
         "................",
         "..k.........k...",
         ".kok.......kok..",
-        ".kooooooooopk...",
-        "koooppppppnnk...",
-        "koooppppppnnk...",
-        "kooooooooooook..",
-        "kooooooooooTTk..",
-        ".kooooooddddok..",
+        "kTTT..kkkkkkkk..",
+        "kTTT.kkkkkkkkkk.",
+        "kTTTkkkkkkoooooo",
+        "kTT.kkkkkooooooe",
+        "kTTkkkkooooooooo",
+        "kkoooooooooooooo",
+        "kkooooppppppooTT",
+        "kkoooooooddddook",
+        ".kooooooddddook.",
         "..kdddd..ddddk..",
-        "...ddd....ddd...",
-        "................",
-        "................",
-        "................",
-        "................",
+        "...kddd...dddk..",
+        "....dd.....dd...",
         "................",
     ],
     "owl_stand": [
@@ -219,14 +225,14 @@ HAND_SPRITES: dict[str, list[str]] = {
         "....kWUUUWk.....",
         "...kWyiiiyWk....",
         "..kWUUUUUUUWk...",
-        "..kWWWWWWWWk....",
         ".kWWWWWWWWWWk...",
+        "kWWWWWWWWWWWWk..",
+        "kWWWWWWWWWWWWk..",
+        "kWWWWWWWWWWWWk..",
         ".kWWWWWWWWWWk...",
         "..kWWWWWWWWk....",
         "...kWWWWWWk.....",
         "....kdd.ddk.....",
-        "................",
-        "................",
         "................",
         "................",
         "................",
@@ -237,14 +243,14 @@ HAND_SPRITES: dict[str, list[str]] = {
         "....kWUUUWk.....",
         "...kWykkkyWk....",
         "..kWUUUUUUUWk...",
-        "..kWWWWWWWWk....",
         ".kWWWWWWWWWWk...",
+        "kWWWWWWWWWWWWk..",
+        "kWWWWWWWWWWWWk..",
+        "kWWWWWWWWWWWWk..",
         ".kWWWWWWWWWWk...",
         "..kWWWWWWWWk....",
         "...kWWWWWWk.....",
         "....kdd.ddk.....",
-        "................",
-        "................",
         "................",
         "................",
         "................",
@@ -253,14 +259,14 @@ HAND_SPRITES: dict[str, list[str]] = {
         "................",
         "....kkkkkkk.....",
         "...kgssssssgk...",
-        "..kgshhhhhsgk...",
-        "..kgggggggggk...",
+        "..kgsheeehsgk...",
         ".kgggggggggggk..",
-        ".kggggggggeek...",
-        "..kggggggggk....",
-        "...kd....dk.....",
-        "...kd....dk.....",
-        "................",
+        "kggggggggggggggk",
+        "kggggggggggeekk.",
+        "kgggggggggggkk..",
+        ".kggggggggggk...",
+        "..kd....d..dk...",
+        "..kd....d..dk...",
         "................",
         "................",
         "................",
@@ -270,178 +276,178 @@ HAND_SPRITES: dict[str, list[str]] = {
     "rabbit_stand": [
         "................",
         "....k.....k.....",
+        "....i.....i.....",
         "....w.....w.....",
         "....w.....w.....",
-        "...kwwwwwwwwk...",
-        "..kwwwniwwwwk...",
-        ".kwwwwwwwwwwwk..",
-        "kwwwwwwwwwwwwwk.",
-        "kwwwwwwwwwwwwwk.",
+        "........kkkkkk..",
+        "......kkkkkkkkk.",
+        "..kkkkkkkwwwwkkk",
+        ".kkkkkkwwniwwwek",
+        "kkkwwwwwwwwwwwkk",
+        "kkwwwwwwwqwwqkkk",
+        "kkwwwwwwwwwwwkkk",
+        "kkwllwwwwwwllkk.",
         ".kwwwwwwwwwwwk..",
         "..kdd.....ddk...",
         "...dd.....dd....",
-        "................",
-        "................",
-        "................",
-        "................",
     ],
     "rabbit_alt": [
         "................",
         "....k.....k.....",
-        ".....w...w......",
+        ".....i...i......",
         "....w.w.........",
-        "...kwwwwwwwwk...",
-        "..kwwwniwwwwk...",
-        ".kwwwwwwwwwwwk..",
-        "kwwwwwwwwwwwwwk.",
-        "kwwwwwwwwwwwwwk.",
+        "....w.....w.....",
+        "........kkkkkk..",
+        "......kkkkkkkkk.",
+        "..kkkkkkkwwwwkkk",
+        ".kkkkkkwwniwwwek",
+        "kkkwwwwwwwwwwwkk",
+        "kkwwwwwwwqwwqkkk",
+        "kkwwwwwwwwwwwkkk",
+        "kkwllwwwwwwllkk.",
         ".kwwwwwwwwwwwk..",
         "..kdd.....ddk...",
         "...dd.....dd....",
-        "................",
-        "................",
-        "................",
-        "................",
     ],
     "gull_stand": [
         "................",
-        "......kkkkkk....",
-        ".....kwllllk....",
-        "....kllmmbbek...",
-        "...kllllllllk...",
-        "..klllllllllk...",
-        ".klllllllllllk..",
-        ".klllllllllllk..",
-        "..klllllllllk...",
-        "...kllllllk.....",
-        "....kdd.ddk.....",
-        "................",
-        "................",
+        "........kkkkkk..",
+        "......kkkkkkkkk.",
+        "..kkkkkkkwwwwwkk",
+        ".kkkkkkhhhhhyek.",
+        "kkkwwwwhhhhhhhk.",
+        "kkwwwwwwwqwwqkkk",
+        "kkwwwwwwwhhhhkkk",
+        "kkwllwwwwwnhhkk.",
+        "kkwllwwwwwwkkkk.",
+        ".kwwwwwwwwwwkk..",
+        "..kwwwwwwwwk....",
+        "...kdd...ddk....",
         "................",
         "................",
         "................",
     ],
     "gull_alt": [
         "................",
-        "......kkkkkk....",
-        ".....kmmlllk....",
-        "....kllwwbbek...",
-        "...kllllllllk...",
-        "..klllllllllk...",
-        ".klllllllllllk..",
-        ".klllllllllllk..",
-        "..klllllllllk...",
-        "...kllllllk.....",
-        "....kdd.ddk.....",
-        "................",
-        "................",
+        "........kkkkkk..",
+        "......kkkkkkkkk.",
+        "..kkkkkkkmwwwwkk",
+        ".kkkkkkhhhhhyek.",
+        "kkkmwwwwhhhhhhhk",
+        "kkwwwwwwwqwwqkkk",
+        "kkwwwwwwwhhhhkkk",
+        "kkwllwwwwwnhhkk.",
+        "kkwllwwwwwwkkkk.",
+        ".kwwwwwwwwwwkk..",
+        "..kwwwwwwwwk....",
+        "...kdd...ddk....",
         "................",
         "................",
         "................",
     ],
     "bird_stand": [
         "................",
-        "......kkkkkk....",
-        ".....klllllk....",
-        "....kllmmbbek...",
-        "...kllllllllk...",
-        "..klllllllllk...",
-        ".klllllllllllk..",
-        ".klllllllllllk..",
-        "..klllllllllk...",
-        "...kllllllk.....",
-        "....kdd.ddk.....",
-        "................",
-        "................",
+        "........kkkkkk..",
+        "......kkkkkkkkk.",
+        "..kkkkkkkbbbbbkk",
+        ".kkkkkkhhhhhyek.",
+        "kkkbbbbhhhhhhhk.",
+        "kkbbbbbbbfbbfkkk",
+        "kkbbbbbbbhhhkkk.",
+        "kkbllbbbbbnhhkk.",
+        "kkbllbbbbbbkkkk.",
+        ".kbbbbbbbbbbkk..",
+        "..kbbbbbbbbk....",
+        "...kdd...ddk....",
         "................",
         "................",
         "................",
     ],
     "bird_alt": [
         "................",
-        "......kkkkkk....",
-        ".....kmmlllk....",
-        "....kllwwbbek...",
-        "...kllllllllk...",
-        "..klllllllllk...",
-        ".klllllllllllk..",
-        ".klllllllllllk..",
-        "..klllllllllk...",
-        "...kllllllk.....",
-        "....kdd.ddk.....",
-        "................",
-        "................",
+        "........kkkkkk..",
+        "......kkkkkkkkk.",
+        "..kkkkkkkmbbbbkk",
+        ".kkkkkkhhhhhyek.",
+        "kkkmbbbbhhhhhhhk",
+        "kkbbbbbbbfbbfkkk",
+        "kkbbbbbbbhhhkkk.",
+        "kkbllbbbbbnhhkk.",
+        "kkbllbbbbbbkkkk.",
+        ".kbbbbbbbbbbkk..",
+        "..kbbbbbbbbk....",
+        "...kdd...ddk....",
         "................",
         "................",
         "................",
     ],
     "mouse": [
         "................",
-        "....kk...kk.....",
-        "....ll...ll.....",
-        "...kllllllllk...",
-        "..tkllllnlllk...",
-        "..klllllllllk...",
-        ".kllllllllllk...",
-        "..klllllllllk...",
-        "...kllllllllk...",
-        "....kdd...ddk...",
-        ".....dd...dd....",
         "................",
-        "................",
-        "................",
+        "...kk.....kk....",
+        "...Ri.....iR....",
+        "..kRRRRRRRRRk...",
+        ".tkRRRRnRRRRRk..",
+        "kRRRRRRRRRRRRRk.",
+        "kRRRRRRRRRRRRRk.",
+        ".kRRRRRRRRRRRk..",
+        "..kRRRRRRRRRk...",
+        "...kdd.....ddk..",
+        "....LL.....dd...",
+        "....kLL.........",
+        ".....LL.........",
         "................",
         "................",
     ],
     "squirrel_stand": [
         "................",
-        "kkk.............",
-        "kSSS............",
-        ".kSSS...........",
-        "..kSSSSSSSSSk...",
-        "...kSSSSSSSSSk..",
+        "....TTTT........",
+        "...kTTTTTTk.....",
+        "..kTTTTTTTTk....",
+        ".kTTTSSSSSSSk...",
+        "kTTTTkkSSSSSSSk.",
+        "kTTTTkSSSSSSSSSk",
+        "kTTTkSSSSSSSSSSk",
+        ".kTTkSSSSSSSSSk.",
+        "..kkSSSSSSSSSSk.",
+        "...kSSSSSSSSSSk.",
         "....kSSSSSSSSk..",
-        ".....kSSSSSSSSk.",
-        "......kSSSSSSSk.",
-        ".......kSSSSSSk.",
-        "........kdd..ddk",
-        ".........dd..dd.",
-        "................",
-        "................",
+        ".....kdd...ddk..",
+        "......dd...dd...",
         "................",
         "................",
     ],
     "squirrel_alt": [
         "................",
-        "kkk.............",
-        "kSSS.t..........",
-        ".kSSS...........",
-        "..kSSSSSSSSSk...",
-        "...kSSSSSSSSSk..",
+        "....TTTT.t......",
+        "...kTTTTTTk.....",
+        "..kTTTTTTTTk....",
+        ".kTTTSSSSSSSk...",
+        "kTTTTkkSSSSSSSk.",
+        "kTTTTkSSSSSSSSSk",
+        "kTTTkSSSSSSSSSSk",
+        ".kTTkSSSSSSSSSk.",
+        "..kkSSSSSSSSSSk.",
+        "...kSSSSSSSSSSk.",
         "....kSSSSSSSSk..",
-        ".....kSSSSSSSSk.",
-        "......kSSSSSSSk.",
-        ".......kSSSSSSk.",
-        "........kdd..ddk",
-        ".........dd..dd.",
-        "................",
-        "................",
+        ".....kdd...ddk..",
+        "......dd...dd...",
         "................",
         "................",
     ],
     "fish_stand": [
+        "................",
         "................",
         "...kkkkkk.......",
         "..kffffffffk....",
         ".tkfffffffffnk..",
         "kfffffffffffffk.",
         "kfffffffffffffk.",
+        "kfffffffffffffk.",
         ".kfffffffffffk..",
         "..kfffffffffk...",
         "...kffffffffk...",
-        "....kkkkkk......",
-        "................",
-        "................",
+        "....kkkkkkkk....",
         "................",
         "................",
         "................",
@@ -449,17 +455,17 @@ HAND_SPRITES: dict[str, list[str]] = {
     ],
     "fish_alt": [
         "................",
-        "...kkkkkk.......",
-        "..kffffffffk....",
+        "................",
+        "....kkkkkk......",
+        "...kffffffffk...",
         "..tkfffffffffnk.",
         ".kfffffffffffffk",
         ".kfffffffffffffk",
-        "..kfffffffffffk.",
-        "...kfffffffffk..",
-        "....kffffffffk..",
-        ".....kkkkkk.....",
-        "................",
-        "................",
+        "..kffffffffffffk",
+        "...kfffffffffffk",
+        "....kfffffffffk.",
+        ".....kffffffffk.",
+        "......kkkkkkkk..",
         "................",
         "................",
         "................",
@@ -471,13 +477,13 @@ HAND_SPRITES: dict[str, list[str]] = {
         "c..kcccccccck..c",
         "..ckcccccccccck.",
         ".ckccccccccccck.",
-        ".ckccccccccccck.",
+        "kcccccccccccccck",
+        "kcccccccccccccck",
+        ".ckcccccccccEck.",
         "..kcccccccccck..",
         "...kuuuuuuuuk...",
-        "....uuuuuuuuu...",
-        "................",
-        "................",
-        "................",
+        "....kuuuuuuk....",
+        ".....kuuuk......",
         "................",
         "................",
         "................",
@@ -485,15 +491,15 @@ HAND_SPRITES: dict[str, list[str]] = {
     ],
     "butterfly_stand": [
         "................",
-        ".aaa....k....bbb",
-        "aaaak...k...bbbb",
-        "aaaak...k...bbbb",
-        "aaaak...k...bbbb",
-        "aaaak...k...bbbb",
-        ".aaa....k....bbb",
+        "aaa.......bbb...",
+        "aaaak.....k.bbbb",
+        "vaaak.....k.bbbb",
+        "aaaak.....k.vbbb",
+        "aaaak.....k.bbbb",
+        "aaaak.....k.bbbb",
+        ".aaa.......bbb..",
         "......k.k.......",
         "......k.k.......",
-        "................",
         "................",
         "................",
         "................",
@@ -504,10 +510,10 @@ HAND_SPRITES: dict[str, list[str]] = {
     "butterfly_alt": [
         "................",
         "......k.k.......",
-        ".....kbbbk......",
-        "....kbbbbk......",
-        "....kbbbbk......",
-        ".....kbbbk......",
+        ".....kvvvvk.....",
+        "....kvvvvvvk....",
+        "....kvvvvvvk....",
+        ".....kvvvvk.....",
         "......k.k.......",
         "................",
         "................",
@@ -551,7 +557,7 @@ PLACEMENTS: dict[str, tuple[int, int]] = {
 }
 
 LARGE = {"destW": 32, "destH": 32}
-MID = {"destW": 24, "destH": 24}
+MID = {"destW": 28, "destH": 28}
 SMALL = {"destW": 14, "destH": 14}
 
 
@@ -629,13 +635,29 @@ def frames_to_js(frames: dict) -> str:
     return "\n".join(lines)
 
 
+def count_opaque(rows: list[str]) -> int:
+    return sum(1 for row in rows for ch in row if ch != ".")
+
+
+def write_preview(sheet: Image.Image, path: Path, scale: int = 8) -> None:
+    """Upscaled atlas preview for silhouette QA."""
+    preview = sheet.resize(
+        (sheet.width * scale, sheet.height * scale), Image.Resampling.NEAREST
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    preview.save(path, optimize=True)
+
+
 def main() -> None:
     sheet = Image.new("RGBA", (COLS * CELL, ROWS * CELL), (0, 0, 0, 0))
 
     # Hand-authored
+    print("Opaque pixel counts (hand-authored):")
     for name, rows in HAND_SPRITES.items():
         col, row = PLACEMENTS[name]
-        paste_tile(sheet, col, row, bake_grid(grid_from_strings(rows)))
+        img = bake_grid(grid_from_strings(rows))
+        paste_tile(sheet, col, row, img)
+        print(f"  {name:18s} {count_opaque(rows):3d}")
 
     # Tiny Farm tiles
     paste_tile(sheet, *PLACEMENTS["grazer"], load_vendor("tile_0120.png"))
@@ -648,6 +670,10 @@ def main() -> None:
     sheet.save(OUT_PATH, optimize=True)
     size_kb = OUT_PATH.stat().st_size / 1024
     print(f"Wrote {OUT_PATH} ({sheet.width}x{sheet.height}, {size_kb:.1f} KB)")
+
+    preview_path = ROOT / "simulation" / "_vendor" / "wildlife-preview-8x.png"
+    write_preview(sheet, preview_path, scale=8)
+    print(f"Wrote {preview_path} ({preview_path.stat().st_size / 1024:.1f} KB)")
 
     frames = build_frames_js()
     print("\n--- WILDLIFE_SHEET_FRAMES (paste into sprites.js) ---\n")
