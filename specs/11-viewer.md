@@ -466,7 +466,8 @@ own and does **not** pathfind, spawn, or reposition creatures.
     and every kind uses procedural art. When ready **and** the kind has an
     entry in `WILDLIFE_SHEET_FRAMES`, `tryDrawWildlifeFromSheet` blits via
     `ctx.drawImage` with `imageSmoothingEnabled = false`, using optional
-    `destW`/`destH` overrides or default `sw`/`sh` × tier scale. Extracted
+    `destW`/`destH` overrides (large **32×32**, mid **24×24**, small **14×14**)
+    or default `sw`/`sh` × tier scale. Extracted
     frame regions are cached in `_wildlifeSheetBlitCache` keyed by source
     rect (same module-level cache idiom as `_tileSourceCanvasCache`). Frame
     entries may be a bare `{ sx, sy, sw, sh, destW?, destH? }` or
@@ -484,18 +485,18 @@ own and does **not** pathfind, spawn, or reposition creatures.
     present, otherwise `stand`. Drawing uses `drawPixelSprite` with
     **per-tier scale** via `WILDLIFE_SIZE_TIER` / `WILDLIFE_TIER_SCALE`
     (replacing the former single `WILDLIFE_SCALE = 2` for all kinds).
-    Approximate on-screen sizes (grid width × tier scale; agents are
-    16-wide × 2 = 32 px):
+    Approximate on-screen sizes (sheet `destW`/`destH`; procedural fallback
+    uses 16-wide grids × tier scale; agents are 16-wide × 2 = 32 px):
 
-  | Tier | Scale | Grid width | On-screen | Kinds |
+  | Tier | Sheet dest | Procedural scale | On-screen | Kinds |
   |---|---|---|---|---|
-  | large | 2 | 16 | ~32 px | `deer`, `boar`, `grazer`, `seal` |
-  | mid | 2 | ~6–8 | ~12–16 px | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
-  | small | 1 | ~8 | ~8 px | `mouse`, `squirrel`, `fish`, `crab`, `butterfly` |
+  | large | 32×32 | 2 | ~32 px | `deer`, `boar`, `grazer`, `seal` |
+  | mid | 24×24 | 2 | ~32 px fallback | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
+  | small | 14×14 | 1 | ~16 px fallback | `mouse`, `squirrel`, `fish`, `crab`, `butterfly` |
 
-  Large-tier grids are upsized toward 16×16 for agent parity; mid/small
-  keep compact grids at their tier scale so relative scale stays believable
-  (a mouse never reaches deer size). Cosmetic motion also includes the
+  All hand-authored sheet cells are dense ~16×16 Tiny Farm-style grids
+  (~80–180 opaque px); mid/small `destW`/`destH` bumps legibility without
+  matching large-tier footprint. Cosmetic motion also includes the
   caller-side `bob` sine offset in `index.html` `drawWildlife`; `frameTick`
   drives frame swap only and does not invent a second position.
 - **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
