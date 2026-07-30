@@ -1910,8 +1910,8 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
 // projected via world.wildlife; index.html culls and applies cosmetic bob.
 //
 // Render dispatch (drawWildlifeCreature):
-//   1. PNG sheet — user art in simulation/assets/wildlife/ (13 kinds)
-//   2. Canvas silhouette helpers — bird, owl, squirrel (no source PNG)
+//   1. PNG sheet — user art in simulation/assets/wildlife/ (16 kinds)
+//   2. Canvas silhouette helpers — fallback when sheet missing/unready
 //   3. Procedural pixel grids (WILDLIFE_SPRITES) — last resort
 //
 // Rebuild atlas: uv run python scripts/build_wildlife_sheet.py
@@ -2413,21 +2413,24 @@ function resolveWildlifeGrid(entry, kind, frameTick) {
 // ---------------------------------------------------------------------
 const WILDLIFE_SHEET_URL = "/wildlife.png";
 
-// Kind → source rect(s). 13 user-art kinds; bird/owl/squirrel unmapped → canvas.
+// Kind → source rect(s). All 16 user-art kinds; canvas helpers remain fallback.
 const WILDLIFE_SHEET_FRAMES = {
-  deer: { sx: 2, sy: 2, sw: 71, sh: 125, destW: 25, destH: 44 },
-  boar: { sx: 75, sy: 2, sw: 256, sh: 181, destW: 44, destH: 31 },
-  grazer: { sx: 333, sy: 2, sw: 195, sh: 119, destW: 44, destH: 27 },
-  seal: { sx: 530, sy: 2, sw: 215, sh: 106, destW: 44, destH: 22 },
-  fox: { sx: 747, sy: 2, sw: 87, sh: 87, destW: 34, destH: 34 },
-  turtle: { sx: 2, sy: 185, sw: 205, sh: 107, destW: 34, destH: 18 },
-  rabbit: { sx: 209, sy: 185, sw: 64, sh: 68, destW: 32, destH: 34 },
-  chicken: { sx: 275, sy: 185, sw: 78, sh: 82, destW: 32, destH: 34 },
-  gull: { sx: 355, sy: 185, sw: 173, sh: 104, destW: 34, destH: 20 },
-  mouse: { sx: 530, sy: 185, sw: 96, sh: 82, destW: 26, destH: 22 },
-  fish: { sx: 628, sy: 185, sw: 102, sh: 78, destW: 26, destH: 20 },
-  crab: { sx: 732, sy: 185, sw: 168, sh: 133, destW: 26, destH: 21 },
-  bee: { sx: 2, sy: 320, sw: 186, sh: 206, destW: 23, destH: 26 },
+  deer: { sx: 2, sy: 2, sw: 70, sh: 125, destW: 25, destH: 44 },
+  boar: { sx: 74, sy: 2, sw: 256, sh: 181, destW: 44, destH: 31 },
+  grazer: { sx: 332, sy: 2, sw: 195, sh: 119, destW: 44, destH: 27 },
+  seal: { sx: 529, sy: 2, sw: 215, sh: 106, destW: 44, destH: 22 },
+  fox: { sx: 746, sy: 2, sw: 83, sh: 87, destW: 32, destH: 34 },
+  turtle: { sx: 2, sy: 185, sw: 198, sh: 107, destW: 34, destH: 18 },
+  rabbit: { sx: 202, sy: 185, sw: 64, sh: 68, destW: 32, destH: 34 },
+  chicken: { sx: 268, sy: 185, sw: 78, sh: 82, destW: 32, destH: 34 },
+  gull: { sx: 348, sy: 185, sw: 173, sh: 104, destW: 34, destH: 20 },
+  bird: { sx: 523, sy: 185, sw: 191, sh: 173, destW: 34, destH: 31 },
+  owl: { sx: 716, sy: 185, sw: 157, sh: 206, destW: 26, destH: 34 },
+  mouse: { sx: 875, sy: 185, sw: 96, sh: 82, destW: 26, destH: 22 },
+  fish: { sx: 2, sy: 393, sw: 102, sh: 78, destW: 26, destH: 20 },
+  crab: { sx: 106, sy: 393, sw: 168, sh: 133, destW: 26, destH: 21 },
+  bee: { sx: 276, sy: 393, sw: 186, sh: 206, destW: 23, destH: 26 },
+  squirrel: { sx: 464, sy: 393, sw: 179, sh: 143, destW: 26, destH: 21 },
 };
 
 const _wildlifeSheetBlitCache = new Map();

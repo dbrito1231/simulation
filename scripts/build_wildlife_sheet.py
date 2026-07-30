@@ -8,8 +8,8 @@ for sprites.js.
 
 Source PNGs are overwritten in place with keyed + trimmed versions.
 
-Kinds without a source PNG (bird, owl, squirrel) are omitted — the viewer falls
-back to canvas helpers / procedural grids.
+Kinds without a source PNG are omitted — the viewer falls back to canvas
+helpers / procedural grids.
 
 Run: uv run python scripts/build_wildlife_sheet.py
 """
@@ -33,8 +33,8 @@ BG_TOLERANCE = 35
 # Kinds with user PNGs (pack order: large → mid → small for tighter rows).
 SHEET_KINDS = [
     "deer", "boar", "grazer", "seal",
-    "fox", "turtle", "rabbit", "chicken", "gull",
-    "mouse", "fish", "crab", "bee",
+    "fox", "turtle", "rabbit", "chicken", "gull", "bird", "owl",
+    "mouse", "fish", "crab", "bee", "squirrel",
 ]
 
 TIER_MAX_SIDE = {
@@ -45,8 +45,10 @@ TIER_MAX_SIDE = {
 
 KIND_TIER = {
     "deer": "large", "boar": "large", "grazer": "large", "seal": "large",
-    "fox": "mid", "turtle": "mid", "rabbit": "mid", "chicken": "mid", "gull": "mid",
+    "fox": "mid", "turtle": "mid", "rabbit": "mid", "chicken": "mid",
+    "gull": "mid", "bird": "mid", "owl": "mid",
     "mouse": "small", "fish": "small", "crab": "small", "bee": "small",
+    "squirrel": "small",
 }
 
 

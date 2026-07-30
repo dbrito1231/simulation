@@ -470,15 +470,12 @@ own and does **not** pathfind, spawn, or reposition creatures.
     source rect (same module-level cache idiom as `_tileSourceCanvasCache`).
     Frame entries may be a bare `{ sx, sy, sw, sh, destW?, destH? }` or
     `{ stand, alt? }` with the same `frameTick` cadence as procedural
-    animation. **`WILDLIFE_SHEET_FRAMES` maps 13 user-art kinds** packed from
+    animation. **`WILDLIFE_SHEET_FRAMES` maps all 16 user-art kinds** packed from
     `simulation/assets/wildlife/*.png` into `/wildlife.png` (variable source
-    rects; dest sizes fit tier boxes preserving aspect ratio). **`bird`,
-    `owl`, and `squirrel` have no source PNG** — they use canvas helpers /
-    procedural fallback only.
-  - **Canvas silhouette helpers:** the three unmapped kinds (`bird`, `owl`,
-    `squirrel`) plus sheet fallbacks use restored pre-sheet canvas primitives
-    (V-wing birds, owl blink, squirrel tail-flick, bee wing flap, etc.) via
-    `WILDLIFE_CANVAS_HELPERS`. Each helper is drawn with a tier scale transform (`WILDLIFE_CANVAS_SCALE_BY_TIER`:
+    rects; dest sizes fit tier boxes preserving aspect ratio).
+  - **Canvas silhouette helpers:** fallback when the sheet is missing or not
+    ready; restored pre-sheet canvas primitives (V-wing birds, owl blink,
+    squirrel tail-flick, bee wing flap, etc.) via `WILDLIFE_CANVAS_HELPERS`. Each helper is drawn with a tier scale transform (`WILDLIFE_CANVAS_SCALE_BY_TIER`:
     large ~1.8, mid ~1.3, small 1.0) around the creature anchor so size tiers
     remain visible. Per-kind alt-frame cadence matches the former helpers
     (8–20 ticks where animated).
