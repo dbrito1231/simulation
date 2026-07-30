@@ -1913,8 +1913,39 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
 // use { stand, alt? } and drawWildlifeCreature alternates alt on frameTick
 // (same idiom as drawAgentSprite stand/walk). Caller-side bob in index.html
 // drawWildlife is additive; frameTick never invents a second position.
+//
+// Size tiers (grid px × tier scale = on-screen px; agents are 16-wide × 2 = 32):
+//   large — scale 2 on 16-wide grids → ~32 px: deer, boar, grazer, seal
+//   mid   — scale 2 on ~6–8-wide grids → ~12–16 px: fox, owl, turtle, rabbit,
+//           chicken, gull, bird
+//   small — scale 1 on ~8-wide grids → ~8 px: mouse, squirrel, fish, crab,
+//           butterfly
 // =====================================================================
-const WILDLIFE_SCALE = 2;
+const WILDLIFE_TIER_SCALE = { large: 2, mid: 2, small: 1 };
+
+const WILDLIFE_SIZE_TIER = {
+  deer: "large",
+  boar: "large",
+  grazer: "large",
+  seal: "large",
+  fox: "mid",
+  owl: "mid",
+  turtle: "mid",
+  rabbit: "mid",
+  chicken: "mid",
+  gull: "mid",
+  bird: "mid",
+  mouse: "small",
+  squirrel: "small",
+  fish: "small",
+  crab: "small",
+  butterfly: "small",
+};
+
+function wildlifeScaleForKind(kind) {
+  const tier = WILDLIFE_SIZE_TIER[kind] || "mid";
+  return WILDLIFE_TIER_SCALE[tier];
+}
 
 // Per-kind alt-frame cadence (ticks per swap); defaults to 12 in drawer.
 const WILDLIFE_ANIM_CADENCE = {
@@ -1968,14 +1999,22 @@ const WILDLIFE_SPRITES = {
   },
 
   // Grazer (sheep/goat/cow-like): blocky rounded wool body, tan head, stub legs.
+  // large tier — 16×16 grid
   grazer: tileFromStrings([
-    "..kkkk...",
-    ".kwwwwk..",
-    "kwwwwwwhk",
-    "kwwwwwwhk",
-    "kwwwwwwyk",
-    "kwwwwwwhk",
-    ".dd...dd.",
+    "....kkkkkkkk....",
+    "...kwwwwwwwwk...",
+    "..kwwwwwwwwwwk..",
+    ".kwwwwwwwwwwwwk.",
+    "kwwwwwwwwwwwwwwk",
+    "kwwwwwhhwwwhhwwk",
+    "kwwwwwwywwwwwwwk",
+    "kwwwwwwwwwwwwwwk",
+    "kwwwwwwwwwwwwwwk",
+    "kwwwwwwwwwwwwwwk",
+    ".kwwwwwwwwwwwwk.",
+    "..kwwwwwwwwwwk..",
+    "...dd......dd...",
+    "...dd......dd...",
   ], { ".": null, k: OUT, w: "#EFEBE0", h: "#8D6E63", y: "#2B2B2B", d: "#3E3226" }),
 
   // Squirrel: small round body, big round ears, thin tail line.
@@ -2001,16 +2040,22 @@ const WILDLIFE_SPRITES = {
   },
 
   // Deer: blocky body, branching antlers, dark stub legs.
+  // large tier — 16×16 grid
   deer: tileFromStrings([
-    "k.k...k.k",
-    ".k.k.k.k.",
-    "..k...k..",
-    ".kbbbbbk.",
-    "kbbbbbybk",
-    "kbllbbbnk",
-    "kbbbbbbbk",
-    "kbbbbbbbk",
-    ".dd...dd.",
+    ".k.k.........k.k",
+    "k.k.k......k.k.k",
+    ".k.k.........k.k",
+    "..k..........k..",
+    "..kbbbbbbbbbbbk.",
+    ".kbbbbbbbybbbbk.",
+    "kbllllbbbbbnbbbk",
+    "kbbbbbbbbbbbbbbk",
+    "kbbbbbbbbbbbbbbk",
+    "kbbbbbbbbbbbbbbk",
+    ".kbbbbbbbbbbbbk.",
+    "..kbbbbbbbbbbk..",
+    "...dd.......dd..",
+    "...dd.......dd..",
   ], { ".": null, k: OUT, b: "#A1887F", y: "#2B2B2B", l: "#D7CCC8", n: "#3E2723", d: "#5D4037" }),
 
   // Fox: orange-brown body, lighter belly patch, triangular ears, pointed snout.
@@ -2025,14 +2070,19 @@ const WILDLIFE_SPRITES = {
   ], { ".": null, k: OUT, b: "#E67E22", l: "#F5D6A8", y: "#2B2B2B", n: "#2B2B2B", d: "#3E2723" }),
 
   // Boar: dark blocky body, small tusk, dark stub legs.
+  // large tier — 16×16 grid
   boar: tileFromStrings([
-    "..k...k..",
-    ".kbk.kbk.",
-    ".kbbbbbk.",
-    "kbbbbbybk",
-    "kbbbbbtbk",
-    "kbbbbbbbk",
-    ".dd...dd.",
+    "..k.k......k.k..",
+    ".kbk.k....k.kbk.",
+    "..k.k......k.k..",
+    ".kbbbbbbbbbbbbk.",
+    ".kbbbbbbbybbbbk.",
+    "kbbbbbbbbbtbbbbk",
+    "kbbbbbbbbbbbbbbk",
+    "kbbbbbbbbbbbbbbk",
+    ".kbbbbbbbbbbbbk.",
+    "..dd........dd..",
+    "..dd........dd..",
   ], { ".": null, k: OUT, b: "#5D4037", y: "#2B2B2B", t: "#EFEBE0", d: "#3E2723" }),
 
   // Owl: rounded body, cream face mask, round eyes, small beak.
@@ -2172,12 +2222,19 @@ const WILDLIFE_SPRITES = {
   ], { ".": null, k: OUT, s: "#558B2F", h: "#33691E", e: "#7CB342", d: "#33691E" }),
 
   // Seal: blue-grey body, flipper, dark nose.
+  // large tier — 16×16 grid
   seal: tileFromStrings([
-    ".kkkkkk..",
-    "kbbbbbbfk",
-    "kbbbbbbnk",
-    "kbbbbbbbk",
-    ".kkkkkk..",
+    "....kkkkkkkk....",
+    "...kbbbbbbbbk...",
+    "..kbbbbbbbbbbk..",
+    ".kbbbbbbbbbbbbk.",
+    "kbbbbbbbbbbbbbbk",
+    "kbbbbbbbbbbbbbbk",
+    "kbbbbbbbbbnbbbbk",
+    "kbbbbbbbbfbbbbbk",
+    "kbbbbbbbbbbbbbbk",
+    ".kbbbbbbbbbbbbk.",
+    "..kkkkkkkkkkkk..",
   ], { ".": null, k: OUT, b: "#607D8B", f: "#455A64", n: "#263238" }),
 };
 
@@ -2195,7 +2252,7 @@ function resolveWildlifeGrid(entry, kind, frameTick) {
 function drawWildlifeCreature(ctx, kind, x, y, frameTick) {
   const grid = resolveWildlifeGrid(WILDLIFE_SPRITES[kind], kind, frameTick);
   if (!grid) return;
-  drawPixelSprite(ctx, x, y, grid, WILDLIFE_SCALE, false);
+  drawPixelSprite(ctx, x, y, grid, wildlifeScaleForKind(kind), false);
 }
 
 // =====================================================================

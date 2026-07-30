@@ -462,10 +462,22 @@ own and does **not** pathfind, spawn, or reposition creatures.
   grid: bare grids draw as-is; `{ stand, alt }` entries pick `alt` on an
   alternating `frameTick` cadence (per-kind 8–20 ticks, default 12 —
   same idiom as agent stand/walk) when `alt` is present, otherwise `stand`.
-  Drawing uses `drawPixelSprite` at `WILDLIFE_SCALE` (2). Cosmetic motion
-  also includes the caller-side `bob` sine offset in `index.html`
-  `drawWildlife`; `frameTick` drives frame swap only and does not invent a
-  second position.
+  Drawing uses `drawPixelSprite` with **per-tier scale** via
+  `WILDLIFE_SIZE_TIER` / `WILDLIFE_TIER_SCALE` (replacing the former
+  single `WILDLIFE_SCALE = 2` for all kinds). Approximate on-screen sizes
+  (grid width × tier scale; agents are 16-wide × 2 = 32 px):
+
+  | Tier | Scale | Grid width | On-screen | Kinds |
+  |---|---|---|---|---|
+  | large | 2 | 16 | ~32 px | `deer`, `boar`, `grazer`, `seal` |
+  | mid | 2 | ~6–8 | ~12–16 px | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
+  | small | 1 | ~8 | ~8 px | `mouse`, `squirrel`, `fish`, `crab`, `butterfly` |
+
+  Large-tier grids are upsized toward 16×16 for agent parity; mid/small
+  keep compact grids at their tier scale so relative scale stays believable
+  (a mouse never reaches deer size). Cosmetic motion also includes the
+  caller-side `bob` sine offset in `index.html` `drawWildlife`; `frameTick`
+  drives frame swap only and does not invent a second position.
 - **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
   (and `districtId`). The viewer does not seed positions client-side and
   does not run a road pathfinder for fauna — motion and cross-district
