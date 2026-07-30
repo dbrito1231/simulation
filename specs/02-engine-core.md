@@ -753,8 +753,10 @@ target). Kind pools and kill yields live in
 `districtEcology` stage ([05-world.md](05-world.md)).
 
 **Habitat clamp.** Forest/farm: district bounds (inset). Beach water kinds
-(`fish`, `crab`, `turtle`, `seal`): shore strip (~70px). `gull`: full beach
-bounds.
+(`fish`, `crab`, `turtle`, `seal`): eastern shore strip (~70px) of the adjacent
+**ocean** district (actual water tiles, not beach sand); y-range intersects the
+spawn beach and ocean bounds. Fallback when no ocean district exists: beach-west
+strip as before. `gull`: full beach bounds.
 
 **`_move_wildlife()`** — every tick when the flag is on (alongside agent
 move). In-district idle wander via simple steering at `WILDLIFE_SPEED[kind]`
