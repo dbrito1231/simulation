@@ -446,7 +446,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
   `WILDLIFE_STAGE_COUNT = {barren: 0, sparse: 1, healthy: 2, lush: 4}`,
   capped at `WILDLIFE_CAP_PER_DISTRICT = 4`. Only forest/farm/beach district
   kinds host fauna pools.
-- **Kind pools (15 kinds):**
+- **Kind pools (16 kinds):**
 
   | District | Kinds | Kill yield |
   |---|---|---|
@@ -455,13 +455,19 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | farm | `butterfly` | none — decorative, not huntable |
   | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
+- **Rendering (`sprites.js`):** each kind is a static pixel-grid entry in
+  the `WILDLIFE_SPRITES` table (flat-color, black-outline idiom matching
+  agent sprites). `drawWildlifeCreature` looks up the grid by `kind` and
+  draws it via `drawPixelSprite` at `WILDLIFE_SCALE` (2). There is no
+  per-kind wing-flap/fin-wiggle math in `sprites.js` for now — cosmetic
+  motion comes from the caller-side `bob` sine offset in `index.html`
+  `drawWildlife` only.
 - **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
   (and `districtId`). The viewer does not seed positions client-side and
   does not run a road pathfinder for fauna — motion and cross-district
-  migration are already resolved server-side between polls. `frameTick`
-  may still drive cosmetic sprite animation (bob, wing-flap, fin-wiggle)
-  in `sprites.js` (`drawWildlifeCreature` dispatching per-kind helpers)
-  without inventing a second position.
+  migration are already resolved server-side between polls. `frameTick` is
+  passed through for future alt-frame animation but does not invent a
+  second position today.
 - **Viewport culling** mirrors `drawSocialTies`: cull by district bounds
   against the scroll/zoom viewport, then per-creature `(x, y)`.
 - **Interaction:** fauna are huntable via the agent action `hunt_wildlife`

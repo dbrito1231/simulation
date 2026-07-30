@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 
 // Current season for seasonal sprite accents. Set by the viewer (setSpriteSeason)
 // once per state poll. This and the viewer-controlled accent gate are the only
@@ -64,7 +64,7 @@ function drawPixelSprite(ctx, cx, cy, grid, scale, flipX) {
   drawPixelGrid(ctx, Math.round(cx - w / 2), Math.round(cy - h + scale * 2), grid, scale, flipX);
 }
 
-// Tileâ†’offscreen-canvas cache: render each 16Ã—16 grid once, then repeat via
+// Tile→offscreen-canvas cache: render each 16×16 grid once, then repeat via
 // createPattern on fill. Module tile constants key by object identity; ocean
 // phases key through getOceanTile()'s stable memoized arrays.
 const _tileSourceCanvasCache = new Map();
@@ -688,7 +688,7 @@ function makeLevel30HouseGrid() {
   grid[2][11] = outline;
   for (let x = 1; x < width - 1; x++) grid[6][x] = roofLight;
 
-  // FaÃ§ade, with a dark outline and warm wall fill.
+  // Façade, with a dark outline and warm wall fill.
   for (let y = 7; y < height; y++) {
     for (let x = 1; x < width - 1; x++) {
       grid[y][x] = (x === 1 || x === width - 2 || y === height - 1)
@@ -856,11 +856,11 @@ function getStructureGrid(structure) {
   const upgraded = structureIsUpgraded(structure);
   // Seed houses need a stable architectural silhouette at the milestone
   // level. Do not let a persisted LLM sprite replace the pitched roof and
-  // faÃ§ade that identify this built-in structure as a house.
+  // façade that identify this built-in structure as a house.
   if (structure.type === "house" && Number(structure.level) >= 30) {
     return LEVEL30_HOUSE_GRID;
   }
-  // Upgraded seed types store a bigger sprite on the instance â€” prefer it
+  // Upgraded seed types store a bigger sprite on the instance — prefer it
   // when it has real detail; flat gray LLM blobs fall back to upscaled seeds.
   if (upgraded && structure.sprite && !spriteSpecIsDegenerate(structure.sprite)) {
     const cacheId = structure.id != null
@@ -1904,311 +1904,193 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
   }
   if (stageTimings) stageTimings.propsMs = performance.now() - stageT0;
 }
+
 // =====================================================================
 // Ambient wildlife (WILDLIFE_ENABLED). Server-authoritative huntable fauna
 // projected via world.wildlife; index.html culls and applies cosmetic bob.
-// These are stateless ~8â€“12px pixel silhouettes per kind (15 kinds total).
-// Butterfly is decorative (not huntable); all other kinds are hunt targets.
+// These are small chunky pixel-grid sprites (same flat-color, black-outline
+// idiom as AGENT_SPRITES above) rather than raw canvas primitives -- one
+// static grid per kind (16 kinds total). Butterfly is decorative (not
+// huntable); all other kinds are hunt targets. Kept intentionally static
+// (no per-kind wing-flap/wobble math): the caller-side cosmetic `bob` sine
+// offset (index.html drawWildlife) already provides motion, and this file
+// stays pure/stateless per the "no mutable module state" convention.
 // =====================================================================
-function drawFishRipple(ctx, x, y, frameTick) {
-  const wobble = Math.sin(frameTick / 12) * 2;
-  ctx.fillStyle = "#4FC3F7";
-  ctx.beginPath();
-  ctx.ellipse(x + wobble, y, 5, 2, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#0288D1";
-  ctx.beginPath();
-  ctx.moveTo(x - 5 + wobble, y);
-  ctx.lineTo(x - 8 + wobble, y - 2);
-  ctx.lineTo(x - 8 + wobble, y + 2);
-  ctx.closePath();
-  ctx.fill();
-}
+const WILDLIFE_SCALE = 2;
 
-function drawBird(ctx, x, y, frameTick) {
-  const flap = Math.abs(Math.sin(frameTick / 8)) * 4;
-  ctx.strokeStyle = "#3E3226";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(x - 5, y - flap);
-  ctx.lineTo(x, y);
-  ctx.lineTo(x + 5, y - flap);
-  ctx.stroke();
-}
+const WILDLIFE_SPRITES = {
+  // Fish: teardrop body, triangular tail fin, round eye dot.
+  fish: tileFromStrings([
+    ".kkkk...",
+    "kbbbbktt",
+    "kbybbkt.",
+    "kbbbbk..",
+    ".kkkk...",
+  ], { ".": null, k: OUT, b: "#4FC3F7", y: "#2B2B2B", t: "#0288D1" }),
 
-function drawGrazer(ctx, x, y) {
-  ctx.fillStyle = "#EFEBE0";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 5, 3.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#3E3226";
-  ctx.fillRect(x - 5, y + 2, 2, 2);
-  ctx.fillRect(x + 3, y + 2, 2, 2);
-}
+  // Bird (generic pigeon-type): rounded body, small pointed beak, wing block.
+  bird: tileFromStrings([
+    "..kkk...",
+    ".kbybbk.",
+    "kbbwwbbe",
+    "kbbbbbbk",
+    ".kbbbbk.",
+    "..dd.dd.",
+  ], { ".": null, k: OUT, b: "#78909C", y: "#2B2B2B", w: "#546E7A", e: "#FFB300", d: "#3E3226" }),
 
-function drawSquirrel(ctx, x, y, frameTick) {
-  const flick = Math.sin(frameTick / 10) * 1.5;
-  ctx.fillStyle = "#8D6E63";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 3.5, 3, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(x + 3, y - 2, 2, 2, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "#6D4C41";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.moveTo(x - 3, y);
-  ctx.quadraticCurveTo(x - 7, y - 5 + flick, x - 2, y - 6);
-  ctx.stroke();
-}
+  // Grazer (sheep/goat/cow-like): blocky rounded wool body, tan head, stub legs.
+  grazer: tileFromStrings([
+    "..kkkk...",
+    ".kwwwwk..",
+    "kwwwwwwhk",
+    "kwwwwwwhk",
+    "kwwwwwwyk",
+    "kwwwwwwhk",
+    ".dd...dd.",
+  ], { ".": null, k: OUT, w: "#EFEBE0", h: "#8D6E63", y: "#2B2B2B", d: "#3E3226" }),
 
-function drawDeer(ctx, x, y) {
-  ctx.fillStyle = "#A1887F";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 6, 3.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(x + 5, y - 3, 2.5, 2.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "#6D4C41";
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.moveTo(x + 4, y - 5);
-  ctx.lineTo(x + 3, y - 8);
-  ctx.moveTo(x + 6, y - 5);
-  ctx.lineTo(x + 7, y - 8);
-  ctx.stroke();
-  ctx.fillStyle = "#5D4037";
-  ctx.fillRect(x - 4, y + 2, 1.5, 3);
-  ctx.fillRect(x + 2, y + 2, 1.5, 3);
-}
+  // Squirrel: small round body, big round ears, thin tail line.
+  squirrel: tileFromStrings([
+    ".kk..kk..",
+    ".bb..bb..",
+    ".kbbbbbk.",
+    "tkbbbbybk",
+    "tkbbbbbbk",
+    ".kbbbbbbk",
+    "..dd.dd..",
+  ], { ".": null, k: OUT, b: "#8D6E63", y: "#2B2B2B", t: "#A1887F", d: "#6D4C41" }),
 
-function drawFox(ctx, x, y) {
-  ctx.fillStyle = "#E67E22";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 5, 3, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(x + 4, y - 1);
-  ctx.lineTo(x + 7, y - 3);
-  ctx.lineTo(x + 7, y + 1);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = "#F5D6A8";
-  ctx.beginPath();
-  ctx.ellipse(x - 4, y, 2, 1.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#3E3226";
-  ctx.fillRect(x - 3, y + 2, 1.5, 2);
-  ctx.fillRect(x + 2, y + 2, 1.5, 2);
-}
+  // Deer: blocky body, branching antlers, dark stub legs.
+  deer: tileFromStrings([
+    "k.k...k.k",
+    ".k.k.k.k.",
+    "..k...k..",
+    ".kbbbbbk.",
+    "kbbbbbybk",
+    "kbllbbbnk",
+    "kbbbbbbbk",
+    "kbbbbbbbk",
+    ".dd...dd.",
+  ], { ".": null, k: OUT, b: "#A1887F", y: "#2B2B2B", l: "#D7CCC8", n: "#3E2723", d: "#5D4037" }),
 
-function drawBoar(ctx, x, y) {
-  ctx.fillStyle = "#5D4037";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 5.5, 3.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(x + 4, y - 1, 2.5, 2.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#EFEBE0";
-  ctx.fillRect(x + 5, y + 1, 2, 1.5);
-  ctx.fillStyle = "#3E2723";
-  ctx.fillRect(x - 3, y + 2, 2, 2);
-  ctx.fillRect(x + 1, y + 2, 2, 2);
-}
+  // Fox: orange-brown body, lighter belly patch, triangular ears, pointed snout.
+  fox: tileFromStrings([
+    "..k...k..",
+    ".kbk.kbk.",
+    ".kbbbbbk.",
+    "kbbbbbybk",
+    "kbllbbbnk",
+    "kbbbbbbbk",
+    ".dd...dd.",
+  ], { ".": null, k: OUT, b: "#E67E22", l: "#F5D6A8", y: "#2B2B2B", n: "#2B2B2B", d: "#3E2723" }),
 
-function drawOwl(ctx, x, y, frameTick) {
-  const blink = Math.abs(Math.sin(frameTick / 40)) > 0.95 ? 0.5 : 1.5;
-  ctx.fillStyle = "#795548";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 4, 4.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#EFEBE0";
-  ctx.beginPath();
-  ctx.ellipse(x - 1.5, y - 1, 1.5, blink, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(x + 1.5, y - 1, 1.5, blink, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#F4A261";
-  ctx.beginPath();
-  ctx.moveTo(x, y + 0.5);
-  ctx.lineTo(x - 1.5, y + 2);
-  ctx.lineTo(x + 1.5, y + 2);
-  ctx.closePath();
-  ctx.fill();
-}
+  // Boar: dark blocky body, small tusk, dark stub legs.
+  boar: tileFromStrings([
+    "..k...k..",
+    ".kbk.kbk.",
+    ".kbbbbbk.",
+    "kbbbbbybk",
+    "kbbbbbtbk",
+    "kbbbbbbbk",
+    ".dd...dd.",
+  ], { ".": null, k: OUT, b: "#5D4037", y: "#2B2B2B", t: "#EFEBE0", d: "#3E2723" }),
 
-function drawRabbit(ctx, x, y, frameTick) {
-  const ear = Math.sin(frameTick / 15) * 0.5;
-  ctx.fillStyle = "#D7CCC8";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 3.5, 3, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(x - 1.5, y - 5 + ear, 1.2, 3, -0.2, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(x + 1.5, y - 5 - ear, 1.2, 3, 0.2, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#3E3226";
-  ctx.fillRect(x - 1, y - 0.5, 1, 1);
-}
+  // Owl: rounded body, cream face mask, round eyes, small beak.
+  owl: tileFromStrings([
+    "..kkk...",
+    ".kbbbbk.",
+    "kbfyyfbk",
+    "kbbeebbk",
+    "kbbbbbbk",
+    ".kbbbbk.",
+    "..dd.dd.",
+  ], { ".": null, k: OUT, b: "#795548", f: "#EFEBE0", y: "#FBC02D", e: "#F4A261", d: "#3E2723" }),
 
-function drawChicken(ctx, x, y, frameTick) {
-  const peck = Math.sin(frameTick / 12) * 1.5;
-  ctx.fillStyle = "#FFF8E1";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 4, 3.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(x + 3, y - 2 + peck * 0.3, 2.5, 2.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#E53935";
-  ctx.beginPath();
-  ctx.moveTo(x + 3, y - 4 + peck * 0.3);
-  ctx.lineTo(x + 2, y - 6);
-  ctx.lineTo(x + 4, y - 6);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = "#FF9800";
-  ctx.beginPath();
-  ctx.moveTo(x + 5, y - 2 + peck);
-  ctx.lineTo(x + 8, y - 1.5 + peck);
-  ctx.lineTo(x + 5, y - 1 + peck);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = "#F4A261";
-  ctx.fillRect(x - 1, y + 3, 1.5, 2);
-  ctx.fillRect(x + 1, y + 3, 1.5, 2);
-}
+  // Rabbit: white/cream body, long upright ears, small pink nose dot.
+  rabbit: tileFromStrings([
+    "..k...k..",
+    "..w...w..",
+    "..w...w..",
+    ".kwwwwwk.",
+    "kwwwwwwwk",
+    "kwnwwwywk",
+    "kwwwwwwwk",
+    ".dd...dd.",
+  ], { ".": null, k: OUT, w: "#F5F5F0", n: "#F48FB1", y: "#2B2B2B", d: "#BCAAA4" }),
 
-function drawMouse(ctx, x, y, frameTick) {
-  const twitch = Math.sin(frameTick / 8) * 1;
-  ctx.fillStyle = "#9E9E9E";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 3, 2, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(x + 2.5, y - 0.5, 1.5, 1.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "#757575";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(x - 3, y);
-  ctx.quadraticCurveTo(x - 6, y + twitch, x - 5, y - 3);
-  ctx.stroke();
-  ctx.fillStyle = "#3E3226";
-  ctx.fillRect(x + 3, y - 0.5, 1, 1);
-}
+  // Chicken: round white/red body, red comb, orange beak/feet.
+  chicken: tileFromStrings([
+    "...ccc...",
+    "..kbbbk..",
+    ".kybbbbke",
+    "kbbbbbbbk",
+    "kbbbbbbbk",
+    "kbbbbbbbk",
+    ".kbbbbbk.",
+    "..ff.ff..",
+  ], { ".": null, k: OUT, b: "#FFF8E1", c: "#E53935", y: "#2B2B2B", e: "#FF9800", f: "#F4A261" }),
 
-function drawButterfly(ctx, x, y, frameTick) {
-  const flap = Math.abs(Math.sin(frameTick / 6)) * 3;
-  ctx.fillStyle = "#AB47BC";
-  ctx.beginPath();
-  ctx.ellipse(x - 3 - flap * 0.3, y - 1, 3 + flap * 0.2, 4, -0.3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#7E57C2";
-  ctx.beginPath();
-  ctx.ellipse(x + 3 + flap * 0.3, y - 1, 3 + flap * 0.2, 4, 0.3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#3E3226";
-  ctx.fillRect(x - 0.5, y - 3, 1, 6);
-}
+  // Mouse: small round body, big round ears, thin tail line.
+  mouse: tileFromStrings([
+    ".kk.kk..",
+    ".bb.bb..",
+    ".kbbbbk.",
+    "tkbbbybk",
+    ".kbbbbbk",
+    "..dd.dd.",
+  ], { ".": null, k: OUT, b: "#9E9E9E", y: "#2B2B2B", t: "#757575", d: "#757575" }),
 
-function drawCrab(ctx, x, y, frameTick) {
-  const scuttle = Math.sin(frameTick / 10) * 1;
-  ctx.fillStyle = "#EF5350";
-  ctx.beginPath();
-  ctx.ellipse(x + scuttle, y, 4, 2.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = "#C62828";
-  ctx.lineWidth = 1.2;
-  ctx.beginPath();
-  ctx.moveTo(x - 3 + scuttle, y - 1);
-  ctx.lineTo(x - 6 + scuttle, y - 3);
-  ctx.moveTo(x + 3 + scuttle, y - 1);
-  ctx.lineTo(x + 6 + scuttle, y - 3);
-  ctx.stroke();
-  ctx.fillStyle = "#B71C1C";
-  ctx.fillRect(x - 4 + scuttle, y + 2, 1.5, 2);
-  ctx.fillRect(x + 2 + scuttle, y + 2, 1.5, 2);
-}
+  // Butterfly (decorative, not huntable): two wing color blocks + body line.
+  butterfly: tileFromStrings([
+    "aaa.k.bbb",
+    "aaaakbbbb",
+    "aaaakbbbb",
+    "aaaakbbbb",
+    ".aa.k.bb.",
+  ], { ".": null, k: "#3E3226", a: "#AB47BC", b: "#7E57C2" }),
 
-function drawGull(ctx, x, y, frameTick) {
-  const flap = Math.abs(Math.sin(frameTick / 9)) * 3.5;
-  ctx.strokeStyle = "#ECEFF1";
-  ctx.lineWidth = 1.8;
-  ctx.beginPath();
-  ctx.moveTo(x - 6, y - flap);
-  ctx.lineTo(x, y);
-  ctx.lineTo(x + 6, y - flap);
-  ctx.stroke();
-  ctx.fillStyle = "#FFB74D";
-  ctx.beginPath();
-  ctx.moveTo(x, y);
-  ctx.lineTo(x + 3, y + 1);
-  ctx.lineTo(x, y + 2);
-  ctx.closePath();
-  ctx.fill();
-}
+  // Crab: rounded shell, small claws, stub legs.
+  crab: tileFromStrings([
+    "c.kkkkk.c",
+    ".kbbbbbk.",
+    "kbbbbbbbk",
+    ".kbbbbbk.",
+    "..d.d.d..",
+  ], { ".": null, k: OUT, b: "#EF5350", c: "#C62828", d: "#B71C1C" }),
 
-function drawTurtle(ctx, x, y) {
-  ctx.fillStyle = "#558B2F";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 5, 3.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#33691E";
-  ctx.beginPath();
-  ctx.ellipse(x, y, 3.5, 2.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#7CB342";
-  ctx.beginPath();
-  ctx.ellipse(x + 5, y, 2, 1.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillRect(x - 5, y + 1, 2, 2);
-  ctx.fillRect(x + 1, y + 2, 2, 2);
-}
+  // Gull: white body, grey wing block, orange beak.
+  gull: tileFromStrings([
+    "..kkk...",
+    ".kbybbk.",
+    "kbbwwbbe",
+    "kbbbbbbk",
+    ".kbbbbk.",
+    "..dd.dd.",
+  ], { ".": null, k: OUT, b: "#ECEFF1", y: "#2B2B2B", w: "#B0BEC5", e: "#FFB74D", d: "#F4A261" }),
 
-function drawSeal(ctx, x, y, frameTick) {
-  const glide = Math.sin(frameTick / 14) * 1.5;
-  ctx.fillStyle = "#607D8B";
-  ctx.beginPath();
-  ctx.ellipse(x + glide, y, 6, 3, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.beginPath();
-  ctx.ellipse(x + 5 + glide, y - 1, 2.5, 2.5, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#455A64";
-  ctx.beginPath();
-  ctx.moveTo(x - 5 + glide, y);
-  ctx.lineTo(x - 8 + glide, y - 2);
-  ctx.lineTo(x - 7 + glide, y + 2);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = "#263238";
-  ctx.fillRect(x + 6 + glide, y - 1.5, 1, 1);
-}
+  // Turtle: rounded shell dome, head/legs poking out.
+  turtle: tileFromStrings([
+    ".kkkkk...",
+    "kssssssk.",
+    "kshhhhske",
+    "kssssssk.",
+    "..d...d..",
+  ], { ".": null, k: OUT, s: "#558B2F", h: "#33691E", e: "#7CB342", d: "#33691E" }),
+
+  // Seal: blue-grey body, flipper, dark nose.
+  seal: tileFromStrings([
+    ".kkkkkk..",
+    "kbbbbbbfk",
+    "kbbbbbbnk",
+    "kbbbbbbbk",
+    ".kkkkkk..",
+  ], { ".": null, k: OUT, b: "#607D8B", f: "#455A64", n: "#263238" }),
+};
 
 function drawWildlifeCreature(ctx, kind, x, y, frameTick) {
-  if (kind === "fish") drawFishRipple(ctx, x, y, frameTick);
-  else if (kind === "bird") drawBird(ctx, x, y, frameTick);
-  else if (kind === "grazer") drawGrazer(ctx, x, y);
-  else if (kind === "squirrel") drawSquirrel(ctx, x, y, frameTick);
-  else if (kind === "deer") drawDeer(ctx, x, y);
-  else if (kind === "fox") drawFox(ctx, x, y);
-  else if (kind === "boar") drawBoar(ctx, x, y);
-  else if (kind === "owl") drawOwl(ctx, x, y, frameTick);
-  else if (kind === "rabbit") drawRabbit(ctx, x, y, frameTick);
-  else if (kind === "chicken") drawChicken(ctx, x, y, frameTick);
-  else if (kind === "mouse") drawMouse(ctx, x, y, frameTick);
-  else if (kind === "butterfly") drawButterfly(ctx, x, y, frameTick);
-  else if (kind === "crab") drawCrab(ctx, x, y, frameTick);
-  else if (kind === "gull") drawGull(ctx, x, y, frameTick);
-  else if (kind === "turtle") drawTurtle(ctx, x, y);
-  else if (kind === "seal") drawSeal(ctx, x, y, frameTick);
+  const grid = WILDLIFE_SPRITES[kind];
+  if (!grid) return;
+  drawPixelSprite(ctx, x, y, grid, WILDLIFE_SCALE, false);
 }
 
 // =====================================================================
