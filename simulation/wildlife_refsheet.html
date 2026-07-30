@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Wildlife reference</title>
+  <style>
+    html, body {
+      margin: 0;
+      background: #1a1a1a;
+      color: #fff;
+      font-family: sans-serif;
+    }
+    h1 {
+      margin: 16px 0 8px;
+      text-align: center;
+      font-size: 18px;
+      font-weight: 600;
+    }
+    canvas {
+      display: block;
+      margin: 0 auto 24px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Wildlife reference (live drawWildlifeCreature)</h1>
+  <canvas id="sheet" width="640" height="680"></canvas>
+  <script src="/sprites.js"></script>
+  <script>
+    "use strict";
+
+    const KINDS = [
+      "deer", "boar", "grazer", "seal",
+      "fox", "owl", "turtle", "rabbit",
+      "chicken", "bird", "gull", "squirrel",
+      "mouse", "fish", "crab", "butterfly",
+    ];
+
+    const COLS = 4;
+    const CELL = 160;
+    const FRAME_TICK = 0;
+    const LABEL_Y_OFFSET = 58;
+
+    function waitForSheetOrTimeout(ms) {
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        setTimeout(finish, ms);
+        const img = new Image();
+        img.onload = finish;
+        img.onerror = finish;
+        img.src = "/wildlife.png";
+      });
+    }
+
+    function drawSheet() {
+      const canvas = document.getElementById("sheet");
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#1a1a1a";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.font = "12px sans-serif";
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+
+      KINDS.forEach((kind, index) => {
+        const col = index % COLS;
+        const row = Math.floor(index / COLS);
+        const cx = col * CELL + CELL / 2;
+        const cy = row * CELL + CELL / 2 - 8;
+
+        drawWildlifeCreature(ctx, kind, cx, cy, FRAME_TICK);
+
+        ctx.fillText(kind, cx, row * CELL + CELL - LABEL_Y_OFFSET);
+      });
+    }
+
+    function start() {
+      waitForSheetOrTimeout(500).then(drawSheet);
+    }
+
+    if (typeof drawWildlifeCreature === "function") {
+      start();
+    } else {
+      window.addEventListener("load", start);
+    }
+  </script>
+</body>
+</html>
