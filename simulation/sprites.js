@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 
 // Current season for seasonal sprite accents. Set by the viewer (setSpriteSeason)
 // once per state poll. This and the viewer-controlled accent gate are the only
@@ -64,12 +64,42 @@ function drawPixelSprite(ctx, cx, cy, grid, scale, flipX) {
   drawPixelGrid(ctx, Math.round(cx - w / 2), Math.round(cy - h + scale * 2), grid, scale, flipX);
 }
 
-function fillRectWithTile(ctx, x, y, w, h, tile) {
-  for (let ty = y; ty < y + h; ty += TILE) {
-    for (let tx = x; tx < x + w; tx += TILE) {
-      drawPixelGrid(ctx, tx, ty, tile, 1, false);
-    }
+// Tileâ†’offscreen-canvas cache: render each 16Ã—16 grid once, then repeat via
+// createPattern on fill. Module tile constants key by object identity; ocean
+// phases key through getOceanTile()'s stable memoized arrays.
+const _tileSourceCanvasCache = new Map();
+
+function createTileSourceCanvas(tile) {
+  let canvas;
+  if (typeof OffscreenCanvas !== "undefined") {
+    canvas = new OffscreenCanvas(TILE, TILE);
+  } else {
+    canvas = document.createElement("canvas");
+    canvas.width = TILE;
+    canvas.height = TILE;
   }
+  const tctx = canvas.getContext("2d");
+  drawPixelGrid(tctx, 0, 0, tile, 1, false);
+  return canvas;
+}
+
+function getTileSourceCanvas(tile) {
+  let source = _tileSourceCanvasCache.get(tile);
+  if (!source) {
+    source = createTileSourceCanvas(tile);
+    _tileSourceCanvasCache.set(tile, source);
+  }
+  return source;
+}
+
+function fillRectWithTile(ctx, x, y, w, h, tile) {
+  const pattern = ctx.createPattern(getTileSourceCanvas(tile), "repeat");
+  if (!pattern) return;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.fillStyle = pattern;
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
 }
 
 // Tiny deterministic hash -- NOT Math.random. Sprites (especially
@@ -232,14 +262,16 @@ function pathBlendForZone(tx, ty) {
 }
 
 function fillRectWithTiles(ctx, x, y, w, h, baseTile, zoneHint) {
-  for (let ty = y; ty < y + h; ty += TILE) {
-    for (let tx = x; tx < x + w; tx += TILE) {
-      const key = `${tx},${ty}`;
-      const tile = PATH_CELLS.has(key)
-        ? (zoneHint ? zoneHint(tx, ty) : PATH_BLEND_GRASS)
-        : baseTile;
-      drawPixelGrid(ctx, tx, ty, tile, 1, false);
-    }
+  fillRectWithTile(ctx, x, y, w, h, baseTile);
+  const x2 = x + w;
+  const y2 = y + h;
+  const blendFn = zoneHint || (() => PATH_BLEND_GRASS);
+  for (const key of PATH_CELLS) {
+    const comma = key.indexOf(",");
+    const tx = Number(key.slice(0, comma));
+    const ty = Number(key.slice(comma + 1));
+    if (tx < x || tx >= x2 || ty < y || ty >= y2) continue;
+    fillRectWithTile(ctx, tx, ty, TILE, TILE, blendFn(tx, ty));
   }
 }
 
@@ -258,7 +290,9 @@ function makeTile(colorKeys) {
 const TILE_GRASS = makeTile(["g1", "g2", "g3"]);
 const TILE_PATH = makeTile(["p1", "p2", "p3"]);
 
-function oceanTile(foamOffset) {
+const OCEAN_TILES_BY_PHASE = [];
+
+function buildOceanTileGrid(foamOffset) {
   const rows = [];
   for (let y = 0; y < TILE; y++) {
     const cells = [];
@@ -271,6 +305,18 @@ function oceanTile(foamOffset) {
     rows.push(cells);
   }
   return rows;
+}
+
+function getOceanTile(phase) {
+  const p = ((Math.floor(phase) % 16) + 16) % 16;
+  if (!OCEAN_TILES_BY_PHASE[p]) {
+    OCEAN_TILES_BY_PHASE[p] = buildOceanTileGrid(p);
+  }
+  return OCEAN_TILES_BY_PHASE[p];
+}
+
+function oceanTile(foamOffset) {
+  return getOceanTile(foamOffset);
 }
 
 const TILE_BEACH = makeTile(["s1", "s2", "s3", "sd"]);
@@ -642,7 +688,7 @@ function makeLevel30HouseGrid() {
   grid[2][11] = outline;
   for (let x = 1; x < width - 1; x++) grid[6][x] = roofLight;
 
-  // Façade, with a dark outline and warm wall fill.
+  // FaÃ§ade, with a dark outline and warm wall fill.
   for (let y = 7; y < height; y++) {
     for (let x = 1; x < width - 1; x++) {
       grid[y][x] = (x === 1 || x === width - 2 || y === height - 1)
@@ -810,11 +856,11 @@ function getStructureGrid(structure) {
   const upgraded = structureIsUpgraded(structure);
   // Seed houses need a stable architectural silhouette at the milestone
   // level. Do not let a persisted LLM sprite replace the pitched roof and
-  // façade that identify this built-in structure as a house.
+  // faÃ§ade that identify this built-in structure as a house.
   if (structure.type === "house" && Number(structure.level) >= 30) {
     return LEVEL30_HOUSE_GRID;
   }
-  // Upgraded seed types store a bigger sprite on the instance — prefer it
+  // Upgraded seed types store a bigger sprite on the instance â€” prefer it
   // when it has real detail; flat gray LLM blobs fall back to upscaled seeds.
   if (upgraded && structure.sprite && !spriteSpecIsDegenerate(structure.sprite)) {
     const cacheId = structure.id != null
@@ -1806,7 +1852,7 @@ function drawDistrictTiles(ctx, district, season = "summer") {
   }
 }
 
-function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges, season = "summer", ecologyStages = null) {
+function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges, season = "summer", ecologyStages = null, stageTimings = null) {
   const foamOffset = Math.floor(frameTick / 8) % 16;
   const activeDistricts = (districts && districts.length) ? districts : STARTER_DISTRICTS_JS;
   CURRENT_DISTRICTS_FOR_BLEND = activeDistricts;
@@ -1817,12 +1863,16 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
   // district, keyed by kind to the TILE_* constants above. New districts
   // (founded, or starter ones sharing an existing kind) need zero new tile
   // code; only the props below stay bespoke to the starter core.
+  let stageT0 = stageTimings ? performance.now() : 0;
   fillRectWithTiles(ctx, 0, 0, worldW, worldH, TILE_GRASS, pathBlendForZone);
+  if (stageTimings) stageTimings.baseFillMs = performance.now() - stageT0;
+
+  stageT0 = stageTimings ? performance.now() : 0;
   for (const d of activeDistricts) {
     const b = d.bounds;
     const w = b.x2 - b.x1, h = b.y2 - b.y1;
     if (d.kind === "ocean") {
-      fillRectWithTile(ctx, b.x1, b.y1, w, h, oceanTile(foamOffset));
+      fillRectWithTile(ctx, b.x1, b.y1, w, h, getOceanTile(foamOffset));
       continue;
     }
     const tile = KIND_TILE[d.kind];
@@ -1835,7 +1885,9 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
     drawDistrictTerrain(ctx, d, season);
     drawDistrictTiles(ctx, d, season);
   }
+  if (stageTimings) stageTimings.districtPassesMs = performance.now() - stageT0;
 
+  stageT0 = stageTimings ? performance.now() : 0;
   drawStarterProps(ctx, season, ecologyStages);
 
   for (const d of activeDistricts) {
@@ -1850,12 +1902,12 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
       drawStructure(ctx, s);
     }
   }
+  if (stageTimings) stageTimings.propsMs = performance.now() - stageT0;
 }
-
 // =====================================================================
 // Ambient wildlife (WILDLIFE_ENABLED). Server-authoritative huntable fauna
 // projected via world.wildlife; index.html culls and applies cosmetic bob.
-// These are stateless ~8–12px pixel silhouettes per kind (15 kinds total).
+// These are stateless ~8â€“12px pixel silhouettes per kind (15 kinds total).
 // Butterfly is decorative (not huntable); all other kinds are hunt targets.
 // =====================================================================
 function drawFishRipple(ctx, x, y, frameTick) {
