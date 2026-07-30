@@ -25,7 +25,7 @@ configured; see "Sovereign God mode" below.
 |---|---|---|---|---|
 | `/` | GET | Serve the viewer shell | — | `index.html` |
 | `/sprites.js` | GET | Serve the pure Canvas renderer | — | `sprites.js` |
-| `/wildlife.png` | GET | Serve the wildlife spritesheet PNG (optional viewer asset; 404 is OK — client falls back to procedural grids) | — | `wildlife.png` |
+| `/wildlife.png` | GET | Serve the wildlife spritesheet PNG (128×64, 16 kinds; 404 falls back to procedural grids in `sprites.js`) | — | `wildlife.png` |
 | `/roles.js` | GET | Serve role data as a JS global | — | `const ROLES = {...};` (`application/javascript`), sourced from the same `ROLES` dict server.py derives its maps from — `roles.json` stays the single edit point |
 | `/log/event` | POST | Ingest a browser-origin activity/conversation event | `{type: "activity"\|"conversation", message/from/to, frame_tick, kind?, outcome?}` | `("", 204)` always |
 | `/log/benchmark` | POST | Ingest a browser-origin benchmark metric | `{metric, value, frame_tick, detail?}` | `("", 204)` always |

@@ -1959,6 +1959,9 @@ const WILDLIFE_ANIM_CADENCE = {
   gull: 9,
 };
 
+// Tiny Farm outline idiom for procedural wildlife fallback (matches wildlife.png).
+const WILDLIFE_OUT = "#3F2631";
+
 const WILDLIFE_SPRITES = {
   // Fish: teardrop body, triangular tail fin, round eye dot.
   fish: {
@@ -2017,73 +2020,73 @@ const WILDLIFE_SPRITES = {
     "...dd......dd...",
   ], { ".": null, k: OUT, w: "#EFEBE0", h: "#8D6E63", y: "#2B2B2B", d: "#3E3226" }),
 
-  // Squirrel: small round body, big round ears, thin tail line.
+  // Squirrel: bushy tail up, round ears — silhouette distinct from mouse/deer.
   squirrel: {
     stand: tileFromStrings([
       ".kk..kk..",
-      ".bb..bb..",
-      ".kbbbbbk.",
-      "tkbbbbybk",
-      "tkbbbbbbk",
-      ".kbbbbbbk",
-      "..dd.dd..",
-    ], { ".": null, k: OUT, b: "#8D6E63", y: "#2B2B2B", t: "#A1887F", d: "#6D4C41" }),
+      ".oo..oo..",
+      ".kooooook.",
+      "tkoooooook",
+      "kooooooook",
+      ".kooooook.",
+      "..dd..dd.",
+    ], { ".": null, k: WILDLIFE_OUT, o: "#E19A65", t: "#E19A65", d: "#52607C" }),
     alt: tileFromStrings([
       ".kk..kk..",
-      ".bb..bb..",
-      ".kbbbbbk.",
-      "kbbbbybkt",
-      "kbbbbbbkt",
-      ".kbbbbbbk",
-      "..dd.dd..",
-    ], { ".": null, k: OUT, b: "#8D6E63", y: "#2B2B2B", t: "#A1887F", d: "#6D4C41" }),
+      ".oo..oo..",
+      ".kooooook.",
+      "koooooootk",
+      "koooooootk",
+      ".kooooook.",
+      "..dd..dd.",
+    ], { ".": null, k: WILDLIFE_OUT, o: "#E19A65", t: "#E19A65", d: "#52607C" }),
   },
 
-  // Deer: blocky body, branching antlers, dark stub legs.
-  // large tier — 16×16 grid
+  // Deer: branching antlers, long legs, light belly — large tier 16×16.
   deer: tileFromStrings([
-    ".k.k.........k.k",
-    "k.k.k......k.k.k",
-    ".k.k.........k.k",
-    "..k..........k..",
-    "..kbbbbbbbbbbbk.",
-    ".kbbbbbbbybbbbk.",
-    "kbllllbbbbbnbbbk",
+    "....k.k.........",
+    "...k.k.k........",
+    "....k.k.........",
+    ".....k..........",
+    "....kbbbbbbbk...",
+    "...kbbbwbbbwbbk.",
+    "..kbbbwbbbwbbbk.",
+    ".kbbbbbbbbbbbbbk",
     "kbbbbbbbbbbbbbbk",
     "kbbbbbbbbbbbbbbk",
-    "kbbbbbbbbbbbbbbk",
+    "kbbbbhhnbbbbbbbk",
     ".kbbbbbbbbbbbbk.",
-    "..kbbbbbbbbbbk..",
-    "...dd.......dd..",
-    "...dd.......dd..",
-  ], { ".": null, k: OUT, b: "#A1887F", y: "#2B2B2B", l: "#D7CCC8", n: "#3E2723", d: "#5D4037" }),
+    "..kdd......ddk..",
+    "...dd......dd...",
+  ], { ".": null, k: WILDLIFE_OUT, b: "#C0CBDC", w: "#FFFFFF", h: "#5A6988", n: "#3E4E6E", d: "#52607C" }),
 
-  // Fox: orange-brown body, lighter belly patch, triangular ears, pointed snout.
+  // Fox: pointed snout, bushy tail, orange — mid tier.
   fox: tileFromStrings([
     "..k...k..",
-    ".kbk.kbk.",
-    ".kbbbbbk.",
-    "kbbbbbybk",
-    "kbllbbbnk",
-    "kbbbbbbbk",
-    ".dd...dd.",
-  ], { ".": null, k: OUT, b: "#E67E22", l: "#F5D6A8", y: "#2B2B2B", n: "#2B2B2B", d: "#3E2723" }),
+    ".kok.kok.",
+    ".koooooo.",
+    "kooopponk",
+    "kooopponk",
+    "koooooook",
+    ".kdd..ddk",
+    "..dd..dd.",
+  ], { ".": null, k: WILDLIFE_OUT, o: "#E19A65", p: "#F7C282", n: "#3E4E6E", d: "#52607C" }),
 
-  // Boar: dark blocky body, small tusk, dark stub legs.
-  // large tier — 16×16 grid
+  // Boar: heavy dark body, visible tusks, small ears — large tier 16×16.
   boar: tileFromStrings([
-    "..k.k......k.k..",
-    ".kbk.k....k.kbk.",
-    "..k.k......k.k..",
-    ".kbbbbbbbbbbbbk.",
-    ".kbbbbbbbybbbbk.",
-    "kbbbbbbbbbtbbbbk",
-    "kbbbbbbbbbbbbbbk",
-    "kbbbbbbbbbbbbbbk",
-    ".kbbbbbbbbbbbbk.",
-    "..dd........dd..",
-    "..dd........dd..",
-  ], { ".": null, k: OUT, b: "#5D4037", y: "#2B2B2B", t: "#EFEBE0", d: "#3E2723" }),
+    "....k.k......k.k",
+    "...k.k.k....k.kk",
+    "....k.k......k.k",
+    "...kxxxxxxxxxxk.",
+    "..kxxxxxxxyxxxk.",
+    ".kxxxxxxxxxxxxk",
+    "kxxxxxxxyxxxxxxk",
+    "kxxxxxxxxxxxxxxk",
+    "kxxxxxxhnxxxxxxk",
+    ".kxxxxxxxxxxxxk.",
+    "..kdd......ddk..",
+    "...dd......dd...",
+  ], { ".": null, k: WILDLIFE_OUT, x: "#6E5541", y: "#F0E6D2", h: "#5A6988", n: "#3E4E6E", d: "#52607C" }),
 
   // Owl: rounded body, cream face mask, round eyes, small beak.
   owl: {
@@ -2155,15 +2158,15 @@ const WILDLIFE_SPRITES = {
     ], { ".": null, k: OUT, b: "#FFF8E1", c: "#E53935", y: "#2B2B2B", e: "#FF9800", f: "#F4A261" }),
   },
 
-  // Mouse: small round body, big round ears, thin tail line.
+  // Mouse: tiny grey body, round ears, thin tail — smallest silhouette.
   mouse: tileFromStrings([
     ".kk.kk..",
-    ".bb.bb..",
-    ".kbbbbk.",
-    "tkbbbybk",
-    ".kbbbbbk",
+    ".mm.mm..",
+    ".kllllk.",
+    "tklllnlk",
+    ".klllllk",
     "..dd.dd.",
-  ], { ".": null, k: OUT, b: "#9E9E9E", y: "#2B2B2B", t: "#757575", d: "#757575" }),
+  ], { ".": null, k: WILDLIFE_OUT, m: "#8B9BB4", l: "#C0CBDC", n: "#3E4E6E", t: "#C0CBDC", d: "#52607C" }),
 
   // Butterfly (decorative, not huntable): two wing color blocks + body line.
   butterfly: {
@@ -2252,20 +2255,53 @@ function resolveWildlifeGrid(entry, kind, frameTick) {
 // ---------------------------------------------------------------------
 // Wildlife PNG spritesheet (Phase 3 pipeline). One preload, ready flag,
 // mandatory procedural fall-through — never render blank.
-// Phase 4 fills WILDLIFE_SHEET_FRAMES; until then every kind uses grids.
+// Atlas 128×64 (8×4 cells). Built by scripts/build_wildlife_sheet.py.
 // ---------------------------------------------------------------------
 const WILDLIFE_SHEET_URL = "/wildlife.png";
 
 // Kind → source rect(s). Bare { sx, sy, sw, sh, destW?, destH? } for static
 // kinds; { stand, alt? } mirrors WILDLIFE_SPRITES animation idiom.
-// Phase 4 (Tiny Farm + hand-authored) populates this map.
 const WILDLIFE_SHEET_FRAMES = {
-  // chicken: { stand: { sx: 0, sy: 0, sw: 16, sh: 16 } },
-  // grazer:  { stand: { sx: 16, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 } },
-  // fish: {
-  //   stand: { sx: 32, sy: 0, sw: 16, sh: 16 },
-  //   alt:   { sx: 48, sy: 0, sw: 16, sh: 16 },
-  // },
+  deer: { sx: 0, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 },
+  boar: { sx: 16, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 },
+  grazer: { sx: 32, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 },
+  seal: { sx: 48, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 },
+  fox: { sx: 64, sy: 0, sw: 16, sh: 16, destW: 16, destH: 16 },
+  owl: {
+    stand: { sx: 80, sy: 0, sw: 16, sh: 16, destW: 16, destH: 16 },
+    alt: { sx: 96, sy: 0, sw: 16, sh: 16, destW: 16, destH: 16 },
+  },
+  turtle: { sx: 112, sy: 0, sw: 16, sh: 16, destW: 16, destH: 16 },
+  rabbit: {
+    stand: { sx: 0, sy: 16, sw: 16, sh: 16, destW: 16, destH: 16 },
+    alt: { sx: 16, sy: 16, sw: 16, sh: 16, destW: 16, destH: 16 },
+  },
+  chicken: {
+    stand: { sx: 32, sy: 16, sw: 16, sh: 16, destW: 16, destH: 16 },
+    alt: { sx: 48, sy: 16, sw: 16, sh: 16, destW: 16, destH: 16 },
+  },
+  gull: {
+    stand: { sx: 64, sy: 16, sw: 16, sh: 16, destW: 16, destH: 16 },
+    alt: { sx: 80, sy: 16, sw: 16, sh: 16, destW: 16, destH: 16 },
+  },
+  bird: {
+    stand: { sx: 96, sy: 16, sw: 16, sh: 16, destW: 16, destH: 16 },
+    alt: { sx: 112, sy: 16, sw: 16, sh: 16, destW: 16, destH: 16 },
+  },
+  mouse: { sx: 0, sy: 32, sw: 16, sh: 16, destW: 8, destH: 8 },
+  squirrel: {
+    stand: { sx: 16, sy: 32, sw: 16, sh: 16, destW: 8, destH: 8 },
+    alt: { sx: 32, sy: 32, sw: 16, sh: 16, destW: 8, destH: 8 },
+  },
+  fish: {
+    stand: { sx: 48, sy: 32, sw: 16, sh: 16, destW: 8, destH: 8 },
+    alt: { sx: 64, sy: 32, sw: 16, sh: 16, destW: 8, destH: 8 },
+  },
+  crab: { sx: 80, sy: 32, sw: 16, sh: 16, destW: 8, destH: 8 },
+  butterfly: {
+    stand: { sx: 96, sy: 32, sw: 16, sh: 16, destW: 8, destH: 8 },
+    alt: { sx: 112, sy: 32, sw: 16, sh: 16, destW: 8, destH: 8 },
+  },
 };
 
 const _wildlifeSheetBlitCache = new Map();

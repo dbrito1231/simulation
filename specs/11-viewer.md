@@ -457,9 +457,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
 
 - **Rendering (`sprites.js`):** `drawWildlifeCreature` tries a PNG
   spritesheet blit first, then **always** falls through to procedural
-  pixel grids — nothing ever renders blank. The sheet path is optional
-  until art lands in Phase 4; an empty `WILDLIFE_SHEET_FRAMES` map is
-  valid.
+  pixel grids — nothing ever renders blank.
   - **Spritesheet loader:** at module load, `preloadWildlifeSheet()` fires
     a fire-and-forget `Image()` fetch for `/wildlife.png` (served beside
     `sprites.js`; see [12-ops.md](12-ops.md)). `_wildlifeSheetReady` is
@@ -473,7 +471,9 @@ own and does **not** pathfind, spawn, or reposition creatures.
     rect (same module-level cache idiom as `_tileSourceCanvasCache`). Frame
     entries may be a bare `{ sx, sy, sw, sh, destW?, destH? }` or
     `{ stand, alt? }` with the same `frameTick` cadence as procedural
-    animation.
+    animation. **`WILDLIFE_SHEET_FRAMES` is populated for all 16 kinds**
+    (128×64 atlas built by `scripts/build_wildlife_sheet.py`; see
+    [12-ops.md](12-ops.md) for art provenance).
   - **Procedural fallback:** each kind is a pixel-grid entry in the
     `WILDLIFE_SPRITES` table (flat-color, black-outline idiom matching
     agent sprites). An entry may be a bare grid (static kinds) or

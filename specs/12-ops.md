@@ -328,9 +328,9 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 | Path | File | Notes |
 |---|---|---|
 | `/sprites.js` | `simulation/sprites.js` | Required — Canvas renderer |
-| `/wildlife.png` | `simulation/wildlife.png` | **Optional** wildlife spritesheet; not shipped until Phase 4 art lands. When absent (404), `sprites.js` keeps `_wildlifeSheetReady = false` and draws procedural `WILDLIFE_SPRITES` grids — first paint is never blocked. |
+| `/wildlife.png` | `simulation/wildlife.png` | Wildlife spritesheet (128×64, 16 kinds). When absent (404), `sprites.js` keeps `_wildlifeSheetReady = false` and draws procedural `WILDLIFE_SPRITES` grids — first paint is never blocked. |
 
-**Wildlife art provenance (Phase 4):** planned source is [Kenney Tiny Farm](https://kenney.nl/assets/tiny-farm) plus hand-authored redraws in the same idiom for kinds Tiny Farm does not cover. Licence target: CC0 1.0. Record pack name, source URL, retrieval date, and any hand-authored frames in-repo when assets land; CC0 requires no attribution but provenance should be tracked regardless.
+**Wildlife art provenance:** [Kenney Tiny Farm](https://kenney.nl/assets/tiny-farm) (CC0 1.0, retrieved 2026-07-29). Direct tiles: `grazer` (sheep, `tile_0120`), `chicken` (`tile_0122`). The cow tile (`tile_0121`) is present in the atlas at an unused slot but is not mapped to any live kind — `grazer` uses sheep only. Remaining 14 kinds are hand-authored redraws in the same Tiny Farm idiom (heavy near-black outline RGB ≈ 63,38,49, 3–4 shade steps, ¾ side view). Rebuild: `uv run python scripts/build_wildlife_sheet.py`. Vendor cache (`simulation/_vendor/`) is gitignored; only `wildlife.png` and the build script are committed.
 
 ## Scripts (`scripts/`, repo root)
 
