@@ -452,7 +452,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
   |---|---|---|
   | forest | `bird`, `squirrel`, `deer`, `fox`, `boar`, `owl` | `meat` |
   | farm | `grazer`, `rabbit`, `chicken`, `mouse` | `meat` |
-  | farm | `butterfly` | none — decorative, not huntable |
+  | farm | `bee` | none — decorative, not huntable |
   | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
 - **Rendering (`sprites.js`):** `drawWildlifeCreature` dispatches in order:
@@ -470,15 +470,15 @@ own and does **not** pathfind, spawn, or reposition creatures.
     source rect (same module-level cache idiom as `_tileSourceCanvasCache`).
     Frame entries may be a bare `{ sx, sy, sw, sh, destW?, destH? }` or
     `{ stand, alt? }` with the same `frameTick` cadence as procedural
-    animation. **`WILDLIFE_SHEET_FRAMES` is populated only for Kenney Tiny
-    Farm tiles:** `grazer` (sheep, 32×32) and `chicken` (stand+alt, 28×28).
-    The full 128×64 atlas (built by `scripts/build_wildlife_sheet.py`; see
-    [12-ops.md](12-ops.md) for art provenance) remains for future art; other
-    hand-authored cells are not blitted live.
-  - **Canvas silhouette helpers:** the 14 non-sheet kinds use restored
-    pre-sheet canvas primitives (V-wing birds/gulls, antler strokes, butterfly
-    flaps, fish ellipse+fin, etc.) via `WILDLIFE_CANVAS_HELPERS`. Each helper
-    is drawn with a tier scale transform (`WILDLIFE_CANVAS_SCALE_BY_TIER`:
+    animation. **`WILDLIFE_SHEET_FRAMES` maps 13 user-art kinds** packed from
+    `simulation/assets/wildlife/*.png` into `/wildlife.png` (variable source
+    rects; dest sizes fit tier boxes preserving aspect ratio). **`bird`,
+    `owl`, and `squirrel` have no source PNG** — they use canvas helpers /
+    procedural fallback only.
+  - **Canvas silhouette helpers:** the three unmapped kinds (`bird`, `owl`,
+    `squirrel`) plus sheet fallbacks use restored pre-sheet canvas primitives
+    (V-wing birds, owl blink, squirrel tail-flick, bee wing flap, etc.) via
+    `WILDLIFE_CANVAS_HELPERS`. Each helper is drawn with a tier scale transform (`WILDLIFE_CANVAS_SCALE_BY_TIER`:
     large ~1.8, mid ~1.3, small 1.0) around the creature anchor so size tiers
     remain visible. Per-kind alt-frame cadence matches the former helpers
     (8–20 ticks where animated).
@@ -492,9 +492,9 @@ own and does **not** pathfind, spawn, or reposition creatures.
 
   | Tier | Sheet dest | Canvas scale | Procedural scale | Kinds |
   |---|---|---|---|---|
-  | large | 32×32 (`grazer`) | ~1.8 | 2 | `deer`, `boar`, `grazer`, `seal` |
-  | mid | 28×28 (`chicken`) | ~1.3 | 2 | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
-  | small | — | 1.0 | 1 | `mouse`, `squirrel`, `fish`, `crab`, `butterfly` |
+  | large | ≈44 px max side | ~1.8 | 2 | `deer`, `boar`, `grazer`, `seal` |
+  | mid | ≈34 px max side | ~1.3 | 2 | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
+  | small | ≈26 px max side | 1.0 | 1 | `mouse`, `squirrel`, `fish`, `crab`, `bee` |
 
   Cosmetic motion also includes the caller-side `bob` sine offset in
   `index.html` `drawWildlife`; `frameTick` drives frame swap only and does
@@ -509,7 +509,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
   against the scroll/zoom viewport, then per-creature `(x, y)`.
 - **Interaction:** fauna are huntable via the agent action `hunt_wildlife`
   (multi-hit HP; land kills grant `meat`, beach kills grant `fish`;
-  `butterfly` is never a valid target) — see [07-actions.md](07-actions.md).
+  `bee` is never a valid target) — see [07-actions.md](07-actions.md).
   The viewer does not resolve hunt hits; it only renders the projected
   alive set (optional cheap HP cue is allowed but not required).
 - **Gate:** `WILDLIFE_ENABLED = false` → no `wildlife` key (or empty) and

@@ -746,7 +746,7 @@ under the engine lock and persisted with the rest of civilization state
 at least: `id`, `kind`, `districtId`, `x`, `y`, `targetX`/`targetY`,
 optional `waypoints`, `hp`, `maxHp`, `alive`, `respawnAt`. `maxHp` is set
 on spawn from `WILDLIFE_MAX_HP[kind]` (HP tiers: low kinds ≈1–2 hits; mid
-≈3–4; high `boar`/`seal` ≈5–6; decorative `butterfly` is not a combat
+≈3–4; high `boar`/`seal` ≈5–6; decorative `bee` is not a combat
 target). Kind pools and kill yields live in
 [08-systems-economy.md](08-systems-economy.md); density caps
 (`WILDLIFE_STAGE_COUNT` / `WILDLIFE_CAP_PER_DISTRICT = 4`) key off

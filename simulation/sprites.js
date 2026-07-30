@@ -1910,21 +1910,18 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
 // projected via world.wildlife; index.html culls and applies cosmetic bob.
 //
 // Render dispatch (drawWildlifeCreature):
-//   1. PNG sheet — Kenney Tiny Farm tiles only: grazer (sheep), chicken
-//   2. Canvas silhouette helpers — readable animated primitives (restored
-//      from pre-sheet art; V-wing birds, antler strokes, butterfly flaps, etc.)
-//   3. Procedural pixel grids (WILDLIFE_SPRITES) — last resort / future art
+//   1. PNG sheet — user art in simulation/assets/wildlife/ (13 kinds)
+//   2. Canvas silhouette helpers — bird, owl, squirrel (no source PNG)
+//   3. Procedural pixel grids (WILDLIFE_SPRITES) — last resort
 //
-// WILDLIFE_SPRITES + build_wildlife_sheet.py pipeline kept for future sheet
-// art; hand-authored atlas cells are NOT blitted (except Tiny Farm grazer/chicken).
+// Rebuild atlas: uv run python scripts/build_wildlife_sheet.py
 // Caller-side bob in index.html drawWildlife is additive; frameTick never
 // invents a second position.
 //
-// Size tiers:
-//   large — sheet 32×32 / canvas scale ~1.8: deer, boar, grazer, seal
-//   mid   — sheet 28×28 / canvas scale ~1.3: fox, owl, turtle, rabbit,
-//           chicken, gull, bird
-//   small — sheet 14×14 / canvas scale 1.0: mouse, squirrel, fish, crab, butterfly
+// Size tiers (dest max side from build script):
+//   large — ≈44 px: deer, boar, grazer, seal
+//   mid   — ≈34 px: fox, turtle, rabbit, chicken, gull
+//   small — ≈26 px: mouse, fish, crab, bee
 // =====================================================================
 const WILDLIFE_TIER_SCALE = { large: 2, mid: 2, small: 1 };
 const WILDLIFE_CANVAS_SCALE_BY_TIER = { large: 1.8, mid: 1.3, small: 1.0 };
@@ -1950,7 +1947,7 @@ const WILDLIFE_SIZE_TIER = {
   squirrel: "small",
   fish: "small",
   crab: "small",
-  butterfly: "small",
+  bee: "small",
 };
 
 function wildlifeScaleForKind(kind) {
@@ -1960,7 +1957,7 @@ function wildlifeScaleForKind(kind) {
 
 // Per-kind alt-frame cadence (ticks per swap); defaults to 12 in drawer.
 const WILDLIFE_ANIM_CADENCE = {
-  butterfly: 8,
+  bee: 8,
   fish: 12,
   squirrel: 10,
   bird: 8,
@@ -2299,7 +2296,7 @@ const WILDLIFE_SPRITES = {
     ".....LL.........",
   ], { ...WILDLIFE_PAL }),
 
-  butterfly: {
+  bee: {
     stand: tileFromStrings([
       "................",
       "aaa.......bbb...",
@@ -2411,21 +2408,26 @@ function resolveWildlifeGrid(entry, kind, frameTick) {
   return null;
 }
 
-// ---------------------------------------------------------------------
-// Wildlife PNG spritesheet (Phase 3 pipeline). One preload, ready flag.
-// Atlas 128×64 (8×4 cells). Built by scripts/build_wildlife_sheet.py.
-// Only Kenney Tiny Farm tiles are blitted live — grazer (sheep) and chicken.
-// Other atlas cells exist for the build pipeline but are not mapped here.
+// Wildlife PNG spritesheet. One preload, ready flag.
+// Atlas built by scripts/build_wildlife_sheet.py from simulation/assets/wildlife/*.png.
 // ---------------------------------------------------------------------
 const WILDLIFE_SHEET_URL = "/wildlife.png";
 
-// Kind → source rect(s). Tiny Farm kinds only; { stand, alt? } for animated.
+// Kind → source rect(s). 13 user-art kinds; bird/owl/squirrel unmapped → canvas.
 const WILDLIFE_SHEET_FRAMES = {
-  grazer: { sx: 32, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 },
-  chicken: {
-    stand: { sx: 32, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
-    alt: { sx: 48, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
-  },
+  deer: { sx: 2, sy: 2, sw: 75, sh: 134, destW: 25, destH: 44 },
+  boar: { sx: 79, sy: 2, sw: 261, sh: 193, destW: 44, destH: 33 },
+  grazer: { sx: 342, sy: 2, sw: 201, sh: 125, destW: 44, destH: 27 },
+  seal: { sx: 545, sy: 2, sw: 215, sh: 111, destW: 44, destH: 23 },
+  fox: { sx: 762, sy: 2, sw: 89, sh: 94, destW: 32, destH: 34 },
+  turtle: { sx: 2, sy: 197, sw: 206, sh: 124, destW: 34, destH: 20 },
+  rabbit: { sx: 210, sy: 197, sw: 77, sh: 82, destW: 32, destH: 34 },
+  chicken: { sx: 289, sy: 197, sw: 83, sh: 91, destW: 31, destH: 34 },
+  gull: { sx: 374, sy: 197, sw: 177, sh: 107, destW: 34, destH: 21 },
+  mouse: { sx: 553, sy: 197, sw: 103, sh: 90, destW: 26, destH: 23 },
+  fish: { sx: 658, sy: 197, sw: 114, sh: 96, destW: 26, destH: 22 },
+  crab: { sx: 774, sy: 197, sw: 168, sh: 134, destW: 26, destH: 21 },
+  bee: { sx: 2, sy: 333, sw: 186, sh: 206, destW: 23, destH: 26 },
 };
 
 const _wildlifeSheetBlitCache = new Map();
@@ -2664,18 +2666,22 @@ function drawMouse(ctx, x, y, frameTick) {
   ctx.fillRect(x + 3, y - 0.5, 1, 1);
 }
 
-function drawButterfly(ctx, x, y, frameTick) {
+function drawBee(ctx, x, y, frameTick) {
   const flap = Math.abs(Math.sin(frameTick / 6)) * 3;
-  ctx.fillStyle = "#AB47BC";
+  ctx.fillStyle = "#FFD54F";
   ctx.beginPath();
-  ctx.ellipse(x - 3 - flap * 0.3, y - 1, 3 + flap * 0.2, 4, -0.3, 0, Math.PI * 2);
+  ctx.ellipse(x - 2 - flap * 0.2, y - 1, 2.5 + flap * 0.15, 3.5, -0.3, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = "#7E57C2";
+  ctx.fillStyle = "#FFF8E1";
   ctx.beginPath();
-  ctx.ellipse(x + 3 + flap * 0.3, y - 1, 3 + flap * 0.2, 4, 0.3, 0, Math.PI * 2);
+  ctx.ellipse(x + 2 + flap * 0.2, y - 1, 2.5 + flap * 0.15, 3.5, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#F9A825";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 2, 3, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = "#3E3226";
-  ctx.fillRect(x - 0.5, y - 3, 1, 6);
+  ctx.fillRect(x - 0.5, y - 2, 1, 4);
 }
 
 function drawCrab(ctx, x, y, frameTick) {
@@ -2762,7 +2768,7 @@ const WILDLIFE_CANVAS_HELPERS = {
   owl: drawOwl,
   rabbit: drawRabbit,
   mouse: drawMouse,
-  butterfly: drawButterfly,
+  bee: drawBee,
   crab: drawCrab,
   gull: drawGull,
   turtle: drawTurtle,

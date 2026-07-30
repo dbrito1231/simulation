@@ -328,10 +328,10 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 | Path | File | Notes |
 |---|---|---|
 | `/sprites.js` | `simulation/sprites.js` | Required — Canvas renderer |
-| `/wildlife.png` | `simulation/wildlife.png` | Wildlife spritesheet (128×64, 16 kinds). When absent (404), `sprites.js` keeps `_wildlifeSheetReady = false` and draws procedural `WILDLIFE_SPRITES` grids — first paint is never blocked. |
+| `/wildlife.png` | `simulation/wildlife.png` | Wildlife spritesheet (variable-size atlas from user PNGs). When absent (404), `sprites.js` keeps `_wildlifeSheetReady = false` and draws canvas helpers / procedural `WILDLIFE_SPRITES` grids — first paint is never blocked. |
 | `/wildlife_refsheet.html` | `simulation/wildlife_refsheet.html` | Dev/debug only — labeled 4×4 grid calling live `drawWildlifeCreature`; not part of the sim viewer loop. |
 
-**Wildlife art provenance:** [Kenney Tiny Farm](https://kenney.nl/assets/tiny-farm) (CC0 1.0, retrieved 2026-07-29). Direct tiles: `grazer` (sheep, `tile_0120`), `chicken` (`tile_0122`). The cow tile (`tile_0121`) is present in the atlas at an unused slot but is not mapped to any live kind — `grazer` uses sheep only. Remaining 14 kinds are hand-authored redraws in the same Tiny Farm idiom (heavy near-black outline RGB ≈ 63,38,49, 3–4 shade steps, ¾ side view). Rebuild: `uv run python scripts/build_wildlife_sheet.py`. Vendor cache (`simulation/_vendor/`) is gitignored; only `wildlife.png` and the build script are committed.
+**Wildlife art provenance:** User-provided PNGs in `simulation/assets/wildlife/` (13 kinds: `bee`, `boar`, `chicken`, `crab`, `deer`, `fish`, `fox`, `grazer`, `gull`, `mouse`, `rabbit`, `seal`, `turtle`). `bee` replaces the former decorative farm kind `butterfly` (same role — not huntable). **`bird`, `owl`, and `squirrel` have no source PNG** — the viewer uses canvas silhouette helpers / procedural grids. Rebuild atlas: `uv run python scripts/build_wildlife_sheet.py` (trims transparency; `bee.png` mint-green backdrop keyed from corner samples). Committed outputs: `wildlife.png`, source PNGs, and the build script. Preview (gitignored): `simulation/_vendor/wildlife-preview-4x.png`.
 
 ## Scripts (`scripts/`, repo root)
 
