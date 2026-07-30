@@ -1908,35 +1908,64 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
 // =====================================================================
 // Ambient wildlife (WILDLIFE_ENABLED). Server-authoritative huntable fauna
 // projected via world.wildlife; index.html culls and applies cosmetic bob.
-// These are small chunky pixel-grid sprites (same flat-color, black-outline
-// idiom as AGENT_SPRITES above) rather than raw canvas primitives -- one
-// static grid per kind (16 kinds total). Butterfly is decorative (not
-// huntable); all other kinds are hunt targets. Kept intentionally static
-// (no per-kind wing-flap/wobble math): the caller-side cosmetic `bob` sine
-// offset (index.html drawWildlife) already provides motion, and this file
-// stays pure/stateless per the "no mutable module state" convention.
+// Small chunky pixel-grid sprites (flat-color, black-outline idiom matching
+// AGENT_SPRITES). Convention: static kinds are bare grids; animated kinds
+// use { stand, alt? } and drawWildlifeCreature alternates alt on frameTick
+// (same idiom as drawAgentSprite stand/walk). Caller-side bob in index.html
+// drawWildlife is additive; frameTick never invents a second position.
 // =====================================================================
 const WILDLIFE_SCALE = 2;
 
+// Per-kind alt-frame cadence (ticks per swap); defaults to 12 in drawer.
+const WILDLIFE_ANIM_CADENCE = {
+  butterfly: 8,
+  fish: 12,
+  squirrel: 10,
+  bird: 8,
+  owl: 20,
+  rabbit: 15,
+  chicken: 12,
+  gull: 9,
+};
+
 const WILDLIFE_SPRITES = {
   // Fish: teardrop body, triangular tail fin, round eye dot.
-  fish: tileFromStrings([
-    ".kkkk...",
-    "kbbbbktt",
-    "kbybbkt.",
-    "kbbbbk..",
-    ".kkkk...",
-  ], { ".": null, k: OUT, b: "#4FC3F7", y: "#2B2B2B", t: "#0288D1" }),
+  fish: {
+    stand: tileFromStrings([
+      ".kkkk...",
+      "kbbbbktt",
+      "kbybbkt.",
+      "kbbbbk..",
+      ".kkkk...",
+    ], { ".": null, k: OUT, b: "#4FC3F7", y: "#2B2B2B", t: "#0288D1" }),
+    alt: tileFromStrings([
+      ".kkkk...",
+      "kbbbbk.t",
+      "kbybbkt.",
+      "kbbbbktt",
+      ".kkkk...",
+    ], { ".": null, k: OUT, b: "#4FC3F7", y: "#2B2B2B", t: "#0288D1" }),
+  },
 
   // Bird (generic pigeon-type): rounded body, small pointed beak, wing block.
-  bird: tileFromStrings([
-    "..kkk...",
-    ".kbybbk.",
-    "kbbwwbbe",
-    "kbbbbbbk",
-    ".kbbbbk.",
-    "..dd.dd.",
-  ], { ".": null, k: OUT, b: "#78909C", y: "#2B2B2B", w: "#546E7A", e: "#FFB300", d: "#3E3226" }),
+  bird: {
+    stand: tileFromStrings([
+      "..kkk...",
+      ".kbybbk.",
+      "kbbwwbbe",
+      "kbbbbbbk",
+      ".kbbbbk.",
+      "..dd.dd.",
+    ], { ".": null, k: OUT, b: "#78909C", y: "#2B2B2B", w: "#546E7A", e: "#FFB300", d: "#3E3226" }),
+    alt: tileFromStrings([
+      "..kkk...",
+      ".kwwbbk.",
+      "kbbbybbe",
+      "kbbbbbbk",
+      ".kbbbbk.",
+      "..dd.dd.",
+    ], { ".": null, k: OUT, b: "#78909C", y: "#2B2B2B", w: "#546E7A", e: "#FFB300", d: "#3E3226" }),
+  },
 
   // Grazer (sheep/goat/cow-like): blocky rounded wool body, tan head, stub legs.
   grazer: tileFromStrings([
@@ -1950,15 +1979,26 @@ const WILDLIFE_SPRITES = {
   ], { ".": null, k: OUT, w: "#EFEBE0", h: "#8D6E63", y: "#2B2B2B", d: "#3E3226" }),
 
   // Squirrel: small round body, big round ears, thin tail line.
-  squirrel: tileFromStrings([
-    ".kk..kk..",
-    ".bb..bb..",
-    ".kbbbbbk.",
-    "tkbbbbybk",
-    "tkbbbbbbk",
-    ".kbbbbbbk",
-    "..dd.dd..",
-  ], { ".": null, k: OUT, b: "#8D6E63", y: "#2B2B2B", t: "#A1887F", d: "#6D4C41" }),
+  squirrel: {
+    stand: tileFromStrings([
+      ".kk..kk..",
+      ".bb..bb..",
+      ".kbbbbbk.",
+      "tkbbbbybk",
+      "tkbbbbbbk",
+      ".kbbbbbbk",
+      "..dd.dd..",
+    ], { ".": null, k: OUT, b: "#8D6E63", y: "#2B2B2B", t: "#A1887F", d: "#6D4C41" }),
+    alt: tileFromStrings([
+      ".kk..kk..",
+      ".bb..bb..",
+      ".kbbbbbk.",
+      "kbbbbybkt",
+      "kbbbbbbkt",
+      ".kbbbbbbk",
+      "..dd.dd..",
+    ], { ".": null, k: OUT, b: "#8D6E63", y: "#2B2B2B", t: "#A1887F", d: "#6D4C41" }),
+  },
 
   // Deer: blocky body, branching antlers, dark stub legs.
   deer: tileFromStrings([
@@ -1996,39 +2036,74 @@ const WILDLIFE_SPRITES = {
   ], { ".": null, k: OUT, b: "#5D4037", y: "#2B2B2B", t: "#EFEBE0", d: "#3E2723" }),
 
   // Owl: rounded body, cream face mask, round eyes, small beak.
-  owl: tileFromStrings([
-    "..kkk...",
-    ".kbbbbk.",
-    "kbfyyfbk",
-    "kbbeebbk",
-    "kbbbbbbk",
-    ".kbbbbk.",
-    "..dd.dd.",
-  ], { ".": null, k: OUT, b: "#795548", f: "#EFEBE0", y: "#FBC02D", e: "#F4A261", d: "#3E2723" }),
+  owl: {
+    stand: tileFromStrings([
+      "..kkk...",
+      ".kbbbbk.",
+      "kbfyyfbk",
+      "kbbeebbk",
+      "kbbbbbbk",
+      ".kbbbbk.",
+      "..dd.dd.",
+    ], { ".": null, k: OUT, b: "#795548", f: "#EFEBE0", y: "#FBC02D", e: "#F4A261", d: "#3E2723" }),
+    alt: tileFromStrings([
+      "..kkk...",
+      ".kbbbbk.",
+      "kbfyyfbk",
+      "kbbbybbk",
+      "kbbbbbbk",
+      ".kbbbbk.",
+      "..dd.dd.",
+    ], { ".": null, k: OUT, b: "#795548", f: "#EFEBE0", y: "#FBC02D", e: "#F4A261", d: "#3E2723" }),
+  },
 
   // Rabbit: white/cream body, long upright ears, small pink nose dot.
-  rabbit: tileFromStrings([
-    "..k...k..",
-    "..w...w..",
-    "..w...w..",
-    ".kwwwwwk.",
-    "kwwwwwwwk",
-    "kwnwwwywk",
-    "kwwwwwwwk",
-    ".dd...dd.",
-  ], { ".": null, k: OUT, w: "#F5F5F0", n: "#F48FB1", y: "#2B2B2B", d: "#BCAAA4" }),
+  rabbit: {
+    stand: tileFromStrings([
+      "..k...k..",
+      "..w...w..",
+      "..w...w..",
+      ".kwwwwwk.",
+      "kwwwwwwwk",
+      "kwnwwwywk",
+      "kwwwwwwwk",
+      ".dd...dd.",
+    ], { ".": null, k: OUT, w: "#F5F5F0", n: "#F48FB1", y: "#2B2B2B", d: "#BCAAA4" }),
+    alt: tileFromStrings([
+      "..k...k..",
+      "...w..w..",
+      "..w.w....",
+      ".kwwwwwk.",
+      "kwwwwwwwk",
+      "kwnwwwywk",
+      "kwwwwwwwk",
+      ".dd...dd.",
+    ], { ".": null, k: OUT, w: "#F5F5F0", n: "#F48FB1", y: "#2B2B2B", d: "#BCAAA4" }),
+  },
 
   // Chicken: round white/red body, red comb, orange beak/feet.
-  chicken: tileFromStrings([
-    "...ccc...",
-    "..kbbbk..",
-    ".kybbbbke",
-    "kbbbbbbbk",
-    "kbbbbbbbk",
-    "kbbbbbbbk",
-    ".kbbbbbk.",
-    "..ff.ff..",
-  ], { ".": null, k: OUT, b: "#FFF8E1", c: "#E53935", y: "#2B2B2B", e: "#FF9800", f: "#F4A261" }),
+  chicken: {
+    stand: tileFromStrings([
+      "...ccc...",
+      "..kbbbk..",
+      ".kybbbbke",
+      "kbbbbbbbk",
+      "kbbbbbbbk",
+      "kbbbbbbbk",
+      ".kbbbbbk.",
+      "..ff.ff..",
+    ], { ".": null, k: OUT, b: "#FFF8E1", c: "#E53935", y: "#2B2B2B", e: "#FF9800", f: "#F4A261" }),
+    alt: tileFromStrings([
+      "...ccc...",
+      "..kbbbk..",
+      "kbbbbbbbk",
+      "kbbbbbbbk",
+      ".kybbbbke",
+      "kbbbbbbbk",
+      ".kbbbbbk.",
+      "..ff.ff..",
+    ], { ".": null, k: OUT, b: "#FFF8E1", c: "#E53935", y: "#2B2B2B", e: "#FF9800", f: "#F4A261" }),
+  },
 
   // Mouse: small round body, big round ears, thin tail line.
   mouse: tileFromStrings([
@@ -2041,13 +2116,22 @@ const WILDLIFE_SPRITES = {
   ], { ".": null, k: OUT, b: "#9E9E9E", y: "#2B2B2B", t: "#757575", d: "#757575" }),
 
   // Butterfly (decorative, not huntable): two wing color blocks + body line.
-  butterfly: tileFromStrings([
-    "aaa.k.bbb",
-    "aaaakbbbb",
-    "aaaakbbbb",
-    "aaaakbbbb",
-    ".aa.k.bb.",
-  ], { ".": null, k: "#3E3226", a: "#AB47BC", b: "#7E57C2" }),
+  butterfly: {
+    stand: tileFromStrings([
+      "aaa.k.bbb",
+      "aaaakbbbb",
+      "aaaakbbbb",
+      "aaaakbbbb",
+      ".aa.k.bb.",
+    ], { ".": null, k: "#3E3226", a: "#AB47BC", b: "#7E57C2" }),
+    alt: tileFromStrings([
+      ".aa.k.bb.",
+      ".aakbbbb.",
+      ".aakbbbb.",
+      ".aakbbbb.",
+      "..k.bb...",
+    ], { ".": null, k: "#3E3226", a: "#AB47BC", b: "#7E57C2" }),
+  },
 
   // Crab: rounded shell, small claws, stub legs.
   crab: tileFromStrings([
@@ -2059,14 +2143,24 @@ const WILDLIFE_SPRITES = {
   ], { ".": null, k: OUT, b: "#EF5350", c: "#C62828", d: "#B71C1C" }),
 
   // Gull: white body, grey wing block, orange beak.
-  gull: tileFromStrings([
-    "..kkk...",
-    ".kbybbk.",
-    "kbbwwbbe",
-    "kbbbbbbk",
-    ".kbbbbk.",
-    "..dd.dd.",
-  ], { ".": null, k: OUT, b: "#ECEFF1", y: "#2B2B2B", w: "#B0BEC5", e: "#FFB74D", d: "#F4A261" }),
+  gull: {
+    stand: tileFromStrings([
+      "..kkk...",
+      ".kbybbk.",
+      "kbbwwbbe",
+      "kbbbbbbk",
+      ".kbbbbk.",
+      "..dd.dd.",
+    ], { ".": null, k: OUT, b: "#ECEFF1", y: "#2B2B2B", w: "#B0BEC5", e: "#FFB74D", d: "#F4A261" }),
+    alt: tileFromStrings([
+      "..kkk...",
+      ".kwwbbk.",
+      "kbbbybbe",
+      "kbbbbbbk",
+      ".kbbbbk.",
+      "..dd.dd.",
+    ], { ".": null, k: OUT, b: "#ECEFF1", y: "#2B2B2B", w: "#B0BEC5", e: "#FFB74D", d: "#F4A261" }),
+  },
 
   // Turtle: rounded shell dome, head/legs poking out.
   turtle: tileFromStrings([
@@ -2087,8 +2181,19 @@ const WILDLIFE_SPRITES = {
   ], { ".": null, k: OUT, b: "#607D8B", f: "#455A64", n: "#263238" }),
 };
 
+function resolveWildlifeGrid(entry, kind, frameTick) {
+  if (!entry) return null;
+  if (Array.isArray(entry)) return entry;
+  if (entry.stand) {
+    const cadence = WILDLIFE_ANIM_CADENCE[kind] || 12;
+    const useAlt = entry.alt && Math.floor(frameTick / cadence) % 2 === 1;
+    return useAlt ? entry.alt : entry.stand;
+  }
+  return null;
+}
+
 function drawWildlifeCreature(ctx, kind, x, y, frameTick) {
-  const grid = WILDLIFE_SPRITES[kind];
+  const grid = resolveWildlifeGrid(WILDLIFE_SPRITES[kind], kind, frameTick);
   if (!grid) return;
   drawPixelSprite(ctx, x, y, grid, WILDLIFE_SCALE, false);
 }

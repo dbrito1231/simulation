@@ -455,19 +455,23 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | farm | `butterfly` | none — decorative, not huntable |
   | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
-- **Rendering (`sprites.js`):** each kind is a static pixel-grid entry in
-  the `WILDLIFE_SPRITES` table (flat-color, black-outline idiom matching
-  agent sprites). `drawWildlifeCreature` looks up the grid by `kind` and
-  draws it via `drawPixelSprite` at `WILDLIFE_SCALE` (2). There is no
-  per-kind wing-flap/fin-wiggle math in `sprites.js` for now — cosmetic
-  motion comes from the caller-side `bob` sine offset in `index.html`
-  `drawWildlife` only.
+- **Rendering (`sprites.js`):** each kind is a pixel-grid entry in the
+  `WILDLIFE_SPRITES` table (flat-color, black-outline idiom matching
+  agent sprites). An entry may be a bare grid (static kinds) or
+  `{ stand, alt? }` (animated kinds). `drawWildlifeCreature` resolves the
+  grid: bare grids draw as-is; `{ stand, alt }` entries pick `alt` on an
+  alternating `frameTick` cadence (per-kind 8–20 ticks, default 12 —
+  same idiom as agent stand/walk) when `alt` is present, otherwise `stand`.
+  Drawing uses `drawPixelSprite` at `WILDLIFE_SCALE` (2). Cosmetic motion
+  also includes the caller-side `bob` sine offset in `index.html`
+  `drawWildlife`; `frameTick` drives frame swap only and does not invent a
+  second position.
 - **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
   (and `districtId`). The viewer does not seed positions client-side and
   does not run a road pathfinder for fauna — motion and cross-district
   migration are already resolved server-side between polls. `frameTick` is
-  passed through for future alt-frame animation but does not invent a
-  second position today.
+  passed through for alt-frame animation; it does not invent a
+  second position.
 - **Viewport culling** mirrors `drawSocialTies`: cull by district bounds
   against the scroll/zoom viewport, then per-creature `(x, y)`.
 - **Interaction:** fauna are huntable via the agent action `hunt_wildlife`
