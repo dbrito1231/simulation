@@ -1908,20 +1908,31 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
 // =====================================================================
 // Ambient wildlife (WILDLIFE_ENABLED). Server-authoritative huntable fauna
 // projected via world.wildlife; index.html culls and applies cosmetic bob.
-// Small chunky pixel-grid sprites (flat-color, black-outline idiom matching
-// AGENT_SPRITES). Convention: static kinds are bare grids; animated kinds
-// use { stand, alt? } and drawWildlifeCreature alternates alt on frameTick
-// (same idiom as drawAgentSprite stand/walk). Caller-side bob in index.html
-// drawWildlife is additive; frameTick never invents a second position.
 //
-// Size tiers (sheet uses destW/destH overrides; procedural = 16-wide grid × tier scale):
-//   large — dest 32×32 (procedural scale 2 → ~32 px): deer, boar, grazer, seal
-//   mid   — dest 28×28 (procedural scale 2 → ~32 px fallback): fox, owl, turtle,
-//           rabbit, chicken, gull, bird
-//   small — dest 14×14 (procedural scale 1 → ~16 px fallback): mouse, squirrel,
-//           fish, crab, butterfly
+// Render dispatch (drawWildlifeCreature):
+//   1. PNG sheet — Kenney Tiny Farm tiles only: grazer (sheep), chicken
+//   2. Canvas silhouette helpers — readable animated primitives (restored
+//      from pre-sheet art; V-wing birds, antler strokes, butterfly flaps, etc.)
+//   3. Procedural pixel grids (WILDLIFE_SPRITES) — last resort / future art
+//
+// WILDLIFE_SPRITES + build_wildlife_sheet.py pipeline kept for future sheet
+// art; hand-authored atlas cells are NOT blitted (except Tiny Farm grazer/chicken).
+// Caller-side bob in index.html drawWildlife is additive; frameTick never
+// invents a second position.
+//
+// Size tiers:
+//   large — sheet 32×32 / canvas scale ~1.8: deer, boar, grazer, seal
+//   mid   — sheet 28×28 / canvas scale ~1.3: fox, owl, turtle, rabbit,
+//           chicken, gull, bird
+//   small — sheet 14×14 / canvas scale 1.0: mouse, squirrel, fish, crab, butterfly
 // =====================================================================
 const WILDLIFE_TIER_SCALE = { large: 2, mid: 2, small: 1 };
+const WILDLIFE_CANVAS_SCALE_BY_TIER = { large: 1.8, mid: 1.3, small: 1.0 };
+
+function wildlifeCanvasScaleForKind(kind) {
+  const tier = WILDLIFE_SIZE_TIER[kind] || "mid";
+  return WILDLIFE_CANVAS_SCALE_BY_TIER[tier];
+}
 
 const WILDLIFE_SIZE_TIER = {
   deer: "large",
@@ -2401,54 +2412,19 @@ function resolveWildlifeGrid(entry, kind, frameTick) {
 }
 
 // ---------------------------------------------------------------------
-// Wildlife PNG spritesheet (Phase 3 pipeline). One preload, ready flag,
-// mandatory procedural fall-through — never render blank.
+// Wildlife PNG spritesheet (Phase 3 pipeline). One preload, ready flag.
 // Atlas 128×64 (8×4 cells). Built by scripts/build_wildlife_sheet.py.
+// Only Kenney Tiny Farm tiles are blitted live — grazer (sheep) and chicken.
+// Other atlas cells exist for the build pipeline but are not mapped here.
 // ---------------------------------------------------------------------
 const WILDLIFE_SHEET_URL = "/wildlife.png";
 
-// Kind → source rect(s). Bare { sx, sy, sw, sh, destW?, destH? } for static
-// kinds; { stand, alt? } mirrors WILDLIFE_SPRITES animation idiom.
+// Kind → source rect(s). Tiny Farm kinds only; { stand, alt? } for animated.
 const WILDLIFE_SHEET_FRAMES = {
-  deer: { sx: 0, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 },
-  boar: { sx: 16, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 },
   grazer: { sx: 32, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 },
-  seal: { sx: 48, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 },
-  fox: { sx: 64, sy: 0, sw: 16, sh: 16, destW: 28, destH: 28 },
-  owl: {
-    stand: { sx: 80, sy: 0, sw: 16, sh: 16, destW: 28, destH: 28 },
-    alt: { sx: 96, sy: 0, sw: 16, sh: 16, destW: 28, destH: 28 },
-  },
-  turtle: { sx: 112, sy: 0, sw: 16, sh: 16, destW: 28, destH: 28 },
-  rabbit: {
-    stand: { sx: 0, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
-    alt: { sx: 16, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
-  },
   chicken: {
     stand: { sx: 32, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
     alt: { sx: 48, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
-  },
-  gull: {
-    stand: { sx: 64, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
-    alt: { sx: 80, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
-  },
-  bird: {
-    stand: { sx: 96, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
-    alt: { sx: 112, sy: 16, sw: 16, sh: 16, destW: 28, destH: 28 },
-  },
-  mouse: { sx: 0, sy: 32, sw: 16, sh: 16, destW: 14, destH: 14 },
-  squirrel: {
-    stand: { sx: 16, sy: 32, sw: 16, sh: 16, destW: 14, destH: 14 },
-    alt: { sx: 32, sy: 32, sw: 16, sh: 16, destW: 14, destH: 14 },
-  },
-  fish: {
-    stand: { sx: 48, sy: 32, sw: 16, sh: 16, destW: 14, destH: 14 },
-    alt: { sx: 64, sy: 32, sw: 16, sh: 16, destW: 14, destH: 14 },
-  },
-  crab: { sx: 80, sy: 32, sw: 16, sh: 16, destW: 14, destH: 14 },
-  butterfly: {
-    stand: { sx: 96, sy: 32, sw: 16, sh: 16, destW: 14, destH: 14 },
-    alt: { sx: 112, sy: 32, sw: 16, sh: 16, destW: 14, destH: 14 },
   },
 };
 
@@ -2530,6 +2506,281 @@ function tryDrawWildlifeFromSheet(ctx, kind, x, y, frameTick) {
   return true;
 }
 
+// Canvas silhouette helpers (pre-sheet art, b28c054). Animated where noted;
+// helpers draw relative to (x, y) as body center / anchor.
+function drawFishRipple(ctx, x, y, frameTick) {
+  const wobble = Math.sin(frameTick / 12) * 2;
+  ctx.fillStyle = "#4FC3F7";
+  ctx.beginPath();
+  ctx.ellipse(x + wobble, y, 5, 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#0288D1";
+  ctx.beginPath();
+  ctx.moveTo(x - 5 + wobble, y);
+  ctx.lineTo(x - 8 + wobble, y - 2);
+  ctx.lineTo(x - 8 + wobble, y + 2);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawBird(ctx, x, y, frameTick) {
+  const flap = Math.abs(Math.sin(frameTick / 8)) * 4;
+  ctx.strokeStyle = "#3E3226";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x - 5, y - flap);
+  ctx.lineTo(x, y);
+  ctx.lineTo(x + 5, y - flap);
+  ctx.stroke();
+}
+
+function drawSquirrel(ctx, x, y, frameTick) {
+  const flick = Math.sin(frameTick / 10) * 1.5;
+  ctx.fillStyle = "#8D6E63";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 3.5, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 3, y - 2, 2, 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#6D4C41";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x - 3, y);
+  ctx.quadraticCurveTo(x - 7, y - 5 + flick, x - 2, y - 6);
+  ctx.stroke();
+}
+
+function drawDeer(ctx, x, y) {
+  ctx.fillStyle = "#A1887F";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 6, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 5, y - 3, 2.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#6D4C41";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(x + 4, y - 5);
+  ctx.lineTo(x + 3, y - 8);
+  ctx.moveTo(x + 6, y - 5);
+  ctx.lineTo(x + 7, y - 8);
+  ctx.stroke();
+  ctx.fillStyle = "#5D4037";
+  ctx.fillRect(x - 4, y + 2, 1.5, 3);
+  ctx.fillRect(x + 2, y + 2, 1.5, 3);
+}
+
+function drawFox(ctx, x, y) {
+  ctx.fillStyle = "#E67E22";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 5, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(x + 4, y - 1);
+  ctx.lineTo(x + 7, y - 3);
+  ctx.lineTo(x + 7, y + 1);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#F5D6A8";
+  ctx.beginPath();
+  ctx.ellipse(x - 4, y, 2, 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#3E3226";
+  ctx.fillRect(x - 3, y + 2, 1.5, 2);
+  ctx.fillRect(x + 2, y + 2, 1.5, 2);
+}
+
+function drawBoar(ctx, x, y) {
+  ctx.fillStyle = "#5D4037";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 5.5, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 4, y - 1, 2.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#EFEBE0";
+  ctx.fillRect(x + 5, y + 1, 2, 1.5);
+  ctx.fillStyle = "#3E2723";
+  ctx.fillRect(x - 3, y + 2, 2, 2);
+  ctx.fillRect(x + 1, y + 2, 2, 2);
+}
+
+function drawOwl(ctx, x, y, frameTick) {
+  const blink = Math.abs(Math.sin(frameTick / 40)) > 0.95 ? 0.5 : 1.5;
+  ctx.fillStyle = "#795548";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 4, 4.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#EFEBE0";
+  ctx.beginPath();
+  ctx.ellipse(x - 1.5, y - 1, 1.5, blink, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 1.5, y - 1, 1.5, blink, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#F4A261";
+  ctx.beginPath();
+  ctx.moveTo(x, y + 0.5);
+  ctx.lineTo(x - 1.5, y + 2);
+  ctx.lineTo(x + 1.5, y + 2);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawRabbit(ctx, x, y, frameTick) {
+  const ear = Math.sin(frameTick / 15) * 0.5;
+  ctx.fillStyle = "#D7CCC8";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 3.5, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x - 1.5, y - 5 + ear, 1.2, 3, -0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 1.5, y - 5 - ear, 1.2, 3, 0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#3E3226";
+  ctx.fillRect(x - 1, y - 0.5, 1, 1);
+}
+
+function drawMouse(ctx, x, y, frameTick) {
+  const twitch = Math.sin(frameTick / 8) * 1;
+  ctx.fillStyle = "#9E9E9E";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 3, 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 2.5, y - 0.5, 1.5, 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#757575";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x - 3, y);
+  ctx.quadraticCurveTo(x - 6, y + twitch, x - 5, y - 3);
+  ctx.stroke();
+  ctx.fillStyle = "#3E3226";
+  ctx.fillRect(x + 3, y - 0.5, 1, 1);
+}
+
+function drawButterfly(ctx, x, y, frameTick) {
+  const flap = Math.abs(Math.sin(frameTick / 6)) * 3;
+  ctx.fillStyle = "#AB47BC";
+  ctx.beginPath();
+  ctx.ellipse(x - 3 - flap * 0.3, y - 1, 3 + flap * 0.2, 4, -0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#7E57C2";
+  ctx.beginPath();
+  ctx.ellipse(x + 3 + flap * 0.3, y - 1, 3 + flap * 0.2, 4, 0.3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#3E3226";
+  ctx.fillRect(x - 0.5, y - 3, 1, 6);
+}
+
+function drawCrab(ctx, x, y, frameTick) {
+  const scuttle = Math.sin(frameTick / 10) * 1;
+  ctx.fillStyle = "#EF5350";
+  ctx.beginPath();
+  ctx.ellipse(x + scuttle, y, 4, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "#C62828";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(x - 3 + scuttle, y - 1);
+  ctx.lineTo(x - 6 + scuttle, y - 3);
+  ctx.moveTo(x + 3 + scuttle, y - 1);
+  ctx.lineTo(x + 6 + scuttle, y - 3);
+  ctx.stroke();
+  ctx.fillStyle = "#B71C1C";
+  ctx.fillRect(x - 4 + scuttle, y + 2, 1.5, 2);
+  ctx.fillRect(x + 2 + scuttle, y + 2, 1.5, 2);
+}
+
+function drawGull(ctx, x, y, frameTick) {
+  const flap = Math.abs(Math.sin(frameTick / 9)) * 3.5;
+  ctx.strokeStyle = "#ECEFF1";
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  ctx.moveTo(x - 6, y - flap);
+  ctx.lineTo(x, y);
+  ctx.lineTo(x + 6, y - flap);
+  ctx.stroke();
+  ctx.fillStyle = "#FFB74D";
+  ctx.beginPath();
+  ctx.moveTo(x, y);
+  ctx.lineTo(x + 3, y + 1);
+  ctx.lineTo(x, y + 2);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawTurtle(ctx, x, y) {
+  ctx.fillStyle = "#558B2F";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 5, 3.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#33691E";
+  ctx.beginPath();
+  ctx.ellipse(x, y, 3.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#7CB342";
+  ctx.beginPath();
+  ctx.ellipse(x + 5, y, 2, 1.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillRect(x - 5, y + 1, 2, 2);
+  ctx.fillRect(x + 1, y + 2, 2, 2);
+}
+
+function drawSeal(ctx, x, y, frameTick) {
+  const glide = Math.sin(frameTick / 14) * 1.5;
+  ctx.fillStyle = "#607D8B";
+  ctx.beginPath();
+  ctx.ellipse(x + glide, y, 6, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + 5 + glide, y - 1, 2.5, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#455A64";
+  ctx.beginPath();
+  ctx.moveTo(x - 5 + glide, y);
+  ctx.lineTo(x - 8 + glide, y - 2);
+  ctx.lineTo(x - 7 + glide, y + 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = "#263238";
+  ctx.fillRect(x + 6 + glide, y - 1.5, 1, 1);
+}
+
+const WILDLIFE_CANVAS_HELPERS = {
+  fish: drawFishRipple,
+  bird: drawBird,
+  squirrel: drawSquirrel,
+  deer: drawDeer,
+  fox: drawFox,
+  boar: drawBoar,
+  owl: drawOwl,
+  rabbit: drawRabbit,
+  mouse: drawMouse,
+  butterfly: drawButterfly,
+  crab: drawCrab,
+  gull: drawGull,
+  turtle: drawTurtle,
+  seal: drawSeal,
+};
+
+function drawWildlifeCreatureWithCanvasHelper(ctx, kind, x, y, frameTick) {
+  const helper = WILDLIFE_CANVAS_HELPERS[kind];
+  if (!helper) return false;
+  const s = wildlifeCanvasScaleForKind(kind);
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  helper(ctx, 0, 0, frameTick);
+  ctx.restore();
+  return true;
+}
+
 function drawWildlifeCreatureProcedural(ctx, kind, x, y, frameTick) {
   const grid = resolveWildlifeGrid(WILDLIFE_SPRITES[kind], kind, frameTick);
   if (!grid) return;
@@ -2538,6 +2789,7 @@ function drawWildlifeCreatureProcedural(ctx, kind, x, y, frameTick) {
 
 function drawWildlifeCreature(ctx, kind, x, y, frameTick) {
   if (tryDrawWildlifeFromSheet(ctx, kind, x, y, frameTick)) return;
+  if (drawWildlifeCreatureWithCanvasHelper(ctx, kind, x, y, frameTick)) return;
   drawWildlifeCreatureProcedural(ctx, kind, x, y, frameTick);
 }
 

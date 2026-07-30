@@ -455,50 +455,50 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | farm | `butterfly` | none — decorative, not huntable |
   | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
-- **Rendering (`sprites.js`):** `drawWildlifeCreature` tries a PNG
-  spritesheet blit first, then **always** falls through to procedural
+- **Rendering (`sprites.js`):** `drawWildlifeCreature` dispatches in order:
+  sheet blit (Tiny Farm kinds only) → canvas silhouette helpers → procedural
   pixel grids — nothing ever renders blank.
   - **Spritesheet loader:** at module load, `preloadWildlifeSheet()` fires
     a fire-and-forget `Image()` fetch for `/wildlife.png` (served beside
     `sprites.js`; see [12-ops.md](12-ops.md)). `_wildlifeSheetReady` is
     set only on successful load with non-zero dimensions; `onerror` or a
-    missing file (404) leaves it `false` permanently for that page load
-    and every kind uses procedural art. When ready **and** the kind has an
-    entry in `WILDLIFE_SHEET_FRAMES`, `tryDrawWildlifeFromSheet` blits via
-    `ctx.drawImage` with `imageSmoothingEnabled = false`, using optional
-    `destW`/`destH` overrides (large **32×32**, mid **28×28**, small **14×14**)
-    or default `sw`/`sh` × tier scale. Extracted
-    frame regions are cached in `_wildlifeSheetBlitCache` keyed by source
-    rect (same module-level cache idiom as `_tileSourceCanvasCache`). Frame
-    entries may be a bare `{ sx, sy, sw, sh, destW?, destH? }` or
+    missing file (404) leaves it `false` permanently for that page load.
+    When ready **and** the kind has an entry in `WILDLIFE_SHEET_FRAMES`,
+    `tryDrawWildlifeFromSheet` blits via `ctx.drawImage` with
+    `imageSmoothingEnabled = false`, using optional `destW`/`destH` overrides.
+    Extracted frame regions are cached in `_wildlifeSheetBlitCache` keyed by
+    source rect (same module-level cache idiom as `_tileSourceCanvasCache`).
+    Frame entries may be a bare `{ sx, sy, sw, sh, destW?, destH? }` or
     `{ stand, alt? }` with the same `frameTick` cadence as procedural
-    animation. **`WILDLIFE_SHEET_FRAMES` is populated for all 16 kinds**
-    (128×64 atlas built by `scripts/build_wildlife_sheet.py`; see
-    [12-ops.md](12-ops.md) for art provenance).
-  - **Procedural fallback:** each kind is a pixel-grid entry in the
+    animation. **`WILDLIFE_SHEET_FRAMES` is populated only for Kenney Tiny
+    Farm tiles:** `grazer` (sheep, 32×32) and `chicken` (stand+alt, 28×28).
+    The full 128×64 atlas (built by `scripts/build_wildlife_sheet.py`; see
+    [12-ops.md](12-ops.md) for art provenance) remains for future art; other
+    hand-authored cells are not blitted live.
+  - **Canvas silhouette helpers:** the 14 non-sheet kinds use restored
+    pre-sheet canvas primitives (V-wing birds/gulls, antler strokes, butterfly
+    flaps, fish ellipse+fin, etc.) via `WILDLIFE_CANVAS_HELPERS`. Each helper
+    is drawn with a tier scale transform (`WILDLIFE_CANVAS_SCALE_BY_TIER`:
+    large ~1.8, mid ~1.3, small 1.0) around the creature anchor so size tiers
+    remain visible. Per-kind alt-frame cadence matches the former helpers
+    (8–20 ticks where animated).
+  - **Procedural fallback:** each kind also has a pixel-grid entry in the
     `WILDLIFE_SPRITES` table (flat-color, black-outline idiom matching
-    agent sprites). An entry may be a bare grid (static kinds) or
-    `{ stand, alt? }` (animated kinds). `drawWildlifeCreatureProcedural`
-    resolves the grid: bare grids draw as-is; `{ stand, alt }` entries
-    pick `alt` on an alternating `frameTick` cadence (per-kind 8–20
-    ticks, default 12 — same idiom as agent stand/walk) when `alt` is
-    present, otherwise `stand`. Drawing uses `drawPixelSprite` with
-    **per-tier scale** via `WILDLIFE_SIZE_TIER` / `WILDLIFE_TIER_SCALE`
-    (replacing the former single `WILDLIFE_SCALE = 2` for all kinds).
-    Approximate on-screen sizes (sheet `destW`/`destH`; procedural fallback
-    uses 16-wide grids × tier scale; agents are 16-wide × 2 = 32 px):
+    agent sprites). `drawWildlifeCreatureProcedural` is the last resort when
+    neither sheet nor canvas helper applies. An entry may be a bare grid
+    (static kinds) or `{ stand, alt? }` (animated kinds). Drawing uses
+    `drawPixelSprite` with **per-tier scale** via `WILDLIFE_SIZE_TIER` /
+    `WILDLIFE_TIER_SCALE`. Approximate on-screen sizes:
 
-  | Tier | Sheet dest | Procedural scale | On-screen | Kinds |
+  | Tier | Sheet dest | Canvas scale | Procedural scale | Kinds |
   |---|---|---|---|---|
-  | large | 32×32 | 2 | ~32 px | `deer`, `boar`, `grazer`, `seal` |
-  | mid | 28×28 | 2 | ~32 px fallback | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
-  | small | 14×14 | 1 | ~16 px fallback | `mouse`, `squirrel`, `fish`, `crab`, `butterfly` |
+  | large | 32×32 (`grazer`) | ~1.8 | 2 | `deer`, `boar`, `grazer`, `seal` |
+  | mid | 28×28 (`chicken`) | ~1.3 | 2 | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
+  | small | — | 1.0 | 1 | `mouse`, `squirrel`, `fish`, `crab`, `butterfly` |
 
-  All hand-authored sheet cells are dense ~16×16 Tiny Farm-style grids
-  (~80–180 opaque px); mid/small `destW`/`destH` bumps legibility without
-  matching large-tier footprint. Cosmetic motion also includes the
-  caller-side `bob` sine offset in `index.html` `drawWildlife`; `frameTick`
-  drives frame swap only and does not invent a second position.
+  Cosmetic motion also includes the caller-side `bob` sine offset in
+  `index.html` `drawWildlife`; `frameTick` drives frame swap only and does
+  not invent a second position.
 - **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
   (and `districtId`). The viewer does not seed positions client-side and
   does not run a road pathfinder for fauna — motion and cross-district
