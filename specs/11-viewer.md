@@ -451,7 +451,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | District | Kinds | Kill yield |
   |---|---|---|
   | forest | `bird`, `squirrel`, `deer`, `fox`, `boar`, `owl` | `meat` |
-  | farm | `grazer`, `rabbit`, `chicken`, `mouse` | `meat` |
+  | farm | `cow`, `rabbit`, `chicken`, `mouse` | `meat` |
   | farm | `bee` | none — decorative, not huntable |
   | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
@@ -489,7 +489,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
 
   | Tier | Sheet dest | Canvas scale | Procedural scale | Kinds |
   |---|---|---|---|---|
-  | large | ≈44 px max side | ~1.8 | 2 | `deer`, `boar`, `grazer`, `seal` |
+  | large | ≈44 px max side | ~1.8 | 2 | `deer`, `boar`, `cow`, `seal` |
   | mid | ≈34 px max side | ~1.3 | 2 | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
   | small | ≈26 px max side | 1.0 | 1 | `mouse`, `squirrel`, `fish`, `crab`, `bee` |
 

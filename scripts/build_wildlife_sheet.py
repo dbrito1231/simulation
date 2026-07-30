@@ -32,7 +32,7 @@ BG_TOLERANCE = 35
 
 # Kinds with user PNGs (pack order: large → mid → small for tighter rows).
 SHEET_KINDS = [
-    "deer", "boar", "grazer", "seal",
+    "deer", "boar", "cow", "seal",
     "fox", "turtle", "rabbit", "chicken", "gull", "bird", "owl",
     "mouse", "fish", "crab", "bee", "squirrel",
 ]
@@ -44,7 +44,7 @@ TIER_MAX_SIDE = {
 }
 
 KIND_TIER = {
-    "deer": "large", "boar": "large", "grazer": "large", "seal": "large",
+    "deer": "large", "boar": "large", "cow": "large", "seal": "large",
     "fox": "mid", "turtle": "mid", "rabbit": "mid", "chicken": "mid",
     "gull": "mid", "bird": "mid", "owl": "mid",
     "mouse": "small", "fish": "small", "crab": "small", "bee": "small",

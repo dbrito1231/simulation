@@ -75,7 +75,7 @@ priced-market paths as the other edibles. `BASE_PRICE` treats `meat` like
 | District pool | Kinds | Yield resource |
 |---|---|---|
 | forest | `bird`, `squirrel`, `deer`, `fox`, `boar`, `owl` | `meat` |
-| farm | `grazer`, `rabbit`, `chicken`, `mouse` | `meat` |
+| farm | `cow`, `rabbit`, `chicken`, `mouse` | `meat` |
 | farm | `bee` | none — decorative; not a valid hunt target |
 | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 

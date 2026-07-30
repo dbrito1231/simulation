@@ -252,26 +252,26 @@ WILDLIFE_ENABLED = True
 # Huntable wildlife (distinct from Path-1 _tick_wildlife forest-attack pressure).
 WILDLIFE_KIND_POOLS = {
     "forest": ["bird", "squirrel", "deer", "fox", "boar", "owl"],
-    "farm": ["grazer", "rabbit", "chicken", "mouse", "bee"],
+    "farm": ["cow", "rabbit", "chicken", "mouse", "bee"],
     "beach": ["fish", "crab", "gull", "turtle", "seal"],
 }
 WILDLIFE_DECORATIVE_KINDS = {"bee"}
 WILDLIFE_YIELD = {
     "bird": "meat", "squirrel": "meat", "deer": "meat", "fox": "meat",
     "boar": "meat", "owl": "meat",
-    "grazer": "meat", "rabbit": "meat", "chicken": "meat", "mouse": "meat",
+    "cow": "meat", "rabbit": "meat", "chicken": "meat", "mouse": "meat",
     "fish": "fish", "crab": "fish", "gull": "fish", "turtle": "fish", "seal": "fish",
 }
 # HP tiers: low ≈1–2, mid ≈3–4, high boar/seal ≈5–6; bee decorative.
 WILDLIFE_MAX_HP = {
     "bird": 1, "squirrel": 1, "rabbit": 1, "chicken": 2, "mouse": 1,
     "fish": 1, "crab": 1, "gull": 1, "bee": 1,
-    "deer": 4, "fox": 3, "owl": 3, "grazer": 4, "turtle": 4,
+    "deer": 4, "fox": 3, "owl": 3, "cow": 4, "turtle": 4,
     "boar": 6, "seal": 5,
 }
 WILDLIFE_SPEED = {
     "bird": 3.2, "squirrel": 2.8, "deer": 3.0, "fox": 3.4, "boar": 2.0, "owl": 2.6,
-    "grazer": 1.8, "rabbit": 3.5, "chicken": 2.2, "mouse": 2.4, "bee": 2.0,
+    "cow": 1.8, "rabbit": 3.5, "chicken": 2.2, "mouse": 2.4, "bee": 2.0,
     "fish": 2.5, "crab": 1.4, "gull": 3.0, "turtle": 1.2, "seal": 2.2,
 }
 HUNT_RADIUS = 90
@@ -6212,6 +6212,9 @@ class SimEngine:
             kind = cre.get("kind") or "bird"
             if kind == "butterfly":
                 kind = "bee"
+                cre["kind"] = kind
+            if kind == "grazer":
+                kind = "cow"
                 cre["kind"] = kind
             did = cre.get("districtId")
             cre.setdefault("id", self._next_wildlife_id())

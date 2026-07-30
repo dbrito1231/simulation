@@ -1919,7 +1919,7 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
 // invents a second position.
 //
 // Size tiers (dest max side from build script):
-//   large — ≈44 px: deer, boar, grazer, seal
+//   large — ≈44 px: deer, boar, cow, seal
 //   mid   — ≈34 px: fox, turtle, rabbit, chicken, gull
 //   small — ≈26 px: mouse, fish, crab, bee
 // =====================================================================
@@ -1934,7 +1934,7 @@ function wildlifeCanvasScaleForKind(kind) {
 const WILDLIFE_SIZE_TIER = {
   deer: "large",
   boar: "large",
-  grazer: "large",
+  cow: "large",
   seal: "large",
   fox: "mid",
   owl: "mid",
@@ -2077,7 +2077,7 @@ const WILDLIFE_SPRITES = {
     ], { ...WILDLIFE_PAL }),
   },
 
-  grazer: tileFromStrings([
+  cow: tileFromStrings([
     "....kkkkkkkk....",
     "...kwwwwwwwwk...",
     "..kwwwwwwwwwwk..",
@@ -2417,7 +2417,7 @@ const WILDLIFE_SHEET_URL = "/wildlife.png";
 const WILDLIFE_SHEET_FRAMES = {
   deer: { sx: 2, sy: 2, sw: 70, sh: 125, destW: 25, destH: 44 },
   boar: { sx: 74, sy: 2, sw: 256, sh: 181, destW: 44, destH: 31 },
-  grazer: { sx: 332, sy: 2, sw: 195, sh: 119, destW: 44, destH: 27 },
+  cow: { sx: 332, sy: 2, sw: 195, sh: 119, destW: 44, destH: 27 },
   seal: { sx: 529, sy: 2, sw: 215, sh: 106, destW: 44, destH: 22 },
   fox: { sx: 746, sy: 2, sw: 83, sh: 87, destW: 32, destH: 34 },
   turtle: { sx: 2, sy: 185, sw: 198, sh: 107, destW: 34, destH: 18 },
