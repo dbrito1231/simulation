@@ -2415,19 +2415,19 @@ const WILDLIFE_SHEET_URL = "/wildlife.png";
 
 // Kind → source rect(s). 13 user-art kinds; bird/owl/squirrel unmapped → canvas.
 const WILDLIFE_SHEET_FRAMES = {
-  deer: { sx: 2, sy: 2, sw: 75, sh: 134, destW: 25, destH: 44 },
-  boar: { sx: 79, sy: 2, sw: 261, sh: 193, destW: 44, destH: 33 },
-  grazer: { sx: 342, sy: 2, sw: 201, sh: 125, destW: 44, destH: 27 },
-  seal: { sx: 545, sy: 2, sw: 215, sh: 111, destW: 44, destH: 23 },
-  fox: { sx: 762, sy: 2, sw: 89, sh: 94, destW: 32, destH: 34 },
-  turtle: { sx: 2, sy: 197, sw: 206, sh: 124, destW: 34, destH: 20 },
-  rabbit: { sx: 210, sy: 197, sw: 77, sh: 82, destW: 32, destH: 34 },
-  chicken: { sx: 289, sy: 197, sw: 83, sh: 91, destW: 31, destH: 34 },
-  gull: { sx: 374, sy: 197, sw: 177, sh: 107, destW: 34, destH: 21 },
-  mouse: { sx: 553, sy: 197, sw: 103, sh: 90, destW: 26, destH: 23 },
-  fish: { sx: 658, sy: 197, sw: 114, sh: 96, destW: 26, destH: 22 },
-  crab: { sx: 774, sy: 197, sw: 168, sh: 134, destW: 26, destH: 21 },
-  bee: { sx: 2, sy: 333, sw: 186, sh: 206, destW: 23, destH: 26 },
+  deer: { sx: 2, sy: 2, sw: 71, sh: 125, destW: 25, destH: 44 },
+  boar: { sx: 75, sy: 2, sw: 256, sh: 181, destW: 44, destH: 31 },
+  grazer: { sx: 333, sy: 2, sw: 195, sh: 119, destW: 44, destH: 27 },
+  seal: { sx: 530, sy: 2, sw: 215, sh: 106, destW: 44, destH: 22 },
+  fox: { sx: 747, sy: 2, sw: 87, sh: 87, destW: 34, destH: 34 },
+  turtle: { sx: 2, sy: 185, sw: 205, sh: 107, destW: 34, destH: 18 },
+  rabbit: { sx: 209, sy: 185, sw: 64, sh: 68, destW: 32, destH: 34 },
+  chicken: { sx: 275, sy: 185, sw: 78, sh: 82, destW: 32, destH: 34 },
+  gull: { sx: 355, sy: 185, sw: 173, sh: 104, destW: 34, destH: 20 },
+  mouse: { sx: 530, sy: 185, sw: 96, sh: 82, destW: 26, destH: 22 },
+  fish: { sx: 628, sy: 185, sw: 102, sh: 78, destW: 26, destH: 20 },
+  crab: { sx: 732, sy: 185, sw: 168, sh: 133, destW: 26, destH: 21 },
+  bee: { sx: 2, sy: 320, sw: 186, sh: 206, destW: 23, destH: 26 },
 };
 
 const _wildlifeSheetBlitCache = new Map();

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Pack user-provided wildlife PNGs into simulation/wildlife.png.
 
-Loads simulation/assets/wildlife/<kind>.png for each mapped kind, trims
-transparent padding (and mint-green backdrop on bee.png), shelf-packs into
-one RGBA atlas, writes simulation/wildlife.png, and prints WILDLIFE_SHEET_FRAMES
+Loads simulation/assets/wildlife/<kind>.png for each mapped kind, keys square
+backdrops via border-connected flood-fill, trims transparent padding, shelf-packs
+into one RGBA atlas, writes simulation/wildlife.png, and prints WILDLIFE_SHEET_FRAMES
 for sprites.js.
+
+Source PNGs are overwritten in place with keyed + trimmed versions.
 
 Kinds without a source PNG (bird, owl, squirrel) are omitted — the viewer falls
 back to canvas helpers / procedural grids.
@@ -15,6 +17,7 @@ Run: uv run python scripts/build_wildlife_sheet.py
 from __future__ import annotations
 
 import json
+from collections import deque
 from pathlib import Path
 
 from PIL import Image
@@ -25,6 +28,7 @@ OUT_PATH = ROOT / "simulation" / "wildlife.png"
 PREVIEW_PATH = ROOT / "simulation" / "_vendor" / "wildlife-preview-4x.png"
 
 PADDING = 2
+BG_TOLERANCE = 35
 
 # Kinds with user PNGs (pack order: large → mid → small for tighter rows).
 SHEET_KINDS = [
@@ -54,50 +58,124 @@ def _corner_colors(img: Image.Image) -> list[tuple[int, int, int, int]]:
     return [px[x, y] for x, y in pts]
 
 
+def _avg_rgb(colors: list[tuple[int, int, int, int]]) -> tuple[int, int, int]:
+    return (
+        sum(c[0] for c in colors) // len(colors),
+        sum(c[1] for c in colors) // len(colors),
+        sum(c[2] for c in colors) // len(colors),
+    )
+
+
 def _is_mint_green(r: int, g: int, b: int) -> bool:
     """Near #c8e6c9 and other light mint-greens used as bee backdrop."""
     if g < 170 or r < 150 or b < 150:
         return False
     if g >= r and g >= b and (g - min(r, b)) >= 15:
         return True
-    # explicit #c8e6c9 neighborhood
     return abs(r - 200) <= 40 and abs(g - 230) <= 40 and abs(b - 201) <= 40
 
 
-def _pixel_empty(r: int, g: int, b: int, a: int, bg: tuple[int, int, int] | None) -> bool:
+def _is_near_white(r: int, g: int, b: int, *, threshold: int = 235) -> bool:
+    return r >= threshold and g >= threshold and b >= threshold
+
+
+def _matches_rgb(
+    r: int,
+    g: int,
+    b: int,
+    ref: tuple[int, int, int],
+    *,
+    tol: int = BG_TOLERANCE,
+) -> bool:
+    return (
+        abs(r - ref[0]) <= tol
+        and abs(g - ref[1]) <= tol
+        and abs(b - ref[2]) <= tol
+    )
+
+
+def _border_background_pixel(
+    r: int,
+    g: int,
+    b: int,
+    a: int,
+    *,
+    corner_avg: tuple[int, int, int],
+    corners: list[tuple[int, int, int, int]],
+    tol: int = BG_TOLERANCE,
+) -> bool:
     if a < 16:
         return True
-    if bg is not None:
-        dr, dg, db = abs(r - bg[0]), abs(g - bg[1]), abs(b - bg[2])
-        if dr <= 35 and dg <= 35 and db <= 35:
-            return True
-    if _is_mint_green(r, g, b):
+    if _matches_rgb(r, g, b, corner_avg, tol=tol):
+        return True
+    if any(_matches_rgb(r, g, b, (c[0], c[1], c[2]), tol=tol) for c in corners):
+        return True
+    if _is_near_white(*corner_avg) and _is_near_white(r, g, b):
+        return True
+    if any(_is_mint_green(c[0], c[1], c[2]) for c in corners) and _is_mint_green(r, g, b):
         return True
     return False
 
 
-def trim_image(img: Image.Image, *, treat_corners_as_bg: bool = False) -> Image.Image:
-    """Crop to opaque bounding box; optional corner-chroma key (bee)."""
+def key_background(img: Image.Image, *, tol: int = BG_TOLERANCE) -> Image.Image:
+    """Remove backdrop connected to image borders via flood-fill."""
+    img = img.convert("RGBA")
+    px = img.load()
+    assert px is not None
+    w, h = img.size
+    corners = _corner_colors(img)
+    corner_avg = _avg_rgb(corners)
+
+    is_bg = [[False] * w for _ in range(h)]
+    queue: deque[tuple[int, int]] = deque()
+
+    def try_seed(x: int, y: int) -> None:
+        r, g, b, a = px[x, y]
+        if _border_background_pixel(
+            r, g, b, a, corner_avg=corner_avg, corners=corners, tol=tol
+        ):
+            is_bg[y][x] = True
+            queue.append((x, y))
+
+    for x in range(w):
+        try_seed(x, 0)
+        try_seed(x, h - 1)
+    for y in range(h):
+        try_seed(0, y)
+        try_seed(w - 1, y)
+
+    while queue:
+        x, y = queue.popleft()
+        for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)):
+            if nx < 0 or ny < 0 or nx >= w or ny >= h or is_bg[ny][nx]:
+                continue
+            r, g, b, a = px[nx, ny]
+            if _border_background_pixel(
+                r, g, b, a, corner_avg=corner_avg, corners=corners, tol=tol
+            ):
+                is_bg[ny][nx] = True
+                queue.append((nx, ny))
+
+    for y in range(h):
+        for x in range(w):
+            if is_bg[y][x]:
+                px[x, y] = (0, 0, 0, 0)
+
+    return img
+
+
+def trim_image(img: Image.Image) -> Image.Image:
+    """Crop to opaque bounding box."""
     img = img.convert("RGBA")
     px = img.load()
     assert px is not None
     w, h = img.size
 
-    bg: tuple[int, int, int] | None = None
-    if treat_corners_as_bg:
-        corners = _corner_colors(img)
-        bg = (
-            sum(c[0] for c in corners) // 4,
-            sum(c[1] for c in corners) // 4,
-            sum(c[2] for c in corners) // 4,
-        )
-
     min_x, min_y = w, h
     max_x, max_y = -1, -1
     for y in range(h):
         for x in range(w):
-            r, g, b, a = px[x, y]
-            if not _pixel_empty(r, g, b, a, bg):
+            if px[x, y][3] >= 16:
                 min_x = min(min_x, x)
                 min_y = min(min_y, y)
                 max_x = max(max_x, x)
@@ -107,6 +185,15 @@ def trim_image(img: Image.Image, *, treat_corners_as_bg: bool = False) -> Image.
         return img
 
     return img.crop((min_x, min_y, max_x + 1, max_y + 1))
+
+
+def key_and_save(path: Path, *, tol: int = BG_TOLERANCE) -> Image.Image:
+    """Key backdrop, trim, overwrite source PNG; return trimmed image."""
+    raw = Image.open(path).convert("RGBA")
+    keyed = key_background(raw, tol=tol)
+    trimmed = trim_image(keyed)
+    trimmed.save(path, optimize=True)
+    return trimmed
 
 
 def dest_size(sw: int, sh: int, max_side: int) -> tuple[int, int]:
@@ -181,14 +268,14 @@ def write_preview(sheet: Image.Image, path: Path, scale: int = 4) -> None:
 
 def main() -> None:
     trimmed: dict[str, Image.Image] = {}
-    print("Loading and trimming assets:")
+    print("Keying, trimming, and saving source assets:")
     for kind in SHEET_KINDS:
         src = ASSETS_DIR / f"{kind}.png"
         if not src.is_file():
             print(f"  SKIP {kind}: missing {src.name}")
             continue
         raw = Image.open(src).convert("RGBA")
-        img = trim_image(raw, treat_corners_as_bg=(kind == "bee"))
+        img = key_and_save(src)
         trimmed[kind] = img
         print(f"  {kind:8s} {raw.size[0]:4d}x{raw.size[1]:<4d} -> {img.size[0]:4d}x{img.size[1]}")
 
