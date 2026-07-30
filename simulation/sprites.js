@@ -2249,11 +2249,115 @@ function resolveWildlifeGrid(entry, kind, frameTick) {
   return null;
 }
 
-function drawWildlifeCreature(ctx, kind, x, y, frameTick) {
+// ---------------------------------------------------------------------
+// Wildlife PNG spritesheet (Phase 3 pipeline). One preload, ready flag,
+// mandatory procedural fall-through — never render blank.
+// Phase 4 fills WILDLIFE_SHEET_FRAMES; until then every kind uses grids.
+// ---------------------------------------------------------------------
+const WILDLIFE_SHEET_URL = "/wildlife.png";
+
+// Kind → source rect(s). Bare { sx, sy, sw, sh, destW?, destH? } for static
+// kinds; { stand, alt? } mirrors WILDLIFE_SPRITES animation idiom.
+// Phase 4 (Tiny Farm + hand-authored) populates this map.
+const WILDLIFE_SHEET_FRAMES = {
+  // chicken: { stand: { sx: 0, sy: 0, sw: 16, sh: 16 } },
+  // grazer:  { stand: { sx: 16, sy: 0, sw: 16, sh: 16, destW: 32, destH: 32 } },
+  // fish: {
+  //   stand: { sx: 32, sy: 0, sw: 16, sh: 16 },
+  //   alt:   { sx: 48, sy: 0, sw: 16, sh: 16 },
+  // },
+};
+
+const _wildlifeSheetBlitCache = new Map();
+let _wildlifeSheetImage = null;
+let _wildlifeSheetReady = false;
+
+function _wildlifeSheetFrameKey(frame) {
+  return `${frame.sx},${frame.sy},${frame.sw},${frame.sh}`;
+}
+
+function preloadWildlifeSheet() {
+  if (_wildlifeSheetImage) return;
+  const img = new Image();
+  img.onload = () => {
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      _wildlifeSheetReady = true;
+    }
+  };
+  img.onerror = () => {
+    _wildlifeSheetReady = false;
+  };
+  img.src = WILDLIFE_SHEET_URL;
+  _wildlifeSheetImage = img;
+}
+
+function resolveWildlifeSheetFrame(kind, frameTick) {
+  const entry = WILDLIFE_SHEET_FRAMES[kind];
+  if (!entry) return null;
+  if (entry.sx !== undefined) return entry;
+  if (entry.stand) {
+    const cadence = WILDLIFE_ANIM_CADENCE[kind] || 12;
+    const useAlt = entry.alt && Math.floor(frameTick / cadence) % 2 === 1;
+    return useAlt ? entry.alt : entry.stand;
+  }
+  return null;
+}
+
+function getWildlifeSheetFrameCanvas(frame) {
+  const key = _wildlifeSheetFrameKey(frame);
+  let source = _wildlifeSheetBlitCache.get(key);
+  if (source || !_wildlifeSheetReady || !_wildlifeSheetImage) return source;
+  let canvas;
+  if (typeof OffscreenCanvas !== "undefined") {
+    canvas = new OffscreenCanvas(frame.sw, frame.sh);
+  } else {
+    canvas = document.createElement("canvas");
+    canvas.width = frame.sw;
+    canvas.height = frame.sh;
+  }
+  const fctx = canvas.getContext("2d");
+  fctx.imageSmoothingEnabled = false;
+  fctx.drawImage(
+    _wildlifeSheetImage,
+    frame.sx, frame.sy, frame.sw, frame.sh,
+    0, 0, frame.sw, frame.sh,
+  );
+  _wildlifeSheetBlitCache.set(key, canvas);
+  return canvas;
+}
+
+function tryDrawWildlifeFromSheet(ctx, kind, x, y, frameTick) {
+  if (!_wildlifeSheetReady) return false;
+  const frame = resolveWildlifeSheetFrame(kind, frameTick);
+  if (!frame) return false;
+  const source = getWildlifeSheetFrameCanvas(frame);
+  if (!source) return false;
+
+  const scale = wildlifeScaleForKind(kind);
+  const destW = frame.destW ?? frame.sw * scale;
+  const destH = frame.destH ?? frame.sh * scale;
+  const dx = Math.round(x - destW / 2);
+  const dy = Math.round(y - destH + scale * 2);
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(source, dx, dy, destW, destH);
+  ctx.restore();
+  return true;
+}
+
+function drawWildlifeCreatureProcedural(ctx, kind, x, y, frameTick) {
   const grid = resolveWildlifeGrid(WILDLIFE_SPRITES[kind], kind, frameTick);
   if (!grid) return;
   drawPixelSprite(ctx, x, y, grid, wildlifeScaleForKind(kind), false);
 }
+
+function drawWildlifeCreature(ctx, kind, x, y, frameTick) {
+  if (tryDrawWildlifeFromSheet(ctx, kind, x, y, frameTick)) return;
+  drawWildlifeCreatureProcedural(ctx, kind, x, y, frameTick);
+}
+
+preloadWildlifeSheet();
 
 // =====================================================================
 // Goods-in-motion shipments (Phase 3 living-ecosystem, CARAVAN_VISUALS_

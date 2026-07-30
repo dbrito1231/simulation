@@ -320,6 +320,18 @@ rule adherence, meme adoption, memory-store size — see
 [09-systems-society.md](09-systems-society.md)). For full determinism
 without an Ollama dependency, use the smoke scripts below instead.
 
+## Viewer static assets
+
+The thin viewer loads a few files from the Flask app beside `index.html`
+(see [04-http-api.md](04-http-api.md)):
+
+| Path | File | Notes |
+|---|---|---|
+| `/sprites.js` | `simulation/sprites.js` | Required — Canvas renderer |
+| `/wildlife.png` | `simulation/wildlife.png` | **Optional** wildlife spritesheet; not shipped until Phase 4 art lands. When absent (404), `sprites.js` keeps `_wildlifeSheetReady = false` and draws procedural `WILDLIFE_SPRITES` grids — first paint is never blocked. |
+
+**Wildlife art provenance (Phase 4):** planned source is [Kenney Tiny Farm](https://kenney.nl/assets/tiny-farm) plus hand-authored redraws in the same idiom for kinds Tiny Farm does not cover. Licence target: CC0 1.0. Record pack name, source URL, retrieval date, and any hand-authored frames in-repo when assets land; CC0 requires no attribution but provenance should be tracked regardless.
+
 ## Scripts (`scripts/`, repo root)
 
 | Script | Needs Ollama? | What it does |

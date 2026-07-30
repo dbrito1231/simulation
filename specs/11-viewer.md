@@ -455,17 +455,37 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | farm | `butterfly` | none — decorative, not huntable |
   | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
-- **Rendering (`sprites.js`):** each kind is a pixel-grid entry in the
-  `WILDLIFE_SPRITES` table (flat-color, black-outline idiom matching
-  agent sprites). An entry may be a bare grid (static kinds) or
-  `{ stand, alt? }` (animated kinds). `drawWildlifeCreature` resolves the
-  grid: bare grids draw as-is; `{ stand, alt }` entries pick `alt` on an
-  alternating `frameTick` cadence (per-kind 8–20 ticks, default 12 —
-  same idiom as agent stand/walk) when `alt` is present, otherwise `stand`.
-  Drawing uses `drawPixelSprite` with **per-tier scale** via
-  `WILDLIFE_SIZE_TIER` / `WILDLIFE_TIER_SCALE` (replacing the former
-  single `WILDLIFE_SCALE = 2` for all kinds). Approximate on-screen sizes
-  (grid width × tier scale; agents are 16-wide × 2 = 32 px):
+- **Rendering (`sprites.js`):** `drawWildlifeCreature` tries a PNG
+  spritesheet blit first, then **always** falls through to procedural
+  pixel grids — nothing ever renders blank. The sheet path is optional
+  until art lands in Phase 4; an empty `WILDLIFE_SHEET_FRAMES` map is
+  valid.
+  - **Spritesheet loader:** at module load, `preloadWildlifeSheet()` fires
+    a fire-and-forget `Image()` fetch for `/wildlife.png` (served beside
+    `sprites.js`; see [12-ops.md](12-ops.md)). `_wildlifeSheetReady` is
+    set only on successful load with non-zero dimensions; `onerror` or a
+    missing file (404) leaves it `false` permanently for that page load
+    and every kind uses procedural art. When ready **and** the kind has an
+    entry in `WILDLIFE_SHEET_FRAMES`, `tryDrawWildlifeFromSheet` blits via
+    `ctx.drawImage` with `imageSmoothingEnabled = false`, using optional
+    `destW`/`destH` overrides or default `sw`/`sh` × tier scale. Extracted
+    frame regions are cached in `_wildlifeSheetBlitCache` keyed by source
+    rect (same module-level cache idiom as `_tileSourceCanvasCache`). Frame
+    entries may be a bare `{ sx, sy, sw, sh, destW?, destH? }` or
+    `{ stand, alt? }` with the same `frameTick` cadence as procedural
+    animation.
+  - **Procedural fallback:** each kind is a pixel-grid entry in the
+    `WILDLIFE_SPRITES` table (flat-color, black-outline idiom matching
+    agent sprites). An entry may be a bare grid (static kinds) or
+    `{ stand, alt? }` (animated kinds). `drawWildlifeCreatureProcedural`
+    resolves the grid: bare grids draw as-is; `{ stand, alt }` entries
+    pick `alt` on an alternating `frameTick` cadence (per-kind 8–20
+    ticks, default 12 — same idiom as agent stand/walk) when `alt` is
+    present, otherwise `stand`. Drawing uses `drawPixelSprite` with
+    **per-tier scale** via `WILDLIFE_SIZE_TIER` / `WILDLIFE_TIER_SCALE`
+    (replacing the former single `WILDLIFE_SCALE = 2` for all kinds).
+    Approximate on-screen sizes (grid width × tier scale; agents are
+    16-wide × 2 = 32 px):
 
   | Tier | Scale | Grid width | On-screen | Kinds |
   |---|---|---|---|---|
