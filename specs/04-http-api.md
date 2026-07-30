@@ -16,9 +16,10 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 23 routes total (`@app.route` count in `simulation/server.py`; no other
 route-registration mechanism is used) — 18 always-registered routes plus the
 5 `/control/god/*` routes added in Phase 2, which are registered
-unconditionally but only ever *answer* requests when both `GOD_MODE_ENABLED`
-(sim_engine.py) and a non-empty `SIM_GOD_TOKEN` (server.py) are configured at
-startup; see "Sovereign God mode" below.
+unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
+(sim_engine.py) is configured at startup and, when `GOD_AUTH_REQUIRED` is
+True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
+configured; see "Sovereign God mode" below.
 
 | Path | Method | Purpose | Request | Response |
 |---|---|---|---|---|
@@ -40,12 +41,12 @@ startup; see "Sovereign God mode" below.
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
 | `/control/resume` | POST | Resume the tick loop | — | `{ok: true, paused: false}` |
 | `/control/reset` | POST | Reset the world, optionally with a new roster size | `{agents?: int}` (optional; omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` |
-| `/control/god/capabilities` | GET | Enabled command/effect names, bounds, duration caps, token status (requires the God token) | — | `{ok, godModeEnabled, tokenConfigured, kinds: {...}, previewTtlSeconds, activeEventsCap, compiler: {enabled, minIntervalSec, sessionCap, promptMaxChars}}` |
-| `/control/god/sight` | GET | Authenticated private inspection, bounded and filterable (requires the God token) | — | `engine.god_sight()` |
-| `/control/god/preview` | POST | Validate and normalize a god command without mutation (requires the God token) | `{kind, payload, expectedFrame?}` | `engine.god_preview(envelope)` |
-| `/control/god/apply` | POST | Apply an exact previewed command (requires the God token) | `{previewId, requestId}` | `engine.god_apply(previewId, requestId)` |
-| `/control/god/cancel` | POST | Cancel an active omen/providence/timed event (requires the God token) | `{targetId}` | `engine.god_cancel(targetId)` |
-| `/control/god/compile` | POST | Optional Phase 8: compile free operator prose into a DRAFT `story_event` preview (requires the God token; also requires `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`, otherwise a clean rejection) | `{prose}` (string, up to `GOD_COMPILER_PROSE_MAX_CHARS = 800` chars) | `engine.god_compile_prose(prose)` — `{compileOk, previewId, commandDigest, previewOutcome, normalizedCommand, reversibilityClass, expiresAt}` or `{compileOk: false, reason}` |
+| `/control/god/capabilities` | GET | Enabled command/effect names, bounds, duration caps, token status (requires God auth when `GOD_AUTH_REQUIRED`) | — | `{ok, godModeEnabled, tokenConfigured, kinds: {...}, previewTtlSeconds, activeEventsCap, compiler: {enabled, minIntervalSec, sessionCap, promptMaxChars}}` |
+| `/control/god/sight` | GET | Authenticated private inspection, bounded and filterable (requires God auth when `GOD_AUTH_REQUIRED`) | — | `engine.god_sight()` |
+| `/control/god/preview` | POST | Validate and normalize a god command without mutation (requires God auth when `GOD_AUTH_REQUIRED`) | `{kind, payload, expectedFrame?}` | `engine.god_preview(envelope)` |
+| `/control/god/apply` | POST | Apply an exact previewed command (requires God auth when `GOD_AUTH_REQUIRED`) | `{previewId, requestId}` | `engine.god_apply(previewId, requestId)` |
+| `/control/god/cancel` | POST | Cancel an active omen/providence/timed event (requires God auth when `GOD_AUTH_REQUIRED`) | `{targetId}` | `engine.god_cancel(targetId)` |
+| `/control/god/compile` | POST | Optional Phase 8: compile free operator prose into a DRAFT `story_event` preview (requires God auth when `GOD_AUTH_REQUIRED`; also requires `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`, otherwise a clean rejection) | `{prose}` (string, up to `GOD_COMPILER_PROSE_MAX_CHARS = 800` chars) | `engine.god_compile_prose(prose)` — `{compileOk, previewId, commandDigest, previewOutcome, normalizedCommand, reversibilityClass, expiresAt}` or `{compileOk: false, reason}` |
 
 `/agent/think` is legacy: the server-authoritative engine never calls it over
 HTTP. Instead, `_ENGINE_DEPS["llm_decide"]` (server.py:3233-3254) is wired
@@ -115,18 +116,23 @@ deliberately separate, optional control plane. All five share one gate and
 one uniform failure shape:
 
 - **Gate:** `GOD_MODE_ENABLED` (sim_engine.py, env-backed `SIM_GOD_MODE`,
-  read once at import — see [01-architecture.md](01-architecture.md)) AND a
-  non-empty `SIM_GOD_TOKEN` (server.py, also read once at import) must both
-  be configured. If the flag is on but the token is missing, server.py
-  prints one startup warning that contains no secret (there is none to
-  reveal) and every route below stays disabled until a restart supplies a
-  token.
-- **Auth:** clients send `X-God-Token`; compared against `SIM_GOD_TOKEN` with
-  `hmac.compare_digest`. Neither header contents nor the token are ever
-  logged, persisted, or echoed back.
-- **Uniform failure:** a disabled flag, unset token, missing header, or wrong
-  token are all indistinguishable from the outside — every case returns the
-  identical `401 {"error": "unauthorized"}`. No God response ever reveals
+  read once at import — see [01-architecture.md](01-architecture.md)) must
+  be configured. When `GOD_AUTH_REQUIRED` is also True (env-backed
+  `SIM_GOD_AUTH`, default **False** — see [12-ops.md](12-ops.md)), a
+  non-empty `SIM_GOD_TOKEN` (server.py, also read once at import) must
+  additionally be configured or routes stay disabled. If the flag is on,
+  auth is required, and the token is missing, server.py prints one startup
+  warning that contains no secret (there is none to reveal) and every route
+  below stays disabled until a restart supplies a token. When auth is off
+  (the default), routes go live as soon as the flag is on — no token needed.
+- **Auth (when `GOD_AUTH_REQUIRED`):** clients send `X-God-Token`; compared
+  against `SIM_GOD_TOKEN` with `hmac.compare_digest`. When auth is off,
+  the header is ignored and tokenless requests succeed. Neither header
+  contents nor the token are ever logged, persisted, or echoed back.
+- **Uniform failure:** a disabled flag, inactive routes (auth required but
+  token unset at startup), or — when auth is required — a missing header or
+  wrong token are all indistinguishable from the outside — every case returns
+  the identical `401 {"error": "unauthorized"}`. No God response ever reveals
   whether a target or event exists to an unauthorized caller.
 - **Body size limit:** POST bodies over `GOD_MAX_BODY_BYTES = 8192` bytes are
   rejected with `413 {"error": "payload_too_large"}` before JSON parsing.
@@ -176,14 +182,14 @@ Phases 2–6.
 
 ### Optional Phase 8: `/control/god/compile`
 
-Token-gated exactly like the other five routes above, with one additional
-gate: it also requires the SECOND, independent `GOD_COMPILER_ENABLED` dark
-flag (env `SIM_GOD_COMPILER`, read once at import — see
-[01-architecture.md](01-architecture.md) and
-[12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler)). The
-token itself is **never forwarded** to `engine.god_compile_prose` — the
-route handler checks `X-God-Token` before calling the engine method, and
-that method has no parameter to receive it.
+Auth-gated exactly like the other five routes above (when
+`GOD_AUTH_REQUIRED`), with one additional gate: it also requires the SECOND,
+independent `GOD_COMPILER_ENABLED` dark flag (env `SIM_GOD_COMPILER`, read
+once at import — see [01-architecture.md](01-architecture.md) and
+[12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler)). The token
+itself is **never forwarded** to `engine.god_compile_prose` — the route
+handler checks authorization before calling the engine method, and that method
+has no parameter to receive it.
 
 This route **never mutates and never applies**. A successful compile
 produces a normal preview record in the SAME `_god_preview_cache` slot

@@ -4184,16 +4184,26 @@ def control_reset():
 
 
 # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
-# GOD_TOKEN is read ONCE at import, exactly like GOD_MODE_ENABLED in
-# sim_engine.py -- no route may change either, and there is no live on/off
-# switch by design. Both must hold for these routes to accept anything: the
-# module flag AND a non-empty token. A flag-on/token-missing combination is a
-# misconfiguration, reported once at startup WITHOUT the secret itself (there
-# is none to reveal -- the token is simply absent), and every /control/god/*
-# route stays disabled until a restart supplies one.
+# Two-gate model: GOD_MODE_ENABLED (sim_engine.py) is always required;
+# GOD_AUTH_REQUIRED (sim_engine.py, default False) optionally requires a
+# token. GOD_TOKEN is read ONCE at import here -- no route may change any of
+# these, and there is no live on/off switch by design. Routes go live when the
+# flag is on AND either auth is off OR a non-empty token is configured. A
+# flag-on/auth-required/token-missing combination is a misconfiguration,
+# reported once at startup WITHOUT the secret itself (there is none to reveal
+# -- the token is simply absent), and every /control/god/* route stays
+# disabled until a restart supplies one.
 GOD_TOKEN = os.environ.get("SIM_GOD_TOKEN", "").strip()
-GOD_ROUTES_ACTIVE = _sim_engine.GOD_MODE_ENABLED and bool(GOD_TOKEN)
-if _sim_engine.GOD_MODE_ENABLED and not GOD_TOKEN:
+GOD_ROUTES_ACTIVE = (
+    _sim_engine.GOD_MODE_ENABLED
+    and (bool(GOD_TOKEN) or not _sim_engine.GOD_AUTH_REQUIRED)
+)
+if _sim_engine.GOD_MODE_ENABLED and not _sim_engine.GOD_AUTH_REQUIRED:
+    _god_bind_host = os.environ.get("SIM_HOST", "0.0.0.0")
+    print("[server] SECURITY: God API is unauthenticated (SIM_GOD_AUTH off); "
+          f"listening bind will be {_god_bind_host} — any LAN client can "
+          "mutate the world via /control/god/*.")
+elif _sim_engine.GOD_MODE_ENABLED and _sim_engine.GOD_AUTH_REQUIRED and not GOD_TOKEN:
     print("[server] WARNING: SIM_GOD_MODE is enabled but SIM_GOD_TOKEN is unset/blank -- "
           "every /control/god/* route stays disabled until a token is configured "
           "and the server is restarted.")
@@ -4205,10 +4215,12 @@ GOD_MAX_BODY_BYTES = 8192
 
 
 def _god_authorized():
-    """True only when the flag AND token are both configured AND the
+    """True when God routes are active and, if GOD_AUTH_REQUIRED, the
     request's X-God-Token header matches via constant-time comparison."""
     if not GOD_ROUTES_ACTIVE:
         return False
+    if not _sim_engine.GOD_AUTH_REQUIRED:
+        return True
     supplied = request.headers.get("X-God-Token", "")
     return hmac.compare_digest(supplied, GOD_TOKEN)
 
@@ -4494,8 +4506,10 @@ if __name__ == "__main__":
     # http://<host-ip>:5001. On Windows, allow inbound TCP 5001 through the
     # firewall (or accept the first-run prompt). threaded=True lets the request
     # handlers run concurrently alongside the (forthcoming) SimEngine thread.
-    # NOTE: this exposes the server — including the Ollama proxy — to the whole
-    # local network. Intended for a trusted home LAN, not a hostile network.
+    # NOTE: this exposes the server — including the Ollama proxy and, when
+    # GOD_AUTH_REQUIRED is off (the default), the unauthenticated God API —
+    # to the whole local network. Intended for a trusted home LAN, not a
+    # hostile network. Set SIM_GOD_AUTH=1 to restore token gating.
     HOST = os.environ.get("SIM_HOST", "0.0.0.0")
     PORT = int(os.environ.get("SIM_PORT", "5001"))
     # Start the server-authoritative engine thread BEFORE the HTTP server so the

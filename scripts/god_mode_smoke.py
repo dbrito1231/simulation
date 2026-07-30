@@ -30,16 +30,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "simulation"))
 
-# SIM_GOD_MODE/SIM_GOD_TOKEN must be set BEFORE the first import of
-# sim_engine/server in this process, since both read the env once at import
-# (see sim_engine.GOD_MODE_ENABLED and server.py's GOD_TOKEN). Every other
-# on/off scenario below is exercised by monkeypatching the already-imported
-# module's plain attributes for the duration of one test, then restoring --
-# the same idiom sid_parity_smoke.py already uses for PIANO_MODULES/
-# ALWAYS_ON_MODULES.
+# SIM_GOD_MODE/SIM_GOD_TOKEN/SIM_GOD_AUTH must be set BEFORE the first import
+# of sim_engine/server in this process, since all three read the env once at
+# import (see sim_engine.GOD_MODE_ENABLED/GOD_AUTH_REQUIRED and server.py's
+# GOD_TOKEN). Every other on/off scenario below is exercised by monkeypatching
+# the already-imported module's plain attributes for the duration of one test,
+# then restoring -- the same idiom sid_parity_smoke.py already uses for
+# PIANO_MODULES/ALWAYS_ON_MODULES.
 TEST_TOKEN = "smoke-god-token-do-not-reuse-anywhere-real"
 os.environ["SIM_GOD_MODE"] = "1"
 os.environ["SIM_GOD_TOKEN"] = TEST_TOKEN
+os.environ["SIM_GOD_AUTH"] = "1"
 
 import sim_engine as se  # noqa: E402
 
@@ -2482,7 +2483,7 @@ def run_http_tests():
 
     assert_true(server.GOD_TOKEN == TEST_TOKEN, "server did not pick up SIM_GOD_TOKEN at import")
     assert_true(server.GOD_ROUTES_ACTIVE is True,
-                "server did not activate god routes with flag+token both set")
+                "server did not activate god routes with flag+token+auth all set")
 
     client = server.app.test_client()
     headers_ok = {"X-God-Token": TEST_TOKEN}
@@ -2499,11 +2500,21 @@ def run_http_tests():
         resp = client.get("/control/god/capabilities", headers=headers)
         assert_true(resp.status_code == 401, (label, resp.status_code))
         assert_true(resp.get_json() == {"error": "unauthorized"}, (label, resp.get_json()))
-    print("  OK missing/wrong token -> uniform 401 {'error': 'unauthorized'}")
+    print("  OK missing/wrong token -> uniform 401 {'error': 'unauthorized'} (auth required)")
 
-    # Simulate "flag on, token unset" the same way a real misconfigured
-    # startup would compute it -- monkeypatch the already-imported module's
-    # plain globals (server.py reads GOD_TOKEN/GOD_ROUTES_ACTIVE once at
+    # When GOD_AUTH_REQUIRED is False, tokenless requests succeed.
+    old_auth = se.GOD_AUTH_REQUIRED
+    se.GOD_AUTH_REQUIRED = False
+    try:
+        resp = client.get("/control/god/capabilities")
+        assert_true(resp.status_code == 200 and resp.get_json()["ok"], resp.get_json())
+        print("  OK GOD_AUTH_REQUIRED off -> tokenless GET /control/god/capabilities returns 200")
+    finally:
+        se.GOD_AUTH_REQUIRED = old_auth
+
+    # Simulate "flag on, auth required, token unset" the same way a real
+    # misconfigured startup would compute it -- monkeypatch the already-imported
+    # module's plain globals (server.py reads GOD_TOKEN/GOD_ROUTES_ACTIVE once at
     # import, exactly like a real restart would) rather than re-importing.
     old_token, old_active = server.GOD_TOKEN, server.GOD_ROUTES_ACTIVE
     server.GOD_TOKEN, server.GOD_ROUTES_ACTIVE = "", False
@@ -2511,7 +2522,8 @@ def run_http_tests():
         resp = client.get("/control/god/capabilities", headers=headers_ok)
         assert_true(resp.status_code == 401 and resp.get_json() == {"error": "unauthorized"},
                     (resp.status_code, resp.get_json()))
-        print("  OK flag-on-without-token leaves routes disabled even with a well-formed header")
+        print("  OK flag-on-with-auth-required-and-no-token leaves routes disabled "
+              "even with a well-formed header")
     finally:
         server.GOD_TOKEN, server.GOD_ROUTES_ACTIVE = old_token, old_active
 

@@ -36,10 +36,13 @@ world state beyond a cached palette/season key.
   (index.html:1663-1664) — distinct from `lmStatus: "offline"` (Ollama
   unreachable, Flask up) and `"compute_error"` (GPU memory error), each with
   its own dot color/label (index.html:1654-1665).
-- `DISTRICTS_POLL_MS = 3000` (index.html:1069) drives `pollDistricts()`
-  (`GET /districts.js`) on a slower cadence since districts/roads change
-  only when a district is founded server-side; rebuilds the terrain cache
-  only when the served district-id list actually changed (index.html:1064-1086).
+- `DISTRICTS_POLL_MS = 3000` drives `pollDistricts()` (`GET /districts.js`)
+  on a slower cadence since districts/roads change only when a district is
+  founded server-side. The first terrain-cache build starts immediately at page
+  kickoff (via `scheduleTerrainCacheBuild`) using `STARTER_DISTRICTS_JS` as a
+  fallback — it does **not** wait for `/districts.js`. When the served
+  district-id list later differs, `pollDistricts()` nulls `terrainCanvas` and
+  rebuilds.
 - The render loop is **decoupled from polling** via `requestAnimationFrame`:
   `tick()` (index.html:2899-2914) redraws every animation frame from
   whatever `world` currently holds, keeping ~60fps even though network polls
@@ -67,10 +70,19 @@ world state beyond a cached palette/season key.
 - **Offscreen terrain cache**: static terrain (zones, crops, trees, dock,
   ocean) is rendered once into an offscreen `terrainCanvas` and blitted each
   frame instead of re-tiling per frame (`buildTerrainCache`/
-  `scheduleTerrainCacheBuild`, index.html:740-756), invalidated on resize, a
-  season change (index.html:2173-2178), a district-list change
-  (index.html:1079-1081), or (`CROP_GROWTH_ENABLED`, living-ecosystem Phase 2)
-  a district's `districtEcology` stage change — see below.
+  `scheduleTerrainCacheBuild`). Tiling uses `createPattern` in
+  `fillRectWithTile` / `fillRectWithTiles` (sprites.js): each 16×16 tile grid
+  is rasterized once, then repeated natively; `fillRectWithTiles` pattern-fills
+  the whole rect with the base tile and overdrawing `PATH_CELLS` only for
+  road cells. `scheduleTerrainCacheBuild` runs the build synchronously on
+  the main thread (~10 ms after pattern-fill); there is no
+  `requestIdleCallback` deferral. The `#worldLoading` overlay covers the build
+  and is hidden in the same turn via `hideWorldLoading()`. The cache is
+  invalidated on resize, a season change, a district-list change (when
+  `districtsKey` from `/districts.js` differs), or (`CROP_GROWTH_ENABLED`,
+  living-ecosystem Phase 2) a district's `districtEcology` stage change — see
+  below. Optional load-perf timings: set `VIEWER_LOAD_DEBUG = true` in
+  index.html to log build stage splits and performance marks.
 
 **Crop/tree growth stages (`CROP_GROWTH_ENABLED`, living-ecosystem Phase 2):**
 terrain — including crops and trees — is baked into the static
@@ -504,42 +516,97 @@ via `drawShipments(ctx, world.frameTick)`, called right after
 
 ## Divine Console (Sovereign God mode, Phase 7)
 
-`#divineConsoleSection` is a single collapsed `<details>` panel appended to
-the right-hand `#sidebarBody`, after Chronicle, holding a tabbar of seven
-always-present sections — **Unlock**, **Sight**, **Voice**, **Miracles**,
-**Story**, **Laws**, **History** — plus an eighth, **Compile**, shown only
-when the server reports the Optional Phase 8 compiler enabled (see below).
-It is strictly additive over
+The Divine Console is a fixed bottom action bar plus a large modal dialog —
+not a sidebar panel. Eight feature buttons (**Unlock**, **Sight**, **Voice**,
+**Miracles**, **Story**, **Laws**, **History**, plus **Compile** when the
+server reports the Optional Phase 8 compiler enabled — see below) live in
+`#divineBar` (`position: fixed; bottom: 0; left: 0; right: 0`). Clicking a
+button opens `#divineModalScrim` / `#divineModal` (`role="dialog"`,
+`aria-modal="true"`), whose body is `#divineModalBody`. At load time the eight
+`#divineTab-<name>` panel nodes sit in a hidden holding container
+`#divineTabHold` so `wireDivineForm()` and other `getElementById` bindings
+still resolve at startup; **opening a feature reparents** (moves, never clones)
+the matching `#divineTab-<name>` into `#divineModalBody`, and **closing**
+returns it to `#divineTabHold`. A shared floating tooltip element `#tooltip`
+serves every `data-tip` control in the bar and modal. `#godPublicBanner` remains
+independent (fixed top-center; see "Public banner" below). The console is
+strictly additive over
 [docs/plan-sovereign-god-mode-v2.md](../docs/plan-sovereign-god-mode-v2.md)'s
 already-shipped backend (Phases 2–6, see
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel)
 and [04-http-api.md](04-http-api.md#sovereign-god-mode)) — no engine or route
 code changed for this phase.
 
-**Feature gate.** The entire panel (DOM visibility, JS behavior, fetches) is
-driven by exactly one signal: `GOD_MODE_ENABLED_FLAG`, a module-level mirror
-of `state.config.flags.GOD_MODE_ENABLED`, set in `applyFlags()` the same way
-every other echoed flag is (see "Polling and render loop" above).
+**Feature gate.** Bar visibility and modal behavior are driven by
+`GOD_MODE_ENABLED_FLAG`, a module-level mirror of
+`state.config.flags.GOD_MODE_ENABLED`, set in `applyFlags()` the same way every
+other echoed flag is (see "Polling and render loop" above).
 `updateGodModeGate()` (called once per `renderSidebar()`, itself once per
-`pollState()` tick — **no new poll loop**) toggles
-`#divineConsoleSection`'s `display` and, when off, force-hides
-`#godPublicBanner` too. When the flag is absent or false — including an older
-snapshot from before this key existed, or a snapshot from a
-`GOD_MODE_ENABLED`-off server — the panel makes zero `/control/god/*`
-requests: every fetch in this section is wired to an explicit button click
-(Connect/Preview/Apply/Cancel/Refresh), never a timer, so a flag-off session
-never issues a single God HTTP call. A flag-off render is byte-identical to
-the pre-Phase-7 page for every other panel.
+`pollState()` tick — **no new poll loop**) toggles `#divineBar`'s `display` and,
+when off, force-hides `#godPublicBanner` too. When `GOD_MODE_ENABLED` is absent
+or false — including an older snapshot from before this key existed, or a
+snapshot from a `GOD_MODE_ENABLED`-off server — the console makes zero
+`/control/god/*` requests except where noted below for open-mode bootstrap.
 
-**Token handling.** The token lives in one JS variable, `godToken`, held only
-in memory. The Unlock tab offers a "remember for this tab" checkbox
-(`#godRememberCheckbox`, default unchecked) that, only when checked, mirrors
-the token into `sessionStorage` — `localStorage` is never used anywhere in
-this section. `godApiFetch()` (the single fetch wrapper every God call goes
-through) clears `godToken`/`godAuthorized`/the cached capabilities/sight
-response and re-locks the console (`godLockConsole()`, switches back to the
-Unlock tab) on any `401` response, matching the backend's uniform
-unauthorized shape (04-http-api.md).
+**Authorization gate (dual signal).** Whether the Unlock lifecycle runs is
+driven by a second mirror, `GOD_AUTH_REQUIRED_FLAG` (from
+`state.config.flags.GOD_AUTH_REQUIRED`, also set in `applyFlags()` and synced
+on every `updateGodModeGate()` tick). When `GOD_AUTH_REQUIRED` is **false**
+(the default): there is no Unlock step — the brand state reads `open` (green),
+the Unlock bar button and its `statuspip` are hidden, every
+`.gbtn.locked-dependent` is enabled immediately via
+`godEffectivelyAuthorized()` (`godAuthorized || !GOD_AUTH_REQUIRED_FLAG`), and
+`/control/god/capabilities` is fetched once without a token as soon as God mode
+is confirmed on (`godOpenModeBootstrap()`, guarded so it runs at most once per
+session and only while `GOD_MODE_ENABLED_FLAG` is true). `godLockConsole()` is
+a no-op re-lock in this mode (console.warn only — a stray 401 must not pop the
+hidden Unlock modal). `restoreGodTokenFromSession()` and the remember-checkbox
+/sessionStorage wiring are skipped entirely.
+
+When `GOD_AUTH_REQUIRED` is **true**: behavior matches the original Phase 7
+contract — `godAuthorized` starts false, the Unlock button and pip are visible,
+locked-dependent buttons stay disabled until `godConnect()` succeeds, a 401 from
+any God call clears the token and re-locks via `godLockConsole()` (opening the
+Unlock modal), and the remember-checkbox may mirror the token into
+`sessionStorage`. The Unlock tab markup and `openDivineModal("unlock")` remain
+in the codebase as dead-but-harmless paths for re-enabling auth.
+
+When God mode is off, a flag-off render is byte-identical to the pre-Phase-7
+page for every other panel; no bootstrap fetch runs.
+
+**Modal UX.** `openDivineModal(name)` and `closeDivineModal()` are the
+primary open/close API (replacing the prior in-sidebar `showGodTab()` toggle;
+`showGodTab` may remain as a thin alias that delegates to `openDivineModal`).
+Opening reparents `#divineTab-<name>` into `#divineModalBody`, sets the modal
+header title/icon/subtitle, and shows `#divineModalScrim`. Closing via the ✕
+button, a backdrop click on `#divineModalScrim`, or Escape reparents the panel
+back to `#divineTabHold` and hides the scrim. Side effects that previously
+fired on tab switch now fire on open: Sight → `refreshGodSight()` when
+effectively authorized (`godEffectivelyAuthorized()`); Laws →
+`renderGodLawsActive()`; History → `renderGodHistory()`.
+The Compile bar button `#godCompileTabBtn` stays dual-gated via
+`capabilities.compiler.enabled` (see Compile below).
+
+**Tooltips.** Every interactive control, every fieldset legend, and every bar
+button carries a `data-tip` attribute whose value is JSON `{t,d}` (short title
++ one-sentence description). A single shared engine on `#tooltip` shows on
+`mouseenter`/`focusin` and hides on `mouseleave`/`focusout` (keyboard accessible,
+not hover-only); positions above the target, flipping below if the viewport top
+would clip; writes content via `escapeHtml`/`textContent` only — never raw HTML
+from variables; and respects `prefers-reduced-motion` for show/hide transitions.
+
+**Token handling (auth-required mode only).** When `GOD_AUTH_REQUIRED_FLAG` is
+true, the token lives in one JS variable, `godToken`, held only in memory. The
+Unlock feature window offers a "remember for this tab" checkbox
+(`#godRememberCheckbox`, default unchecked) that, only when checked, mirrors the
+token into `sessionStorage` — `localStorage` is never used anywhere in this
+section. `godApiFetch()` (the single fetch wrapper every God call goes through)
+clears `godToken`/`godAuthorized`/the cached capabilities/sight response and
+re-locks the console (`godLockConsole()`, switches back to the Unlock feature
+via `openDivineModal("unlock")`) on any `401` response, matching the backend's
+uniform unauthorized shape (04-http-api.md). When `GOD_AUTH_REQUIRED_FLAG` is
+false, `godApiFetch()` omits the `X-God-Token` header (no token in memory) and
+`godLockConsole()` does not clear state or open the Unlock modal on 401.
 
 **Rendering contract.** Every dynamic string this section writes into
 `innerHTML` is escaped with the file's existing `escapeHtml()` helper before
@@ -576,7 +643,7 @@ the latest polled `world.frameTick`.
 replacement is disclosed proactively by the preview response
 (`fingerprint.outgoingId`), so the console can show the warning before the
 operator ever needs to know an id. A `story_event` modifier-key conflict
-(used by both the Story and Laws tabs, since Laws submits a `story_event`
+(used by both the Story and Laws feature windows, since Laws submits a `story_event`
 carrying only `modifiers`) is instead a **hard preview rejection** naming the
 occupying event's id in the reason string (`_validate_god_story_event`, see
 02-engine-core.md) — there is no disclosed `outgoingId` to read. The console
@@ -589,11 +656,13 @@ conflict the same way — see this phase's report for the underlying gap.
 
 **Sections:**
 
-- **Unlock** — token field, "remember for this tab" checkbox, Connect button,
-  and a status readout (`locked` / `Authorized.` / an unauthorized message).
-  A disabled-flag hint line was scoped out per the phase brief (the panel is
-  never rendered at all when the flag is off, so there is nothing to hint
-  from inside it).
+- **Unlock** (visible only when `GOD_AUTH_REQUIRED_FLAG` is true) — token
+  field, "remember for this tab" checkbox, Connect button, and a status readout
+  (`locked` / `Authorized.` / an unauthorized message). When auth is not
+  required the bar button is hidden and the brand state shows `open` instead.
+  A disabled-flag hint line was scoped out per the phase brief (the bar is
+  never rendered at all when God mode is off, so there is nothing to hint from
+  inside it).
 - **Sight** — an agent selector (`getLivingAgents()`, the same public roster
   every other panel already reads) plus a Refresh button that calls
   `GET /control/god/sight` and renders the selected agent's health/hunger/
@@ -631,7 +700,8 @@ conflict the same way — see this phase's report for the underlying gap.
   `state.god.recentPublicInterventions`, each tagged with a `public` badge.
   Private history (omens, private story events) is deliberately never shown
   here — per `snapshot()`'s allowlist (04-http-api.md), it is not present in
-  `/state` at all and is reachable only through the authenticated Sight tab.
+  `/state` at all and is reachable only through the authenticated Sight
+  feature window.
 - **Compile** (Optional Phase 8, dual-gated) — `#godCompileTabBtn` stays
   `display:none` until `applyGodCapabilitiesToForms()` sees
   `capabilities.compiler.enabled === true` (itself already the AND of
@@ -641,22 +711,22 @@ conflict the same way — see this phase's report for the underlying gap.
   same check also bounds the prose textarea's `maxLength` to
   `capabilities.compiler.promptMaxChars` and stores
   `capabilities.compiler.minIntervalSec` for the client-side rate-limit UX
-  below. The tab holds one textarea and a single Compile button — **no Apply
-  button of its own, on purpose**. Clicking Compile posts `{prose}` to
+  below. The feature window holds one textarea and a single Compile button —
+  **no Apply button of its own, on purpose**. Clicking Compile posts `{prose}` to
   `POST /control/god/compile`; on `compileOk: true` it calls
   `godPopulateStoryFromCompiled(normalizedCommand)` — which fills the Story
-  tab's title/narration/visibility/target/duration/modifier-checkboxes/
+  feature window's title/narration/visibility/target/duration/modifier-checkboxes/
   primitive rows/providence fields from the compiled draft, explicitly
   invalidates any stale Story preview (dispatches the same `input` event
   `wireDivineForm`'s own listener already watches), then calls
-  `showGodTab("story")` — so the operator reviews and Applies through the
+  `openDivineModal("story")` — so the operator reviews and Applies through the
   **exact same** Preview → Apply flow every other Voice/Miracle/Law/Story
   action already uses, documented above. On rejection or a network error the
   reason is written via `.textContent` only (never `innerHTML`) into
   `#godCompileResult` — the compiler's raw model output can appear inside
   that reason string (e.g. a truncated non-JSON response), so it gets the
   same plain-text-only treatment as every other stored/adversarial string in
-  this panel. After every click (success, rejection, or error alike) the
+  this console. After every click (success, rejection, or error alike) the
   Compile button disables itself client-side for `minIntervalSec` seconds —
   advisory only; `GOD_COMPILER_MIN_INTERVAL_SEC` on the server is the
   authoritative rate limit and rejects independently of what the client UI

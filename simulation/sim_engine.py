@@ -372,15 +372,25 @@ WEATHER_CLEARING_REGROW_MULT = 1.5  # post-storm "rain" boost for the same distr
 # not a runtime toggle: no HTTP route may change it, and there is no live
 # on/off switch by design -- enabling or disabling it requires the normal
 # single-instance server restart with SIM_GOD_MODE set (or unset) in the
-# process environment beforehand. Absent/blank/"0"/false-like resolves to
-# disabled, which is the default -- the simulation stays a pure observer
-# experience unless a deployer opts in deliberately. This is also the FIRST
+# process environment beforehand. Absent/blank/anything not explicitly
+# false-like resolves to enabled, which is the default -- the Divine Console
+# bar is now a normal, permanent part of the viewer. Set SIM_GOD_MODE to a
+# false-like value ("0"/"false"/"no"/"off") before starting the server to
+# opt back out and hide the console bar entirely. This is also the FIRST
 # env-var-backed flag in sim_engine.py (every prior env-var precedent, e.g.
 # SIM_HOST/SIM_PORT/SIM_AGENTS/SIM_LOG_RETENTION, lives only in server.py);
-# see specs/01-architecture.md for that precedent note. server.py separately
-# requires a non-empty SIM_GOD_TOKEN before any God route actually accepts
-# requests -- see server.py's God-mode section for that half of the gate.
-GOD_MODE_ENABLED = str(os.environ.get("SIM_GOD_MODE", "")).strip().lower() in (
+# see specs/01-architecture.md for that precedent note. God routes use a
+# two-gate model: GOD_MODE_ENABLED must be True (this flag), and token auth
+# is optional via GOD_AUTH_REQUIRED / SIM_GOD_AUTH (default off). See
+# server.py's God-mode section and specs/12-ops.md -- security-relevant
+# because HOST binds 0.0.0.0 (LAN-wide).
+GOD_MODE_ENABLED = str(os.environ.get("SIM_GOD_MODE", "1")).strip().lower() not in (
+    "0", "false", "no", "off",
+)
+# GOD_AUTH_REQUIRED is env-backed, read-once-at-import; default False (no
+# token gate). Set SIM_GOD_AUTH=1 to restore the SIM_GOD_TOKEN check.
+# Security-relevant: server.py HOST binds 0.0.0.0 (see specs/12-ops.md).
+GOD_AUTH_REQUIRED = str(os.environ.get("SIM_GOD_AUTH", "0")).strip().lower() in (
     "1", "true", "yes", "on",
 )
 GOD_STATE_VERSION = 1               # schema version for civilization["godState"]
@@ -17102,6 +17112,7 @@ class SimEngine:
                         # default without a private route. The "god" key
                         # below, by contrast, is opt-in ONLY when enabled.
                         "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
+                        "GOD_AUTH_REQUIRED": GOD_AUTH_REQUIRED,
                     },
                 },
             }

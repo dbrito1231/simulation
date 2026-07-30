@@ -738,23 +738,34 @@
   #councilAssemblyVerdict { padding:9px; border:1px solid #b99446; border-radius:5px; background:#302718; color:#ffe4a1; }
   #councilAssemblyReopenBtn { display:none; position:fixed; right:18px; bottom:18px; z-index:109; box-shadow:0 4px 18px rgba(0,0,0,.45); }
   #councilAssemblyReopenBtn.visible { display:block; }
-  /* --- Divine Console (Sovereign God mode Phase 7, docs/plan-sovereign-god-
-     mode-v2.md "Viewer: Divine Console"). Strictly additive: every rule below
-     only ever touches elements inside #divineConsoleSection/#godPublicBanner,
-     which stay display:none unless config.flags.GOD_MODE_ENABLED is true
-     (see updateGodModeGate()) -- a flag-off snapshot renders byte-identical
-     to before this section existed. */
-  #divineConsoleSection summary {
-    cursor: pointer; font-size: 13px; font-weight: 600; color: #ffd27a;
-    margin-bottom: 6px; outline: none;
+  /* --- Divine Console (Sovereign God mode Phase 7 → bottom-bar relocation,
+     docs/plan-divine-console-bottom-bar.md). Strictly additive: every rule
+     below only ever touches #divineBar / #divineModalScrim / #tooltip /
+     #divineTabHold / #godPublicBanner (and form styles used inside modals),
+     plus chrome clearance for #wrap / #minimap / #councilAssemblyReopenBtn
+     when body.divine-bar-visible is set. Flag-off stays display:none/inert
+     (see updateGodModeGate()). */
+  /* Shrink #wrap above the fixed bar so flex sidebars (#convPanel / #sidebar)
+     scroll in the remaining viewport instead of sitting under the bar.
+     ~92px ≈ bar padding 10+10 + .gbtn ~54 + border. */
+  body.divine-bar-visible {
+    --divine-bar-clearance: 92px;
   }
-  .divine-tabbar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
-  .divine-tab-btn {
-    padding: 4px 8px; font: 11px sans-serif; background: #24242e; color: #bbb;
-    border: 1px solid #3a3a48; border-radius: 3px; cursor: pointer;
+  body.divine-bar-visible #wrap {
+    height: calc(100vh - var(--divine-bar-clearance));
   }
-  .divine-tab-btn:hover { background: #2c2c38; }
-  .divine-tab-btn.active { background: #4a3a1a; color: #ffd27a; border-color: #b5883a; }
+  /* #sidebar / #convPanel size from the viewport (not #wrap), so they need
+     the same clearance or Council/Chronicle still sit under the fixed bar. */
+  body.divine-bar-visible #sidebar,
+  body.divine-bar-visible #convPanel {
+    height: calc(100vh - 16px - var(--divine-bar-clearance));
+  }
+  body.divine-bar-visible #minimap {
+    bottom: calc(18px + var(--divine-bar-clearance));
+  }
+  body.divine-bar-visible #councilAssemblyReopenBtn {
+    bottom: calc(18px + var(--divine-bar-clearance));
+  }
   .divine-tab-panel { font-size: 12px; color: #ccc; }
   .divine-fieldset {
     border: 1px solid #2e2e3a; border-radius: 4px; padding: 8px; margin-bottom: 10px;
@@ -800,6 +811,102 @@
   .divine-history-private { background: #3a1e3a; color: #e0b3ff; }
   .divine-primitive-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 4px; padding: 4px; border: 1px dashed #333; border-radius: 3px; }
   .divine-primitive-row select, .divine-primitive-row input { font-size: 11px; padding: 2px 4px; }
+  /* Bottom action bar */
+  .divine-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+    display: flex; align-items: stretch; gap: 6px;
+    padding: 10px 14px;
+    background: linear-gradient(180deg, rgba(18,18,24,.55), rgba(10,10,14,.96));
+    border-top: 1px solid #34343f;
+    backdrop-filter: blur(8px);
+  }
+  .divine-bar .bar-brand {
+    display: flex; flex-direction: column; justify-content: center;
+    padding-right: 12px; margin-right: 4px; border-right: 1px solid #282831;
+    min-width: 96px;
+  }
+  .bar-brand .b1 {
+    font: 700 12px system-ui, sans-serif; color: #ffd27a;
+    letter-spacing: .06em; text-transform: uppercase;
+  }
+  .bar-brand .b2 { font: 600 10px ui-monospace, monospace; color: #6f6f7c; margin-top: 2px; }
+  .bar-buttons { display: flex; gap: 6px; flex: 1 1 auto; flex-wrap: wrap; }
+  .gbtn {
+    display: flex; flex-direction: column; align-items: center; gap: 5px;
+    min-width: 74px; padding: 8px 10px 6px;
+    background: #1b1b25; color: #9a9aa8;
+    border: 1px solid #282831; border-radius: 7px;
+    cursor: pointer; font: 600 11px system-ui, sans-serif;
+    transition: background .12s, color .12s, border-color .12s, transform .08s;
+  }
+  .gbtn svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+  .gbtn:hover:not(:disabled) {
+    background: #23232e; color: #dcdce4; border-color: #b5883a; transform: translateY(-1px);
+  }
+  .gbtn.active { background: #4a3a1a; color: #ffd27a; border-color: #b5883a; }
+  .gbtn.locked-dependent:disabled { opacity: .4; cursor: not-allowed; }
+  .gbtn.compile { border-style: dashed; }
+  .gbtn .statuspip {
+    font: 700 8px ui-monospace, monospace; letter-spacing: .04em;
+    text-transform: uppercase; color: #ef9a9a;
+  }
+  .gbtn.unlock[data-state="unlocked"] .statuspip { color: #a5d6a7; }
+  /* Modal shell */
+  .modal-scrim {
+    position: fixed; inset: 0; z-index: 30;
+    background: rgba(6,6,10,.66); backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center; padding: 24px;
+  }
+  .modal-scrim.open { display: flex; }
+  .modal {
+    width: min(680px, 96vw); max-height: 82vh; display: flex; flex-direction: column;
+    background: #1b1b25; border: 1px solid #34343f; border-radius: 12px;
+    box-shadow: 0 24px 70px rgba(0,0,0,.6), 0 0 0 1px rgba(255,210,122,.06);
+    animation: divine-modal-pop .16s ease-out;
+  }
+  @keyframes divine-modal-pop {
+    from { transform: translateY(10px) scale(.985); opacity: 0; }
+    to { transform: none; opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .modal { animation: none; }
+    #tooltip { transition: none; }
+  }
+  .modal-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px 18px; border-bottom: 1px solid #282831;
+  }
+  .modal-head .mh-icon {
+    width: 34px; height: 34px; display: grid; place-items: center;
+    border-radius: 8px; background: #4a3a1a; color: #ffd27a;
+    border: 1px solid #b5883a; flex: none;
+  }
+  .modal-head .mh-icon svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 1.7; }
+  .modal-head h2 { margin: 0; font-size: 16px; font-weight: 700; color: #ffd27a; }
+  .modal-head p { margin: 2px 0 0; font-size: 11.5px; color: #9a9aa8; }
+  .modal-head .spacer { flex: 1 1 auto; }
+  .modal-close {
+    width: 30px; height: 30px; border-radius: 7px; flex: none;
+    background: transparent; border: 1px solid #282831; color: #9a9aa8;
+    cursor: pointer; font-size: 16px; line-height: 1;
+  }
+  .modal-close:hover { color: #dcdce4; border-color: #b5883a; background: #23232e; }
+  .modal-body { padding: 16px 18px; overflow-y: auto; }
+  .tip {
+    display: inline-grid; place-items: center; width: 14px; height: 14px; flex: none;
+    border-radius: 50%; border: 1px solid #b5883a; color: #ffd27a;
+    font: 700 9px ui-monospace, monospace; cursor: help; background: rgba(255,210,122,.06);
+  }
+  [data-tip] { position: relative; }
+  #tooltip {
+    position: fixed; z-index: 60; max-width: 260px; pointer-events: none;
+    background: #0a0a0e; color: #dcdce4; border: 1px solid #b5883a;
+    border-radius: 7px; padding: 8px 10px; font: 500 11.5px/1.5 system-ui, sans-serif;
+    box-shadow: 0 10px 30px rgba(0,0,0,.55);
+    opacity: 0; transform: translateY(3px); transition: opacity .12s, transform .12s;
+  }
+  #tooltip.show { opacity: 1; transform: none; }
+  #tooltip .t-title { font-weight: 700; color: #ffd27a; margin-bottom: 2px; display: block; }
   #godPublicBanner {
     position: fixed; top: 78px; left: 50%; transform: translateX(-50%);
     padding: 6px 18px; font: 600 13px system-ui, sans-serif;
@@ -820,6 +927,16 @@
     #councilAssemblyBody { grid-template-columns:1fr; }
     #councilAssemblyInfo { border-left:0; border-top:1px solid #3d3424; }
     #councilAssemblyCanvas { min-width:0; }
+    .bar-brand { display: none; }
+    .gbtn { min-width: 0; flex: 1 1 auto; }
+    /* height:auto overrides the desktop calc; margin clears the fixed bar. */
+    body.divine-bar-visible #wrap {
+      height: auto;
+      margin-bottom: var(--divine-bar-clearance);
+    }
+  }
+  @media (max-width: 620px) {
+    .gbtn span.lbl { display: none; }
   }
 </style>
 </head>
@@ -928,76 +1045,135 @@
       <h2>Chronicle</h2>
       <ul id="chronicleList"></ul>
     </section>
-    <section class="panel-section" id="divineConsoleSection" style="display:none">
-      <details id="divineConsolePanel">
-        <summary>Divine Console</summary>
-        <div class="divine-tabbar">
-          <button type="button" class="divine-tab-btn" data-tab="unlock">Unlock</button>
-          <button type="button" class="divine-tab-btn" data-tab="sight">Sight</button>
-          <button type="button" class="divine-tab-btn" data-tab="voice">Voice</button>
-          <button type="button" class="divine-tab-btn" data-tab="miracles">Miracles</button>
-          <button type="button" class="divine-tab-btn" data-tab="story">Story</button>
-          <button type="button" class="divine-tab-btn" data-tab="laws">Laws</button>
-          <button type="button" class="divine-tab-btn" data-tab="history">History</button>
-          <!-- Sovereign God mode Optional Phase 8: dual-gated (GOD_MODE_ENABLED
-               AND the separate GOD_COMPILER_ENABLED dark flag). Hidden by
-               default; applyGodCapabilitiesToForms() reveals it only when
-               capabilities.compiler.enabled is true. -->
-          <button type="button" class="divine-tab-btn" data-tab="compile" id="godCompileTabBtn" style="display:none">Compile</button>
-        </div>
-
+    </div>
+  </aside>
+</div>
+<!-- Divine Console bottom bar + modal (relocated from sidebar; gated by GOD_MODE_ENABLED) -->
+<div id="divineBar" class="divine-bar" style="display:none">
+  <div class="bar-brand">
+    <span class="b1">Divine</span>
+    <span class="b2" id="divineBarBrandState">locked</span>
+  </div>
+  <div class="bar-buttons">
+    <button type="button" class="gbtn unlock" data-feature="unlock" data-tab="unlock" data-state="locked"
+      data-tip='{"t":"Unlock the Divine Console","d":"Authenticate with the God token to enable every other tool."}'>
+      <svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 7.5-2"/></svg>
+      <span class="lbl">Unlock</span>
+      <span class="statuspip" id="divineUnlockPip">locked</span>
+    </button>
+    <button type="button" class="gbtn sight locked-dependent" data-feature="sight" data-tab="sight" disabled
+      data-tip='{"t":"Sight — private inspection","d":"See what agents never expose publicly: vitals, ties, omens, active effects."}'>
+      <svg viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.5"/></svg>
+      <span class="lbl">Sight</span>
+    </button>
+    <button type="button" class="gbtn voice locked-dependent" data-feature="voice" data-tab="voice" disabled
+      data-tip='{"t":"Voice — proclamations &amp; omens","d":"Speak to the village, or whisper a private omen to one agent."}'>
+      <svg viewBox="0 0 24 24"><path d="M4 8h9l5-3v14l-5-3H4z"/><path d="M20 9a4 4 0 0 1 0 6"/></svg>
+      <span class="lbl">Voice</span>
+    </button>
+    <button type="button" class="gbtn miracles locked-dependent" data-feature="miracles" data-tab="miracles" disabled
+      data-tip='{"t":"Miracles — direct intervention","d":"Heal, grant resources, or repair/damage a structure. Irreversible once applied."}'>
+      <svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.4L18 9l-4.2 1.6L12 15l-1.8-4.4L6 9l4.2-1.6z"/><path d="M18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z"/></svg>
+      <span class="lbl">Miracles</span>
+    </button>
+    <button type="button" class="gbtn story locked-dependent" data-feature="story" data-tab="story" disabled
+      data-tip='{"t":"Story — timed narrative events","d":"Compose a titled event from validated effect primitives."}'>
+      <svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h6v18H6a2 2 0 0 1-2-2z"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/></svg>
+      <span class="lbl">Story</span>
+    </button>
+    <button type="button" class="gbtn laws locked-dependent" data-feature="laws" data-tab="laws" disabled
+      data-tip='{"t":"Laws — temporary world modifiers","d":"Bend gather yield, hunger, spoilage and more for a bounded time."}'>
+      <svg viewBox="0 0 24 24"><path d="M12 3v18M5 7h14M7 7l-3 6h6zM17 7l3 6h-6z"/></svg>
+      <span class="lbl">Laws</span>
+    </button>
+    <button type="button" class="gbtn history locked-dependent" data-feature="history" data-tab="history" disabled
+      data-tip='{"t":"History — intervention log","d":"Every applied intervention, public and private, most recent first."}'>
+      <svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>
+      <span class="lbl">History</span>
+    </button>
+    <!-- Sovereign God mode Optional Phase 8: dual-gated (GOD_MODE_ENABLED
+         AND the separate GOD_COMPILER_ENABLED dark flag). Hidden by
+         default; applyGodCapabilitiesToForms() reveals it only when
+         capabilities.compiler.enabled is true. -->
+    <button type="button" class="gbtn compile locked-dependent" data-feature="compile" data-tab="compile"
+      id="godCompileTabBtn" style="display:none" disabled
+      data-tip='{"t":"Compile — prose to event","d":"Turn narrative prose into a typed draft. Dark until contention is measured."}'>
+      <svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>
+      <span class="lbl">Compile</span>
+    </button>
+  </div>
+</div>
+<div id="divineModalScrim" class="modal-scrim">
+  <div id="divineModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="divineModalTitle">
+    <div class="modal-head">
+      <div class="mh-icon" id="divineModalIcon"></div>
+      <div>
+        <h2 id="divineModalTitle">—</h2>
+        <p id="divineModalSub">—</p>
+      </div>
+      <div class="spacer"></div>
+      <button type="button" class="modal-close" id="divineModalClose" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="divineModalBody"></div>
+  </div>
+</div>
+<!-- Hidden holding container: all 8 #divineTab-* panels live here at load so getElementById + wireDivineForm still work -->
+<div id="divineTabHold" style="display:none" aria-hidden="true">
         <div class="divine-tab-panel" id="divineTab-unlock">
           <div class="divine-row">
-            <label>Token
+            <label data-tip='{"t":"God token","d":"The value of SIM_GOD_TOKEN set at server startup. Sent as the X-God-Token header on every request."}'>Token
               <input type="password" id="godTokenInput" autocomplete="off" placeholder="X-God-Token" />
             </label>
           </div>
           <div class="divine-row">
-            <label style="flex-direction:row; align-items:center; gap:6px;">
+            <label style="flex-direction:row; align-items:center; gap:6px;"
+              data-tip='{"t":"Remember for this tab","d":"Stores the token in sessionStorage — cleared when the tab closes. localStorage is never used."}'>
               <input type="checkbox" id="godRememberCheckbox" style="width:auto;" />
               Remember for this tab (sessionStorage — never localStorage)
             </label>
           </div>
-          <div class="divine-actions"><button type="button" id="godConnectBtn">Connect</button></div>
+          <div class="divine-actions"><button type="button" id="godConnectBtn"
+            data-tip='{"t":"Connect","d":"Validates the token against /control/god/capabilities and unlocks the console."}'>Connect</button></div>
           <div id="godAuthStatus" class="divine-status">Locked.</div>
         </div>
 
         <div class="divine-tab-panel" id="divineTab-sight" style="display:none">
           <div class="divine-row">
-            <label>Agent <select id="godSightAgentSelect"></select></label>
-            <div class="divine-actions"><button type="button" id="godSightRefreshBtn">Refresh sight</button></div>
+            <label data-tip='{"t":"Agent selector","d":"Pick any living agent. The panel refreshes from /control/god/sight for that agent id."}'>Agent <select id="godSightAgentSelect"></select></label>
+            <div class="divine-actions"><button type="button" id="godSightRefreshBtn"
+              data-tip='{"t":"Refresh sight","d":"Re-fetch the private sight payload for the selected agent."}'>Refresh sight</button></div>
           </div>
           <div id="godSightOutput" class="divine-result"></div>
         </div>
 
         <div class="divine-tab-panel" id="divineTab-voice" style="display:none">
           <fieldset class="divine-fieldset" id="godProclamationFieldset">
-            <legend>Proclamation (public, one-shot)</legend>
-            <div class="divine-row"><label>Text <textarea id="godProcText"></textarea></label></div>
+            <legend data-tip='{"t":"Proclamation","d":"A one-off public announcement. Writes to activity + the Chronicle as a divine event. No lasting cognition effect."}'>Proclamation (public, one-shot)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Message","d":"Public text shown to the village and Chronicle."}'>Text <textarea id="godProcText"></textarea></label></div>
             <div class="divine-actions">
-              <button type="button" id="godProcPreviewBtn">Preview</button>
-              <button type="button" id="godProcApplyBtn" disabled>Apply</button>
+              <button type="button" id="godProcPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godProcApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godProcResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godProvidenceFieldset">
-            <legend>Providence (public, cancellable)</legend>
-            <div class="divine-row"><label>Text <textarea id="godProvText"></textarea></label></div>
-            <div class="divine-row"><label>Duration (frames) <input type="number" id="godProvDuration" /></label></div>
+            <legend data-tip='{"t":"Providence","d":"A public, cancellable guidance banner that expires after a duration."}'>Providence (public, cancellable)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Providence text","d":"Public guidance shown while the providence is active."}'>Text <textarea id="godProvText"></textarea></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Duration","d":"How long providence stays active, in 30-frames-per-second sim time."}'>Duration (frames) <input type="number" id="godProvDuration" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godProvPreviewBtn">Preview</button>
-              <button type="button" id="godProvApplyBtn" disabled>Apply</button>
+              <button type="button" id="godProvPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godProvApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godProvResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godOmenFieldset">
-            <legend>Private omen (one agent, cancellable)</legend>
-            <div class="divine-row"><label>Agent <select id="godOmenAgentSelect"></select></label></div>
-            <div class="divine-row"><label>Text <textarea id="godOmenText"></textarea></label></div>
-            <div class="divine-row"><label>Duration (frames) <input type="number" id="godOmenDuration" /></label></div>
+            <legend data-tip='{"t":"Private omen","d":"A guidance line seen ONLY by one agent, and never in public /state. On expiry it enters that agent&#39;s memory exactly once."}'>Private omen (one agent, cancellable)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Target","d":"One living agent. Keyed by stable id, so a rename never misroutes it."}'>Agent <select id="godOmenAgentSelect"></select></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Omen text","d":"Private guidance visible only to the target agent."}'>Text <textarea id="godOmenText"></textarea></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Duration","d":"How long the omen stays active, in 30-frames-per-second sim time."}'>Duration (frames) <input type="number" id="godOmenDuration" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godOmenPreviewBtn">Preview</button>
-              <button type="button" id="godOmenApplyBtn" disabled>Apply</button>
+              <button type="button" id="godOmenPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godOmenApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godOmenResult"></div>
           </fieldset>
@@ -1005,37 +1181,37 @@
 
         <div class="divine-tab-panel" id="divineTab-miracles" style="display:none">
           <fieldset class="divine-fieldset" id="godVitalsFieldset">
-            <legend>Agent vitals (IRREVERSIBLE)</legend>
-            <div class="divine-row"><label>Agent <select id="godVitalsAgentSelect"></select></label></div>
-            <div class="divine-row"><label>Health delta <input type="number" id="godVitalsHealth" value="0" step="1" /></label>
-              <label>Hunger delta <input type="number" id="godVitalsHunger" value="0" step="1" /></label></div>
+            <legend data-tip='{"t":"Agent vitals","d":"Add health and/or hunger to one living agent, clamped 0–100. A negative delta cannot drive an agent to death in v1."}'>Agent vitals (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Living agent whose vitals will change."}'>Agent <select id="godVitalsAgentSelect"></select></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Health delta","d":"Signed change applied to health, then clamped. Preview reveals the resulting value."}'>Health delta <input type="number" id="godVitalsHealth" value="0" step="1" /></label>
+              <label data-tip='{"t":"Hunger delta","d":"Signed change applied to hunger, then clamped 0–100."}'>Hunger delta <input type="number" id="godVitalsHunger" value="0" step="1" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godVitalsPreviewBtn">Preview</button>
-              <button type="button" id="godVitalsApplyBtn" disabled>Apply</button>
+              <button type="button" id="godVitalsPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godVitalsApplyBtn" disabled data-tip='{"t":"Apply","d":"IRREVERSIBLE once applied — an inverse is a new intervention, not a rollback."}'>Apply</button>
             </div>
             <div class="divine-result" id="godVitalsResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godGrantFieldset">
-            <legend>Grant resource (IRREVERSIBLE)</legend>
-            <div class="divine-row"><label>Resource <select id="godGrantResourceSelect"></select></label>
-              <label>Amount <input type="number" id="godGrantAmount" value="1" min="1" step="1" /></label></div>
-            <div class="divine-row"><label>Target
+            <legend data-tip='{"t":"Grant resource","d":"Add a known resource to the village stockpile or one agent. Capped per command and per session; respects carry limits."}'>Grant resource (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Resource","d":"Known resource id from the registry."}'>Resource <select id="godGrantResourceSelect"></select></label>
+              <label data-tip='{"t":"Amount","d":"How many units to grant. Clamped by server caps."}'>Amount <input type="number" id="godGrantAmount" value="1" min="1" step="1" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Target kind","d":"Stockpile, or a single agent&#39;s inventory."}'>Target
               <select id="godGrantTargetKind"><option value="stockpile">Stockpile</option><option value="agent">Agent</option></select>
             </label>
-            <label>Agent (if target=agent) <select id="godGrantAgentSelect"></select></label></div>
+            <label data-tip='{"t":"Agent target","d":"Required when Target is Agent."}'>Agent (if target=agent) <select id="godGrantAgentSelect"></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godGrantPreviewBtn">Preview</button>
-              <button type="button" id="godGrantApplyBtn" disabled>Apply</button>
+              <button type="button" id="godGrantPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godGrantApplyBtn" disabled data-tip='{"t":"Apply","d":"IRREVERSIBLE once applied — an inverse is a new intervention, not a rollback."}'>Apply</button>
             </div>
             <div class="divine-result" id="godGrantResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godStructureFieldset">
-            <legend>Structure condition (IRREVERSIBLE)</legend>
-            <div class="divine-row"><label>Structure <select id="godStructureSelect"></select></label>
-              <label>Delta (+repair / -damage) <input type="number" id="godStructureDelta" value="0" step="1" /></label></div>
+            <legend data-tip='{"t":"Structure condition","d":"Repair (+) or damage (−) a living structure&#39;s condition. Irreversible once applied."}'>Structure condition (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Structure","d":"Non-ruin structure to adjust."}'>Structure <select id="godStructureSelect"></select></label>
+              <label data-tip='{"t":"Condition delta","d":"Positive repairs; negative damages. Preview shows the clamped result."}'>Delta (+repair / -damage) <input type="number" id="godStructureDelta" value="0" step="1" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godStructurePreviewBtn">Preview</button>
-              <button type="button" id="godStructureApplyBtn" disabled>Apply</button>
+              <button type="button" id="godStructurePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godStructureApplyBtn" disabled data-tip='{"t":"Apply","d":"IRREVERSIBLE once applied — an inverse is a new intervention, not a rollback."}'>Apply</button>
             </div>
             <div class="divine-result" id="godStructureResult"></div>
           </fieldset>
@@ -1043,65 +1219,72 @@
 
         <div class="divine-tab-panel" id="divineTab-story" style="display:none">
           <fieldset class="divine-fieldset" id="godStoryFieldset">
-            <legend>Story event (cancellable, or CONSEQUENTIAL with primitives)</legend>
-            <div class="divine-row"><label>Title <input type="text" id="godStoryTitle" /></label></div>
-            <div class="divine-row"><label>Narration <textarea id="godStoryNarration"></textarea></label></div>
+            <legend data-tip='{"t":"Story event","d":"Bundles narration + timed modifiers + optional immediate effects under one id. Preview validates every part; Apply is all-or-nothing."}'>Story event (cancellable, or CONSEQUENTIAL with primitives)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Title","d":"Short name shown in History and the Chronicle."}'>Title <input type="text" id="godStoryTitle" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Narration","d":"Story text delivered with the event."}'>Narration <textarea id="godStoryNarration"></textarea></label></div>
             <div class="divine-row">
-              <label>Visibility
+              <label data-tip='{"t":"Visibility","d":"Public reaches the village; private is scoped to one agent."}'>Visibility
                 <select id="godStoryVisibility"><option value="public">Public</option><option value="private">Private</option></select>
               </label>
-              <label>Target (if private) <select id="godStoryTargetSelect"></select></label>
-              <label>Duration (frames) <input type="number" id="godStoryDuration" /></label>
+              <label data-tip='{"t":"Private target","d":"Required when Visibility is Private."}'>Target (if private) <select id="godStoryTargetSelect"></select></label>
+              <label data-tip='{"t":"Duration","d":"Total lifetime of the event and its timed modifiers."}'>Duration (frames) <input type="number" id="godStoryDuration" /></label>
             </div>
-            <div id="godStoryModifiers" class="divine-row" style="flex-direction:column; align-items:stretch;"></div>
+            <div id="godStoryModifiers" class="divine-row" style="flex-direction:column; align-items:stretch;"
+              data-tip='{"t":"Timed modifiers","d":"World multipliers active for the event&#39;s lifetime. One active value per key."}'></div>
             <div class="divine-row">
-              <label style="flex-direction:row; align-items:center; gap:6px;">
+              <label style="flex-direction:row; align-items:center; gap:6px;"
+                data-tip='{"t":"Also set providence","d":"Optionally attach a public providence banner to this story event."}'>
                 <input type="checkbox" id="godStoryProvidenceCheckbox" style="width:auto;" /> Also set public providence
               </label>
-              <label>Providence text <input type="text" id="godStoryProvidenceText" /></label>
+              <label data-tip='{"t":"Providence text","d":"Text for the optional providence banner."}'>Providence text <input type="text" id="godStoryProvidenceText" /></label>
             </div>
             <div id="godStoryPrimitives"></div>
             <div class="divine-actions">
-              <button type="button" id="godStoryAddPrimitiveBtn">+ Add primitive effect</button>
+              <button type="button" id="godStoryAddPrimitiveBtn"
+                data-tip='{"t":"Add primitive","d":"Append an immediate effect. Adding one makes the story CONSEQUENTIAL — cancel stops the future, not what already happened."}'>+ Add primitive effect</button>
             </div>
             <div class="divine-row">
-              <label style="flex-direction:row; align-items:center; gap:6px;">
+              <label style="flex-direction:row; align-items:center; gap:6px;"
+                data-tip='{"t":"Replace conflict","d":"Enabled after a rejected preview that reports a conflicting effect id."}'>
                 <input type="checkbox" id="godStoryReplaceCheckbox" style="width:auto;" disabled /> Replace conflicting effect (id shown after a rejected preview)
               </label>
               <input type="text" id="godStoryReplaceId" placeholder="effect id" readonly />
             </div>
             <div class="divine-actions">
-              <button type="button" id="godStoryPreviewBtn">Preview</button>
-              <button type="button" id="godStoryApplyBtn" disabled>Apply</button>
+              <button type="button" id="godStoryPreviewBtn" data-tip='{"t":"Preview","d":"Validate every part without mutating. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godStoryApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. All-or-nothing."}'>Apply</button>
             </div>
             <div class="divine-result" id="godStoryResult"></div>
           </fieldset>
         </div>
 
         <div class="divine-tab-panel" id="divineTab-laws" style="display:none">
-          <div class="divine-note">Active timed law modifiers:</div>
+          <div class="divine-note" data-tip='{"t":"Active laws","d":"Currently running modifiers with remaining time. Cancel ends one early."}'>Active timed law modifiers:</div>
           <div id="godLawsActive" class="divine-result"></div>
           <fieldset class="divine-fieldset" id="godLawFieldset">
-            <legend>New law (bounded timed multiplier)</legend>
-            <div class="divine-row"><label>Title <input type="text" id="godLawTitle" placeholder="Divine decree" /></label></div>
-            <div class="divine-row"><label>Narration <textarea id="godLawNarration" placeholder="(auto-filled from selected modifiers if left blank)"></textarea></label></div>
-            <div class="divine-row"><label>Duration (frames) <input type="number" id="godLawDuration" /></label></div>
-            <div id="godLawModifiers" class="divine-row" style="flex-direction:column; align-items:stretch;"></div>
+            <legend data-tip='{"t":"Timed law","d":"Scales a live calculation for a bounded time. A value of 1.0 is a no-op, identical to the feature being off."}'>New law (bounded timed multiplier)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Title","d":"Short label for History / Chronicle."}'>Title <input type="text" id="godLawTitle" placeholder="Divine decree" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Narration","d":"Optional story text; auto-filled from selected modifiers if left blank."}'>Narration <textarea id="godLawNarration" placeholder="(auto-filled from selected modifiers if left blank)"></textarea></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Duration","d":"How long the law stays active, in frames."}'>Duration (frames) <input type="number" id="godLawDuration" /></label></div>
+            <div id="godLawModifiers" class="divine-row" style="flex-direction:column; align-items:stretch;"
+              data-tip='{"t":"Modifiers","d":"Keys and values clamped to ranges from /control/god/capabilities."}'></div>
             <div class="divine-row">
-              <label style="flex-direction:row; align-items:center; gap:6px;">
+              <label style="flex-direction:row; align-items:center; gap:6px;"
+                data-tip='{"t":"Replace conflict","d":"Enabled after a rejected preview that reports a conflicting law id."}'>
                 <input type="checkbox" id="godLawReplaceCheckbox" style="width:auto;" disabled /> Replace conflicting law (id shown after a rejected preview)
               </label>
               <input type="text" id="godLawReplaceId" placeholder="effect id" readonly />
             </div>
             <div class="divine-actions">
-              <button type="button" id="godLawPreviewBtn">Preview</button>
-              <button type="button" id="godLawApplyBtn" disabled>Apply</button>
+              <button type="button" id="godLawPreviewBtn" data-tip='{"t":"Preview","d":"Validate without mutating. Shows divine vs village-rule contribution separately."}'>Preview</button>
+              <button type="button" id="godLawApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. CANCELLABLE while active."}'>Apply</button>
             </div>
             <div class="divine-result" id="godLawResult"></div>
           </fieldset>
         </div>
 
-        <div class="divine-tab-panel" id="divineTab-history" style="display:none">
+        <div class="divine-tab-panel" id="divineTab-history" style="display:none"
+          data-tip='{"t":"Intervention log","d":"Newest first. Public entries also appear in the Chronicle; private omens are visible here only."}'>
           <ul id="godHistoryList" class="divine-result"></ul>
         </div>
 
@@ -1113,17 +1296,15 @@
              every other kind already uses (see godPopulateStoryFromCompiled). -->
         <div class="divine-tab-panel" id="divineTab-compile" style="display:none">
           <fieldset class="divine-fieldset" id="godCompileFieldset">
-            <legend>Compile free prose into a draft story event (preview-only)</legend>
-            <div class="divine-row"><label>Prose <textarea id="godCompileProse" rows="4"></textarea></label></div>
-            <div class="divine-actions"><button type="button" id="godCompileBtn">Compile</button></div>
+            <legend data-tip='{"t":"Compile","d":"Turn free prose into a typed Story draft. Never mutates — successful compile fills Story for Preview/Apply."}'>Compile free prose into a draft story event (preview-only)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Prose","d":"Narrative text to compile into a draft story event."}'>Prose <textarea id="godCompileProse" rows="4"></textarea></label></div>
+            <div class="divine-actions"><button type="button" id="godCompileBtn"
+              data-tip='{"t":"Compile","d":"Ask the compiler for a draft, then open Story for review."}'>Compile</button></div>
             <div class="divine-result" id="godCompileResult"></div>
           </fieldset>
         </div>
-      </details>
-    </section>
-    </div>
-  </aside>
 </div>
+<div id="tooltip"></div>
 <div id="deadAgentsModal" role="dialog" aria-labelledby="deadAgentsTitle" aria-modal="true">
   <div id="deadAgentsDialog">
     <header>
@@ -1166,6 +1347,21 @@
 <script src="sprites.js"></script>
 <script>
 "use strict";
+
+// Load-perf instrumentation (docs/plan-load-performance.md): set true to log
+// terrain-cache build timings and performance marks.
+const VIEWER_LOAD_DEBUG = false;
+const VIEWER_LOAD_T0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
+if (VIEWER_LOAD_DEBUG) {
+  performance.mark("viewer:script-start");
+  console.info("[viewer-load] script start", {
+    devicePixelRatio: window.devicePixelRatio,
+    msSinceNavigation: (() => {
+      const nav = performance.getEntriesByType && performance.getEntriesByType("navigation")[0];
+      return nav ? +(performance.now() - nav.startTime).toFixed(1) : null;
+    })(),
+  });
+}
 
 // =====================================================================
 // THIN VIEWER — the simulation runs server-side (see server.py / sim_engine.py).
@@ -1236,23 +1432,22 @@ function applySeasonTint(canvas, season) {
 function hideWorldLoading() {
   if (!worldLoadingEl || worldLoadingEl.classList.contains("hidden")) return;
   worldLoadingEl.classList.add("hidden");
+  if (VIEWER_LOAD_DEBUG) {
+    performance.mark("viewer:world-loading-hidden");
+    console.info("[viewer-load] hideWorldLoading", {
+      msSinceScriptStart: +(performance.now() - VIEWER_LOAD_T0).toFixed(1),
+    });
+  }
 }
 
 function scheduleTerrainCacheBuild() {
   if (terrainCanvas || terrainBuildScheduled) return;
   terrainBuildScheduled = true;
-  const run = () => {
-    try {
-      buildTerrainCache();
-    } finally {
-      terrainBuildScheduled = false;
-      hideWorldLoading();
-    }
-  };
-  if (typeof requestIdleCallback === "function") {
-    requestIdleCallback(run, { timeout: 1500 });
-  } else {
-    setTimeout(run, 0);
+  try {
+    buildTerrainCache();
+  } finally {
+    terrainBuildScheduled = false;
+    hideWorldLoading();
   }
 }
 
@@ -1529,6 +1724,10 @@ function ecologyStagesForTerrain() {
 // districtsKey changes (a district was founded) via pollDistricts(), the
 // season changes, or (CROP_GROWTH_ENABLED) a district's ecology stage changes.
 function buildTerrainCache() {
+  if (VIEWER_LOAD_DEBUG) performance.mark("viewer:terrain-build-start");
+  const buildT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
+  const stageTimings = VIEWER_LOAD_DEBUG ? {} : null;
+
   const districts = getDistricts();
   terrainCanvas = document.createElement("canvas");
   terrainCanvas.width = WORLD_W;
@@ -1537,9 +1736,15 @@ function buildTerrainCache() {
   tctx.imageSmoothingEnabled = false;
   const season = world.calendar && world.calendar.season;
   const [ecologyStages, ecologyStageKey] = ecologyStagesForTerrain();
+
+  const drawT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
   drawTiledWorld(tctx, WORLD_W, WORLD_H, 0, null, districts,
-                 districtsData.roadNodes, districtsData.roadEdges, season || "summer", ecologyStages);
+                 districtsData.roadNodes, districtsData.roadEdges, season || "summer", ecologyStages, stageTimings);
+  const drawTiledWorldMs = VIEWER_LOAD_DEBUG ? performance.now() - drawT0 : 0;
+
+  const tintT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
   applySeasonTint(terrainCanvas, season);
+  const seasonTintMs = VIEWER_LOAD_DEBUG ? performance.now() - tintT0 : 0;
   lastEcologyStageKeyRendered = ecologyStageKey;
 
   // The ocean's animated foam strip is scoped to the ocean district's own
@@ -1550,6 +1755,7 @@ function buildTerrainCache() {
   oceanFrames = { bounds: oceanBounds, frames: [] };
   const ow = oceanBounds.x2 - oceanBounds.x1;
   const oh = oceanBounds.y2 - oceanBounds.y1;
+  const oceanT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
   for (let phase = 0; phase < 16; phase++) {
     const oc = document.createElement("canvas");
     oc.width = ow;
@@ -1560,7 +1766,25 @@ function buildTerrainCache() {
     applySeasonTint(oc, season);
     oceanFrames.frames.push(oc);
   }
+  const oceanFramesMs = VIEWER_LOAD_DEBUG ? performance.now() - oceanT0 : 0;
   lastSeasonRendered = season || null;
+
+  if (VIEWER_LOAD_DEBUG) {
+    const totalMs = performance.now() - buildT0;
+    performance.mark("viewer:terrain-build-end");
+    console.info("[viewer-load] buildTerrainCache", {
+      totalMs: +totalMs.toFixed(1),
+      drawTiledWorldMs: +drawTiledWorldMs.toFixed(1),
+      baseFillMs: +(stageTimings.baseFillMs || 0).toFixed(1),
+      districtPassesMs: +(stageTimings.districtPassesMs || 0).toFixed(1),
+      propsMs: +(stageTimings.propsMs || 0).toFixed(1),
+      seasonTintMs: +seasonTintMs.toFixed(1),
+      oceanFramesMs: +oceanFramesMs.toFixed(1),
+      msSinceScriptStart: +(performance.now() - VIEWER_LOAD_T0).toFixed(1),
+      season: season || "summer",
+      devicePixelRatio: window.devicePixelRatio,
+    });
+  }
 }
 
 // The dock (drawn at world 150,470, 144x36) straddles the beach/ocean line, so
@@ -1711,11 +1935,21 @@ function drawWorld(ctx, frameTick) {
 // ~10Hz cadence. Rebuilds the terrain cache only when the served list
 // actually changed (a district was founded), not on every poll.
 const DISTRICTS_POLL_MS = 3000;
+let districtsJsResolvedLogged = false;
 async function pollDistricts() {
   try {
     const res = await fetch("/districts.js", { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
+    if (!districtsJsResolvedLogged) {
+      districtsJsResolvedLogged = true;
+      if (VIEWER_LOAD_DEBUG) {
+        performance.mark("viewer:districts-js-resolved");
+        console.info("[viewer-load] /districts.js resolved", {
+          msSinceScriptStart: +(performance.now() - VIEWER_LOAD_T0).toFixed(1),
+        });
+      }
+    }
     const key = JSON.stringify((data.districts || []).map((d) => d.id));
     if (key !== districtsKey) {
       districtsKey = key;
@@ -3316,6 +3550,8 @@ let STRUCTURE_UPGRADES_ENABLED = true;
 // always echoed by /state regardless of the flag's value (see
 // specs/01-architecture.md flag index). false until the first /state poll.
 let GOD_MODE_ENABLED_FLAG = false;
+// Mirrors config.flags.GOD_AUTH_REQUIRED (default false = open Divine Console).
+let GOD_AUTH_REQUIRED_FLAG = false;
 
 function applyFlags(flags) {
   if (!flags) return;
@@ -3343,6 +3579,7 @@ function applyFlags(flags) {
   if ("CARAVAN_VISUALS_ENABLED" in flags) CARAVAN_VISUALS_ENABLED = !!flags.CARAVAN_VISUALS_ENABLED;
   if ("WEATHER_ENABLED" in flags) WEATHER_ENABLED = !!flags.WEATHER_ENABLED;
   if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
+  if ("GOD_AUTH_REQUIRED" in flags) GOD_AUTH_REQUIRED_FLAG = !!flags.GOD_AUTH_REQUIRED;
 }
 
 // Bounded viewer-only social pass. The engine has already filtered and
@@ -3705,12 +3942,42 @@ const godTokenInput = document.getElementById("godTokenInput");
 const godRememberCheckbox = document.getElementById("godRememberCheckbox");
 const godConnectBtn = document.getElementById("godConnectBtn");
 const godAuthStatusEl = document.getElementById("godAuthStatus");
-const divineConsoleSectionEl = document.getElementById("divineConsoleSection");
+const divineBarEl = document.getElementById("divineBar");
+const divineBarBrandStateEl = document.getElementById("divineBarBrandState");
+const divineUnlockPipEl = document.getElementById("divineUnlockPip");
+const divineModalScrimEl = document.getElementById("divineModalScrim");
+const divineModalBodyEl = document.getElementById("divineModalBody");
+const divineModalIconEl = document.getElementById("divineModalIcon");
+const divineModalTitleEl = document.getElementById("divineModalTitle");
+const divineModalSubEl = document.getElementById("divineModalSub");
+const divineTabHoldEl = document.getElementById("divineTabHold");
+const divineTooltipEl = document.getElementById("tooltip");
 const godPublicBannerEl = document.getElementById("godPublicBanner");
 const godHistoryListEl = document.getElementById("godHistoryList");
 const godLawsActiveEl = document.getElementById("godLawsActive");
 const godSightOutputEl = document.getElementById("godSightOutput");
 const godSightAgentSelectEl = document.getElementById("godSightAgentSelect");
+
+const DIVINE_FEATURE_ICONS = {
+  unlock:  '<svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 7.5-2"/></svg>',
+  sight:   '<svg viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.5"/></svg>',
+  voice:   '<svg viewBox="0 0 24 24"><path d="M4 8h9l5-3v14l-5-3H4z"/><path d="M20 9a4 4 0 0 1 0 6"/></svg>',
+  miracles:'<svg viewBox="0 0 24 24"><path d="M12 3l1.8 4.4L18 9l-4.2 1.6L12 15l-1.8-4.4L6 9l4.2-1.6z"/><path d="M18 15l.9 2.1L21 18l-2.1.9L18 21l-.9-2.1L15 18l2.1-.9z"/></svg>',
+  story:   '<svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h6v18H6a2 2 0 0 1-2-2z"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/></svg>',
+  laws:    '<svg viewBox="0 0 24 24"><path d="M12 3v18M5 7h14M7 7l-3 6h6zM17 7l3 6h-6z"/></svg>',
+  history: '<svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>',
+  compile: '<svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>',
+};
+const DIVINE_FEATURES = {
+  unlock:  { title: "Unlock the Divine Console", sub: "Authenticate with the God token to enable every other tool.", gated: false },
+  sight:   { title: "Sight — private inspection", sub: "See what agents never expose publicly: vitals, ties, omens, active effects.", gated: true },
+  voice:   { title: "Voice — proclamations & omens", sub: "Speak to the village, or whisper a private omen to one agent.", gated: true },
+  miracles:{ title: "Miracles — direct intervention", sub: "Heal, grant resources, or repair/damage a structure. Irreversible once applied.", gated: true },
+  story:   { title: "Story — timed narrative events", sub: "Compose a titled event from validated effect primitives.", gated: true },
+  laws:    { title: "Laws — temporary world modifiers", sub: "Bend gather yield, hunger, spoilage and more for a bounded time.", gated: true },
+  history: { title: "History — intervention log", sub: "Every applied intervention, public and private, most recent first.", gated: true },
+  compile: { title: "Compile — prose to event", sub: "Turn narrative prose into a typed draft. Dark until contention is measured.", gated: true },
+};
 
 function godFramesToSeconds(frames) {
   return Math.round((Number(frames) || 0) / 30);
@@ -3789,14 +4056,77 @@ function updateGodAuthStatus(text, cls) {
   godAuthStatusEl.className = "divine-status" + (cls ? " " + cls : "");
 }
 
+function godEffectivelyAuthorized() {
+  return godAuthorized || !GOD_AUTH_REQUIRED_FLAG;
+}
+
+function updateDivineBarAuthUi() {
+  if (divineBarBrandStateEl) {
+    if (!GOD_AUTH_REQUIRED_FLAG) {
+      divineBarBrandStateEl.textContent = "open";
+      divineBarBrandStateEl.style.color = "#a5d6a7";
+    } else {
+      divineBarBrandStateEl.textContent = godAuthorized ? "authorized" : "locked";
+      divineBarBrandStateEl.style.color = godAuthorized ? "#a5d6a7" : "#6f6f7c";
+    }
+  }
+  const unlockBtn = divineBarEl && divineBarEl.querySelector(".gbtn.unlock");
+  if (unlockBtn) {
+    if (!GOD_AUTH_REQUIRED_FLAG) {
+      unlockBtn.style.display = "none";
+    } else {
+      unlockBtn.style.display = "";
+      unlockBtn.dataset.state = godAuthorized ? "unlocked" : "locked";
+    }
+  }
+  if (divineUnlockPipEl) {
+    if (!GOD_AUTH_REQUIRED_FLAG) {
+      divineUnlockPipEl.style.display = "none";
+      divineUnlockPipEl.textContent = "";
+    } else {
+      divineUnlockPipEl.style.display = "";
+      divineUnlockPipEl.textContent = godAuthorized ? "ready" : "locked";
+    }
+  }
+  if (!divineBarEl) return;
+  const effective = godEffectivelyAuthorized();
+  divineBarEl.querySelectorAll(".gbtn.locked-dependent").forEach((btn) => {
+    // Compile stays dual-gated by capabilities display; still lock-disable when unauthorized.
+    btn.disabled = !effective;
+  });
+}
+
 function godLockConsole(message) {
+  if (!GOD_AUTH_REQUIRED_FLAG) {
+    console.warn(message || "godLockConsole ignored — Divine Console is in open mode (GOD_AUTH_REQUIRED off).");
+    return;
+  }
   godToken = null;
   godAuthorized = false;
   godCapabilities = null;
   godLastSight = null;
   try { sessionStorage.removeItem("godToken"); } catch (err) { /* ignore */ }
   updateGodAuthStatus(message || "Locked.", "divine-status-locked");
-  showGodTab("unlock");
+  updateDivineBarAuthUi();
+  if (GOD_MODE_ENABLED_FLAG) openDivineModal("unlock");
+  else {
+    godActiveTab = "unlock";
+    closeDivineModal();
+  }
+}
+
+let godOpenModeBootstrapped = false;
+async function godOpenModeBootstrap() {
+  if (GOD_AUTH_REQUIRED_FLAG || godOpenModeBootstrapped || !GOD_MODE_ENABLED_FLAG) return;
+  godOpenModeBootstrapped = true;
+  godAuthorized = true;
+  updateDivineBarAuthUi();
+  const resp = await godApiFetch("/control/god/capabilities");
+  if (resp.ok && resp.data && resp.data.ok) {
+    godCapabilities = resp.data;
+    applyGodCapabilitiesToForms();
+    populateGodAgentSelects();
+  }
 }
 
 async function godConnect(tokenValue) {
@@ -3810,12 +4140,14 @@ async function godConnect(tokenValue) {
     godAuthorized = true;
     godCapabilities = resp.data;
     updateGodAuthStatus("Authorized.", "divine-status-ok");
+    updateDivineBarAuthUi();
     applyGodCapabilitiesToForms();
     populateGodAgentSelects();
     showGodTab("sight");
   } else {
     godToken = null;
     godAuthorized = false;
+    updateDivineBarAuthUi();
     updateGodAuthStatus("Unauthorized — check the token (or god mode may be disabled).", "divine-status-locked");
   }
 }
@@ -3871,48 +4203,159 @@ function applyGodCapabilitiesToForms() {
 }
 
 // --- sessionStorage "remember for this tab" (never localStorage) ------
-(function restoreGodTokenFromSession() {
-  try {
-    const stored = sessionStorage.getItem("godToken");
-    if (stored) {
-      godTokenInput.value = stored;
-      godRememberCheckbox.checked = true;
+if (GOD_AUTH_REQUIRED_FLAG) {
+  (function restoreGodTokenFromSession() {
+    try {
+      const stored = sessionStorage.getItem("godToken");
+      if (stored) {
+        godTokenInput.value = stored;
+        godRememberCheckbox.checked = true;
+      }
+    } catch (err) { /* ignore */ }
+  })();
+  godRememberCheckbox.addEventListener("change", () => {
+    if (!godRememberCheckbox.checked) {
+      try { sessionStorage.removeItem("godToken"); } catch (err) { /* ignore */ }
+    } else if (godToken) {
+      try { sessionStorage.setItem("godToken", godToken); } catch (err) { /* ignore */ }
     }
-  } catch (err) { /* ignore */ }
-})();
-godRememberCheckbox.addEventListener("change", () => {
-  if (!godRememberCheckbox.checked) {
-    try { sessionStorage.removeItem("godToken"); } catch (err) { /* ignore */ }
-  } else if (godToken) {
-    try { sessionStorage.setItem("godToken", godToken); } catch (err) { /* ignore */ }
-  }
-});
-// Re-derive the "remember" persistence on every successful connect (not just
-// the change event) so a token typed AFTER checking the box is still saved.
-const _godConnectOriginal = godConnect;
-godConnect = async function (tokenValue) {
-  await _godConnectOriginal(tokenValue);
-  if (godAuthorized && godRememberCheckbox.checked) {
-    try { sessionStorage.setItem("godToken", tokenValue); } catch (err) { /* ignore */ }
-  }
-};
-
-// --- Tabs ---------------------------------------------------------------
-const GOD_TABS = ["unlock", "sight", "voice", "miracles", "story", "laws", "history", "compile"];
-const godTabButtons = Array.from(document.querySelectorAll(".divine-tab-btn"));
-function showGodTab(name) {
-  if (GOD_TABS.indexOf(name) === -1) name = "unlock";
-  godActiveTab = name;
-  godTabButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === name));
-  GOD_TABS.forEach((t) => {
-    const el = document.getElementById("divineTab-" + t);
-    if (el) el.style.display = (t === name) ? "" : "none";
   });
-  if (name === "sight" && godAuthorized) refreshGodSight();
+  // Re-derive the "remember" persistence on every successful connect (not just
+  // the change event) so a token typed AFTER checking the box is still saved.
+  const _godConnectOriginal = godConnect;
+  godConnect = async function (tokenValue) {
+    await _godConnectOriginal(tokenValue);
+    if (godAuthorized && godRememberCheckbox.checked) {
+      try { sessionStorage.setItem("godToken", tokenValue); } catch (err) { /* ignore */ }
+    }
+  };
+}
+
+// --- Bottom bar + modal (relocated from sidebar tabs) --------------------
+const GOD_TABS = ["unlock", "sight", "voice", "miracles", "story", "laws", "history", "compile"];
+const godBarButtons = Array.from(document.querySelectorAll("#divineBar .gbtn"));
+let divineModalOpenFeature = null;
+
+function closeDivineModal() {
+  if (divineModalOpenFeature) {
+    const panel = document.getElementById("divineTab-" + divineModalOpenFeature);
+    if (panel && divineTabHoldEl) divineTabHoldEl.appendChild(panel);
+    divineModalOpenFeature = null;
+  }
+  if (divineModalScrimEl) divineModalScrimEl.classList.remove("open");
+  godBarButtons.forEach((btn) => btn.classList.remove("active"));
+  hideDivineTip();
+}
+
+function openDivineModal(name) {
+  if (GOD_TABS.indexOf(name) === -1) name = "unlock";
+  const feature = DIVINE_FEATURES[name] || DIVINE_FEATURES.unlock;
+  // Reparent any currently open panel back to the hold first.
+  if (divineModalOpenFeature && divineModalOpenFeature !== name) {
+    const prev = document.getElementById("divineTab-" + divineModalOpenFeature);
+    if (prev && divineTabHoldEl) {
+      prev.style.display = "none";
+      divineTabHoldEl.appendChild(prev);
+    }
+  }
+  godActiveTab = name;
+  godBarButtons.forEach((btn) => btn.classList.toggle("active", btn.dataset.feature === name));
+  if (divineModalIconEl) divineModalIconEl.innerHTML = DIVINE_FEATURE_ICONS[name] || "";
+  if (divineModalTitleEl) divineModalTitleEl.textContent = feature.title;
+  if (divineModalSubEl) divineModalSubEl.textContent = feature.sub;
+  const panel = document.getElementById("divineTab-" + name);
+  if (panel && divineModalBodyEl) {
+    divineModalBodyEl.appendChild(panel);
+    panel.style.display = "";
+  }
+  // Hide siblings still in the hold (not the open panel).
+  GOD_TABS.forEach((t) => {
+    if (t === name) return;
+    const el = document.getElementById("divineTab-" + t);
+    if (el && el.parentElement === divineTabHoldEl) el.style.display = "none";
+  });
+  divineModalOpenFeature = name;
+  if (divineModalScrimEl) divineModalScrimEl.classList.add("open");
+  if (name === "sight" && godEffectivelyAuthorized()) refreshGodSight();
   if (name === "laws") renderGodLawsActive();
   if (name === "history") renderGodHistory();
 }
-godTabButtons.forEach((btn) => btn.addEventListener("click", () => showGodTab(btn.dataset.tab)));
+
+// Thin alias: existing callers (connect→sight, lock→unlock, compile→story) open the modal.
+function showGodTab(name) {
+  openDivineModal(name);
+}
+
+godBarButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    if (btn.disabled) return;
+    openDivineModal(btn.dataset.feature);
+  });
+});
+const divineModalCloseBtn = document.getElementById("divineModalClose");
+if (divineModalCloseBtn) divineModalCloseBtn.addEventListener("click", closeDivineModal);
+if (divineModalScrimEl) {
+  divineModalScrimEl.addEventListener("click", (e) => {
+    if (e.target === divineModalScrimEl) closeDivineModal();
+  });
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && divineModalScrimEl && divineModalScrimEl.classList.contains("open")) {
+    closeDivineModal();
+  }
+});
+
+// --- Shared tooltip engine (delegated; safe for late-rendered sight/history) ---
+let divineTipHideTimer = null;
+function hideDivineTip() {
+  if (divineTooltipEl) divineTooltipEl.classList.remove("show");
+}
+function showDivineTip(el) {
+  if (!divineTooltipEl || !el) return;
+  let raw = el.getAttribute("data-tip");
+  if (!raw) return;
+  let data;
+  try {
+    data = JSON.parse(raw.replace(/&#39;/g, "'"));
+  } catch (err) {
+    return;
+  }
+  const title = data && data.t != null ? String(data.t) : "";
+  const desc = data && data.d != null ? String(data.d) : "";
+  divineTooltipEl.innerHTML = '<span class="t-title">' + escapeHtml(title) + "</span>" + escapeHtml(desc);
+  divineTooltipEl.classList.add("show");
+  const r = el.getBoundingClientRect();
+  const tw = divineTooltipEl.offsetWidth;
+  const th = divineTooltipEl.offsetHeight;
+  let x = r.left + r.width / 2 - tw / 2;
+  let y = r.top - th - 8;
+  if (y < 8) y = r.bottom + 8;
+  x = Math.max(8, Math.min(x, window.innerWidth - tw - 8));
+  divineTooltipEl.style.left = x + "px";
+  divineTooltipEl.style.top = y + "px";
+}
+document.addEventListener("mouseenter", (e) => {
+  const el = e.target && e.target.closest && e.target.closest("[data-tip]");
+  if (!el) return;
+  clearTimeout(divineTipHideTimer);
+  showDivineTip(el);
+}, true);
+document.addEventListener("mouseleave", (e) => {
+  const el = e.target && e.target.closest && e.target.closest("[data-tip]");
+  if (!el) return;
+  divineTipHideTimer = setTimeout(hideDivineTip, 60);
+}, true);
+document.addEventListener("focusin", (e) => {
+  const el = e.target && e.target.closest && e.target.closest("[data-tip]");
+  if (el) showDivineTip(el);
+});
+document.addEventListener("focusout", (e) => {
+  const el = e.target && e.target.closest && e.target.closest("[data-tip]");
+  if (el) hideDivineTip();
+});
+
+if (!GOD_AUTH_REQUIRED_FLAG) godAuthorized = true;
+updateDivineBarAuthUi();
 
 // --- Preview -> Apply generic wiring ------------------------------------
 // One reusable helper per mutating form (docs/plan: "no Apply before a
@@ -3973,7 +4416,7 @@ function wireDivineForm(formSelector, opts) {
 }
 
 function refreshGodSightIfOpen() {
-  if (godActiveTab === "sight" && godAuthorized) refreshGodSight();
+  if (godActiveTab === "sight" && godEffectivelyAuthorized()) refreshGodSight();
   if (godActiveTab === "laws") renderGodLawsActive();
 }
 
@@ -4550,6 +4993,10 @@ function renderGodLawsActive() {
       `</div>`;
   }).join("");
   godLawsActiveEl.querySelectorAll(".godCancelLawBtn").forEach((btn) => {
+    btn.setAttribute("data-tip", JSON.stringify({
+      t: "Cancel law",
+      d: "End this timed modifier early. Does not roll back past effects.",
+    }));
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       await godCancelEffect(btn.dataset.id);
@@ -4580,11 +5027,27 @@ function updateGodModeGate() {
   const flags = (world.config && world.config.flags) || {};
   const enabled = !!flags.GOD_MODE_ENABLED;
   if (enabled !== GOD_MODE_ENABLED_FLAG) GOD_MODE_ENABLED_FLAG = enabled;
-  divineConsoleSectionEl.style.display = GOD_MODE_ENABLED_FLAG ? "" : "none";
+  const authRequired = !!flags.GOD_AUTH_REQUIRED;
+  const authFlagChanged = authRequired !== GOD_AUTH_REQUIRED_FLAG;
+  if (authFlagChanged) GOD_AUTH_REQUIRED_FLAG = authRequired;
+  if (divineBarEl) divineBarEl.style.display = GOD_MODE_ENABLED_FLAG ? "" : "none";
+  document.body.classList.toggle("divine-bar-visible", !!GOD_MODE_ENABLED_FLAG);
   if (!GOD_MODE_ENABLED_FLAG) {
+    closeDivineModal();
     godPublicBannerEl.style.display = "none";
     return;
   }
+  if (authFlagChanged) {
+    if (GOD_AUTH_REQUIRED_FLAG) {
+      if (!godToken) godAuthorized = false;
+    } else {
+      godAuthorized = true;
+      godOpenModeBootstrapped = false;
+    }
+    updateDivineBarAuthUi();
+    if (!GOD_AUTH_REQUIRED_FLAG) godOpenModeBootstrap();
+  }
+  if (!GOD_AUTH_REQUIRED_FLAG) godOpenModeBootstrap();
   // Change-detected, not every-poll: repopulating <select> elements on every
   // 100ms tick would reset an in-progress dropdown selection.
   const agentKey = JSON.stringify([
@@ -4637,6 +5100,7 @@ function renderDivineConsole() {
 
 // Kick off: render immediately (mock or last frame), poll on an interval.
 syncPauseButton();
+scheduleTerrainCacheBuild(); // speculative build via STARTER_DISTRICTS_JS (~10 ms)
 requestAnimationFrame(tick);
 pollState();
 setInterval(pollState, STATE_POLL_MS);
