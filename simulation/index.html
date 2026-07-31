@@ -1969,7 +1969,7 @@ function drawLightningFlash(ctx, renderFrame, weather) {
   if (!WEATHER_ENABLED || !weather || weather.state !== "storm") return;
   const bucket = Math.floor(renderFrame / LIGHTNING_BUCKET_FRAMES);
   const trigger = weatherParticleHash(bucket + 0x5f3759df);
-  if (trigger < 0.88) return; // ~12% of buckets (~every 2.4 min) may flash
+  if (trigger < 0.88) return; // ~12% of buckets (~every ~75s at 60fps) may flash
   const localFrame = renderFrame % LIGHTNING_BUCKET_FRAMES;
   const startFrame = Math.floor(weatherParticleHash(bucket + 1) * (LIGHTNING_BUCKET_FRAMES - 20));
   const duration = 8 + Math.floor(weatherParticleHash(bucket + 2) * 11);
@@ -3142,7 +3142,7 @@ function renderSidebar() {
   }
 
   // Disaster banner: edge-detect new chronicle entries with kind === "disaster".
-  if (CHRONICLE_ENABLED && (world.chronicle || []).length) {
+  if (CHRONICLE_ENABLED) {
     const disasterEntries = (world.chronicle || []).filter((e) => e.kind === "disaster");
     if (disasterFramesSeen === null) {
       disasterFramesSeen = new Set(disasterEntries.map((e) => e.frame));

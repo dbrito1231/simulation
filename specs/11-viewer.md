@@ -419,7 +419,7 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   `frameTick`, in `LIGHTNING_BUCKET_FRAMES` (540) windows — no new
   `/state` fields. Drawn immediately after the sky tint, before golden hour;
   alpha ~0.10–0.20 so readability is preserved. ~12% of buckets may flash
-  (~every 2+ minutes), not every second.
+  (~every ~75s at 60fps), not every second.
 - **Weather chip on World Clock HUD** (`renderWorldClockHud`, index.html,
   `WORLD_CLOCK_HUD_ENABLED`): when `WEATHER_ENABLED` and `world.weather` are
   present, appends the title-case state label after season+phase, e.g.
@@ -428,7 +428,8 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   banner pattern — edge-detects new `world.chronicle` entries with
   `kind === "disaster"` via a first-snapshot-seen `Set` on `frame` (no replay
   on page load). Shows storm-colored slate/teal banner for 5.5s with entry
-  text. Gated on `CHRONICLE_ENABLED` and chronicle being present.
+  text. Gated on `CHRONICLE_ENABLED`; edge-detection mirrors founding (runs
+  whenever enabled — empty chronicle clears the seen Set).
 - **Structure hit flash** (`trackStructureConditionDeltas`,
   `drawStructureHitFlash`, index.html): client-only diff of structure
   `condition`/`isRuin` between polls; flashes when condition drops by at
