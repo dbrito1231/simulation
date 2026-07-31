@@ -4339,6 +4339,35 @@ def control_god_capabilities():
                 "reversibilityClass": "irreversible",
                 "notes": "positive delta repairs, negative delta damages (may reach ruin).",
             },
+            "repair_structures": {
+                "applyable": True,
+                "payload": {
+                    "scope": {"type": "string | object",
+                              "enum": ["ids", "all_critical"],
+                              "description": '"ids", "all_critical", or {"districtId": "<id>"}'},
+                    "structureIds": {"type": "array", "optional": True,
+                                    "description": "required when scope is ids"},
+                    "conditionTarget": {"type": "number", "optional": True,
+                                       "min": 0, "max": 100},
+                    "unRuin": {"type": "boolean", "optional": True, "default": True},
+                },
+                "reversibilityClass": "irreversible",
+                "batchMax": _sim_engine.GOD_REPAIR_STRUCTURES_BATCH_MAX,
+                "conditionMax": _sim_engine.GOD_REPAIR_STRUCTURES_CONDITION_MAX,
+                "notes": "batch restore / un-ruin; only this command and agent repair_structure may un-ruin.",
+            },
+            "clear_ruins": {
+                "applyable": True,
+                "payload": {
+                    "structureIds": {"type": "array", "optional": True},
+                    "minAgeFrames": {"type": "integer", "optional": True,
+                                    "default": _sim_engine.RUIN_CULL_AGE_FRAMES},
+                    "districtId": {"type": "string", "optional": True},
+                },
+                "reversibilityClass": "irreversible",
+                "batchMax": _sim_engine.GOD_CLEAR_RUINS_BATCH_MAX,
+                "notes": "delete selected or aged ruins; mirrors engine cull cleanup.",
+            },
             # Sovereign God mode Phase 5 (docs/plan-sovereign-god-mode-v2.md
             # "Storyteller events" + "Timed lawgiver modifiers"). Reversibility
             # is "cancellable" with no primitives, "consequential" once any

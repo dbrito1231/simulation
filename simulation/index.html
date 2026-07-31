@@ -1223,6 +1223,35 @@
             </div>
             <div class="divine-result" id="godStructureResult"></div>
           </fieldset>
+          <fieldset class="divine-fieldset" id="godMassRepairFieldset">
+            <legend data-tip='{"t":"Mass repair","d":"Batch restore or un-ruin up to 10 structures. Irreversible once applied."}'>Mass repair structures (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Scope","d":"ids = explicit list; all_critical = house/market/workshop/foundry/granary/farm_plot; district = one district."}'>Scope
+              <select id="godMassRepairScope"><option value="all_critical">All critical</option><option value="ids">Explicit ids</option><option value="district">District</option></select>
+            </label>
+            <label data-tip='{"t":"Structure ids","d":"Comma-separated ids when scope is Explicit ids."}'>Structure ids <input type="text" id="godMassRepairIds" placeholder="1,2,3" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"District","d":"Required when scope is District."}'>District <select id="godMassRepairDistrict"></select></label>
+              <label data-tip='{"t":"Condition target","d":"Optional target condition 0–100; default restores by REPAIR_CONDITION_RESTORE or un-ruins to 50."}'>Condition target <input type="number" id="godMassRepairTarget" min="0" max="100" step="1" placeholder="(optional)" /></label>
+              <label style="flex-direction:row; align-items:center; gap:6px;" data-tip='{"t":"Un-ruin","d":"When checked, ruined structures are restored (default on)."}'><input type="checkbox" id="godMassRepairUnRuin" checked style="width:auto;" /> Un-ruin ruins</label></div>
+            <div class="divine-actions">
+              <button type="button" id="godMassRepairPreviewBtn">Preview</button>
+              <button type="button" id="godMassRepairApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godMassRepairResult"></div>
+          </fieldset>
+          <fieldset class="divine-fieldset" id="godClearRuinsFieldset">
+            <legend data-tip='{"t":"Clear ruins","d":"Delete up to 10 ruins from the registry. Irreversible once applied."}'>Clear ruins (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Mode","d":"Explicit ids, aged ruins village-wide, or aged ruins in one district."}'>Mode
+              <select id="godClearRuinsMode"><option value="aged">Aged ruins (≥1 sim day)</option><option value="ids">Explicit ids</option><option value="district">Aged in district</option></select>
+            </label>
+            <label data-tip='{"t":"Ruin ids","d":"Comma-separated ruin ids when mode is Explicit ids."}'>Ruin ids <input type="text" id="godClearRuinsIds" placeholder="1,2,3" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"District","d":"Required when mode is Aged in district."}'>District <select id="godClearRuinsDistrict"></select></label>
+              <label data-tip='{"t":"Min age","d":"Minimum ruin age in frames (default one sim day)."}'>Min age (frames) <input type="number" id="godClearRuinsMinAge" placeholder="13500" /></label></div>
+            <div class="divine-actions">
+              <button type="button" id="godClearRuinsPreviewBtn">Preview</button>
+              <button type="button" id="godClearRuinsApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godClearRuinsResult"></div>
+          </fieldset>
         </div>
 
         <div class="divine-tab-panel" id="divineTab-story" style="display:none">
@@ -4223,6 +4252,16 @@ function populateGodAgentSelects() {
       `<option value="${s.id}">${escapeHtml(s.name || s.type)} (#${s.id})</option>`
     ).join("") || `<option value="">(no structures)</option>`;
   }
+  const districtOptions = getDistricts().map((d) =>
+    `<option value="${escapeHtml(d.id)}">${escapeHtml(d.label || d.id)}</option>`
+  ).join("") || `<option value="">(no districts)</option>`;
+  ["godMassRepairDistrict", "godClearRuinsDistrict"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const prior = el.value;
+    el.innerHTML = districtOptions;
+    if (prior && Array.from(el.options).some((o) => o.value === prior)) el.value = prior;
+  });
 }
 
 // --- Auth / fetch plumbing --------------------------------------------
@@ -4836,6 +4875,68 @@ wireDivineForm("#godStructureFieldset", {
     const delta = parseFloat(document.getElementById("godStructureDelta").value || "0");
     if (!delta) return { error: "delta must be non-zero" };
     return { envelope: { kind: "structure_condition", payload: { structureId: parseInt(structureId, 10), delta } } };
+  },
+});
+
+wireDivineForm("#godMassRepairFieldset", {
+  previewBtnId: "godMassRepairPreviewBtn", applyBtnId: "godMassRepairApplyBtn", resultElId: "godMassRepairResult",
+  label: "mass repair structures",
+  buildEnvelope: () => {
+    const scopeMode = document.getElementById("godMassRepairScope").value;
+    const payload = { unRuin: document.getElementById("godMassRepairUnRuin").checked };
+    const targetRaw = document.getElementById("godMassRepairTarget").value;
+    if (targetRaw) {
+      const conditionTarget = parseFloat(targetRaw);
+      if (!Number.isFinite(conditionTarget) || conditionTarget < 0 || conditionTarget > 100) {
+        return { error: "condition target must be 0–100" };
+      }
+      payload.conditionTarget = conditionTarget;
+    }
+    if (scopeMode === "ids") {
+      const raw = document.getElementById("godMassRepairIds").value.trim();
+      if (!raw) return { error: "enter comma-separated structure ids" };
+      const structureIds = raw.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
+      if (!structureIds.length) return { error: "invalid structure ids" };
+      payload.scope = "ids";
+      payload.structureIds = structureIds;
+    } else if (scopeMode === "district") {
+      const districtId = document.getElementById("godMassRepairDistrict").value;
+      if (!districtId) return { error: "select a district" };
+      payload.scope = { districtId };
+    } else {
+      payload.scope = "all_critical";
+    }
+    return { envelope: { kind: "repair_structures", payload } };
+  },
+});
+
+wireDivineForm("#godClearRuinsFieldset", {
+  previewBtnId: "godClearRuinsPreviewBtn", applyBtnId: "godClearRuinsApplyBtn", resultElId: "godClearRuinsResult",
+  label: "clear ruins",
+  buildEnvelope: () => {
+    const mode = document.getElementById("godClearRuinsMode").value;
+    const payload = {};
+    const minAgeRaw = document.getElementById("godClearRuinsMinAge").value;
+    if (minAgeRaw) {
+      const minAgeFrames = parseInt(minAgeRaw, 10);
+      if (!Number.isFinite(minAgeFrames) || minAgeFrames < 0) return { error: "min age must be a non-negative integer" };
+      payload.minAgeFrames = minAgeFrames;
+    }
+    if (mode === "ids") {
+      const raw = document.getElementById("godClearRuinsIds").value.trim();
+      if (!raw) return { error: "enter comma-separated ruin ids" };
+      const structureIds = raw.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
+      if (!structureIds.length) return { error: "invalid ruin ids" };
+      payload.structureIds = structureIds;
+    } else if (mode === "district") {
+      const districtId = document.getElementById("godClearRuinsDistrict").value;
+      if (!districtId) return { error: "select a district" };
+      payload.districtId = districtId;
+      if (!("minAgeFrames" in payload)) payload.minAgeFrames = 13500;
+    } else {
+      if (!("minAgeFrames" in payload)) payload.minAgeFrames = 13500;
+    }
+    return { envelope: { kind: "clear_ruins", payload } };
   },
 });
 

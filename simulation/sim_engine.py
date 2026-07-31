@@ -465,6 +465,10 @@ GOD_GRANT_SESSION_CAP = 2000
 # transitions -- including the homeOf homeless handling -- fire through their
 # normal narration rather than a parallel code path.
 GOD_STRUCTURE_DELTA_MAX = 100
+# Town-integrity mass structure commands (repair_structures / clear_ruins).
+GOD_REPAIR_STRUCTURES_CONDITION_MAX = 100
+GOD_REPAIR_STRUCTURES_BATCH_MAX = 10
+GOD_CLEAR_RUINS_BATCH_MAX = 10
 
 # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 5) ---
 # Timed lawgiver modifiers + storyteller events. "One active value per key":
@@ -1027,15 +1031,29 @@ SHELTER_HUNGER_FLOOR = 20
 # Mid retune 0.1/tick (~5.8h to disrepair, ~8.3h to ruin) still failed the
 # 2026-07-10 morning soak on a reset world: ruins 11→154 over ~13.5h real /
 # ~8.6h sim while agents were heal-spamming, all 15 houses non-working, births
-# stalled (pop 16→5). Now 0.05/tick: ~11.7h of neglect to disrepair, ~16.7h to
-# ruin -- survives one unattended overnight; sprawl still decays across days.
+# stalled (pop 16→5). 0.05/tick (~11.7h to disrepair, ~16.7h to ruin) still
+# outran repair under soak. Town-integrity retune 0.025/tick: ~23.3h to
+# disrepair, ~33.3h to ruin -- paired with repair campaigns, critical backstop
+# widening, and ruin cull so sprawl decays across days without offline prune.
 # Paired with _maybe_repair_critical (house category) so zero working houses
 # can't permanently lock the population cap. A ruin is rebuilt via
 # repair_structure for half the original needs (min 1 each) -- cheaper than
 # new, the deterministic escape.
-STRUCTURE_DECAY_PER_GOODS_TICK = 0.05
+STRUCTURE_DECAY_PER_GOODS_TICK = 0.025
 STRUCTURE_DISREPAIR_THRESHOLD = 30
 REPAIR_CONDITION_RESTORE = 50
+# Repair campaigns: autonomous repair goals when village-wide pressure rises.
+REPAIR_CAMPAIGN_RUIN_RATIO = 0.15
+REPAIR_CAMPAIGN_WORKING_FRAC = 0.5
+REPAIR_CAMPAIGN_MAX_ASSIGN = 2
+REPAIR_CAMPAIGN_GOAL_TTL = STALL_THRESHOLD * 2
+REPAIR_CAMPAIGN_CRITICAL_TYPES = (
+    "house", "market", "workshop", "foundry", "granary", "farm_plot",
+)
+# Ruin cull: in-sim registry deletion for aged, unaffordable ruins.
+RUIN_CULL_AGE_FRAMES = DAY_FRAMES
+RUIN_CULL_MIN_PER_CALL = 1
+RUIN_CULL_MAX_PER_CALL = 3
 
 
 def structure_condition_tier(structure):
@@ -1048,10 +1066,11 @@ def structure_condition_tier(structure):
     if condition < 60:
         return "worn"
     return "pristine"
-# Disaster: rare random damage so decay isn't perfectly predictable. 0.005 per
-# ~30s goods tick => expected roughly once per 100 minutes of runtime.
-DISASTER_PROB = 0.005
-DISASTER_DAMAGE = (40, 70)
+# Disaster: rare random damage so decay isn't perfectly predictable.
+# Town-integrity retune: 0.002 per ~30s goods tick => ~once per 250 real min;
+# damage softened to (30, 55). STORM_DISASTER_PROB unchanged.
+DISASTER_PROB = 0.002
+DISASTER_DAMAGE = (30, 55)
 # Seasons: a four-season clock derived purely from frameTick (no extra state to
 # persist). YEAR_FRAMES is the single canonical in-world year -- 3 real hours
 # = exactly 24 day/night cycles (DAY_FRAMES) -- and seasons and aging both
@@ -4505,6 +4524,7 @@ class SimEngine:
                 f"working until someone uses repair_structure")
         if new_cond <= 0:
             s["isRuin"] = True
+            s.setdefault("ruinedSinceFrame", self.frameTick)
             self._push_activity(
                 f"The {name} in {did} has collapsed into a ruin! "
                 f"repair_structure can rebuild it for half the original materials")
@@ -8083,6 +8103,36 @@ class SimEngine:
                 continue
             self._bury_agent_at(cemetery, corpse, buried_by=None)
 
+    def _village_repair_pressure(self):
+        """True when ruin ratio or working fraction crosses campaign thresholds."""
+        if not GOODS_ENABLED:
+            return False
+        structures = self.civilization["structures"]
+        total = len(structures)
+        if total == 0:
+            return False
+        ruined = sum(
+            1 for s in structures
+            if s.get("isRuin") or s.get("condition", 100) <= 0
+        )
+        working = sum(
+            1 for s in structures
+            if not s.get("isRuin")
+            and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD
+        )
+        return (
+            ruined / total >= REPAIR_CAMPAIGN_RUIN_RATIO
+            or working / total < REPAIR_CAMPAIGN_WORKING_FRAC
+        )
+
+    def _category_has_disrepaired_or_ruined(self, type_):
+        for s in self.civilization["structures"]:
+            if s.get("type") != type_:
+                continue
+            if s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD:
+                return True
+        return False
+
     def _repair_backstop_agent(self, structures):
         """Pick a living non-responder nearest the worst-condition target who
         can fund the repair (stockpile + held). Shared by housing/market
@@ -8132,42 +8182,78 @@ class SimEngine:
             (
                 "house",
                 lambda: GOODS_ENABLED,
-                lambda: self._working_structure_count("house") == 0,
+                lambda: (
+                    self._working_structure_count("house") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("house")
+                    )
+                ),
                 "Housing emergency -- {summary} (no working houses left; "
                 "population cap was locked)",
             ),
             (
                 "market",
                 lambda: GOODS_ENABLED and ECONOMY_ENABLED and has_type("market"),
-                lambda: not self._market_active(),
+                lambda: (
+                    not self._market_active()
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("market")
+                    )
+                ),
                 "Market emergency -- {summary} (no working market left; "
                 "priced trade was locked)",
             ),
             (
                 "workshop",
                 lambda: GOODS_ENABLED and has_type("workshop"),
-                lambda: self._working_structure_count("workshop") == 0,
+                lambda: (
+                    self._working_structure_count("workshop") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("workshop")
+                    )
+                ),
                 "Workshop emergency -- {summary} (no working workshop left; "
                 "crafting was locked)",
             ),
             (
                 "foundry",
                 lambda: GOODS_ENABLED and path1_on("TIER3_CONTENT_ENABLED") and has_type("foundry"),
-                lambda: self._working_structure_count("foundry") == 0,
+                lambda: (
+                    self._working_structure_count("foundry") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("foundry")
+                    )
+                ),
                 "Foundry emergency -- {summary} (no working foundry left; "
                 "tier-3 crafting was locked)",
             ),
             (
                 "granary",
                 lambda: GOODS_ENABLED and CRAFTING_ENABLED and has_type("granary"),
-                lambda: self._working_structure_count("granary") == 0,
+                lambda: (
+                    self._working_structure_count("granary") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("granary")
+                    )
+                ),
                 "Granary emergency -- {summary} (no working granary left; "
                 "food storage was locked)",
             ),
             (
                 "farm_plot",
                 lambda: GOODS_ENABLED and has_type("farm_plot"),
-                lambda: self._working_structure_count("farm_plot") == 0,
+                lambda: (
+                    self._working_structure_count("farm_plot") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("farm_plot")
+                    )
+                ),
                 "Farm emergency -- {summary} (no working farm plot left; "
                 "food production was locked)",
             ),
@@ -8202,6 +8288,139 @@ class SimEngine:
             if summary and "lacks" not in summary and "nothing" not in summary:
                 self._push_activity(message.format(summary=summary))
             return
+
+    def _repair_campaign_targets(self):
+        """Worst structures village-wide, preferring critical categories."""
+        damaged = [
+            s for s in self.civilization["structures"]
+            if s.get("isRuin") or s.get("condition", 100) < 100
+        ]
+        if not damaged:
+            return []
+        critical = [s for s in damaged if s.get("type") in REPAIR_CAMPAIGN_CRITICAL_TYPES]
+        pool = critical or damaged
+
+        def _sort_key(s):
+            is_critical = 0 if s.get("type") in REPAIR_CAMPAIGN_CRITICAL_TYPES else 1
+            return (is_critical, s.get("condition", 100))
+
+        return sorted(pool, key=_sort_key)
+
+    def _maybe_repair_campaign(self):
+        """Assign repair goals when village-wide structural pressure is high."""
+        if not GOODS_ENABLED or not self._village_repair_pressure():
+            return
+        em = self._sage_emergency() if SURVIVAL_ENABLED else None
+        responders = self._sage_responders(em) if em else set()
+        targets = self._repair_campaign_targets()
+        if not targets:
+            return
+        assigned = 0
+        used_agents = set()
+        for target in targets:
+            if assigned >= REPAIR_CAMPAIGN_MAX_ASSIGN:
+                break
+            agent = self._repair_backstop_agent([target])
+            if not agent or agent["name"] in used_agents:
+                continue
+            if agent["name"] in responders:
+                continue
+            if (agent.get("goal") or {}).get("kind") == "repair":
+                continue
+            agent["goal"] = {
+                "kind": "repair",
+                "target": target["id"],
+                "ttl": REPAIR_CAMPAIGN_GOAL_TTL,
+            }
+            used_agents.add(agent["name"])
+            assigned += 1
+
+    def _village_resources_total(self):
+        totals = dict(self.civilization.get("stockpile") or {})
+        for agent in self.agents:
+            if agent.get("deathFrame") is not None:
+                continue
+            for res, amt in (agent.get("resources") or {}).items():
+                totals[res] = totals.get(res, 0) + int(amt)
+        return totals
+
+    def _village_can_afford_rebuild(self, structure):
+        cost = self._repair_cost(structure)
+        totals = self._village_resources_total()
+        for res, amt in cost.items():
+            if totals.get(res, 0) < amt:
+                return False
+        return True
+
+    def _village_can_afford_any_rebuild(self):
+        ruins = [
+            s for s in self.civilization["structures"]
+            if s.get("isRuin") or s.get("condition", 100) <= 0
+        ]
+        return any(self._village_can_afford_rebuild(s) for s in ruins)
+
+    def _cull_priority_key(self, structure, ruined_list):
+        type_ = structure.get("type")
+        if type_ not in REPAIR_CAMPAIGN_CRITICAL_TYPES:
+            return (0, -(structure.get("ruinedSinceFrame") or 0))
+        if self._working_structure_count(type_) == 0:
+            ruins_of_type = [r for r in ruined_list if r.get("type") == type_]
+            if len(ruins_of_type) <= 1:
+                return (2, -(structure.get("ruinedSinceFrame") or 0))
+        return (1, -(structure.get("ruinedSinceFrame") or 0))
+
+    def _remove_structures_from_registry(self, structure_ids):
+        """Drop structures and clear homeStructureId / reorgTasks references."""
+        if not structure_ids:
+            return 0
+        ids = set(structure_ids)
+        c = self.civilization
+        before = len(c["structures"])
+        c["structures"] = [s for s in c["structures"] if s.get("id") not in ids]
+        removed = before - len(c["structures"])
+        for agent in self.agents:
+            if agent.get("homeStructureId") in ids:
+                agent["homeStructureId"] = None
+        reorg_tasks = c.get("reorgTasks")
+        if reorg_tasks is not None:
+            c["reorgTasks"] = [
+                t for t in reorg_tasks if t.get("structureId") not in ids
+            ]
+        return removed
+
+    def _maybe_cull_ruins(self):
+        """Remove aged, unaffordable ruins when ruin pressure is high."""
+        if not GOODS_ENABLED:
+            return
+        structures = self.civilization["structures"]
+        total = len(structures)
+        if total == 0:
+            return
+        ruined = [s for s in structures if s.get("isRuin")]
+        if not ruined:
+            return
+        if len(ruined) / total <= REPAIR_CAMPAIGN_RUIN_RATIO:
+            return
+        eligible = []
+        for s in ruined:
+            age_frame = s.get("ruinedSinceFrame", 0)
+            if self.frameTick - age_frame >= RUIN_CULL_AGE_FRAMES:
+                eligible.append(s)
+        if not eligible:
+            return
+        if self._village_can_afford_any_rebuild():
+            return
+        eligible.sort(key=lambda s: self._cull_priority_key(s, ruined))
+        cull_count = min(RUIN_CULL_MAX_PER_CALL, max(RUIN_CULL_MIN_PER_CALL, len(eligible)))
+        to_remove = eligible[:cull_count]
+        ids = [s["id"] for s in to_remove]
+        names = [s.get("name") or s.get("type") for s in to_remove]
+        removed = self._remove_structures_from_registry(ids)
+        if removed:
+            self._push_activity(
+                f"The village abandons {removed} ruined structure(s) beyond repair: "
+                f"{', '.join(names)}")
+            self._tick_structure_health_benchmark()
 
     # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
     def _succession_candidates(self):
@@ -12727,6 +12946,31 @@ class SimEngine:
             self._maybe_caravan_goal(agent)
             agent["goal"] = None
             return False
+        if g["kind"] == "repair":
+            target_id = g.get("target")
+            structure = next(
+                (s for s in self.civilization["structures"] if s.get("id") == target_id),
+                None,
+            )
+            if structure is None:
+                agent["goal"] = None
+                return False
+            did = structure.get("districtId")
+            if did and agent.get("currentDistrict") != did:
+                self._set_agent_target_once(agent, did)
+                return True
+            summary = self.apply_decision(agent, {
+                "action": "repair_structure",
+                "target": str(target_id),
+                "reasoning": f"goal:repair {target_id}",
+            })
+            s = summary or ""
+            if any(t in s for t in ("lacks ", "found nothing", "nothing needs repair")):
+                agent["goal"] = None
+                return False
+            if "repaired" in s.lower() or "rebuilt" in s.lower():
+                agent["goal"] = None
+            return True
         district_id = g.get("district") or self._resolve_contribution_district(agent)
         if g["kind"] in ("gather", "deliver", "build") and not district_id:
             agent["goal"] = None
@@ -14122,6 +14366,9 @@ class SimEngine:
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_feed_starving()
                 self._maybe_repair_critical()
+                if GOODS_ENABLED:
+                    self._maybe_repair_campaign()
+                    self._maybe_cull_ruins()
                 self._maybe_abandon_stalled_projects()
                 self._maybe_relocate_stuck_project()
                 self._maybe_reorganize_structures()
@@ -15143,6 +15390,86 @@ class SimEngine:
                     return float(value)
         return default
 
+    def _god_select_repair_structures(self, payload):
+        """Resolve repair_structures target set. Returns (structures, reason)."""
+        scope = payload.get("scope")
+        un_ruin = payload.get("unRuin", True)
+        c = self.civilization
+        if scope == "ids":
+            ids = set(payload.get("structureIds") or [])
+            structures = [s for s in c["structures"] if s.get("id") in ids]
+            if len(structures) != len(ids):
+                return None, "unknown structure id in structureIds"
+        elif scope == "all_critical":
+            structures = [
+                s for s in c["structures"]
+                if s.get("type") in REPAIR_CAMPAIGN_CRITICAL_TYPES
+            ]
+        elif isinstance(scope, dict) and "districtId" in scope:
+            did = scope["districtId"]
+            if did not in c.get("districts", {}):
+                return None, "unknown district"
+            structures = [s for s in c["structures"] if s.get("districtId") == did]
+        else:
+            return None, 'scope must be "ids", "all_critical", or {"districtId": "<id>"}'
+        if not un_ruin:
+            ruined = [s for s in structures if s.get("isRuin") or s.get("condition", 100) <= 0]
+            if ruined:
+                return None, "unRuin must be true to include ruined structures"
+        return structures, None
+
+    def _god_select_clear_ruins(self, payload):
+        """Resolve clear_ruins target ruins. Returns (ruins, reason)."""
+        c = self.civilization
+        structure_ids = payload.get("structureIds")
+        district_id = payload.get("districtId")
+        min_age = payload.get("minAgeFrames", RUIN_CULL_AGE_FRAMES)
+        if structure_ids is not None:
+            ruins = []
+            for sid in structure_ids:
+                s = next((x for x in c["structures"] if x.get("id") == sid), None)
+                if s is None:
+                    return None, f"unknown structure id {sid}"
+                if not s.get("isRuin"):
+                    return None, f"structure {sid} is not a ruin"
+                ruins.append(s)
+            return ruins, None
+        pool = [s for s in c["structures"] if s.get("isRuin")]
+        if district_id is not None:
+            if district_id not in c.get("districts", {}):
+                return None, "unknown district"
+            pool = [s for s in pool if s.get("districtId") == district_id]
+        if min_age is not None:
+            pool = [
+                s for s in pool
+                if self.frameTick - s.get("ruinedSinceFrame", 0) >= min_age
+            ]
+        return pool, None
+
+    def _god_project_structure_repair(self, structure, condition_target, un_ruin):
+        """Non-mutating preview of one repair_structures entry."""
+        old_cond = structure.get("condition", 100.0)
+        was_ruin = bool(structure.get("isRuin")) or old_cond <= 0
+        if was_ruin:
+            if not un_ruin:
+                return None
+            target = condition_target if condition_target is not None else REPAIR_CONDITION_RESTORE
+            new_cond = max(REPAIR_CONDITION_RESTORE, min(100.0, float(target)))
+        elif condition_target is not None:
+            delta = float(condition_target) - old_cond
+            delta = max(-GOD_REPAIR_STRUCTURES_CONDITION_MAX,
+                        min(GOD_REPAIR_STRUCTURES_CONDITION_MAX, delta))
+            new_cond = min(100.0, old_cond + delta) if delta >= 0 else max(0.0, old_cond + delta)
+        else:
+            new_cond = min(100.0, old_cond + REPAIR_CONDITION_RESTORE)
+        return {
+            "structureId": structure["id"],
+            "structureName": structure.get("name") or structure.get("type"),
+            "oldCondition": old_cond,
+            "newCondition": new_cond,
+            "unRuined": was_ruin and un_ruin,
+        }
+
     def _validate_god_envelope(self, envelope):
         """Validate + canonicalize a {kind, payload, expectedFrame} command
         envelope. NO mutation. Returns (normalized_command, reason);
@@ -15310,6 +15637,99 @@ class SimEngine:
             return {"kind": "structure_condition",
                     "payload": {"structureId": structure_id, "delta": float(delta)}}, None
 
+        if kind == "repair_structures":
+            scope = payload.get("scope")
+            if scope == "ids":
+                structure_ids = payload.get("structureIds")
+                if not isinstance(structure_ids, list) or not structure_ids:
+                    return None, "structureIds must be a non-empty list when scope is ids"
+                seen = set()
+                for sid in structure_ids:
+                    if isinstance(sid, bool) or not isinstance(sid, int):
+                        return None, "structureIds must contain integers"
+                    if sid in seen:
+                        return None, "structureIds must be unique"
+                    seen.add(sid)
+            elif scope == "all_critical":
+                pass
+            elif isinstance(scope, dict) and "districtId" in scope:
+                did = scope["districtId"]
+                if not isinstance(did, str) or not did.strip():
+                    return None, "districtId must be a non-empty string"
+                if did.strip() not in self.civilization.get("districts", {}):
+                    return None, "unknown district"
+            else:
+                return None, 'scope must be "ids", "all_critical", or {"districtId": "<id>"}'
+            un_ruin = payload.get("unRuin", True)
+            if not isinstance(un_ruin, bool):
+                return None, "unRuin must be a boolean"
+            condition_target = payload.get("conditionTarget")
+            if condition_target is not None:
+                if isinstance(condition_target, bool) or not isinstance(condition_target, (int, float)):
+                    return None, "conditionTarget must be a number"
+                if not math.isfinite(condition_target):
+                    return None, "conditionTarget must be finite"
+                if not (0 <= condition_target <= 100):
+                    return None, "conditionTarget must be between 0 and 100"
+            structures, sel_reason = self._god_select_repair_structures({
+                "scope": scope,
+                "structureIds": payload.get("structureIds"),
+                "unRuin": un_ruin,
+            })
+            if sel_reason:
+                return None, sel_reason
+            if not structures:
+                return None, "empty structure selection"
+            if len(structures) > GOD_REPAIR_STRUCTURES_BATCH_MAX:
+                return None, f"batch exceeds cap of {GOD_REPAIR_STRUCTURES_BATCH_MAX} structures"
+            norm_payload = {"scope": scope, "unRuin": un_ruin}
+            if scope == "ids":
+                norm_payload["structureIds"] = list(payload.get("structureIds") or [])
+            if condition_target is not None:
+                norm_payload["conditionTarget"] = float(condition_target)
+            return {"kind": "repair_structures", "payload": norm_payload}, None
+
+        if kind == "clear_ruins":
+            structure_ids = payload.get("structureIds")
+            district_id = payload.get("districtId")
+            min_age = payload.get("minAgeFrames", RUIN_CULL_AGE_FRAMES)
+            if structure_ids is None and district_id is None and "minAgeFrames" not in payload:
+                return None, "at least one selector is required (structureIds, districtId, or minAgeFrames)"
+            if structure_ids is not None:
+                if not isinstance(structure_ids, list) or not structure_ids:
+                    return None, "structureIds must be a non-empty list"
+            if district_id is not None:
+                if not isinstance(district_id, str) or not district_id.strip():
+                    return None, "districtId must be a non-empty string"
+                if district_id.strip() not in self.civilization.get("districts", {}):
+                    return None, "unknown district"
+            if min_age is not None:
+                if isinstance(min_age, bool) or not isinstance(min_age, int):
+                    return None, "minAgeFrames must be an integer"
+                if min_age < 0:
+                    return None, "minAgeFrames must be non-negative"
+            ruins, sel_reason = self._god_select_clear_ruins({
+                "structureIds": structure_ids,
+                "districtId": district_id.strip() if isinstance(district_id, str) else district_id,
+                "minAgeFrames": min_age,
+            })
+            if sel_reason:
+                return None, sel_reason
+            if not ruins:
+                return None, "empty ruin selection"
+            if len(ruins) > GOD_CLEAR_RUINS_BATCH_MAX:
+                return None, f"batch exceeds cap of {GOD_CLEAR_RUINS_BATCH_MAX} ruins"
+            norm_payload = {}
+            if structure_ids is not None:
+                norm_payload["structureIds"] = list(structure_ids)
+            if district_id is not None:
+                norm_payload["districtId"] = district_id.strip()
+            if "minAgeFrames" in payload:
+                norm_payload["minAgeFrames"] = min_age
+            elif structure_ids is None and district_id is None:
+                norm_payload["minAgeFrames"] = min_age
+            return {"kind": "clear_ruins", "payload": norm_payload}, None
+
         # --- Sovereign God mode Phase 6: weather override ---
         if kind == "weather_override":
             return self._validate_god_weather_override(payload)
@@ -15464,6 +15884,27 @@ class SimEngine:
                     "structureName": structure.get("name") or structure.get("type"),
                     "oldCondition": old_cond, "newCondition": new_cond,
                     "wouldBecomeRuin": bool(delta < 0 and new_cond <= 0)}
+        if kind == "repair_structures":
+            structures, sel_reason = self._god_select_repair_structures(payload)
+            if sel_reason or not structures:
+                return None
+            condition_target = payload.get("conditionTarget")
+            un_ruin = payload.get("unRuin", True)
+            outcomes = []
+            for s in structures:
+                projected = self._god_project_structure_repair(s, condition_target, un_ruin)
+                if projected:
+                    outcomes.append(projected)
+            return {"structures": outcomes, "count": len(outcomes)}
+        if kind == "clear_ruins":
+            ruins, sel_reason = self._god_select_clear_ruins(payload)
+            if sel_reason or not ruins:
+                return None
+            return {
+                "structureIds": [s["id"] for s in ruins],
+                "structureNames": [s.get("name") or s.get("type") for s in ruins],
+                "count": len(ruins),
+            }
         if kind == "story_event":
             modifiers = payload.get("modifiers") or {}
             outcome = {
@@ -16129,6 +16570,10 @@ class SimEngine:
             return self._god_apply_grant_resource(normalized["payload"]), None
         if kind == "structure_condition":
             return self._god_apply_structure_condition(normalized["payload"]), None
+        if kind == "repair_structures":
+            return self._god_apply_repair_structures(normalized["payload"]), None
+        if kind == "clear_ruins":
+            return self._god_apply_clear_ruins(normalized["payload"]), None
         if kind == "story_event":
             return self._god_apply_story_event(normalized["payload"]), None
         if kind == "weather_override":
@@ -16381,6 +16826,74 @@ class SimEngine:
         return {"interventionId": intervention_id, "kind": "structure_condition",
                 "structureId": structure_id, "oldCondition": old_cond, "newCondition": new_cond,
                 "becameRuin": became_ruin}
+
+    def _god_apply_repair_structures(self, payload):
+        """Batch condition restore / un-ruin for operator escape."""
+        structures, sel_reason = self._god_select_repair_structures(payload)
+        if sel_reason or not structures:
+            return None
+        condition_target = payload.get("conditionTarget")
+        un_ruin = payload.get("unRuin", True)
+        intervention_id = self._next_intervention_id()
+        outcomes = []
+        for structure in structures:
+            old_cond = structure.get("condition", 100.0)
+            was_ruin = bool(structure.get("isRuin")) or old_cond <= 0
+            name = structure.get("name") or structure.get("type")
+            if was_ruin:
+                target = condition_target if condition_target is not None else REPAIR_CONDITION_RESTORE
+                new_cond = max(REPAIR_CONDITION_RESTORE, min(100.0, float(target)))
+                structure["condition"] = new_cond
+                structure["isRuin"] = False
+                structure.pop("ruinedSinceFrame", None)
+            elif condition_target is not None:
+                delta = float(condition_target) - old_cond
+                delta = max(-GOD_REPAIR_STRUCTURES_CONDITION_MAX,
+                            min(GOD_REPAIR_STRUCTURES_CONDITION_MAX, delta))
+                new_cond = self._apply_structure_condition_delta(structure, delta)
+            else:
+                new_cond = self._apply_structure_condition_delta(
+                    structure, min(REPAIR_CONDITION_RESTORE, GOD_REPAIR_STRUCTURES_CONDITION_MAX))
+            outcomes.append({
+                "structureId": structure["id"],
+                "structureName": name,
+                "oldCondition": old_cond,
+                "newCondition": structure.get("condition", new_cond),
+                "unRuined": was_ruin and un_ruin,
+            })
+        count = len(outcomes)
+        text = f"A divine hand restores {count} structure(s) across the village"
+        self._push_activity(text)
+        self._push_communication("divine_repair_structures", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "repair_structures", "frameTick": self.frameTick,
+            "count": count, "structures": outcomes, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "repair_structures",
+                "count": count, "structures": outcomes}
+
+    def _god_apply_clear_ruins(self, payload):
+        """Delete selected or aged ruins from the registry."""
+        ruins, sel_reason = self._god_select_clear_ruins(payload)
+        if sel_reason or not ruins:
+            return None
+        intervention_id = self._next_intervention_id()
+        ids = [s["id"] for s in ruins]
+        names = [s.get("name") or s.get("type") for s in ruins]
+        removed = self._remove_structures_from_registry(ids)
+        if removed:
+            text = f"A divine hand clears {removed} ruin(s) from the village: {', '.join(names)}"
+            self._push_activity(text)
+            self._push_communication("divine_clear_ruins", "divine", "everyone", text, source="divine")
+            self._push_chronicle(text, kind="divine", source="divine")
+            self._tick_structure_health_benchmark()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "clear_ruins", "frameTick": self.frameTick,
+            "structureIds": ids, "removed": removed, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "clear_ruins",
+                "structureIds": ids, "removed": removed}
 
     # --- Huntable wildlife god kinds (irreversible; same public audit path) ---
     def _god_apply_wildlife_spawn(self, payload):
