@@ -456,8 +456,9 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
 - **Rendering (`sprites.js`):** `drawWildlifeCreature` dispatches in order:
-  sheet blit (Tiny Farm kinds only) → canvas silhouette helpers → procedural
-  pixel grids — nothing ever renders blank.
+  sheet blit for kinds in `WILDLIFE_SHEET_FRAMES` (all 16 when atlas present)
+  → canvas silhouette helpers → procedural pixel grids — nothing ever renders
+  blank.
   - **Spritesheet loader:** at module load, `preloadWildlifeSheet()` fires
     a fire-and-forget `Image()` fetch for `/wildlife.png` (served beside
     `sprites.js`; see [12-ops.md](12-ops.md)). `_wildlifeSheetReady` is

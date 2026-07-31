@@ -1,7 +1,7 @@
 # Plan — Wildlife sprite legibility (Tiny Farm art direction)
 
-**Status:** planned — not started. Decisions resolved (see [Decisions](#decisions)); awaiting go.
-**Owner spec:** [specs/11-viewer.md](../specs/11-viewer.md) (wildlife rendering, render pipeline). No engine, action, flag, or route changes proposed.
+**Status:** done / shipped on `feature/wildlife-sprites` (PR #5).
+**Owner spec:** [specs/11-viewer.md](../specs/11-viewer.md) (wildlife rendering, render pipeline). Shipped: kind renames (`grazer`→`cow`, `butterfly`→`bee`), `/wildlife.png` + `/wildlife_refsheet.html`, save migration in `_normalize_wildlife_records`.
 **Delivery:** new branch in a new git worktree based on `feature/god-mode` → push → PR into `feature/god-mode` for user review (see [Branch, worktree, and delivery](#branch-worktree-and-delivery)).
 **Goal:** make each of the 16 wildlife kinds identifiable at a glance in the viewer, without breaking the load-performance win or the server-authoritative fauna contract.
 

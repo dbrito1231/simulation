@@ -3,7 +3,7 @@
 The Flask route surface: every endpoint the browser or external tools call,
 what it does, and its request/response shape.
 
-**Canonical for:** the full route table (18 routes), `/state` top-level
+**Canonical for:** the full route table (26 routes), `/state` top-level
 payload key inventory, server startup/shutdown behavior. **See also:**
 [specs/01-architecture.md](01-architecture.md) (data flow, thin-viewer
 contract), [specs/03-cognition.md](03-cognition.md) (what `run_agent_decision`
@@ -13,8 +13,8 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 
 ## Route table
 
-23 routes total (`@app.route` count in `simulation/server.py`; no other
-route-registration mechanism is used) — 18 always-registered routes plus the
+26 routes total (`@app.route` count in `simulation/server.py`; no other
+route-registration mechanism is used) — 21 always-registered routes plus the
 5 `/control/god/*` routes added in Phase 2, which are registered
 unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
 (sim_engine.py) is configured at startup and, when `GOD_AUTH_REQUIRED` is
@@ -25,7 +25,8 @@ configured; see "Sovereign God mode" below.
 |---|---|---|---|---|
 | `/` | GET | Serve the viewer shell | — | `index.html` |
 | `/sprites.js` | GET | Serve the pure Canvas renderer | — | `sprites.js` |
-| `/wildlife.png` | GET | Serve the wildlife spritesheet PNG (128×64, 16 kinds; 404 falls back to procedural grids in `sprites.js`) | — | `wildlife.png` |
+| `/wildlife.png` | GET | Serve the wildlife spritesheet PNG (variable-size atlas from user PNGs; 404 falls back to canvas helpers / procedural grids in `sprites.js`) | — | `wildlife.png` |
+| `/wildlife_refsheet.html` | GET | Dev/debug — labeled 4×4 grid calling live `drawWildlifeCreature`; not part of the sim viewer loop | — | `wildlife_refsheet.html` |
 | `/roles.js` | GET | Serve role data as a JS global | — | `const ROLES = {...};` (`application/javascript`), sourced from the same `ROLES` dict server.py derives its maps from — `roles.json` stays the single edit point |
 | `/log/event` | POST | Ingest a browser-origin activity/conversation event | `{type: "activity"\|"conversation", message/from/to, frame_tick, kind?, outcome?}` | `("", 204)` always |
 | `/log/benchmark` | POST | Ingest a browser-origin benchmark metric | `{metric, value, frame_tick, detail?}` | `("", 204)` always |
