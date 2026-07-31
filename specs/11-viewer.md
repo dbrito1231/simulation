@@ -368,13 +368,13 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   composited in the **same full-canvas overlay stage** as the existing
   night overlay — drawn immediately after it, before the golden-hour band —
   so the two stack coherently instead of fighting. `WEATHER_SKY_ALPHA =
-  {clear: 0, gathering: 0.10, storm: 0.26, clearing: 0.14}` is a step ramp
+  {clear: 0, gathering: 0.17, storm: 0.41, clearing: 0.20}` is a step ramp
   keyed by `weather.state` (the server sends only the current state, not a
   within-state progress fraction, so this is a discrete ramp across state
-  transitions rather than a continuous animation). Color is a slate-teal
-  (`rgba(18, 26, 34, …)`), distinct from the night overlay's navy, so a
-  storm during the day is still visually legible as weather rather than
-  dusk.
+  transitions rather than a continuous animation). Color is a cooler
+  green-slate (`rgba(12, 28, 32, …)`), distinct from the night overlay's
+  navy, so a storm during the day is still visually legible as weather
+  rather than dusk.
 - **Darkness clamp:** `MAX_NIGHT_PLUS_WEATHER_ALPHA = 0.68`. The weather
   alpha actually drawn is `min(rawWeatherAlpha, 0.68 - nightAlpha)`, so
   night + storm can never exceed a combined 0.68 before sequential
@@ -382,49 +382,65 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   (winter storm, deep night `nightAlpha = MAX_NIGHT_ALPHA = 0.45`, no golden
   hour since deep night falls outside the golden-hour dawn/dusk bands, no
   light glow since the district is unlit): `weatherAlpha` clamps from a raw
-  0.26 down to 0.23, combined visible darkening ≈ 0.577 — noticeably
-  stormier than a plain night but still well short of opaque; verified by
-  inspection in the Phase 4 report (agents/structures/terrain remain
-  identifiable underneath the tint).
-- **Locality tradeoff:** the tint (and particles, below) are **world-wide**,
-  not clipped to `weather.districts`, even though `_maybe_disaster`'s damage
-  targeting *is* localized to those districts (see
-  [08-systems-economy.md](08-systems-economy.md)). Per-district clipping of
-  a full-canvas overlay would fight the also-global night overlay for
-  little visual payoff — a deliberate v1 simplification, not an oversight.
+  0.41 down to 0.23, combined visible darkening remains well short of
+  opaque; agents/structures/terrain stay identifiable underneath the tint.
+- **Locality split:** the **base sky tint** is **world-wide** (same stage as
+  the also-global night overlay). During `storm`/`clearing`, districts listed
+  in `weather.districts` additionally receive a **local storm veil**
+  (`drawDistrictStormVeil`): a darker translucent fill clipped to each
+  district's `bounds` rect from `/districts.js` (`getDistrictBounds(id)`),
+  plus **extra rain** clipped to those same rects
+  (`drawDistrictStormRain`). The global tint reads as atmosphere; the veil
+  reads as "the storm is here" while damage targeting stays localized per
+  [08-systems-economy.md](08-systems-economy.md).
 - **Particles** (`drawWeatherParticles`, index.html; `drawWeatherParticle`,
   sprites.js): drawn every frame (not baked into `terrainCanvas` — motion
   can't live in a static cache, same reasoning as `drawWildlife`). Active
   only during `storm` (full intensity) and `clearing` (45% intensity,
   tapering off); `clear`/`gathering` draw nothing (`WEATHER_STATE_INTENSITY`).
   Snow (`drawWeatherParticle(ctx, "snow", …)`, small drifting dot) replaces
-  rain (a short diagonal streak) when `calendar.season === "winter"`.
-  Positions are deterministic from `frameTick` and a per-particle-index hash
+  rain when `calendar.season === "winter"`. Rain streaks slant with wind
+  (default offset `x-6` → `y+12`). Every `WEATHER_SHEET_EVERY_N` (9) rain
+  particle draws a thicker "sheet" streak (`lineWidth: 2`, higher alpha).
+  Storm uses a denser divisor (`WEATHER_STORM_DENSITY_DIVISOR = 9500` vs
+  `WEATHER_PARTICLE_DENSITY_DIVISOR = 14000` for clearing). Positions are
+  deterministic from `frameTick` and a per-particle-index hash
   (`weatherParticleHash`, FNV-1a-style) — no retained state, same discipline
-  as `drawStructureSmoke`/`drawActivityDust`: `x` is a hashed fraction of
-  the visible width, `y` is `frameTick` modulo a per-kind fall period
-  (`130` frames for rain, `500` for the slower-drifting snow) mapped into
-  the visible height, so particles continuously "fall" through the visible
-  band without ever being stored between frames.
-- **Cap by visible area, not world area:** particle count is
-  `min(WEATHER_PARTICLE_CAP(260), floor(visibleW * visibleH /
-  WEATHER_PARTICLE_DENSITY_DIVISOR(14000) * intensity))`, where
-  `visibleW`/`visibleH` come from the same `canvasWrapEl.scrollLeft/scrollTop
-  / zoomLevel` viewport math `drawWildlife`/`drawShipments` already use.
-  Zooming out shrinks the effective per-particle screen size but the *count*
-  is bounded by the actual visible pixel area, so a fully-zoomed-out view of
-  the whole (5200x5400) world never spends time computing or drawing
-  hundreds of off-screen or redundant particles.
-- **Lightning:** intentionally **not implemented** in Phase 4 — the plan
-  allowed skipping it ("keep it subtle and rate-limited... skip if unsure")
-  and a flash tied to individual (per-goods-tick, server-side-only) damage
-  events would need either new `/state` signal plumbing or client-side
-  activity-log diffing to trigger correctly without becoming either a
-  seizure risk or visually decoupled from the actual damage event: left out
-  of scope rather than shipped half-verified.
+  as `drawStructureSmoke`/`drawActivityDust`.
+- **Cap by visible area, not world area:** global particle count is
+  `min(WEATHER_PARTICLE_CAP(260), floor(visibleW * visibleH / densityDiv *
+  intensity))`, where `visibleW`/`visibleH` come from the same
+  `canvasWrapEl.scrollLeft/scrollTop / zoomLevel` viewport math
+  `drawWildlife`/`drawShipments` already use. District-local rain adds up
+  to 140 particles per affected district (divisor 6500), clipped to bounds.
+- **Lightning** (`drawLightningFlash`, index.html): during `storm` only,
+  deterministic rare full-canvas white/blue flashes (~8–18 display frames,
+  ~130–300ms at 60fps), keyed off local `renderFrame` (rAF), not
+  `frameTick`, in `LIGHTNING_BUCKET_FRAMES` (540) windows — no new
+  `/state` fields. Drawn immediately after the sky tint, before golden hour;
+  alpha ~0.10–0.20 so readability is preserved. ~12% of buckets may flash
+  (~every ~75s at 60fps), not every second.
+- **Weather chip on World Clock HUD** (`renderWorldClockHud`, index.html,
+  `WORLD_CLOCK_HUD_ENABLED`): when `WEATHER_ENABLED` and `world.weather` are
+  present, appends the title-case state label after season+phase, e.g.
+  `spring day · Storm`.
+- **Disaster banner** (`#disasterBanner`, index.html): mirrors the founding
+  banner pattern — edge-detects new `world.chronicle` entries with
+  `kind === "disaster"` via a first-snapshot-seen `Set` on `frame` (no replay
+  on page load). Shows storm-colored slate/teal banner for 5.5s with entry
+  text. Gated on `CHRONICLE_ENABLED`; edge-detection mirrors founding (runs
+  whenever enabled — empty chronicle clears the seen Set).
+- **Structure hit flash** (`trackStructureConditionDeltas`,
+  `drawStructureHitFlash`, index.html): client-only diff of structure
+  `condition`/`isRuin` between polls; flashes when condition drops by at
+  least `STRUCTURE_HIT_FLASH_MIN_DROP` (5 — enough to ignore passive decay
+  ~0.05 per goods tick, still catches disasters at 40–70) or when
+  `isRuin` newly becomes true. That id flashes white/cyan outline + bright
+  overlay for ~800ms wall clock. Gated on `STRUCTURE_WEAR_ENABLED`.
 - **Gate:** `WEATHER_ENABLED = false` — `weatherSkyAlpha` returns 0 (no sky
-  change) and `drawWeatherParticles` returns immediately (nothing drawn),
-  regardless of `world.weather`'s presence/content.
+  change), lightning/veil/district rain/global particles all no-op, and the
+  World Clock HUD omits the weather chip, regardless of `world.weather`'s
+  presence/content.
 
 ## Ambient wildlife (`WILDLIFE_ENABLED`)
 

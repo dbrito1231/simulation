@@ -1012,7 +1012,8 @@ function drawStructureSmoke(ctx, structure, frameTick) {
 // rain streak or snow dot. Pure per-call draw, no retained state -- the
 // caller (drawWeatherParticles, index.html) derives x/y deterministically
 // from frameTick each frame.
-function drawWeatherParticle(ctx, kind, x, y, index) {
+function drawWeatherParticle(ctx, kind, x, y, index, opts) {
+  opts = opts || {};
   ctx.save();
   if (kind === "snow") {
     const drift = Math.sin((x + index) * 0.05) * 1.5;
@@ -1021,11 +1022,14 @@ function drawWeatherParticle(ctx, kind, x, y, index) {
     ctx.arc(Math.round(x + drift), Math.round(y), 1.6, 0, Math.PI * 2);
     ctx.fill();
   } else {
-    ctx.strokeStyle = "rgba(190, 210, 230, 0.55)";
-    ctx.lineWidth = 1;
+    const xOff = opts.xOff != null ? opts.xOff : -6;
+    const yOff = opts.yOff != null ? opts.yOff : 12;
+    const sheet = opts.sheet === true;
+    ctx.strokeStyle = sheet ? "rgba(190, 210, 230, 0.72)" : "rgba(190, 210, 230, 0.55)";
+    ctx.lineWidth = sheet ? 2 : 1;
     ctx.beginPath();
     ctx.moveTo(Math.round(x), Math.round(y));
-    ctx.lineTo(Math.round(x - 2), Math.round(y + 10));
+    ctx.lineTo(Math.round(x + xOff), Math.round(y + yOff));
     ctx.stroke();
   }
   ctx.restore();
