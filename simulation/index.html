@@ -1863,7 +1863,7 @@ const WEATHER_PARTICLE_DENSITY_DIVISOR = 14000; // visible px^2 per particle at 
 const WEATHER_STORM_DENSITY_DIVISOR = 9500;
 const WEATHER_PARTICLE_CAP = 260;
 const WEATHER_SHEET_EVERY_N = 9; // every Nth rain particle draws a thicker "sheet" streak
-const LIGHTNING_BUCKET_FRAMES = 540; // ~18s at 30 sim-fps — rare full-canvas flash windows
+const LIGHTNING_BUCKET_FRAMES = 540; // 540 local frames ≈ ~9s at 60fps — rare full-canvas flash windows
 function weatherParticleHash(i) {
   let h = (2166136261 ^ i) >>> 0;
   h = Math.imul(h, 16777619);
@@ -1956,7 +1956,7 @@ function drawDistrictStormRain(ctx, frameTick, weather, cal) {
       const x = ix1 + hi * iw;
       const yFrac = ((frameTick + hj * fallPeriod) % fallPeriod) / fallPeriod;
       const y = iy1 + yFrac * ih;
-      const sheet = i % (WEATHER_SHEET_EVERY_N - 2) === 0;
+      const sheet = i % WEATHER_SHEET_EVERY_N === 0;
       drawWeatherParticle(ctx, "rain", x, y, seed + i, sheet ? { sheet: true } : null);
     }
     ctx.restore();
@@ -1964,15 +1964,15 @@ function drawDistrictStormRain(ctx, frameTick, weather, cal) {
 }
 
 // Deterministic rare lightning during storm: full-canvas white/blue flash,
-// 1–3 frames per event, keyed off frameTick hash — no server signal needed.
-function drawLightningFlash(ctx, frameTick, weather) {
+// keyed off local renderFrame (rAF), not sim frameTick — no server signal needed.
+function drawLightningFlash(ctx, renderFrame, weather) {
   if (!WEATHER_ENABLED || !weather || weather.state !== "storm") return;
-  const bucket = Math.floor(frameTick / LIGHTNING_BUCKET_FRAMES);
+  const bucket = Math.floor(renderFrame / LIGHTNING_BUCKET_FRAMES);
   const trigger = weatherParticleHash(bucket + 0x5f3759df);
   if (trigger < 0.88) return; // ~12% of buckets (~every 2.4 min) may flash
-  const localFrame = frameTick % LIGHTNING_BUCKET_FRAMES;
-  const startFrame = Math.floor(weatherParticleHash(bucket + 1) * (LIGHTNING_BUCKET_FRAMES - 5));
-  const duration = 1 + Math.floor(weatherParticleHash(bucket + 2) * 3);
+  const localFrame = renderFrame % LIGHTNING_BUCKET_FRAMES;
+  const startFrame = Math.floor(weatherParticleHash(bucket + 1) * (LIGHTNING_BUCKET_FRAMES - 20));
+  const duration = 8 + Math.floor(weatherParticleHash(bucket + 2) * 11);
   if (localFrame < startFrame || localFrame >= startFrame + duration) return;
   const alpha = 0.10 + weatherParticleHash(bucket + 3) * 0.10;
   const blueish = weatherParticleHash(bucket + 4) > 0.45;
@@ -4076,7 +4076,7 @@ function tickBody() {
     ctx.fillStyle = `rgba(${WEATHER_SKY_COLOR}, ${wa.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
-  drawLightningFlash(ctx, world.frameTick, world.weather);
+  drawLightningFlash(ctx, renderFrame, world.weather);
   const gha = goldenHourAlpha(world.calendar);
   if (gha > 0) {
     ctx.fillStyle = `rgba(255, 177, 78, ${gha.toFixed(3)})`;

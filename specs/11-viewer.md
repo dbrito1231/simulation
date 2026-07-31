@@ -414,8 +414,9 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   `drawWildlife`/`drawShipments` already use. District-local rain adds up
   to 140 particles per affected district (divisor 6500), clipped to bounds.
 - **Lightning** (`drawLightningFlash`, index.html): during `storm` only,
-  deterministic rare full-canvas white/blue flashes (1–3 frames), keyed
-  off `frameTick` hash in `LIGHTNING_BUCKET_FRAMES` (540) windows — no new
+  deterministic rare full-canvas white/blue flashes (~8–18 display frames,
+  ~130–300ms at 60fps), keyed off local `renderFrame` (rAF), not
+  `frameTick`, in `LIGHTNING_BUCKET_FRAMES` (540) windows — no new
   `/state` fields. Drawn immediately after the sky tint, before golden hour;
   alpha ~0.10–0.20 so readability is preserved. ~12% of buckets may flash
   (~every 2+ minutes), not every second.
