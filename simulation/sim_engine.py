@@ -252,26 +252,26 @@ WILDLIFE_ENABLED = True
 # Huntable wildlife (distinct from Path-1 _tick_wildlife forest-attack pressure).
 WILDLIFE_KIND_POOLS = {
     "forest": ["bird", "squirrel", "deer", "fox", "boar", "owl"],
-    "farm": ["grazer", "rabbit", "chicken", "mouse", "butterfly"],
+    "farm": ["cow", "rabbit", "chicken", "mouse", "bee"],
     "beach": ["fish", "crab", "gull", "turtle", "seal"],
 }
-WILDLIFE_DECORATIVE_KINDS = {"butterfly"}
+WILDLIFE_DECORATIVE_KINDS = {"bee"}
 WILDLIFE_YIELD = {
     "bird": "meat", "squirrel": "meat", "deer": "meat", "fox": "meat",
     "boar": "meat", "owl": "meat",
-    "grazer": "meat", "rabbit": "meat", "chicken": "meat", "mouse": "meat",
+    "cow": "meat", "rabbit": "meat", "chicken": "meat", "mouse": "meat",
     "fish": "fish", "crab": "fish", "gull": "fish", "turtle": "fish", "seal": "fish",
 }
-# HP tiers: low ≈1–2, mid ≈3–4, high boar/seal ≈5–6; butterfly decorative.
+# HP tiers: low ≈1–2, mid ≈3–4, high boar/seal ≈5–6; bee decorative.
 WILDLIFE_MAX_HP = {
     "bird": 1, "squirrel": 1, "rabbit": 1, "chicken": 2, "mouse": 1,
-    "fish": 1, "crab": 1, "gull": 1, "butterfly": 1,
-    "deer": 4, "fox": 3, "owl": 3, "grazer": 4, "turtle": 4,
+    "fish": 1, "crab": 1, "gull": 1, "bee": 1,
+    "deer": 4, "fox": 3, "owl": 3, "cow": 4, "turtle": 4,
     "boar": 6, "seal": 5,
 }
 WILDLIFE_SPEED = {
     "bird": 3.2, "squirrel": 2.8, "deer": 3.0, "fox": 3.4, "boar": 2.0, "owl": 2.6,
-    "grazer": 1.8, "rabbit": 3.5, "chicken": 2.2, "mouse": 2.4, "butterfly": 2.0,
+    "cow": 1.8, "rabbit": 3.5, "chicken": 2.2, "mouse": 2.4, "bee": 2.0,
     "fish": 2.5, "crab": 1.4, "gull": 3.0, "turtle": 1.2, "seal": 2.2,
 }
 HUNT_RADIUS = 90
@@ -6098,6 +6098,17 @@ class SimEngine:
         kind = d.get("kind")
         return kind if kind in WILDLIFE_KIND_POOLS else None
 
+    def _wildlife_ocean_district(self):
+        """Return the ocean district dict, preferring id 'ocean'."""
+        districts = self.civilization.get("districts") or {}
+        ocean = districts.get("ocean")
+        if ocean and ocean.get("kind") == "ocean":
+            return ocean
+        for d in districts.values():
+            if d.get("kind") == "ocean":
+                return d
+        return None
+
     def _wildlife_habitat_rect(self, district_id, kind):
         """Return (x1, y1, x2, y2) clamp rect for a creature kind in a district."""
         d = self.civilization["districts"].get(district_id)
@@ -6112,6 +6123,17 @@ class SimEngine:
                     max(y1 + inset + 1, y2 - inset))
         if dkind == "beach":
             if kind in WILDLIFE_BEACH_WATER_KINDS:
+                ocean = self._wildlife_ocean_district()
+                if ocean:
+                    ob = ocean["bounds"]
+                    ox1, oy1, ox2, oy2 = ob["x1"], ob["y1"], ob["x2"], ob["y2"]
+                    strip = min(WILDLIFE_SHORE_STRIP, max(1, ox2 - ox1))
+                    hy1 = max(y1, oy1)
+                    hy2 = min(y2, oy2)
+                    if hy2 <= hy1:
+                        hy1, hy2 = oy1, oy2
+                    return (ox2 - strip, hy1, ox2, hy2)
+                # fallback: beach-west strip when no ocean district
                 strip = min(WILDLIFE_SHORE_STRIP, max(1, x2 - x1))
                 return (x1, y1, x1 + strip, y2)
             # gull (and any non-water beach kind): full beach bounds
@@ -6134,17 +6156,12 @@ class SimEngine:
         seed = self._wildlife_hash_seed(str(district_id))
         rx = ((seed * (index + 7) * 48271) % 2147483647) / 2147483647
         ry = ((seed * (index + 13) * 16807) % 2147483647) / 2147483647
-        if kind in WILDLIFE_BEACH_WATER_KINDS and d.get("kind") == "beach":
-            span_w = min(WILDLIFE_SHORE_STRIP, max(1, b["x2"] - b["x1"]))
-            x = b["x1"] + rx * span_w
-            y = b["y1"] + ry * (b["y2"] - b["y1"])
-        else:
-            rect = self._wildlife_habitat_rect(district_id, kind)
-            if not rect:
-                return (b["x1"] + b["x2"]) / 2, (b["y1"] + b["y2"]) / 2
-            x1, y1, x2, y2 = rect
-            x = x1 + rx * max(1, x2 - x1)
-            y = y1 + ry * max(1, y2 - y1)
+        rect = self._wildlife_habitat_rect(district_id, kind)
+        if not rect:
+            return (b["x1"] + b["x2"]) / 2, (b["y1"] + b["y2"]) / 2
+        x1, y1, x2, y2 = rect
+        x = x1 + rx * max(1, x2 - x1)
+        y = y1 + ry * max(1, y2 - y1)
         return self._wildlife_clamp_pos(district_id, kind, x, y)
 
     def _wildlife_random_point(self, district_id, kind):
@@ -6193,6 +6210,12 @@ class SimEngine:
             if not isinstance(cre, dict):
                 continue
             kind = cre.get("kind") or "bird"
+            if kind == "butterfly":
+                kind = "bee"
+                cre["kind"] = kind
+            if kind == "grazer":
+                kind = "cow"
+                cre["kind"] = kind
             did = cre.get("districtId")
             cre.setdefault("id", self._next_wildlife_id())
             cre.setdefault("kind", kind)

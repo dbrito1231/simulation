@@ -446,27 +446,68 @@ own and does **not** pathfind, spawn, or reposition creatures.
   `WILDLIFE_STAGE_COUNT = {barren: 0, sparse: 1, healthy: 2, lush: 4}`,
   capped at `WILDLIFE_CAP_PER_DISTRICT = 4`. Only forest/farm/beach district
   kinds host fauna pools.
-- **Kind pools (15 kinds):**
+- **Kind pools (16 kinds):**
 
   | District | Kinds | Kill yield |
   |---|---|---|
   | forest | `bird`, `squirrel`, `deer`, `fox`, `boar`, `owl` | `meat` |
-  | farm | `grazer`, `rabbit`, `chicken`, `mouse` | `meat` |
-  | farm | `butterfly` | none — decorative, not huntable |
+  | farm | `cow`, `rabbit`, `chicken`, `mouse` | `meat` |
+  | farm | `bee` | none — decorative, not huntable |
   | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
+- **Rendering (`sprites.js`):** `drawWildlifeCreature` dispatches in order:
+  sheet blit for kinds in `WILDLIFE_SHEET_FRAMES` (all 16 when atlas present)
+  → canvas silhouette helpers → procedural pixel grids — nothing ever renders
+  blank.
+  - **Spritesheet loader:** at module load, `preloadWildlifeSheet()` fires
+    a fire-and-forget `Image()` fetch for `/wildlife.png` (served beside
+    `sprites.js`; see [12-ops.md](12-ops.md)). `_wildlifeSheetReady` is
+    set only on successful load with non-zero dimensions; `onerror` or a
+    missing file (404) leaves it `false` permanently for that page load.
+    When ready **and** the kind has an entry in `WILDLIFE_SHEET_FRAMES`,
+    `tryDrawWildlifeFromSheet` blits via `ctx.drawImage` with
+    `imageSmoothingEnabled = false`, using optional `destW`/`destH` overrides.
+    Extracted frame regions are cached in `_wildlifeSheetBlitCache` keyed by
+    source rect (same module-level cache idiom as `_tileSourceCanvasCache`).
+    Frame entries may be a bare `{ sx, sy, sw, sh, destW?, destH? }` or
+    `{ stand, alt? }` with the same `frameTick` cadence as procedural
+    animation. **`WILDLIFE_SHEET_FRAMES` maps all 16 user-art kinds** packed from
+    `simulation/assets/wildlife/*.png` into `/wildlife.png` (variable source
+    rects; dest sizes fit tier boxes preserving aspect ratio).
+  - **Canvas silhouette helpers:** fallback when the sheet is missing or not
+    ready; restored pre-sheet canvas primitives (V-wing birds, owl blink,
+    squirrel tail-flick, bee wing flap, etc.) via `WILDLIFE_CANVAS_HELPERS`. Each helper is drawn with a tier scale transform (`WILDLIFE_CANVAS_SCALE_BY_TIER`:
+    large ~1.8, mid ~1.3, small 1.0) around the creature anchor so size tiers
+    remain visible. Per-kind alt-frame cadence matches the former helpers
+    (8–20 ticks where animated).
+  - **Procedural fallback:** each kind also has a pixel-grid entry in the
+    `WILDLIFE_SPRITES` table (flat-color, black-outline idiom matching
+    agent sprites). `drawWildlifeCreatureProcedural` is the last resort when
+    neither sheet nor canvas helper applies. An entry may be a bare grid
+    (static kinds) or `{ stand, alt? }` (animated kinds). Drawing uses
+    `drawPixelSprite` with **per-tier scale** via `WILDLIFE_SIZE_TIER` /
+    `WILDLIFE_TIER_SCALE`. Approximate on-screen sizes:
+
+  | Tier | Sheet dest | Canvas scale | Procedural scale | Kinds |
+  |---|---|---|---|---|
+  | large | ≈44 px max side | ~1.8 | 2 | `deer`, `boar`, `cow`, `seal` |
+  | mid | ≈34 px max side | ~1.3 | 2 | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
+  | small | ≈26 px max side | 1.0 | 1 | `mouse`, `squirrel`, `fish`, `crab`, `bee` |
+
+  Cosmetic motion also includes the caller-side `bob` sine offset in
+  `index.html` `drawWildlife`; `frameTick` drives frame swap only and does
+  not invent a second position.
 - **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
   (and `districtId`). The viewer does not seed positions client-side and
   does not run a road pathfinder for fauna — motion and cross-district
-  migration are already resolved server-side between polls. `frameTick`
-  may still drive cosmetic sprite animation (bob, wing-flap, fin-wiggle)
-  in `sprites.js` (`drawWildlifeCreature` dispatching per-kind helpers)
-  without inventing a second position.
+  migration are already resolved server-side between polls. `frameTick` is
+  passed through for alt-frame animation; it does not invent a
+  second position.
 - **Viewport culling** mirrors `drawSocialTies`: cull by district bounds
   against the scroll/zoom viewport, then per-creature `(x, y)`.
 - **Interaction:** fauna are huntable via the agent action `hunt_wildlife`
   (multi-hit HP; land kills grant `meat`, beach kills grant `fish`;
-  `butterfly` is never a valid target) — see [07-actions.md](07-actions.md).
+  `bee` is never a valid target) — see [07-actions.md](07-actions.md).
   The viewer does not resolve hunt hits; it only renders the projected
   alive set (optional cheap HP cue is allowed but not required).
 - **Gate:** `WILDLIFE_ENABLED = false` → no `wildlife` key (or empty) and

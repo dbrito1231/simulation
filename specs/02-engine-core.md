@@ -746,15 +746,17 @@ under the engine lock and persisted with the rest of civilization state
 at least: `id`, `kind`, `districtId`, `x`, `y`, `targetX`/`targetY`,
 optional `waypoints`, `hp`, `maxHp`, `alive`, `respawnAt`. `maxHp` is set
 on spawn from `WILDLIFE_MAX_HP[kind]` (HP tiers: low kinds ≈1–2 hits; mid
-≈3–4; high `boar`/`seal` ≈5–6; decorative `butterfly` is not a combat
+≈3–4; high `boar`/`seal` ≈5–6; decorative `bee` is not a combat
 target). Kind pools and kill yields live in
 [08-systems-economy.md](08-systems-economy.md); density caps
 (`WILDLIFE_STAGE_COUNT` / `WILDLIFE_CAP_PER_DISTRICT = 4`) key off
 `districtEcology` stage ([05-world.md](05-world.md)).
 
 **Habitat clamp.** Forest/farm: district bounds (inset). Beach water kinds
-(`fish`, `crab`, `turtle`, `seal`): shore strip (~70px). `gull`: full beach
-bounds.
+(`fish`, `crab`, `turtle`, `seal`): eastern shore strip (~70px) of the adjacent
+**ocean** district (actual water tiles, not beach sand); y-range intersects the
+spawn beach and ocean bounds. Fallback when no ocean district exists: beach-west
+strip as before. `gull`: full beach bounds.
 
 **`_move_wildlife()`** — every tick when the flag is on (alongside agent
 move). In-district idle wander via simple steering at `WILDLIFE_SPEED[kind]`

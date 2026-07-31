@@ -320,6 +320,19 @@ rule adherence, meme adoption, memory-store size — see
 [09-systems-society.md](09-systems-society.md)). For full determinism
 without an Ollama dependency, use the smoke scripts below instead.
 
+## Viewer static assets
+
+The thin viewer loads a few files from the Flask app beside `index.html`
+(see [04-http-api.md](04-http-api.md)):
+
+| Path | File | Notes |
+|---|---|---|
+| `/sprites.js` | `simulation/sprites.js` | Required — Canvas renderer |
+| `/wildlife.png` | `simulation/wildlife.png` | Wildlife spritesheet (variable-size atlas from user PNGs). When absent (404), `sprites.js` keeps `_wildlifeSheetReady = false` and draws canvas helpers / procedural `WILDLIFE_SPRITES` grids — first paint is never blocked. |
+| `/wildlife_refsheet.html` | `simulation/wildlife_refsheet.html` | Dev/debug only — labeled 4×4 grid calling live `drawWildlifeCreature`; not part of the sim viewer loop. |
+
+**Wildlife art provenance:** User-provided PNGs in `simulation/assets/wildlife/` (16 kinds: `bee`, `bird`, `boar`, `chicken`, `cow`, `crab`, `deer`, `fish`, `fox`, `gull`, `mouse`, `owl`, `rabbit`, `seal`, `squirrel`, `turtle`). `bee` replaces the former decorative farm kind `butterfly` (same role — not huntable). `cow` replaces the former farm kind `grazer` (save migration in `_normalize_wildlife_records`). Rebuild atlas: `uv run python scripts/build_wildlife_sheet.py` (keys square backdrops via border flood-fill, trims transparency; `bee.png` mint-green backdrop keyed from corner samples). Committed outputs: `wildlife.png`, source PNGs, and the build script. Preview (gitignored): `simulation/_vendor/wildlife-preview-4x.png`.
+
 ## Scripts (`scripts/`, repo root)
 
 | Script | Needs Ollama? | What it does |

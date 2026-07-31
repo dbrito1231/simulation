@@ -2660,6 +2660,18 @@ def sprites():
     return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "sprites.js")
 
 
+@app.route("/wildlife_refsheet.html")
+def wildlife_refsheet():
+    return send_from_directory(
+        os.path.dirname(os.path.abspath(__file__)), "wildlife_refsheet.html"
+    )
+
+
+@app.route("/wildlife.png")
+def wildlife_png():
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "wildlife.png")
+
+
 @app.route("/roles.js")
 def roles_js():
     # Serve the single role source as a JS global so the browser uses the exact
