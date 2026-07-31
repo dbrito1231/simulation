@@ -146,12 +146,16 @@ one uniform failure shape:
 
 Phase 2 shipped exactly one applyable command kind, `proclamation`; Phase 3
 added `providence`/`private_omen`/`revoke_guidance`; Phase 4 added
-`agent_vitals`/`grant_resource`/`structure_condition`; Phase 5 adds
+`agent_vitals`/`grant_resource`/`structure_condition`; town-integrity adds
+`repair_structures`/`clear_ruins`; Phase 5 adds
 `story_event` (timed modifiers + zero or more Phase 4 primitives + optional
 providence, composed atomically). `/control/god/capabilities` echoes the
 full current catalog — payload shape, bounds, and `reversibilityClass` per
 kind (`story_event`'s is `"cancellable"` with no primitives, `"consequential"`
-with any) — plus `modifierRanges` for the seven timed-lawgiver keys. See
+with any) — plus `modifierRanges` for the seven timed-lawgiver keys. Mass
+structure commands (`repair_structures`, `clear_ruins`) are documented in
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-town-integrity--mass-structure-repair-and-ruin-clearance).
+See
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel)
 for the command catalog and stored-text contract, and
 [12-ops.md](12-ops.md) for `divine.jsonl`.

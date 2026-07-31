@@ -217,8 +217,8 @@ sub-systems, all deterministic (no LLM).
 | Sub-system | Constants | Behavior |
 |---|---|---|
 | **Spoilage** | `SPOILAGE_RATIO = 0.25` | `_tick_spoilage`: edible overflow beyond `_storage_capacity` rots at 25% (min 1) per tick — stockpile first, then largest holders, never below `EDIBLE_RESERVE` per agent. Escape: build storage (granary `stores`), eat, or contribute. |
-| **Structure decay** | `STRUCTURE_DECAY_PER_GOODS_TICK = 0.05`, `STRUCTURE_DISREPAIR_THRESHOLD = 30`, `REPAIR_CONDITION_RESTORE = 50` | `condition` starts at 100, decays 0.05/tick (~11.7h to disrepair, ~16.7h to full ruin at 0). Below the disrepair threshold a structure stops "working" (no produce/boost/houses/stores); at 0 it becomes a ruin. `repair_structure` restores `REPAIR_CONDITION_RESTORE`; rebuilding a ruin costs half the original needs (min 1 each). `/state` surfaces the raw `condition`/`isRuin` plus server-derived `conditionTier`: `pristine` (>=60), `worn` (>=30 and <60), `crumbling` (<30), or `ruin` (`isRuin` or <=0). |
-| **Disasters** | `DISASTER_PROB = 0.005`, `DISASTER_DAMAGE = (40, 70)`, `STORM_DISASTER_PROB = 0.32` | See below — storm-gated when `WEATHER_ENABLED`, legacy random roll otherwise. |
+| **Structure decay** | `STRUCTURE_DECAY_PER_GOODS_TICK = 0.025`, `STRUCTURE_DISREPAIR_THRESHOLD = 30`, `REPAIR_CONDITION_RESTORE = 50` | `condition` starts at 100, decays 0.025/tick (~23.3h to disrepair, ~33.3h to full ruin at 0). Below the disrepair threshold a structure stops "working" (no produce/boost/houses/stores); at 0 it becomes a ruin. `repair_structure` restores `REPAIR_CONDITION_RESTORE`; rebuilding a ruin costs half the original needs (min 1 each). `/state` surfaces the raw `condition`/`isRuin` plus server-derived `conditionTier`: `pristine` (>=60), `worn` (>=30 and <60), `crumbling` (<30), or `ruin` (`isRuin` or <=0). |
+| **Disasters** | `DISASTER_PROB = 0.002`, `DISASTER_DAMAGE = (30, 55)`, `STORM_DISASTER_PROB = 0.32` | See below — storm-gated when `WEATHER_ENABLED`, legacy random roll otherwise. |
 | **Shelter** | `DAY_FRAMES = 13500`, `HOUSE_SHELTER_OCCUPANTS = 2`, `SHELTER_HUNGER_PENALTY = 6`, `SHELTER_HUNGER_FLOOR = 20` | `_tick_shelter()` once per day-frame: each working house shelters up to 2 occupants (homeowners guaranteed their own home under `ECONOMY_ENABLED`, else nearest-first); unsheltered agents lose `SHELTER_HUNGER_PENALTY` hunger, floored at 20 (never into the `STARVING_HUNGER` band). |
 | **Seasons** | `YEAR_FRAMES = 324,000`, `SEASON_FRAMES = 81,000` (4 seasons), `SEASON_REGROW_MULT = {spring: 2, summer: 1, autumn: 1, winter: 0}` | Pure function of `frameTick`; multiplies district ecology stock regrowth (winter halts it) — see [05-world.md](05-world.md). |
 | **Vehicles/carry** | `CART_CARRY_BONUS = 20` (cart), `WAGON_CARRY_BONUS = 40`/`WAGON_SPEED_MULT = 1.4` (wagon, tier-2, `TECH_TREE_ENABLED`) | `_carry_cap`/`_vehicle_speed_mult` add query-time bonuses on top of `COLLECT_CAP` for the holder. |
@@ -230,9 +230,11 @@ Composable-build blocks with `shelter: True` (`wall`, `fence` — see
 **Disasters, storm-gated (`WEATHER_ENABLED`, living-ecosystem Phase 4).**
 `_maybe_disaster` (sim_engine.py) has two mutually exclusive branches:
 
-- **`WEATHER_ENABLED = False`:** byte-identical to the pre-Phase-4 behavior
-  — `DISASTER_PROB = 0.005` chance per goods tick (≈once/100 real min) of
-  damage (`DISASTER_DAMAGE = (40, 70)`) to a random structure anywhere.
+- **`WEATHER_ENABLED = False`:** legacy random branch — `DISASTER_PROB =
+  0.002` chance per goods tick (≈once/250 real min) of damage
+  (`DISASTER_DAMAGE = (30, 55)`) to a random structure anywhere. Retuned
+  downward from the pre-town-integrity baseline (`0.005` / `(40, 70)`) so
+  overnight ruin growth is dominated by passive decay rather than rare spikes.
 - **`WEATHER_ENABLED = True`:** damage only fires while
   `civilization["weather"]["state"] == "storm"` (see the weather state
   machine, [05-world.md](05-world.md)), at `STORM_DISASTER_PROB = 0.32` per
@@ -274,8 +276,35 @@ events/goods-tick** (measured via a standalone `SimEngine`, `random.seed`
 per run, `WEATHER_ENABLED` toggled, 200,000 goods ticks/seed with damaged
 structures repaired between checks so the candidate pool never runs dry) —
 i.e. turning weather on does **not** measurably change the long-run damage
-rate. See the Phase 4 implementation report for the full seed-by-seed
-numbers.
+rate. **Town-integrity retune:** the legacy (`WEATHER_ENABLED = False`)
+branch now uses `DISASTER_PROB = 0.002` and softened `DISASTER_DAMAGE =
+(30, 55)`, targeting **~0.002 events/goods-tick** (≈once/250 real min)
+instead of the pre-retune ~0.005 baseline; `STORM_DISASTER_PROB` is
+**unchanged** at `0.32` — a future implementation pass may re-calibrate
+storm-branch damage to match the lowered legacy expectation if soak data
+shows weather-on runs outpacing the new off-rate. See the Phase 4
+implementation report for the full seed-by-seed numbers on the pre-retune
+constants.
+
+**Repair campaigns.** When village-wide structural pressure crosses campaign
+thresholds, the engine assigns autonomous repair goals that execute through
+the ordinary `repair_structure` action path (same funding, narration, and
+`_apply_structure_condition_delta` semantics as an LLM-chosen repair).
+
+| Constant | Value | Role |
+|---|---:|---|
+| `REPAIR_CAMPAIGN_RUIN_RATIO` | `0.15` | `_village_repair_pressure()` returns campaign pressure when `ruined / total >= 0.15` **or** `working / total < REPAIR_CAMPAIGN_WORKING_FRAC`. |
+| `REPAIR_CAMPAIGN_WORKING_FRAC` | `0.5` | Same helper — also fires when fewer than half of all structures are working (`condition >= STRUCTURE_DISREPAIR_THRESHOLD` and not a ruin). |
+| `REPAIR_CAMPAIGN_MAX_ASSIGN` | `2` | `_maybe_repair_campaign` (sim_engine.py, RULES_TICK `150` batch, gated `GOODS_ENABLED`) assigns at most two living, non-incapacitated agents per call. |
+
+Each assigned agent receives `goal = {"kind": "repair", "target": structureId,
+"ttl": ...}`; goal synthesis routes to `repair_structure` until success,
+funding failure, or TTL expiry. Targets are chosen from the worst
+(lowest-condition) working or ruined structures village-wide, preferring
+critical categories (`house`, `market`, `workshop`, `foundry`, `granary`,
+`farm_plot`) when any are disrepaired or ruined. Campaign assignment runs in
+the same unconditional `150`-frame batch as `_maybe_repair_critical`
+([02-engine-core.md](02-engine-core.md)).
 
 **Critical-structure repair backstop.** `_maybe_repair_critical` (sim_engine.py,
 called unconditionally once per RULES_TICK gate, [02-engine-core.md](02-engine-core.md))
@@ -283,24 +312,60 @@ is a deterministic escape for when an entire structure category has zero
 working instances village-wide — `repair_structure` is reachable by the LLM
 and funds itself from the stockpile, but under survival pressure agents
 reliably lose the priority contest and never pick it, permanently locking the
-category. Table-driven (`_critical_structure_categories`): walks an ordered
-list of `(type_, guard, trigger, message)` entries and repairs at most ONE
-category per call (so competing emergencies don't drain the same scarce
-stockpile in a single tick), using `_repair_backstop_agent` to pick the
-nearest living, non-Sage-responding agent who can fund the repair. Categories
-covered, in priority order:
+category. **Town-integrity widening:** when `_village_repair_pressure()` is
+true (`ruin_ratio >= REPAIR_CAMPAIGN_RUIN_RATIO` or `working_frac <
+REPAIR_CAMPAIGN_WORKING_FRAC`), the backstop also runs its table even if some
+non-zero working instances remain in a category — it still repairs at most ONE
+category per call, but no longer waits for a category to hit absolute zero
+before acting under mass-decay pressure. Table-driven
+(`_critical_structure_categories`): walks an ordered list of `(type_, guard,
+trigger, message)` entries and repairs at most ONE category per call (so
+competing emergencies don't drain the same scarce stockpile in a single
+tick), using `_repair_backstop_agent` to pick the nearest living,
+non-Sage-responding agent who can fund the repair. Categories covered, in
+priority order:
 
 | Type | Guard | Trigger |
 |---|---|---|
-| `house` | `GOODS_ENABLED` | zero working houses |
-| `market` | `GOODS_ENABLED`, `ECONOMY_ENABLED`, at least one market built | `not _market_active()` (no pricing-unlock market working) |
-| `workshop` | `GOODS_ENABLED`, at least one workshop built | zero working workshops |
-| `foundry` | `GOODS_ENABLED`, `path1_on("TIER3_CONTENT_ENABLED")`, at least one foundry built | zero working foundries |
-| `granary` | `GOODS_ENABLED`, `CRAFTING_ENABLED`, at least one granary built | zero working granaries |
-| `farm_plot` | `GOODS_ENABLED`, at least one farm plot built | zero working farm plots |
+| `house` | `GOODS_ENABLED` | zero working houses, **or** `_village_repair_pressure()` with any disrepaired/ruined house |
+| `market` | `GOODS_ENABLED`, `ECONOMY_ENABLED`, at least one market built | `not _market_active()` (no pricing-unlock market working), **or** pressure with any disrepaired/ruined market |
+| `workshop` | `GOODS_ENABLED`, at least one workshop built | zero working workshops, **or** pressure with any disrepaired/ruined workshop |
+| `foundry` | `GOODS_ENABLED`, `path1_on("TIER3_CONTENT_ENABLED")`, at least one foundry built | zero working foundries, **or** pressure with any disrepaired/ruined foundry |
+| `granary` | `GOODS_ENABLED`, `CRAFTING_ENABLED`, at least one granary built | zero working granaries, **or** pressure with any disrepaired/ruined granary |
+| `farm_plot` | `GOODS_ENABLED`, at least one farm plot built | zero working farm plots, **or** pressure with any disrepaired/ruined farm plot |
 
 Related actions: `repair_structure`, `upgrade_structure`, `craft_item`
 (cart/wagon recipes) — [07-actions.md](07-actions.md).
+
+**Ruin cull (in-sim registry deletion).** `_maybe_cull_ruins()` (sim_engine.py,
+same RULES_TICK `150` batch and `GOODS_ENABLED` gate as `_maybe_repair_campaign`)
+deterministically removes aged, unaffordable ruins from
+`civilization["structures"]` so routine soak runs do not require offline
+[`scripts/prune_ruins.py`](../scripts/prune_ruins.py). A cull tick fires only
+when **all** of the following hold:
+
+1. `ruin_ratio > REPAIR_CAMPAIGN_RUIN_RATIO` (same ratio as repair campaigns).
+2. The oldest eligible ruin has `ruinedSinceFrame` (or equivalent ruin-age
+   field) at least `RUIN_CULL_AGE_FRAMES = DAY_FRAMES` (~1 sim day,
+   `13500` frames at 30/s ≈ 7.5 real min) ago.
+3. Village-wide rebuild remains unaffordable — combined village stockpile plus
+   agent carry cannot fund the half-cost `repair_structure` rebuild of the
+   candidate ruin(s).
+
+Each call removes **1–3** ruins (`RUIN_CULL_MIN_PER_CALL = 1`,
+`RUIN_CULL_MAX_PER_CALL = 3`), preferring non-critical types and duplicate
+ruins before the last working-critical instance of `house`, `market`,
+`workshop`, `foundry`, `granary`, or `farm_plot`. Removal mirrors the offline
+prune script: drop the structure from `civilization["structures"]`, clear any
+agent `homeStructureId` pointing at it, and filter `reorgTasks` entries
+referencing it. Writes an `activity` line and updates the `structure_health`
+benchmark detail (`ruined` count drops; `total` drops with it). **Contract
+amendment:** this is an explicit exception to the prior invariant that
+structures are never removed from `civilization["structures"]` — passive
+decay/disaster damage still produces ruins (never auto-deletes); only
+`_maybe_cull_ruins()`, the God `clear_ruins` command
+([02-engine-core.md](02-engine-core.md#sovereign-god-mode-town-integrity--mass-structure-repair-and-ruin-clearance)),
+or offline `prune_ruins.py` may delete registry entries.
 
 **`structure_health` benchmark.** `_tick_structure_health_benchmark`
 (sim_engine.py) logs a `structure_health` benchmark every `GOODS_TICK_FRAMES`

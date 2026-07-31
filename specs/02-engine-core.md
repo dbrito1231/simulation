@@ -27,7 +27,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | `RULES_ENABLED` | 150 | `_maybe_advance_rules` |
 | `LIFECYCLE_ENABLED` | 150 | `_maybe_resolve_stalled_succession` |
 | `LIFECYCLE_ENABLED` | 300 | `_tick_lifecycle` |
-| (unconditional) | 150 | a fixed batch: `_maybe_feed_starving`, `_maybe_repair_critical`, `_maybe_abandon_stalled_projects`, `_maybe_relocate_stuck_project`, `_maybe_reorganize_structures`, `_maybe_force_contribution`, `_maybe_start_idle_district_project`, `_maybe_build_funded_project`, `_maybe_start_approved_custom`, `_maybe_retire_blueprint`, `_maybe_amnesty_rejected_blueprints`, `_maybe_retire_custom_resource`, `_maybe_invention_backstop`, `_maybe_found_district`, `_maybe_welcome_newcomer` |
+| (unconditional) | 150 | a fixed batch: `_maybe_feed_starving`, `_maybe_repair_critical`, `_maybe_repair_campaign`, `_maybe_cull_ruins`, `_maybe_abandon_stalled_projects`, `_maybe_relocate_stuck_project`, `_maybe_reorganize_structures`, `_maybe_force_contribution`, `_maybe_start_idle_district_project`, `_maybe_build_funded_project`, `_maybe_start_approved_custom`, `_maybe_retire_blueprint`, `_maybe_amnesty_rejected_blueprints`, `_maybe_retire_custom_resource`, `_maybe_invention_backstop`, `_maybe_found_district`, `_maybe_welcome_newcomer` |
 | within the 150-batch, `SAGE_REVIEW_ENABLED` | 150 | `_maybe_skip_sage_review`, `_maybe_amnesty_denied_sage_reviews` |
 | within the 150-batch, `TECH_TREE_ENABLED` | 150 | `_maybe_era_transition`, `_maybe_dissolve_council` |
 | `DAILY_COUNCIL_ENABLED` | day boundary (`frameTick % DAY_FRAMES == 0`) and deterministic phase gate | `_maybe_convene_daily_council`, `_maybe_advance_daily_council` |
@@ -517,13 +517,94 @@ magnitude capped at `GOD_STRUCTURE_DELTA_MAX = 100`. Both repair (`delta >=
 tick's per-structure body specifically so both callers share it), clamping to
 `0..100` and firing the exact `STRUCTURE_DISREPAIR_THRESHOLD`-crossing and
 ruin-transition narration (including the `homeOf`/`homeStructureId` homeless
-handling) a natural decay collapse would. Because validation already rejects
-ruined structures, repair through this miracle can never recreate a destroyed
-structure — it only ever restores condition on a structure that was never a
-ruin to begin with — and damage cannot delete registry state (a structure
-that reaches 0 becomes a ruin, exactly like natural decay; it is never
-removed from `civilization["structures"]`). See
-[05-world.md](05-world.md) for the shared decay/ruin contract this reuses.
+handling) a natural decay collapse would. **Single-structure scope:** this
+Phase 4 miracle still targets one non-ruined structure only — it cannot
+un-ruin a collapsed structure. Batch un-ruin and registry deletion are
+separate town-integrity commands (`repair_structures`, `clear_ruins`; see
+below). **Registry contract (amended):** passive decay, disasters, and this
+miracle's damage path still produce ruins rather than deleting registry
+entries — a structure that reaches 0 becomes a ruin, exactly like natural
+decay, and remains in `civilization["structures"]` until culled by
+`_maybe_cull_ruins()`, removed by God `clear_ruins`, or pruned offline. See
+[05-world.md](05-world.md) for the shared decay/ruin helper contract and
+[08-systems-economy.md](08-systems-economy.md) for repair campaigns, ruin
+cull, and disaster retune.
+
+## Sovereign God mode (Town integrity — mass structure repair and ruin clearance)
+
+Two additional irreversible, public apply kinds extend the Phase 4 miracle
+set for operator escape hatches when ruin pressure outruns autonomous repair.
+Both use the same `god_preview` / `god_apply` pipeline, write one
+`divine.jsonl` `"applied"` record each, set `godState.intervened = True`
+(monotonic), and are wired into the Divine Console **Miracles** tab alongside
+the Phase 4 trio ([11-viewer.md](11-viewer.md)). Neither is cancellable via
+`god_cancel` (same irreversible class as `structure_condition`). Field
+schemas and caps are advertised in `/control/god/capabilities`
+([04-http-api.md](04-http-api.md)).
+
+**`repair_structures`** — batch condition restore and optional un-ruin.
+Payload (conceptual):
+
+```json
+{
+  "scope": "ids" | "all_critical" | {"districtId": int},
+  "structureIds": [int]?,
+  "conditionTarget": number?,
+  "unRuin": true?
+}
+```
+
+- `scope` selects the target set: explicit `structureIds` (required when
+  `scope == "ids"`), every working-critical type village-wide when
+  `scope == "all_critical"`, or all structures in `districtId` when scoped
+  to a district.
+- `conditionTarget` is optional; when present it sets `condition` (clamped
+  `0..100`) via `_apply_structure_condition_delta`-equivalent semantics per
+  structure, magnitude capped at `GOD_REPAIR_STRUCTURES_CONDITION_MAX = 100`
+  per structure and `GOD_REPAIR_STRUCTURES_BATCH_MAX = 10` structures per
+  command.
+- When `unRuin` is true (default), ruined targets (`isRuin` or
+  `condition <= 0`) are restored to at least `REPAIR_CONDITION_RESTORE`
+  (`50`) and `isRuin` cleared — the explicit exception to the old Phase 4
+  text that "repair through this miracle can never recreate a destroyed
+  structure." The single-target `structure_condition` miracle remains
+  non-ruin-only; only `repair_structures` (and agent `repair_structure`)
+  may un-ruin.
+- Rejects unknown ids, empty selections, or batches exceeding the cap.
+  Preview reports the exact per-structure outcomes.
+
+**`clear_ruins`** — delete selected or aged ruins from the registry (mirrors
+engine cull cleanup). Payload (conceptual):
+
+```json
+{
+  "structureIds": [int]?,
+  "minAgeFrames": int?,
+  "districtId": int?
+}
+```
+
+- At least one selector is required. `structureIds` removes explicit ruins;
+  `minAgeFrames` (default `RUIN_CULL_AGE_FRAMES = DAY_FRAMES`) restricts to
+  ruins at least that old; `districtId` limits to one district.
+- Each removed ruin uses the same cleanup as `_maybe_cull_ruins()` and
+  [`scripts/prune_ruins.py`](../scripts/prune_ruins.py): drop from
+  `civilization["structures"]`, clear `homeStructureId`, filter
+  `reorgTasks`. Non-ruin ids are rejected.
+- Batch capped at `GOD_CLEAR_RUINS_BATCH_MAX = 10` per command. Writes
+  activity + chronicle attribution (`source="divine"`) like other miracles.
+
+**Amended invariants (summary).**
+
+| Path | May un-ruin? | May delete registry entry? |
+|---|---|---|
+| Passive decay / disaster damage | No (produces ruin) | No |
+| `structure_condition` miracle | No (non-ruin targets only) | No |
+| Agent `repair_structure` | Yes (funded half-cost rebuild) | No |
+| `repair_structures` (God) | Yes (batch, capped) | No |
+| `_maybe_cull_ruins()` (engine) | No | Yes (1–3 aged, unaffordable ruins) |
+| `clear_ruins` (God) | No | Yes (operator-selected/aged ruins) |
+| `scripts/prune_ruins.py` (offline) | No | Yes (all ruins) |
 
 ## Sovereign God mode (Phase 5 — storyteller events and timed lawgiver modifiers)
 
