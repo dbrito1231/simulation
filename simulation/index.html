@@ -654,6 +654,13 @@
     border: 1px solid #4ac882; border-radius: 4px;
     z-index: 11; display: none; pointer-events: none;
   }
+  #disasterBanner {
+    position: fixed; top: 78px; left: 50%; transform: translateX(-50%);
+    padding: 6px 18px; font: 600 13px system-ui, sans-serif;
+    background: rgba(22, 48, 52, 0.92); color: #b8e8f0;
+    border: 1px solid #3a9aaa; border-radius: 4px;
+    z-index: 11; display: none; pointer-events: none;
+  }
   #councilPanel summary {
     cursor: pointer; font-size: 13px; font-weight: 600; color: #fff;
     margin-bottom: 6px; outline: none;
@@ -984,6 +991,7 @@
     <canvas id="minimap" width="220" height="160"></canvas>
     <div id="councilBanner"></div>
     <div id="foundingBanner"></div>
+    <div id="disasterBanner"></div>
     <div id="godPublicBanner"></div>
   </div>
   <aside id="sidebar">
@@ -1687,6 +1695,11 @@ function findDistrictBounds(kind) {
   return d ? d.bounds : null;
 }
 
+function getDistrictBounds(id) {
+  const d = getDistricts().find((x) => x.id === id);
+  return d ? d.bounds : null;
+}
+
 // =====================================================================
 // Convenience accessors — render functions below read these like the old globals.
 // =====================================================================
@@ -1823,13 +1836,11 @@ function goldenHourAlpha(cal) {
 // same full-canvas overlay stage as the night overlay/golden-hour band as
 // weather.state worsens -- clear/gathering/storm/clearing map to a fixed
 // per-state alpha (a step ramp across the state machine, not a within-state
-// animation; weather.state is all the server sends). World-wide, not
-// clipped to weather.districts, even though storm damage targeting IS
-// localized (see specs/08's _maybe_disaster) -- splitting the sky tint
-// itself per-district would fight the also-global night overlay for little
-// visual payoff, a deliberate v1 tradeoff (see specs/11-viewer.md).
-const WEATHER_SKY_ALPHA = { clear: 0, gathering: 0.10, storm: 0.26, clearing: 0.14 };
-const WEATHER_SKY_COLOR = "18, 26, 34"; // slate-teal storm sky, distinct from night's navy
+// animation; weather.state is all the server sends). The base tint is
+// world-wide; storm/clearing districts also get a local veil + extra rain
+// clipped to weather.districts (see drawDistrictStormVeil).
+const WEATHER_SKY_ALPHA = { clear: 0, gathering: 0.17, storm: 0.41, clearing: 0.20 };
+const WEATHER_SKY_COLOR = "12, 28, 32"; // cooler green-slate storm sky, distinct from night's navy
 // Clamp on night-overlay-alpha + weather-sky-alpha together so a winter
 // storm at deep night in an unlit district can never compound into an
 // unreadable screen.
@@ -1848,8 +1859,11 @@ function weatherSkyAlpha(weather, nightA) {
 // drawShipments use), not world area -- the world is much larger than any
 // one screen, especially fully zoomed out.
 const WEATHER_STATE_INTENSITY = { clear: 0, gathering: 0, storm: 1, clearing: 0.45 };
-const WEATHER_PARTICLE_DENSITY_DIVISOR = 14000; // visible px^2 per particle at intensity 1
+const WEATHER_PARTICLE_DENSITY_DIVISOR = 14000; // visible px^2 per particle at intensity 1 (storm uses STORM divisor)
+const WEATHER_STORM_DENSITY_DIVISOR = 9500;
 const WEATHER_PARTICLE_CAP = 260;
+const WEATHER_SHEET_EVERY_N = 9; // every Nth rain particle draws a thicker "sheet" streak
+const LIGHTNING_BUCKET_FRAMES = 540; // ~18s at 30 sim-fps — rare full-canvas flash windows
 function weatherParticleHash(i) {
   let h = (2166136261 ^ i) >>> 0;
   h = Math.imul(h, 16777619);
@@ -1868,7 +1882,8 @@ function drawWeatherParticles(ctx, frameTick, weather, cal) {
   const h = canvasWrapEl.clientHeight / zoomLevel;
   if (w <= 0 || h <= 0) return;
   const isSnow = !!(cal && cal.season === "winter");
-  const count = Math.min(WEATHER_PARTICLE_CAP, Math.floor((w * h / WEATHER_PARTICLE_DENSITY_DIVISOR) * intensity));
+  const densityDiv = intensity >= 1 ? WEATHER_STORM_DENSITY_DIVISOR : WEATHER_PARTICLE_DENSITY_DIVISOR;
+  const count = Math.min(WEATHER_PARTICLE_CAP, Math.floor((w * h / densityDiv) * intensity));
   const fallPeriod = isSnow ? 500 : 130; // frames for one particle to cross the visible band
   for (let i = 0; i < count; i++) {
     const hx = weatherParticleHash(i * 2 + 1);
@@ -1876,8 +1891,95 @@ function drawWeatherParticles(ctx, frameTick, weather, cal) {
     const x = left + hx * w;
     const yFrac = ((frameTick + hy * fallPeriod) % fallPeriod) / fallPeriod;
     const y = top + yFrac * h;
-    drawWeatherParticle(ctx, isSnow ? "snow" : "rain", x, y, i);
+    const sheet = !isSnow && (i % WEATHER_SHEET_EVERY_N === 0);
+    drawWeatherParticle(ctx, isSnow ? "snow" : "rain", x, y, i, sheet ? { sheet: true } : null);
   }
+}
+
+function districtWeatherSeed(id) {
+  let h = 2166136261;
+  const s = String(id);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function drawDistrictStormVeil(ctx, weather) {
+  if (!WEATHER_ENABLED || !weather) return;
+  const state = weather.state;
+  if (state !== "storm" && state !== "clearing") return;
+  const ids = weather.districts;
+  if (!ids || !ids.length) return;
+  const alpha = state === "storm" ? 0.24 : 0.14;
+  for (const id of ids) {
+    const b = getDistrictBounds(id);
+    if (!b) continue;
+    ctx.fillStyle = `rgba(6, 16, 22, ${alpha.toFixed(3)})`;
+    ctx.fillRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+  }
+}
+
+function drawDistrictStormRain(ctx, frameTick, weather, cal) {
+  if (!WEATHER_ENABLED || !weather) return;
+  const state = weather.state;
+  if (state !== "storm" && state !== "clearing") return;
+  if (cal && cal.season === "winter") return; // snow uses the global layer only
+  const ids = weather.districts;
+  if (!ids || !ids.length) return;
+  const intensity = state === "storm" ? 1 : 0.45;
+  const left = canvasWrapEl.scrollLeft / zoomLevel;
+  const top = canvasWrapEl.scrollTop / zoomLevel;
+  const vw = canvasWrapEl.clientWidth / zoomLevel;
+  const vh = canvasWrapEl.clientHeight / zoomLevel;
+  const fallPeriod = 130;
+  for (const id of ids) {
+    const b = getDistrictBounds(id);
+    if (!b) continue;
+    const ix1 = Math.max(b.x1, left);
+    const iy1 = Math.max(b.y1, top);
+    const ix2 = Math.min(b.x2, left + vw);
+    const iy2 = Math.min(b.y2, top + vh);
+    const iw = ix2 - ix1;
+    const ih = iy2 - iy1;
+    if (iw <= 0 || ih <= 0) continue;
+    const seed = districtWeatherSeed(id);
+    const count = Math.min(140, Math.floor((iw * ih / 6500) * intensity));
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+    ctx.clip();
+    for (let i = 0; i < count; i++) {
+      const hi = weatherParticleHash(seed + i * 2 + 1);
+      const hj = weatherParticleHash(seed + i * 2 + 2);
+      const x = ix1 + hi * iw;
+      const yFrac = ((frameTick + hj * fallPeriod) % fallPeriod) / fallPeriod;
+      const y = iy1 + yFrac * ih;
+      const sheet = i % (WEATHER_SHEET_EVERY_N - 2) === 0;
+      drawWeatherParticle(ctx, "rain", x, y, seed + i, sheet ? { sheet: true } : null);
+    }
+    ctx.restore();
+  }
+}
+
+// Deterministic rare lightning during storm: full-canvas white/blue flash,
+// 1–3 frames per event, keyed off frameTick hash — no server signal needed.
+function drawLightningFlash(ctx, frameTick, weather) {
+  if (!WEATHER_ENABLED || !weather || weather.state !== "storm") return;
+  const bucket = Math.floor(frameTick / LIGHTNING_BUCKET_FRAMES);
+  const trigger = weatherParticleHash(bucket + 0x5f3759df);
+  if (trigger < 0.88) return; // ~12% of buckets (~every 2.4 min) may flash
+  const localFrame = frameTick % LIGHTNING_BUCKET_FRAMES;
+  const startFrame = Math.floor(weatherParticleHash(bucket + 1) * (LIGHTNING_BUCKET_FRAMES - 5));
+  const duration = 1 + Math.floor(weatherParticleHash(bucket + 2) * 3);
+  if (localFrame < startFrame || localFrame >= startFrame + duration) return;
+  const alpha = 0.10 + weatherParticleHash(bucket + 3) * 0.10;
+  const blueish = weatherParticleHash(bucket + 4) > 0.45;
+  ctx.fillStyle = blueish
+    ? `rgba(190, 215, 255, ${alpha.toFixed(3)})`
+    : `rgba(255, 255, 255, ${alpha.toFixed(3)})`;
+  ctx.fillRect(0, 0, WORLD_W, WORLD_H);
 }
 
 // Light glow (ENV_EFFECTS_ENABLED): warm radial glow over lit structures while
@@ -2080,7 +2182,21 @@ function drawStructureWithShadow(structure) {
   ctx.ellipse(structure.x + size.width / 2, structure.y + size.height, size.width * 0.55, 7, 0, 0, Math.PI * 2);
   ctx.fill();
   drawStructure(ctx, structure, STRUCTURE_WEAR_ENABLED);
+  if (STRUCTURE_WEAR_ENABLED && isStructureHitFlashing(structure.id)) {
+    drawStructureHitFlash(ctx, structure, size);
+  }
   drawStructureLabel(ctx, structure, size);
+}
+
+function drawStructureHitFlash(ctx, structure, size) {
+  const pulse = 0.55 + 0.45 * Math.sin(renderFrame * 0.35);
+  ctx.save();
+  ctx.strokeStyle = `rgba(160, 240, 255, ${(0.75 * pulse).toFixed(3)})`;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(structure.x - 1, structure.y - 1, size.width + 2, size.height + 2);
+  ctx.fillStyle = `rgba(255, 255, 255, ${(0.22 * pulse).toFixed(3)})`;
+  ctx.fillRect(structure.x, structure.y, size.width, size.height);
+  ctx.restore();
 }
 
 function drawStructureLabel(ctx, structure, size) {
@@ -2193,6 +2309,7 @@ const civProjectSpriteCtx = civProjectSprite.getContext("2d");
 const civLevelLabelEl = document.getElementById("civLevelLabel");
 const councilBannerEl = document.getElementById("councilBanner");
 const foundingBannerEl = document.getElementById("foundingBanner");
+const disasterBannerEl = document.getElementById("disasterBanner");
 const councilSectionEl = document.getElementById("councilSection");
 const councilMetaEl = document.getElementById("councilMeta");
 const councilCardsEl = document.getElementById("councilCards");
@@ -2414,6 +2531,47 @@ let lastLogKey = "";
 let lastChronicleKey = "";
 let foundingFramesSeen = null; // null until first snapshot processed (see founding-banner logic)
 let foundingBannerTimer = null;
+let disasterFramesSeen = null;
+let disasterBannerTimer = null;
+const prevStructureCondition = {}; // structure id -> { condition, isRuin }
+const structureFlashUntil = {}; // structure id -> wall-clock ms deadline
+const STRUCTURE_HIT_FLASH_MIN_DROP = 5; // ignore passive decay (~0.05/tick); catch disasters (40–70)
+
+// Client-only diff of structure condition/isRuin between polls; flash on meaningful
+// damage or a new ruin transition — not every passive decay tick.
+function trackStructureConditionDeltas() {
+  if (!STRUCTURE_WEAR_ENABLED) return;
+  const structures = getCiv().structures || [];
+  const liveIds = new Set();
+  for (const s of structures) {
+    if (s.id == null) continue;
+    liveIds.add(s.id);
+    const cond = s.condition != null ? Number(s.condition) : 100;
+    const ruin = !!s.isRuin;
+    const prev = prevStructureCondition[s.id];
+    if (prev && ((prev.condition - cond) >= STRUCTURE_HIT_FLASH_MIN_DROP || (ruin && !prev.isRuin))) {
+      structureFlashUntil[s.id] = Date.now() + 800;
+    }
+    prevStructureCondition[s.id] = { condition: cond, isRuin: ruin };
+  }
+  for (const id of Object.keys(prevStructureCondition)) {
+    if (!liveIds.has(Number(id))) {
+      delete prevStructureCondition[id];
+      delete structureFlashUntil[id];
+    }
+  }
+}
+
+function isStructureHitFlashing(id) {
+  if (id == null) return false;
+  const until = structureFlashUntil[id];
+  if (!until) return false;
+  if (Date.now() > until) {
+    delete structureFlashUntil[id];
+    return false;
+  }
+  return true;
+}
 
 // --- Client-only per-agent activity history (Plan B1: no server endpoint,
 // resets on reload). Newest entry is last in the array; capped per agent. ---
@@ -2983,6 +3141,33 @@ function renderSidebar() {
     foundingBannerEl.style.display = "none";
   }
 
+  // Disaster banner: edge-detect new chronicle entries with kind === "disaster".
+  if (CHRONICLE_ENABLED && (world.chronicle || []).length) {
+    const disasterEntries = (world.chronicle || []).filter((e) => e.kind === "disaster");
+    if (disasterFramesSeen === null) {
+      disasterFramesSeen = new Set(disasterEntries.map((e) => e.frame));
+    } else {
+      const fresh = disasterEntries.find((e) => !disasterFramesSeen.has(e.frame));
+      if (fresh) {
+        disasterFramesSeen.add(fresh.frame);
+        disasterBannerEl.textContent = fresh.text;
+        disasterBannerEl.style.display = "block";
+        if (disasterBannerTimer) clearTimeout(disasterBannerTimer);
+        disasterBannerTimer = setTimeout(() => {
+          disasterBannerEl.style.display = "none";
+          disasterBannerTimer = null;
+        }, 5500);
+      }
+      for (const f of Array.from(disasterFramesSeen)) {
+        if (!disasterEntries.some((e) => e.frame === f)) disasterFramesSeen.delete(f);
+      }
+    }
+  } else {
+    disasterBannerEl.style.display = "none";
+  }
+
+  trackStructureConditionDeltas();
+
   renderDivineConsole();
 }
 
@@ -2994,6 +3179,12 @@ function calendarPhase(cal) {
   if (f < 0.80) return "dusk";
   if (f < 0.95) return "night";
   return "dawn";
+}
+
+function weatherStateLabel(weather) {
+  if (!weather || !weather.state) return null;
+  const labels = { clear: "Clear", gathering: "Gathering", storm: "Storm", clearing: "Clearing" };
+  return labels[weather.state] || null;
 }
 
 function renderWorldClockHud() {
@@ -3008,7 +3199,12 @@ function renderWorldClockHud() {
     return;
   }
   worldClockHudEl.style.display = "block";
-  worldClockHudEl.textContent = `${cal.season} ${phase}`;
+  let label = `${cal.season} ${phase}`;
+  if (WEATHER_ENABLED && world.weather) {
+    const wl = weatherStateLabel(world.weather);
+    if (wl) label += ` · ${wl}`;
+  }
+  worldClockHudEl.textContent = label;
 }
 
 // =====================================================================
@@ -3880,13 +4076,16 @@ function tickBody() {
     ctx.fillStyle = `rgba(${WEATHER_SKY_COLOR}, ${wa.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
+  drawLightningFlash(ctx, world.frameTick, world.weather);
   const gha = goldenHourAlpha(world.calendar);
   if (gha > 0) {
     ctx.fillStyle = `rgba(255, 177, 78, ${gha.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
   drawLightGlows(world.calendar);
+  drawDistrictStormVeil(ctx, world.weather);
   drawWeatherParticles(ctx, world.frameTick, world.weather, world.calendar);
+  drawDistrictStormRain(ctx, world.frameTick, world.weather, world.calendar);
 
   // C5 follow-cam: re-center every frame on the followed agent while active;
   // release the lock once they're deselected or no longer living.
