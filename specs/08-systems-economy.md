@@ -29,7 +29,7 @@ Runs every tick via `_update_survival(agent)` (sim_engine.py:1837), gated
 | `REVIVE_HUNGER` | 35 | hunger floor on revival (else 0-hunger re-collapse in ~8s) |
 | `EDIBLE_RESERVE` | 3 | per-agent carry reserve for `EDIBLE_RESOURCES` only — food/fish/meat an agent keeps back from builds/auto-share; not used for village-wide scarcity or Daily Council agenda |
 | `SHARE_RADIUS` | 120px | range for the anti-hoarding auto-share backstop |
-| `STARVING_HUNGER` | 10 | below this a foodless agent deterministically seeks food |
+| `STARVING_HUNGER` | 10 | below this, deterministic survival backstops fire (seek-food reflex and, when prey is nearer than any gatherable edible, forced hunt — see [Starvation reflex and forced hunt precedence](#starvation-reflex-and-forced-hunt-precedence)) |
 
 Sequence each `_update_survival` call: auto-eat if hungry and holding an
 edible → `_share_edible_with` backstop if starving (hunger ≤ 0) and holding
@@ -80,9 +80,142 @@ priced-market paths as the other edibles. `BASE_PRICE` treats `meat` like
 | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
 Grant uses the same carry-cap / overflow-to-stockpile split every other
-resource-gain path uses. Related action: `hunt_wildlife`
+resource-gain path uses.
+
+**Hunt damage (retuned).** Multi-hit combat constants (sim_engine.py, Phase 2b
+implements):
+
+| Constant | Value | Role |
+|---|---:|---|
+| `HUNT_DAMAGE` | `2` | per-hit damage for non-`hunter` actors |
+| `HUNT_DAMAGE_HUNTER` | `4` | per-hit damage when actor `role == "hunter"` (2× base bonus preserved) |
+| `HUNT_RADIUS` | `90` | max px from actor to valid prey |
+| `WILDLIFE_FLEE_RADIUS` | `120` | proximity flee before combat (agent within radius → prey flees) |
+
+On every successful hit, prey always force-flees (retarget 80–120px away from
+the attacker). Minimum damage per hit remains `1` after int coercion.
+
+**Expected hits to kill** against shipped `WILDLIFE_MAX_HP` tiers
+([02-engine-core.md](02-engine-core.md)):
+
+| Prey tier | Examples (maxHp) | Non-hunter hits | Hunter hits |
+|---|---|---:|---:|
+| Low | bird, squirrel, rabbit, mouse, fish, crab, gull (1) | 1 | 1 |
+| Low-mid | chicken (2) | 1 | 1 |
+| Mid | fox, owl (3) | 2 | 1 |
+| Mid-high | deer, cow, turtle (4) | 2 | 1 |
+| High | seal (5) | 3 | 2 |
+| High | boar (6) | 3 | 2 |
+
+Hunters clear common 1–4 HP prey in one hit; the heaviest game (`boar`,
+`seal`) still requires two hunter swings or three non-hunter swings — wildlife
+is faster food than farming when stocks fail, not a zero-cost tap.
+
+Related action: `hunt_wildlife`
 ([07-actions.md](07-actions.md)); hunter specialty `meat`
 ([06-agents.md](06-agents.md)).
+
+([06-agents.md](06-agents.md)).
+
+## Survival role rebalance (`EMERGENT_ROLES`)
+
+`_village_needed_role()` branch **(2) survival-critical** replaces the old
+fixed-order `farmer → fisher → hunter` walk with a stock-aware,
+wildlife-aware precedence. Fires when `len(starving) >= ROLE_STARVE_NEED_THRESHOLD`
+(`2`) among living, non-incapacitated agents with `hunger <= STARVING_HUNGER`.
+Helper predicates (Phase 2b):
+
+- **`_edible_scarce(rid)`** — village-wide held + stockpiled quantity for
+  edible `rid` is at or below `EDIBLE_SCARCITY_THRESHOLD = 3` (same order of
+  magnitude as `DAILY_COUNCIL_SCARCITY_THRESHOLD`).
+- **`_gather_failing(rid)`** — `rid` has a gather zone **and** every district
+  of that zone has ecology ratio `< STOCK_LOW_RATIO` (0.25), i.e. in-ground
+  gathering is depleted/low.
+- **`_wildlife_present()`** — at least one living, huntable creature exists
+  village-wide (`WILDLIFE_ENABLED`).
+- **`_meat_scarce()`** — `_edible_scarce("meat")` **or** total edible held +
+  stockpiled (`food`+`fish`+`meat`) is at or below `EDIBLE_SCARCITY_THRESHOLD`.
+
+**Selection order** (first match wins):
+
+1. **`farmer`** — `_edible_scarce("food")` and farmer role unfilled.
+2. **`fisher`** — `_edible_scarce("fish")` and fisher role unfilled.
+3. **`hunter`** — `_wildlife_present()` **and** hunter unfilled **and**
+   (`_meat_scarce()` or `_edible_scarce` on any edible) **and**
+   (`_gather_failing("food")` or `_gather_failing("fish")`) — promotes hunter
+   **ahead of** unfilled farmer/fisher when farms/fish zones are barren but prey
+   exists (the regression the old fixed-order loop missed).
+4. **First-unfilled fallback** — walk `EDIBLE_RESOURCES` gather roles in registry
+   order (`food`, `fish`, `meat`) and return the first unfilled role (preserves
+   legacy behavior when none of the stock/wildlife signals fire).
+
+Branch **(3) ecology scarcity** additionally registers **`meat`** despite
+`gatherZone: None`: scarcity ratio = `(stockpile["meat"] + Σ agent held meat) /
+MEAT_SCARCITY_CAP` where `MEAT_SCARCITY_CAP = 12` (roughly one boar kill +
+reserve per ~3 agents). When ratio `< STOCK_LOW_RATIO` and hunter is unfilled,
+hunter is eligible in the scarce-role sort alongside district-stock resources.
+Other edibles continue to use aggregated `districtStocks` ratios as today.
+
+No change to `AUTOSWITCH_PROTECTED_ROLES` or `_is_flexible_role`: switching
+**to** hunter already works for flexible candidates.
+
+## Starvation reflex and forced hunt precedence
+
+Two deterministic backstops share the `RULES_TICK_FRAMES` (150) unconditional
+batch ([02-engine-core.md](02-engine-core.md)) and the same hunger band
+(`hunger <= STARVING_HUNGER`). They must never assign conflicting goals on the
+same tick — ordering is load-bearing.
+
+### 1) Seek-food reflex (`_maybe_feed_starving`)
+
+Existing behavior, documented here for precedence. For each eligible agent
+(not incapacitated, not holding any edible, not a Sage-emergency responder):
+
+1. Scan `EDIBLE_RESOURCES` for gather zones that exist (`_gather_zone_for_resource`).
+2. Pick the nearest district of any such zone (food@farm, fish@beach, etc.).
+3. If found: clear competing goals, walk there (`_set_agent_target`) or
+   `collect_resource` immediately when already in-zone; may install a short
+   `gather` goal for follow-through.
+
+This path wins whenever **any gatherable edible source is reachable** (a gather
+zone exists for that resource — reachability is district distance, not ecology
+stock level). Starving agents head to farms/beaches even when stocks are low;
+gather may fail on arrival, but the reflex still fires first.
+
+### 2) Forced hunt goal (`_maybe_forced_hunt`)
+
+Runs **after** `_maybe_feed_starving` on the same tick, only for agents still
+eligible and **without** a gatherable edible source:
+
+**Gate (all required):**
+
+- `SURVIVAL_ENABLED` and `WILDLIFE_ENABLED`.
+- Agent living, not incapacitated, not a Sage-emergency responder.
+- `hunger <= STARVING_HUNGER`.
+- `prey_in_range` — at least one huntable creature within `HUNT_RADIUS` of the
+  agent (same predicate as think payload / `_nearest_huntable_wildlife`).
+- **Edible below reserve:** personal held edibles plus accessible village edibles
+  (stockpile share within `SHARE_RADIUS` backstop semantics) sum to `<
+  EDIBLE_RESERVE` (`3`) for every edible type combined.
+- **No gatherable edible:** step (1) found no gather zone for any edible **or**
+  the nearest gather zone is farther than the nearest huntable prey (prey is
+  strictly the closer survival option).
+
+**Assignment:** `goal = {"kind": "hunt", "target": <wildlife_id>, "ttl":
+FORCED_HUNT_GOAL_TTL}` where `FORCED_HUNT_GOAL_TTL = STALL_THRESHOLD` (`600`,
+~20s — same scale as `seek_shelter`). Target id is the nearest valid prey.
+Applies to **any** living agent, not only hunters; when multiple agents qualify
+the same tick, prefer candidates whose role is `hunter`, then nearest to prey.
+
+**Goal execution (`_step_goal`, kind `hunt`):** each `GOAL_STEP_FRAMES` tick,
+synthesize `hunt_wildlife` with `target` set to the goal prey id until kill,
+prey flees out of range, goal TTL expires, or agent becomes incapacitated.
+Incoming inbox messages still interrupt per ordinary `USE_GOALS` rules.
+
+**Mutual exclusion:** if step (1) assigned movement or a `gather` goal, step (2)
+is a no-op that tick. If step (1) skipped because no gather zone exists but prey
+is in range, step (2) may assign `hunt`. Both never write `goal` for the same
+agent in one batch pass.
 
 ## CRAFTING_ENABLED
 
@@ -124,8 +257,10 @@ Goal kinds (`g["kind"]`): `craft_gather` (walk to gather missing craft
 inputs), `plant_terrain` (apply `plant_terrain` once), `seek_shelter`
 (walk to a district with shelter, `PRESSURE_LOOP_ENABLED`), `dig_relocate`
 (walk to a diggable district, then `_dig_terrain` until carry-capped),
-`caravan` (walk to the other settlement, `PATH1_DIPLOMACY_ENABLED`), plus
-generic `gather`/`deliver`/`build` goals resolved against a target district.
+`caravan` (walk to the other settlement, `PATH1_DIPLOMACY_ENABLED`),
+**`hunt`** (synthesize `hunt_wildlife` against `target` wildlife id —
+[Starvation reflex and forced hunt precedence](#starvation-reflex-and-forced-hunt-precedence)),
+plus generic `gather`/`deliver`/`build` goals resolved against a target district.
 An incoming message always interrupts a goal (falls through to a normal
 think that turn) so agents stay responsive to being talked to.
 

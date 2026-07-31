@@ -613,6 +613,67 @@ disagreement resolves conservatively to `rival`. The browser uses this
 authoritative projection only to render nearby relationship cues; it does not
 derive or mutate social state.
 
+## Bounded agent conflict (`confront_agent`)
+
+Deterministic, opt-in agent-vs-agent friction — not a combat minigame and not
+a free-for-all raid system. Full action params and `apply_decision` effects:
+[07-actions.md](07-actions.md). Pair cooldown persistence:
+[06-agents.md](06-agents.md).
+
+**Design intent.** Conflict resolves scarce-food pressure and existing social
+tension without introducing always-on PvP. Most agent pairs never qualify.
+
+### Social gate
+
+`confront_agent` appears in `available_actions` only when the actor can name a
+valid target and at least one **authorization** holds:
+
+| Authorization | Condition |
+|---|---|
+| Rivalry | Actor's `relationships[targetName] == "rival"` (seller-side opinion semantics — the actor must personally hold the rival tie toward the named target). |
+| Path-1 pressure context | `path1_on("PRESSURE_LOOP_ENABLED")` **and** (`_is_night()` with actor unsheltered **or** actor was startled by Path-1 forest wildlife within `CONFRONT_PRESSURE_WINDOW_FRAMES = STALL_THRESHOLD * 2` — i.e. recent `lastNightNote` / wildlife-attack frame). |
+
+Neutral and ally pairs **reject** at validation (`normalize_decision` /
+`apply_decision`) even if the action were forced. Sage (`role == "elder"`) is
+never a valid target — attempts log a rejection note and do nothing.
+
+### Resolution (contact range)
+
+Contact radius `CONFRONT_CONTACT_DIST = 80` px (matches heal/bury/trade
+adjacency). Out of range: action sets movement toward target (same pattern as
+`trade_resource` / `heal_agent`).
+
+On contact, deterministic order:
+
+1. **Damage** — subtract `CONFRONT_DAMAGE = 10` from target `health`.
+   - **Non-lethal default:** clamp so target `health` never drops below
+     `CONFRONT_INCAP_HEALTH = 1` (mirrors God vitals floor — cannot
+     incapacitate a healthy target in one swing).
+   - **Lethal exception:** if target `health` was already `<=
+     CONFRONT_LETHAL_THRESHOLD = 15` before damage, allow `health` to reach `0`
+     and flip `incapacitated = True` through the ordinary survival path — no
+     instant `_agent_dies` / permanent death.
+2. **Steal (optional)** — if target holds any edible above `EDIBLE_RESERVE`,
+   transfer `1` unit of the target's most-abundant edible (`food`/`fish`/`meat`)
+   to the actor (carry-cap overflow routes to village stockpile like any other
+   transfer).
+3. **Flee** — actor retargets ~`CONFRONT_FLEE_DIST = 60` px away from target
+   (short disengage, not map-wide flight).
+4. **Social hit** — if relationship was neutral, set actor→target to `rival`;
+   if already `rival`, leave unchanged (reinforced by activity copy only).
+5. **Cooldown** — write `civilization["confrontCooldowns"][pairKey] =
+   frameTick + CONFRONT_COOLDOWN_FRAMES` where `CONFRONT_COOLDOWN_FRAMES =
+   STALL_THRESHOLD * 4` (~4 min real time) and `pairKey` is
+   `"<minId>:<maxId>"`.
+
+**Activity + memory.** One activity line (e.g. confrontation + optional steal);
+optional `_push_memory` on both parties with salience proportional to outcome.
+No Chronicle milestone — routine conflict stays in `activity.jsonl`.
+
+**Explicit non-goals.** No multi-agent brawls, no structure damage, no
+settlement raids, no confronting incapacitated or dead agents, no bypass of
+Sage emergency responder exemption (actors in `_sage_responders()` reject).
+
 **Personality drift:** major life events (collapse, etc.) append one short
 deterministic trait clause to an agent's persona text, capped at
 `PERSONALITY_DRIFT_CAP = 3` clauses so a long-lived elder's persona doesn't

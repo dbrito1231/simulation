@@ -101,8 +101,12 @@ similar non-farm structure). Any living agent may still choose
 `hunt_wildlife` when prey is in range ([07-actions.md](07-actions.md)); the
 hunter role specializes via prompt mention, `role_fallback_action` bias toward
 `hunt_wildlife` when prey is near, and higher per-hit damage
-(`HUNT_DAMAGE_HUNTER` vs base `HUNT_DAMAGE`). Kill yields feed
-`meat`/`fish` per [08-systems-economy.md](08-systems-economy.md).
+(`HUNT_DAMAGE_HUNTER = 4` vs base `HUNT_DAMAGE = 2` — retuned in
+[08-systems-economy.md](08-systems-economy.md#huntable-wildlife-yields-wildlife_enabled)).
+Kill yields feed `meat`/`fish` per that section. Emergent-role auto-switch
+promotes `hunter` ahead of unfilled `farmer`/`fisher` when wildlife is present,
+meat (or total edible) is scarce, and farm/fish gathering is failing — see
+**Survival role rebalance** below.
 
 An emergent registry entry is keyed by its validated slug and additionally stores
 its display `name`. Its `skill`, `specialty`, and `preferredProject` fields use
@@ -117,7 +121,7 @@ an emergent role, so the single elder role remains a seed-only invariant.
 | Movement | `x`, `y`, `targetX`, `targetY`, `speed`, `waypoints`, `currentZone`, `currentDistrict` |
 | Social | `relationships`, `inbox`, `beliefs`, `votes`, `message`, `messageTimer`, `consecutiveTalks`, `lastSpokeFrame` |
 | Survival | `resources`, `hunger`, `health`, `incapacitated` |
-| Cognition | `memory` (`{working, shortTerm, longTerm}`), `memoryWiki` (`{relationships, goals, lessons}`, each capped at `WIKI_SECTION_CHAR_CAP`=300 chars — see below), `thinkTimer`, `thinkInterval`, `isThinking`, `pendingThink`, `lastAction`, `lastReasoning`, `persona`, `idleFrames`, `moduleTick`, `modules` (`{perception, social, desire, reflection}`), `moduleReports` (`{module: {tick, text}}` — persistence-only mirror of the engine's `_piano_module_cache` entry for this agent, written alongside `moduleTick` after every think; never read on the hot path, only rehydrated by `restore_state()`), `goal`, `commitment`, `actionCounts` |
+| Cognition | `memory` (`{working, shortTerm, longTerm}`), `memoryWiki` (`{relationships, goals, lessons}`, each capped at `WIKI_SECTION_CHAR_CAP`=300 chars — see below), `thinkTimer`, `thinkInterval`, `isThinking`, `pendingThink`, `lastAction`, `lastReasoning`, `persona`, `idleFrames`, `moduleTick`, `modules` (`{perception, social, desire, reflection}`), `moduleReports` (`{module: {tick, text}}` — persistence-only mirror of the engine's `_piano_module_cache` entry for this agent, written alongside `moduleTick` after every think; never read on the hot path, only rehydrated by `restore_state()`), `goal` (kinds include `gather`, `deliver`, `build`, `craft_gather`, `plant_terrain`, `seek_shelter`, `dig_relocate`, `caravan`, `repair`, and **`hunt`** — forced starvation backstop; see [08-systems-economy.md](08-systems-economy.md#starvation-reflex-and-forced-hunt-precedence)), `commitment`, `actionCounts` |
 | Task/build | `assignedTask`, `idleCycles`, `lastTaskedFrame`, `lastContributedFrame`, `consecutiveIdleMoves`, `homeStructureId`, `reorgTask` |
 | Invention/sprite | `inventionTurn`, `inventionRetryUsed`, `inventionBuildContext`, `spriteDesignTurn` |
 | Rejection-note fields | `lastBlueprintRejection`, `lastGatherRejection`, `lastUpgradeRejection`, `lastSpriteRejection`, `lastProjectRejection`, `lastTerraformRejection`, `lastCraftRejection`, `lastRepairRejection`, `lastRecipeRejection`, `lastBurialRejection`, `lastTradeRejection`, `lastShelterNote`, `lastHomelessNudgeFrame` — each surfaces *why* the agent's last attempt at that action was rejected, back into its next prompt |
@@ -322,13 +326,25 @@ therefore cannot leak role specializations into one another.
 
 `_is_flexible_role(role)` (sim_engine.py:6401-6402): a role is "flexible" (eligible
 for auto-switch) if it has no fixed specialty resource and isn't `elder`.
-`_village_needed_role()` (sim_engine.py:6414+) detects an unfilled need in
+`_village_needed_role()` (sim_engine.py:9660+) detects an unfilled need in
 priority order: (1) an active build project stalled on an unmet resource with no
-living gatherer for it, (2) survival-critical (starving agents, no living
-food/fish gatherer) when `SURVIVAL_ENABLED`, (3) ecology scarcity. Every
+living gatherer for it, (2) **survival-critical** when `SURVIVAL_ENABLED`
+(stock-aware, wildlife-aware — full algorithm in
+[08-systems-economy.md](08-systems-economy.md#survival-role-rebalance-emergent_roles)),
+(3) ecology scarcity (including **`meat`** via village-held totals, not
+`districtStocks`, because `meat` has `gatherZone: None`). Every
 `ROLE_SWITCH_TICK_FRAMES = 120` frames (sim_engine.py:393, 9406),
 `_maybe_auto_switch_role()` (sim_engine.py:6502-6532) checks the needed role
 against a cooldown (`ROLE_SWITCH_COOLDOWN`) and, if a flexible-role candidate is
 found (`_auto_switch_candidate`), deterministically applies a `switch_role`
 decision on that agent's behalf — the same code path an LLM-chosen `switch_role`
 action would take (see [07-actions.md](07-actions.md)).
+
+### Agent conflict cooldown state (`confront_agent`)
+
+Bounded PvP pair cooldowns live on civilization, not on individual agents:
+`civilization["confrontCooldowns"]` maps a canonical pair key
+(`"<minId>:<maxId>"` of the two agent ids) → `frameTick` when the cooldown
+expires. Populated only after a successful `confront_agent` resolution;
+`restore_state()` `setdefault`s an empty dict. Full combat contract:
+[07-actions.md](07-actions.md) and [09-systems-society.md](09-systems-society.md#bounded-agent-conflict-confront_agent).
