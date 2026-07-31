@@ -276,8 +276,9 @@ WILDLIFE_SPEED = {
 }
 HUNT_RADIUS = 90
 WILDLIFE_FLEE_RADIUS = 120
-HUNT_DAMAGE = 1
-HUNT_DAMAGE_HUNTER = 2
+# Retuned Phase 2b: hunters clear 1–4 HP prey in one hit; boar/seal need two.
+HUNT_DAMAGE = 2
+HUNT_DAMAGE_HUNTER = 4
 WILDLIFE_RESPAWN_FRAMES = 600
 WILDLIFE_POP_TICK_FRAMES = 600
 WILDLIFE_MIGRATE_CHECK_FRAMES = 600
@@ -694,6 +695,8 @@ COLLAPSE_REGEN = 0.5
 COLLAPSE_REVIVE_HEALTH = 15
 REVIVE_HUNGER = 35          # hunger floor on revival, else 0-hunger re-collapse in ~8s
 EDIBLE_RESERVE = 3          # food/fish/meat an agent keeps back from builds/sharing
+EDIBLE_SCARCITY_THRESHOLD = 3   # village-wide edible scarcity (matches council threshold)
+MEAT_SCARCITY_CAP = 12          # ecology branch meat ratio denominator (~one boar + reserve)
 SHARE_RADIUS = 120          # auto-share edibles with a starving neighbour within this range
 STARVING_HUNGER = 10        # below this, a foodless agent deterministically seeks the nearest food zone
 
@@ -1313,6 +1316,14 @@ PERSONALITY_DRIFT_CAP = 3
 # for LIFECYCLE_ENABLED's permanent death.
 CEMETERY_ENABLED = True
 BURY_CONTACT_DIST = 80                # matches heal_agent's contact radius
+CONFRONT_CONTACT_DIST = 80            # bounded PvP adjacency (heal/bury/trade parity)
+CONFRONT_DAMAGE = 10
+CONFRONT_INCAP_HEALTH = 1             # non-lethal floor unless target already critical
+CONFRONT_LETHAL_THRESHOLD = 15
+CONFRONT_FLEE_DIST = 60
+CONFRONT_COOLDOWN_FRAMES = STALL_THRESHOLD * 4
+CONFRONT_PRESSURE_WINDOW_FRAMES = STALL_THRESHOLD * 2
+FORCED_HUNT_GOAL_TTL = STALL_THRESHOLD
 BURIAL_BACKSTOP_FRAMES = STALL_THRESHOLD * 3  # ~1 min grace for organic bury_agent before the backstop buries directly
 
 # --- Path 1: Minecraft-like world depth (PATH1_ENABLED) ---
@@ -2258,6 +2269,7 @@ class SimEngine:
             "nextGeneratedAgentId": 1000,  # synthetic ids for generated villagers once AGENT_DEFS is exhausted
             "nextWildlifeId": 1,           # huntable fauna creature ids (WILDLIFE_ENABLED)
             "wildlife": [],                # civilization["wildlife"] fauna records
+            "confrontCooldowns": {},       # pairKey -> frameTick when cooldown expires
             "pendingSuccession": None,     # {electionId, candidates:[names], startFrame, deadline}
             "lastSuccessionActivityFrame": 0,
             "harvestQuotas": {},            # rule id -> {"district": id|None, "resource": id|None, "value": n}
@@ -9657,6 +9669,135 @@ class SimEngine:
             for a in self.agents
         )
 
+    def _edible_scarce(self, rid):
+        """Village held + stockpiled quantity at/below scarcity threshold."""
+        return self._village_holdings(rid) <= EDIBLE_SCARCITY_THRESHOLD
+
+    def _meat_scarce(self):
+        if self._edible_scarce("meat"):
+            return True
+        total = sum(self._village_holdings(rid) for rid in EDIBLE_RESOURCES)
+        return total <= EDIBLE_SCARCITY_THRESHOLD
+
+    def _gather_failing(self, rid):
+        """True when every district of rid's gather zone is ecology-depleted."""
+        zone = self._gather_zone_for_resource(rid)
+        if not zone:
+            return False
+        districts = self._districts_of_kind(zone)
+        if not districts:
+            return True
+        for did in districts:
+            ratio = self._district_ecology_ratio(did)
+            if ratio is not None and ratio >= STOCK_LOW_RATIO:
+                return False
+        return True
+
+    def _wildlife_present(self):
+        if not WILDLIFE_ENABLED:
+            return False
+        for cre in (self.civilization.get("wildlife") or []):
+            if not cre.get("alive"):
+                continue
+            kind = cre.get("kind")
+            if kind in WILDLIFE_DECORATIVE_KINDS or kind not in WILDLIFE_YIELD:
+                continue
+            return True
+        return False
+
+    def _agent_accessible_edible_total(self, agent):
+        """Personal edibles plus nearby surplus (SHARE_RADIUS backstop semantics)."""
+        total = sum(agent["resources"].get(rid, 0) for rid in EDIBLE_RESOURCES)
+        for donor in self.agents:
+            if donor is agent or donor["incapacitated"]:
+                continue
+            if self._distance_to(agent, donor) > SHARE_RADIUS:
+                continue
+            for rid in EDIBLE_RESOURCES:
+                total += max(0, donor["resources"].get(rid, 0) - EDIBLE_RESERVE)
+        return total
+
+    def _nearest_gather_edible_distance(self, agent):
+        best = None
+        for rid in EDIBLE_RESOURCES:
+            zone = self._gather_zone_for_resource(rid)
+            if not zone:
+                continue
+            for did in self._districts_of_kind(zone):
+                d = self._distance_to_district(agent, did)
+                if best is None or d < best:
+                    best = d
+        return best
+
+    def _nearest_prey_distance(self, agent):
+        prey = self._nearest_huntable_wildlife(agent)
+        if prey is None:
+            return None
+        return _dist(agent["x"], agent["y"], prey["x"], prey["y"])
+
+    def _confront_pair_key(self, id_a, id_b):
+        a, b = int(id_a), int(id_b)
+        lo, hi = (a, b) if a <= b else (b, a)
+        return f"{lo}:{hi}"
+
+    def _confront_on_cooldown(self, agent, target):
+        key = self._confront_pair_key(agent["id"], target["id"])
+        expires = (self.civilization.get("confrontCooldowns") or {}).get(key, 0)
+        return self.frameTick < expires
+
+    def _confront_pressure_context(self, agent):
+        if not path1_on("PRESSURE_LOOP_ENABLED"):
+            return False
+        if self._is_night() and not agent.get("homeStructureId"):
+            return True
+        note = agent.get("lastNightNote")
+        if note and self.frameTick - note.get("frame", 0) <= CONFRONT_PRESSURE_WINDOW_FRAMES:
+            return True
+        return False
+
+    def _confront_authorized(self, agent, target):
+        if agent["relationships"].get(target["name"]) == "rival":
+            return True
+        return self._confront_pressure_context(agent)
+
+    def _confront_eligible_targets(self, agent):
+        em = self._sage_emergency()
+        if em and agent["name"] in self._sage_responders(em):
+            return []
+        targets = []
+        for other in self.agents:
+            if other is agent or other["incapacitated"]:
+                continue
+            if other.get("deathFrame") is not None:
+                continue
+            if other["role"] == "elder":
+                continue
+            if not self._confront_authorized(agent, other):
+                continue
+            if self._confront_on_cooldown(agent, other):
+                continue
+            if self._distance_to(agent, other) > 200:
+                continue
+            targets.append(other)
+        return targets
+
+    def _most_abundant_edible_for_steal(self, agent):
+        best, best_count = None, EDIBLE_RESERVE
+        for rid in EDIBLE_RESOURCES:
+            count = agent["resources"].get(rid, 0)
+            if count > best_count:
+                best_count, best = count, rid
+        return best
+
+    def _flee_from_agent(self, agent, other):
+        dx = agent["x"] - other["x"]
+        dy = agent["y"] - other["y"]
+        dist = math.sqrt(dx * dx + dy * dy) or 1.0
+        agent["targetX"] = agent["x"] + (dx / dist) * CONFRONT_FLEE_DIST
+        agent["targetY"] = agent["y"] + (dy / dist) * CONFRONT_FLEE_DIST
+        agent["waypoints"] = []
+        agent["goal"] = None
+
     def _village_needed_role(self):
         """Return a gather role the village needs, or None.
 
@@ -9675,7 +9816,7 @@ class SimEngine:
                 if roles and not self._role_is_filled(roles):
                     return roles[0]
 
-        # 2) Survival need: starving agents and no living food/fish gatherer.
+        # 2) Survival need: stock-aware, wildlife-aware precedence (specs/08).
         if SURVIVAL_ENABLED:
             living = self._living_agents()
             starving = [
@@ -9683,20 +9824,25 @@ class SimEngine:
                 if not a["incapacitated"] and a["hunger"] <= STARVING_HUNGER
             ]
             if len(starving) >= ROLE_STARVE_NEED_THRESHOLD:
-                food_roles = []
+                if self._edible_scarce("food") and not self._role_is_filled("farmer"):
+                    return "farmer"
+                if self._edible_scarce("fish") and not self._role_is_filled("fisher"):
+                    return "fisher"
+                if (self._wildlife_present()
+                        and not self._role_is_filled("hunter")
+                        and (self._meat_scarce()
+                             or any(self._edible_scarce(r) for r in EDIBLE_RESOURCES))
+                        and (self._gather_failing("food") or self._gather_failing("fish"))):
+                    return "hunter"
                 for rid in EDIBLE_RESOURCES:
-                    food_roles.extend(self.d["RESOURCE_GATHER_ROLES"].get(rid) or ())
-                # Prefer farmer (food) over fisher when both are missing.
-                for role in food_roles:
-                    if not self._role_is_filled(role):
-                        return role
+                    for role in (self.d["RESOURCE_GATHER_ROLES"].get(rid) or ()):
+                        if not self._role_is_filled(role):
+                            return role
 
         # 3) Ecology need: a tracked resource is depleted/low village-wide
-        # and its gather role is unfilled.
+        # and its gather role is unfilled (meat uses village totals — no gatherZone).
         if ECOLOGY_ENABLED:
             self._ensure_district_stocks()
-            # Aggregate stock ratio per resource across districts; pick the
-            # scarcest unfilled gather role.
             totals = {}
             for stocks in self.civilization["districtStocks"].values():
                 for rid, val in stocks.items():
@@ -9717,6 +9863,12 @@ class SimEngine:
                 if not roles or self._role_is_filled(roles):
                     continue
                 scarce.append((ratio, roles[0]))
+            meat_total = self._village_holdings("meat")
+            meat_ratio = meat_total / MEAT_SCARCITY_CAP
+            if meat_ratio < STOCK_LOW_RATIO:
+                roles = self.d["RESOURCE_GATHER_ROLES"].get("meat")
+                if roles and not self._role_is_filled(roles):
+                    scarce.append((meat_ratio, roles[0]))
             if scarce:
                 scarce.sort(key=lambda t: t[0])
                 return scarce[0][1]
@@ -9873,6 +10025,42 @@ class SimEngine:
                 self._set_agent_target(agent, district_id)
                 self._push_activity(
                     f"{agent['name']} is starving and heads to {district_id} for {rid}")
+
+    def _maybe_forced_hunt(self):
+        """Deterministic hunt goal when starving, prey is nearer than gather, and
+        edibles are below reserve. Runs after _maybe_feed_starving (specs/08)."""
+        if not SURVIVAL_ENABLED or not WILDLIFE_ENABLED:
+            return
+        em = self._sage_emergency()
+        responders = self._sage_responders(em) if em else set()
+        candidates = []
+        for agent in self.agents:
+            if agent["incapacitated"] or agent["hunger"] > STARVING_HUNGER:
+                continue
+            if agent["name"] in responders or self._first_edible(agent):
+                continue
+            if self._agent_accessible_edible_total(agent) >= EDIBLE_RESERVE:
+                continue
+            prey = self._nearest_huntable_wildlife(agent)
+            if prey is None:
+                continue
+            prey_dist = _dist(agent["x"], agent["y"], prey["x"], prey["y"])
+            gather_dist = self._nearest_gather_edible_distance(agent)
+            if gather_dist is not None and gather_dist <= prey_dist:
+                continue
+            goal = agent.get("goal")
+            if goal and goal.get("kind") in ("gather", "hunt"):
+                continue
+            candidates.append((0 if agent["role"] == "hunter" else 1, prey_dist, agent, prey))
+        candidates.sort(key=lambda t: (t[0], t[1]))
+        for _, _, agent, prey in candidates:
+            agent["goal"] = {
+                "kind": "hunt",
+                "target": prey.get("id"),
+                "ttl": FORCED_HUNT_GOAL_TTL,
+            }
+            self._push_activity(
+                f"{agent['name']} is starving and hunts nearby {prey.get('kind')}")
 
     def _maybe_start_idle_district_project(self):
         """With multiple buildable districts, nothing today encourages the
@@ -12360,6 +12548,64 @@ class SimEngine:
                         summary = (f"{agent['name']} strikes a {result.get('kind')} "
                                    f"({result.get('hp')}/{creature.get('maxHp', '?')} hp)")
 
+        elif action == "confront_agent":
+            if not SURVIVAL_ENABLED:
+                summary = f"{agent['name']} cannot confront — survival is disabled"
+            else:
+                em = self._sage_emergency()
+                if em and agent["name"] in self._sage_responders(em):
+                    summary = f"{agent['name']} cannot confront — Sage emergency duty"
+                else:
+                    target = self._find_agent(decision.get("target"))
+                    if not target or target.get("deathFrame") is not None:
+                        summary = f"{agent['name']} found no one to confront"
+                    elif target["incapacitated"]:
+                        summary = (f"{agent['name']} cannot confront {target['name']} — "
+                                   "they have collapsed")
+                    elif target["role"] == "elder":
+                        summary = f"{agent['name']} cannot confront the elder"
+                    elif not self._confront_authorized(agent, target):
+                        summary = (f"{agent['name']} has no cause to confront "
+                                   f"{target['name']}")
+                    elif self._confront_on_cooldown(agent, target):
+                        summary = (f"{agent['name']} must wait before confronting "
+                                   f"{target['name']} again")
+                    elif self._distance_to(agent, target) > CONFRONT_CONTACT_DIST:
+                        self._auto_move_toward_target(agent, target["name"])
+                        summary = f"{agent['name']} moves to confront {target['name']}"
+                    else:
+                        pre_health = target["health"]
+                        if pre_health <= CONFRONT_LETHAL_THRESHOLD:
+                            target["health"] = max(0, pre_health - CONFRONT_DAMAGE)
+                            if target["health"] <= 0:
+                                target["incapacitated"] = True
+                        else:
+                            target["health"] = max(
+                                CONFRONT_INCAP_HEALTH, pre_health - CONFRONT_DAMAGE)
+                        stolen = self._most_abundant_edible_for_steal(target)
+                        if stolen:
+                            target["resources"][stolen] -= 1
+                            cap = self._carry_cap(agent)
+                            held = agent["resources"].get(stolen, 0)
+                            if held < cap:
+                                agent["resources"][stolen] = held + 1
+                            else:
+                                c["stockpile"][stolen] = (
+                                    c["stockpile"].get(stolen, 0) + 1)
+                        self._flee_from_agent(agent, target)
+                        if agent["relationships"].get(target["name"]) != "rival":
+                            agent["relationships"][target["name"]] = "rival"
+                        pair_key = self._confront_pair_key(agent["id"], target["id"])
+                        c.setdefault("confrontCooldowns", {})[pair_key] = (
+                            self.frameTick + CONFRONT_COOLDOWN_FRAMES)
+                        note = f"{agent['name']} confronted {target['name']}"
+                        if stolen:
+                            note += f" and took {stolen}"
+                        self._push_activity(note)
+                        self._push_memory(agent, f"Confronted {target['name']}")
+                        self._push_memory(target, f"Confronted by {agent['name']}")
+                        summary = note
+
         elif action == "talk_to_nearby":
             recipient = self._resolve_talk_target(agent, decision)
             self._auto_move_toward_target(agent, recipient if recipient != "everyone" else decision.get("target"))
@@ -12946,6 +13192,24 @@ class SimEngine:
             self._maybe_caravan_goal(agent)
             agent["goal"] = None
             return False
+        if g["kind"] == "hunt":
+            prey_id = g.get("target")
+            creature = self._find_wildlife_by_id(prey_id)
+            if creature is None or not creature.get("alive"):
+                agent["goal"] = None
+                return False
+            if _dist(agent["x"], agent["y"], creature["x"], creature["y"]) > HUNT_RADIUS:
+                agent["goal"] = None
+                return False
+            self.apply_decision(agent, {
+                "action": "hunt_wildlife",
+                "target": str(prey_id),
+                "message": None,
+                "reasoning": "goal:hunt",
+            })
+            if not creature.get("alive"):
+                agent["goal"] = None
+            return True
         if g["kind"] == "repair":
             target_id = g.get("target")
             structure = next(
@@ -13714,6 +13978,8 @@ class SimEngine:
                  or path1_on("PATH1_DIPLOMACY_ENABLED"))
             and (action_name != "hunt_wildlife"
                  or (WILDLIFE_ENABLED and self._nearest_huntable_wildlife(agent) is not None))
+            and (action_name != "confront_agent"
+                 or (SURVIVAL_ENABLED and bool(self._confront_eligible_targets(agent))))
         ]
 
         # Sovereign God mode (Phase 3): computed once per think payload,
@@ -14365,6 +14631,7 @@ class SimEngine:
                 self._tick_lifecycle()
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_feed_starving()
+                self._maybe_forced_hunt()
                 self._maybe_repair_critical()
                 if GOODS_ENABLED:
                     self._maybe_repair_campaign()
@@ -14669,6 +14936,7 @@ class SimEngine:
                 civ.setdefault("emergencyRuleSeq", 0)
                 civ.setdefault("roleNeedSinceFrame", None)
                 civ.setdefault("lastRoleRebalanceLatency", None)
+                civ.setdefault("confrontCooldowns", {})
                 # Phase 2 role registry migration: older saves only know the
                 # roles.json seeds, while newer saves carry per-world approved
                 # roles. Merge missing seeds without overwriting live entries.

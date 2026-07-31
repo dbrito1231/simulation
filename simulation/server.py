@@ -1039,6 +1039,7 @@ DECISION_ACTIONS = [
     "propose_treaty", "vote_treaty",
     # Huntable wildlife (WILDLIFE_ENABLED): engine offers only when prey is in range.
     "hunt_wildlife",
+    "confront_agent",
     # Daily Council Assembly. Offered only to a seated attendee in-session.
     "council_speak", "council_propose", "council_vote",
 ]

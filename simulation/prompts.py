@@ -102,6 +102,11 @@ HUNTING (when hunt_wildlife is available):
    collect_resource (zone gathering). Hunters deal more damage per hit and specialize
    in meat.
 
+CONFLICT (when confront_agent is available):
+12c. Use confront_agent only against a named rival or under night/wildlife pressure.
+   Target must be a living villager (never the elder). On contact: damage, possible
+   steal of one edible, then disengage. Friendly/neutral pairs reject.
+
 CRAFTING (recipe tree):
 13. Some advanced builds need crafted goods. Use craft_item with target set to the item
    id; you must be in the recipe's station zone and hold its inputs.
