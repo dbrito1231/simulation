@@ -233,7 +233,9 @@ over the roster, so a flat `for o in self.agents` scan is O(n) per call
 - `reset(roster_size=None)` (sim_engine.py:9891) rebuilds the world
   (`_reset_world`), clears the in-process memory store, then deletes and
   immediately rewrites `state.db` via `clear_state()` + `save_state()` so a
-  reset persists cleanly.
+  reset persists cleanly. The HTTP route `POST /control/reset` (server.py)
+  calls this only after a successful `SIM_RESET_PASSWORD` check — see
+  [04-http-api.md](04-http-api.md).
 
 ## Sage emergency
 
@@ -326,11 +328,19 @@ of `civilization` (no serializer change) and always exists, flag on or off:
 
 ```json
 {
-  "version": 1, "intervened": false, "nextInterventionSeq": 1,
+  "version": 2, "intervened": false, "nextInterventionSeq": 1,
   "providence": null, "privateOmens": {}, "activeEvents": [],
-  "recentInterventions": []
+  "recentInterventions": [], "recentDivineResponses": [],
+  "whisperCampaigns": {}, "agentSampling": {}, "contextMasks": {},
+  "decisionGates": {}, "burningBush": {}, "anointments": {},
+  "identityForges": {}, "architectZones": [], "checkpoints": []
 }
 ```
+
+`GOD_STATE_VERSION` is `2` (Matrix scaffolding + live `whisperCampaigns` and
+`agentSampling`).
+Private maps (`whisperCampaigns`, `agentSampling`, `contextMasks`, etc.) never
+appear in `snapshot()["god"]` — only the public allowlist fields below.
 
 `_default_god_state()` builds this; `_normalize_god_state(raw)` is the
 restore-time normalizer, called unconditionally (same setdefault-only
@@ -364,19 +374,23 @@ the lock, stores the response, and consumes the preview (single-use once
 applied).
 
 **Command catalog (Phase 2).** `kind == "proclamation"` is applyable:
-`{"kind": "proclamation", "payload": {"text": str}}`. `text` passes through
-`_normalize_divine_text` (Unicode NFC; rejects NUL and C0/C1 controls other
-than space; rejects embedded newlines; enforces both a 240-character and a
-600-UTF-8-byte cap post-normalization — the byte cap is intentionally tighter
-than `4 * 240` so it is load-bearing, not merely redundant with the character
-cap) and is stored as plain text, never HTML. Applying a proclamation
-consumes `godState["nextInterventionSeq"]` for an id like `divine-1`, sets
-`intervened = True` (monotonic `false → true`), and writes an activity line,
-a `conversationLog` entry (`kind="divine_proclamation"`, `source="divine"`),
-and a chronicle entry (`kind="divine"`, `source="divine"`) — all with
-explicit non-emergent attribution. `story_event` (Phase 5, timed/composite)
-still validates far enough to be rejected cleanly with "not implemented in
-this phase"; an unrecognized kind is rejected as unknown.
+`{"kind": "proclamation", "payload": {"text": str, "durationFrames": int?}}`.
+`text` passes through `_normalize_divine_text` (Unicode NFC; rejects NUL and
+C0/C1 controls other than space; rejects embedded newlines; enforces both a
+240-character and a 600-UTF-8-byte cap post-normalization — the byte cap is
+intentionally tighter than `4 * 240` so it is load-bearing, not merely
+redundant with the character cap). **Proclamation auto-converts to
+providence:** applying a proclamation does **not** write a separate
+one-shot public record — it routes through the same `_god_apply_providence`
+machinery as a standalone `providence` command, occupying the single
+`godState["providence"]` slot with the same default/clamped `durationFrames`,
+disclose-then-replace fingerprint, `revoke_guidance`/`god_cancel` closure, and
+expiry discipline documented below. Activity/`conversationLog`/chronicle
+still attribute the event as a divine proclamation (`kind=
+"divine_proclamation"`, `source="divine"`) for operator readability, but
+cognition and adherence use the providence record. `story_event` (Phase 5,
+timed/composite) still validates far enough to be rejected cleanly with "not
+implemented in this phase"; an unrecognized kind is rejected as unknown.
 `god_cancel(target_id)` is plumbing only — there is nothing it handles;
 `revoke_guidance` (Phase 3, below) is the real cancellation path for
 providence and private omens, and it always returns a clean
@@ -401,15 +415,17 @@ work; providence/omen expiry is live from Phase 3 (below).
 `intervened`/`active_effects`/`rejected_commands` detail — see
 [12-ops.md](12-ops.md).
 
-## Sovereign God mode (Phase 3 — voice and providence)
+## Sovereign God mode (Phase 3 — Voice binding guidance)
 
 Three more catalog kinds are applyable, and `god_sight` gains the per-agent
-omen status field this section describes. Cognition-side rendering (the two
-prompt lines, the elder-directive separation) is [03](03-cognition.md).
+omen status field and `recentDivineResponses` adherence log this section
+describes. Cognition-side rendering (binding prompt lines, `divine_response`,
+the elder-directive separation) is [03](03-cognition.md).
 
 **`providence`** — `{"text": str, "durationFrames": int?}`. One active public
-non-binding line at a time, stored in `civilization["godState"]["providence"]`
-as `{id, text, createdFrame, expiresFrame, visibility: "public"}`.
+**binding** guidance line at a time, stored in
+`civilization["godState"]["providence"]` as `{id, text, createdFrame,
+expiresFrame, visibility: "public", ackedAgentIds?: {}}`.
 `durationFrames` is optional (default `GOD_GUIDANCE_DEFAULT_DURATION_FRAMES =
 5400`, ~3 minutes, mirroring `DIRECTIVE_TTL_FRAMES`) and is silently clamped
 into `GOD_GUIDANCE_MIN_DURATION_FRAMES..GOD_GUIDANCE_MAX_DURATION_FRAMES`
@@ -431,10 +447,259 @@ deceased (`deathFrame is not None`) target is rejected before the text is
 even normalized. Stored in `civilization["godState"]["privateOmens"]`, keyed
 **only** by `str(agent["id"])`, one record per agent:
 `{id, targetId, targetName, text, createdFrame, expiresFrame,
-memoryWritten}`. `targetName` is a non-authoritative display snapshot only.
-Never touches public activity/`conversationLog`/chronicle. Replacement
-follows the same disclose-then-replace fingerprint mechanism as providence,
-keyed per-target.
+memoryWritten, acked?: bool}`. `targetName` is a non-authoritative display
+snapshot only. **Binding** — same `divine_response` contract as public
+providence ([03](03-cognition.md)). Never touches public activity/
+`conversationLog`/chronicle. Replacement follows the same disclose-then-
+replace fingerprint mechanism as providence, keyed per-target.
+
+**`whisper_campaign`** — `{"theme": str, "durationFrames": int?,
+"whispers": [{targetId, text}, ...]}` (max `GOD_WHISPER_CAMPAIGN_MAX_TARGETS =
+12`). Batch apply: one parent campaign id in `godState["whisperCampaigns"]`
+linking `targets: {str(agentId): omenId}` plus per-target private omens via
+the same `_god_apply_private_omen` machinery (replace semantics unchanged).
+Campaign `theme` and whisper texts are **private** — never in `snapshot()`
+god allowlist or public logs. Cancel via `god_cancel(campaignId)` revokes every
+linked omen still active and removes the campaign entry; individual omen expiry
+or replacement also finalizes the campaign when no linked omens remain.
+
+**`agent_sampling`** — `{"targetId": int, "model": "sim-smart"|"sim-fast",
+"temperature": 0.0–1.5, "top_p"?, "top_k"?, "min_p"?, "durationFrames"?}`.
+`targetId` must resolve to a living agent. `model` defaults to `"sim-smart"`
+when omitted. Sampling numbers must be finite and in range (`top_p`/`min_p`
+0.0–1.0, `top_k` 0–200). `durationFrames` is optional — when omitted the
+override persists until `revoke_agent_sampling` or `god_cancel(interventionId)`
+(no `expiresFrame`). When supplied it is clamped like other guidance kinds.
+Stored in `godState["agentSampling"]`, keyed by `str(agentId)`:
+`{id, targetId, model, temperature, top_p?, top_k?, min_p?, createdFrame,
+expiresFrame?, sourceId}` (one active override per agent; replace semantics).
+**Private** — never in `snapshot()` god allowlist; `recentInterventions` records
+use `"public": false`. At preview/apply time, at most **one** living agent may
+hold an active `sim-fast` decision override (shared Ollama pool contention with
+PIANO — see [03](03-cognition.md)); replacing an agent's own existing
+`sim-fast` override does not count against the cap. Expiry via
+`_expire_divine_effects` when `expiresFrame` is reached.
+
+**`revoke_agent_sampling`** — `{"targetId": int}`. Clears the active sampling
+override for that agent if present; rejects when none is active. Also
+cancellable by `god_cancel(interventionId)` on the override's `id`.
+
+**`memory_insert`** — `{"targetId": int, "text": str, "salience": 0.0–1.0,
+"kind"?}`. `targetId` must resolve to a living agent. `text` is normalized via
+`_normalize_divine_text`. `kind` defaults to `"divine_false_memory"`. Applies
+via `_god_memory_insert`, which writes to `MemoryStore` (when present) and
+mirrors into the agent's local `memory.working` / `memory.shortTerm` tiers
+using the same salience eviction rules as `_push_memory`. **Private and
+irreversible** — never in `snapshot()` god allowlist, never in public
+activity/`conversationLog`/chronicle. `recentInterventions` records use
+`"public": false`; apply/preview outcomes expose counts and metadata only
+(no memory text).
+
+**`memory_delete`** — `{"targetId": int, "keyword"?, "frameFrom"?, "frameTo"?,
+"kinds"?}`. `targetId` must resolve to a living agent. **At least one** of
+`keyword` (case-insensitive substring on entry text), `frameFrom`/`frameTo`
+(inclusive bounds on `frame_tick`), or `kinds` (list of kind strings) is
+required. Deletes matching rows from `MemoryStore.delete_where` and, when
+`keyword` is set, purges matching lines from the agent's local
+`memory.working` / `memory.shortTerm` lists (local tiers carry no
+kind/frame metadata). **Private and irreversible** — same visibility contract
+as `memory_insert`. Preview/apply outcomes report `deletedCount` only.
+
+**`belief_plant`** — `{"targetId": int, "beliefId"?, "text"?, "plantInMemeTexts":
+bool, "salience"?}`. `targetId` must resolve to a living agent. At least one
+of `beliefId` or `text` is required. When only `text` is supplied, the engine
+registers a new divine-authored belief (`authoredBy: "divine"`) with a
+generated `divine_<hash>` id. When `beliefId` is supplied it must exist in
+`beliefRegistry` / seed `MEMES`. `plantInMemeTexts: true` stores the
+resolved tenet in `civilization["memeTexts"][beliefId]`. Adds the belief to
+`agent["beliefs"]` and writes a private memory line via `_god_memory_insert`
+(`kind="divine_belief"`). **Private and irreversible** — never in public
+logs; outcomes expose `beliefId` and belief counts, not tenet text, in
+`/state` projections.
+
+**`context_mask`** — `{"targetId": int, "mode": "dream"|"blue_pill"|"red_pill"|
+"whisper_chain", "durationFrames"?, "dreamSnapshot"?, "forgedConversations"?}`.
+`targetId` must resolve to a living agent. `durationFrames` is clamped like
+other guidance kinds (default applies when omitted). Stored in
+`godState["contextMasks"]`, keyed by `str(agentId)`:
+`{id, targetId, mode, createdFrame, expiresFrame, dreamSnapshot?,
+forgedConversations?}` — **one active mask per agent**; replace semantics with
+preview fingerprint `outgoingId` (same disclose-then-replace contract as
+private omens). **Private and cancellable** — never in `snapshot()` god
+allowlist; `recentInterventions` records use `"public": false`. Cancel via
+`god_cancel(interventionId)` on the mask's `id`; expiry via
+`_expire_divine_effects`. Modes mutate the **think payload only** (after the
+true snapshot is built) — never `conversationLog` or world state:
+
+| Mode | Effect |
+|---|---|
+| `dream` | Replace allowlisted think-payload keys from `dreamSnapshot` |
+| `blue_pill` | Strip `divine_public_line`, `divine_private_line`, `divine_public_event_line`, and divine-sourced `recent_conversations` slices |
+| `red_pill` | Inject `divine_simulation_truth_line` (flags, agent identity, intervened status — never other agents' private omens) |
+| `whisper_chain` | Replace `recent_conversations` with `forgedConversations` text |
+
+`dreamSnapshot` keys are allowlisted (`nearby_agents`, `resources`,
+`weather_line`, `recent_conversations`, `district_stocks`, `nearby_wildlife`,
+`nearby_wildlife_line`, `hunger`, `health`); unknown keys are rejected at
+preview. `forgedConversations` is a bounded list of `{from, to, message}`
+(normalized via `_normalize_divine_text` per message).
+
+**Decision gate (Divine Matrix Phase 5).** Stored in
+`godState["decisionGates"]`, keyed by `str(agentId)` — **private**, never in
+`snapshot()` god allowlist. One active gate per agent (replace semantics with
+preview fingerprint `outgoingId`). Modes:
+
+| Mode | Record shape | Think-path behavior |
+|---|---|---|
+| `compulsion` | `{mode, pinnedDecision, expiresFrame?, remainingTurns?, id, ...}` | After LLM (or fallback), `_apply_gated_decision` replaces the candidate with `pinnedDecision` (validated via `normalize_decision` at preview/apply). Decrements `remainingTurns` when set; expires when turns or `expiresFrame` elapse. |
+| `veto` | `{mode, armed: true, status, pendingDecision?, holdExpiresFrame?, id, ...}` | When armed, stashes the LLM candidate in `pendingDecision`, sets `agent["divineHold"]=True`, and does **not** apply until `decision_veto_resolve` (`approve`/`reject`/`rewrite`). Non-blocking for the tick thread. Concurrent holds capped at `GOD_VETO_HOLD_CAP = 3`; hold timeout → reject + `rest`. |
+| `possession` | `{mode, bypassLlm: true, pinnedDecision \| queue, queueIndex?, id, ...}` | Pre-LLM short-circuit in `_think_job`: skips `llm_decide`, applies pin/queue under lock. Post-LLM gate still forces pin if LLM somehow ran. |
+
+**Sage emergency bypass:** `_rush_to_heal` and the in-flight Sage discard path
+in `_think_job` call `apply_decision` directly — never `_apply_gated_decision`
+— so survival heals are never blocked by compulsion/veto/possession.
+
+Kinds: `decision_compulsion`, `decision_veto_arm`, `decision_veto_resolve`,
+`agent_possession`, `revoke_decision_gate`; cancel via `god_cancel` on gate
+`id`. Applied compelled/possessed world actions attribute
+`source="divine"` via `_push_communication` / `_push_chronicle` (activity
+summary from `apply_decision` remains; divine lines are additive). Agent field
+`divineHold` pauses movement and think scheduling while a veto hold is active.
+
+**Burning Bush + Merovingian Bargain (Divine Matrix Phase 6).** Stored in
+`godState["burningBush"]`, keyed by `str(agentId)` — **private**, never in
+`snapshot()` god allowlist. Per-agent record:
+`{id, targetId, thread: [{role: god|agent, text, frame}], bargain?, status,
+createdFrame}`. Thread text is soft-capped at `GOD_BURNING_BUSH_THREAD_MAX =
+20` entries and `GOD_BURNING_BUSH_PROMPT_MAX_CHARS` in prompt injection.
+
+Kinds: `burning_bush_message` (append God line to thread),
+`burning_bush_close` (end session), `merovingian_bargain` (attach open bargain
+with allowlisted predicates), `bargain_settle` (manual success/failure).
+
+Bargain predicates (`GOD_BARGAIN_PREDICATES`): `agent_has_resource`
+(`resourceId`, `amount?`), `structure_built` (`structureType`),
+`frame_reached` (`frame`), `agent_health_below` (`threshold`). Reward/punish
+primitives reuse `grant_resource` / `agent_vitals` only
+(`GOD_BARGAIN_PRIMITIVE_KINDS`). `_tick_divine_bargains()` runs under lock
+from `_expire_divine_effects` each tick: success predicate → reward;
+`failurePredicate` (optional) → punish; `expiresFrame` without success →
+failure punish. Grant rewards produce public activity (divine attribution);
+bush thread text and bargain terms stay private (`public: false` audit).
+
+Agent replies append to `thread` from `apply_decision` talk/reasoning via
+`_capture_burning_bush_reply`. Sight: `{active, messageCount, bargainActive,
+expiresFrame?}` — never thread text.
+
+**Anointed (Divine Matrix Phase 7).** Stored in `godState["anointments"]`,
+keyed by `str(agentId)` — **private**, never in `snapshot()` god allowlist.
+Per-agent record: `{id, targetId, destinyText, stigmataTags: [str],
+oracleHints: [{text, revealFrame}], createdFrame, expiresFrame}`.
+`destinyText` and due oracle hints (`revealFrame <= frameTick`) inject via
+`divine_anointment_line` in `_build_think_payload` / `build_user_prompt`
+(private — target only). `stigmataTags` fold into `_get_nearby_detailed` for
+**other** agents' prompts (`format_nearby_agents` suffix `signs: …`) — never
+into `/state` agent public fields.
+
+Kinds: `anoint` (replace semantics per agent), `revoke_anoint`. Caps:
+`GOD_ANOINT_STIGMATA_MAX`, `GOD_ANOINT_ORACLE_HINTS_MAX`,
+`GOD_ANOINT_PROMPT_MAX_CHARS`. Expiry via `_expire_divine_effects`; cancel via
+`god_cancel` on intervention `id` or `revoke_anoint`. Audit `public: false`
+for destiny/oracle text. Sight: `{active, tagCount, nextOracleFrame?,
+expiresFrame}` — never destiny or oracle secret text.
+
+**Identity Forge (Divine Matrix Phase 8).** Stored in `godState["identityForges"]`,
+keyed by `str(agentId)` — **private**, never in `snapshot()` god allowlist.
+Per-agent record: `{id, targetId, snapshot: {persona, personality, role},
+baseline?, copyFromId?, rate?, progress, createdFrame, expiresFrame?}`.
+
+Kinds: `identity_edit` (mutate persona/personality/role — role must exist in
+`roles.json`; timed edits restore snapshot on expiry/cancel via
+`_close_identity_forge`), `identity_copy_overwrite` (`targetId`, `sourceId`,
+`ratePerThink` 0.0–1.0, optional `syncMemories` plants up to
+`GOD_IDENTITY_COPY_MEMORIES_MAX` source working/shortTerm lines via
+`_god_memory_insert` — not a full clone), `identity_forge_cancel` (restore
+snapshot). Copy blend advances in `_advance_identity_forge_on_think` after each
+think cycle completes (`_finish_think_identity_forge`). Elder role swaps warn in
+preview (`warning` in `previewOutcome`) but are allowed at apply. Permanent
+edits (no `durationFrames`) are `consequential`; timed edits and copy are
+`cancellable`. Audit `public: false`. Sight: `{active, progress, rate?,
+copyFromId?, expiresFrame}` — no full persona dump.
+
+**Architect Zones (Divine Matrix Phase 9).** Stored in
+`godState["architectZones"]` (list) — **omitted** from `snapshot()` god
+allowlist; Sight exposes `{id, kind, districtId?, cellCount, expiresFrame,
+holdCount?}` summaries only (never `keyId`, `revertSnapshot`, or limbo prior
+coords). Per-zone record:
+`{id, kind: paint|door|limbo, districtId?, cells, paintTerrain?, keyId?,
+holdAgentIds[], grantKeyAgentIds?, reversible?, revertSnapshot?, limboHolds?,
+expiresFrame, status}`.
+
+Kinds: `architect_zone`, `architect_zone_cancel`, `architect_release_hold`.
+Constants: `GOD_LIMBO_STATION = (140, 500)` (ocean district Trainman platform),
+`GOD_ARCHITECT_ZONE_MAX_CELLS = 64`, `GOD_ARCHITECT_ZONES_MAX = 16`,
+`GOD_ARCHITECT_PAINT_TERRAINS` (`soil`, `rock`, `grove`, `water`, `sand`).
+
+| Kind | Mechanics | Audit `public` |
+|---|---|---|
+| `paint` | Writes Path1 `district["terrain"]` cells; `revertSnapshot` on cancel/expiry when `reversible: true` (default) | `true` (world-visible terrain) |
+| `door` | `_architect_door_blocks_move` in `_move_agent` — agents without matching `agent["godKeys"]` tag bounce in place | `false` |
+| `limbo` | Sets `divineHold=True`, parks agents at `GOD_LIMBO_STATION`, stores prior pose in `architectLimbo` | `false` |
+
+`grantKeyAgentIds` on door apply adds `keyId` to `agent["godKeys"]` (god-granted
+tags, not craft items). `architect_release_hold` restores pose and clears
+`divineHold` when no decision-gate veto hold remains. Expiry/cancel via
+`_close_architect_zone` (shared with `god_cancel` on zone `id`).
+
+**Reload / Déjà Vu checkpoints (Divine Matrix Phase 10).** Kinds:
+`checkpoint_create`, `checkpoint_restore`, `deja_vu_replay` (stub). Metadata in
+`godState["checkpoints"]` (list, cap `GOD_CHECKPOINT_MAX = 5`): `{id, label,
+frameTick, path, createdAt}` with `path` relative (`backup/god-checkpoints/<id>`).
+Disk layout under `simulation/backup/god-checkpoints/<id>/`: `state.db` and
+`memory_store.json` (WAL truncated on create via `save_state` + `PRAGMA
+wal_checkpoint(TRUNCATE)`). Injectable root: module `GOD_CHECKPOINT_ROOT` or
+per-engine `god_checkpoint_root` attribute (smoke uses temp dirs). At cap,
+preview rejects unless `replaceOldest: true` (drops oldest file+metadata on
+apply). Restore: pause-safe copy back to live `DB_PATH` + memory store path,
+`restore_state()`, clear preview/idempotency caches (same as any restore),
+resume. Audit `public: true`. `deja_vu_replay` rejects when
+`GOD_DEJA_VU_REPLAY` is off; when on, still rejects as not implemented (honest
+stub). Sight lists checkpoint summaries (no absolute disk paths); `checkpoints`
+metadata is **not** in `/state` `god` allowlist.
+
+**Voice apply side effects.** `_god_apply_providence`, `_god_apply_private_omen`,
+whisper-campaign per-target omens, and proclamation (via the providence path)
+each call `_cancel_voice_blocked_special_turns(affected_agent_ids)` at apply
+time. That helper drops any pending `sprite_design_only` or `invention_only`
+turn for those agents — clears the special-turn flag, does not reschedule it.
+The same cancellation runs on every tick while Voice guidance remains active
+and unacknowledged for an agent ([03](03-cognition.md)). This is a hard drop,
+not a soft defer to after guidance expires.
+
+**Divine-response log.** `godState["recentDivineResponses"]` is a bounded
+newest-first ring (cap `GOD_DIVINE_RESPONSE_LOG_MAX`, same order of magnitude
+as `recentInterventions`) of adherence records written when an agent's think
+records a valid or synthesized `divine_response` against active guidance:
+
+```json
+{
+  "agentId": 3,
+  "agentName": "Ash",
+  "guidanceId": "divine-12",
+  "guidanceKind": "providence" | "private_omen",
+  "stance": "follow" | "continue",
+  "reason": "…",
+  "synthetic": false,
+  "frameTick": 120450,
+  "action": "contribute_resources"
+}
+```
+
+`synthetic: true` when the engine supplied `missing_divine_response`.
+`reason` is always operator-visible in Sight; private-omen **text** itself
+never appears here — only the agent's stated adherence reason. The log is
+**private** (never in `/state`); `god_sight()` exposes it in full for the
+authenticated operator. Entries are never folded into agent prompts.
 
 **`revoke_guidance`** — `{"id": str}`. Ends an active providence or private
 omen early by its intervention id, whichever it matches (checked in that
@@ -475,12 +740,15 @@ replace, or a `revoke_guidance` targeting one sets `"public": False`, and
 this is the one guard standing between a private omen and a public `/state`
 leak, so every new intervention-recording call site MUST set `"public"`
 explicitly. `god_sight(filters)`'s per-agent projection exposes omen
-**status** only — `{"active": true, "expiresFrame": int}` or `None` — never
-the omen's text; the text itself is still reachable through
-`recentInterventions` in the same `god_sight` response (an "intervention
-outcome", explicitly in scope for the authenticated sight route) or by the
-operator recalling what they wrote. No omen content ever reaches unauthenticated
-surfaces.
+**status** only — `{"active": true, "expiresFrame": int, "unacked": bool}` or
+`None` — never the omen's text; `unacked` is true while the agent has not yet
+recorded a `divine_response` for that guidance id. The authenticated sight
+response also carries `recentDivineResponses` (the bounded adherence ring
+above) and per-agent slices filtered from it. Guidance text itself is still
+reachable through `recentInterventions` in the same `god_sight` response (an
+"intervention outcome", explicitly in scope for the authenticated sight route)
+or by the operator recalling what they wrote. No omen content ever reaches
+unauthenticated surfaces.
 
 ## Sovereign God mode (Phase 4 — bounded immediate miracles)
 
@@ -800,13 +1068,14 @@ its normal closure path (`_close_providence`, `_close_omen`, or
 `_close_story_event`) and returns `{"ok": true, "cancelled": true,
 "targetId": ..., "targetKind": "providence"|"private_omen"|"story_event"}`.
 No match — including any id minted by an irreversible Phase 4 miracle
-(`agent_vitals`/`grant_resource`/`structure_condition`) or a one-shot
-`proclamation`, none of which is ever stored in any of the three searched
-stores — returns the same `{"ok": true, "cancelled": false, "reason":
-"nothing to cancel", "targetId": ...}` shape Phase 2 already established, so
-a miracle id is refused by construction rather than through a kind-specific
-carve-out. This is a direct, lock-held mutation with no preview/apply step,
-matching the shape Phase 2 already gave this route.
+(`agent_vitals`/`grant_resource`/`structure_condition`), none of which is
+ever stored in any of the three searched stores — returns the same
+`{"ok": true, "cancelled": false, "reason": "nothing to cancel",
+"targetId": ...}` shape Phase 2 already established, so a miracle id is
+refused by construction rather than through a kind-specific carve-out.
+(Proclamation applies as providence and is cancellable via the providence
+slot when still active.) This is a direct, lock-held mutation with no
+preview/apply step, matching the shape Phase 2 already gave this route.
 
 **Preview — divine vs. custom-rule composition.** When a `story_event`
 preview's `modifiers` include `gather_yield_multiplier` or

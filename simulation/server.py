@@ -351,13 +351,22 @@ def resolve_high_stakes(data):
 
 def model_for_decision(data):
     """Phase 3 revision: every decision turn -- routine or high-stakes --
-    routes to MODEL_SMART. is_high_stakes_turn(data) is still computed by
-    callers (build_decision_payload, run_agent_decision's timeout choice, the
-    slim retry) to select thinking/timeout/max_tokens, but no longer selects
-    the model id here. MODEL_FAST is reserved for background cognition
-    (PIANO modules, memory summarizer/wiki merge, meta system, belief pitch
-    -- every direct lm_complete() caller), never for decisions. See the
-    MODEL_SMART/MODEL_FAST comment block above for why."""
+    routes to MODEL_SMART unless a Divine Matrix agent_sampling override is
+    active (sim-fast forces MODEL_FAST; sim-smart stays on the smart tier).
+    is_high_stakes_turn(data) is still computed by callers
+    (build_decision_payload, run_agent_decision's timeout choice, the slim
+    retry) to select thinking/timeout/max_tokens, but no longer selects the
+    model id here except via divine_sampling. MODEL_FAST is otherwise
+    reserved for background cognition (PIANO modules, memory summarizer/wiki
+    merge, meta system, belief pitch -- every direct lm_complete() caller),
+    never for decisions. See the MODEL_SMART/MODEL_FAST comment block above."""
+    sampling = data.get("divine_sampling")
+    if isinstance(sampling, dict):
+        model_key = sampling.get("model")
+        if model_key == "sim-fast":
+            return MODEL_FAST
+        if model_key == "sim-smart":
+            return MODEL_SMART
     return MODEL_SMART
 
 
@@ -729,6 +738,68 @@ class MemoryStore:
         if tier:
             snapshot = [e for e in snapshot if e["tier"] == tier]
         return snapshot[-max(1, int(limit)):]
+
+    def delete_where(self, *, agent=None, keyword=None, frame_from=None,
+                     frame_to=None, kinds=None):
+        """Delete entries matching structured filters. Thread-safe. Returns count
+        deleted. At least one filter should be supplied by the caller."""
+        kinds_set = set(kinds) if kinds else None
+        kw_lower = keyword.lower() if isinstance(keyword, str) and keyword else None
+        deleted = 0
+        with self._lock:
+            kept = []
+            for e in self.entries:
+                if agent and e.get("agent") != agent:
+                    kept.append(e)
+                    continue
+                if kw_lower is not None and kw_lower not in (e.get("text") or "").lower():
+                    kept.append(e)
+                    continue
+                ft = e.get("frame_tick")
+                if frame_from is not None and (not isinstance(ft, int) or ft < frame_from):
+                    kept.append(e)
+                    continue
+                if frame_to is not None and (not isinstance(ft, int) or ft > frame_to):
+                    kept.append(e)
+                    continue
+                if kinds_set is not None and e.get("kind") not in kinds_set:
+                    kept.append(e)
+                    continue
+                deleted += 1
+            if deleted:
+                self.entries = kept
+                self._since_persist += 1
+                should_persist = self._since_persist >= MEMORY_PERSIST_EVERY
+                if should_persist:
+                    self._since_persist = 0
+            else:
+                should_persist = False
+        if should_persist:
+            self._persist()
+        return deleted
+
+    def count_where(self, *, agent=None, keyword=None, frame_from=None,
+                    frame_to=None, kinds=None):
+        """Non-mutating count of entries that delete_where would remove."""
+        kinds_set = set(kinds) if kinds else None
+        kw_lower = keyword.lower() if isinstance(keyword, str) and keyword else None
+        count = 0
+        with self._lock:
+            snapshot = list(self.entries)
+        for e in snapshot:
+            if agent and e.get("agent") != agent:
+                continue
+            if kw_lower is not None and kw_lower not in (e.get("text") or "").lower():
+                continue
+            ft = e.get("frame_tick")
+            if frame_from is not None and (not isinstance(ft, int) or ft < frame_from):
+                continue
+            if frame_to is not None and (not isinstance(ft, int) or ft > frame_to):
+                continue
+            if kinds_set is not None and e.get("kind") not in kinds_set:
+                continue
+            count += 1
+        return count
 
     def _trim_locked(self):
         """Drop the lowest-value entries once over the global cap."""
@@ -1185,6 +1256,18 @@ DECISION_SCHEMA = {
                 "grid": {"type": "array"},
             },
         },
+        # Required on every decision turn while voice_guidance_active is true
+        # (binding Voice guidance). Missing/invalid values are synthesized in
+        # synthesize_divine_response() — not rejected.
+        "divine_response": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "properties": {
+                "stance": {"type": "string", "enum": ["follow", "continue"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["stance", "reason"],
+        },
     },
 }
 
@@ -1449,7 +1532,12 @@ def format_nearby_agents(nearby):
                 food = item.get("food", 0)
                 wood = item.get("wood", 0)
                 gold = item.get("gold", 0)
-                parts.append(f"{name} ({role}, food:{food} wood:{wood} gold:{gold})")
+                stigma_suffix = ""
+                stigmata = item.get("stigmata")
+                if isinstance(stigmata, list) and stigmata:
+                    stigma_suffix = f", signs: {', '.join(str(t) for t in stigmata)}"
+                parts.append(
+                    f"{name} ({role}, food:{food} wood:{wood} gold:{gold}{stigma_suffix})")
             else:
                 parts.append(str(item))
         return "; ".join(parts)
@@ -2375,6 +2463,34 @@ def role_fallback_action(role, agent_data):
     return {"action": "collect_resource", "target": None, "message": None,
             "new_role": None, "relationship_update": None,
             "reasoning": "Working toward civilization goals."}
+
+
+def synthesize_divine_response(decision, agent_data):
+    """When binding Voice guidance is active, ensure divine_response is present.
+
+    Missing/invalid values synthesize continue + missing_divine_response without
+    rejecting the validated action."""
+    if not isinstance(decision, dict) or not agent_data.get("voice_guidance_active"):
+        return decision
+    raw = decision.get("divine_response")
+    valid = (
+        isinstance(raw, dict)
+        and raw.get("stance") in ("follow", "continue")
+        and isinstance(raw.get("reason"), str)
+        and raw.get("reason", "").strip()
+    )
+    if valid:
+        decision["divine_response"] = {
+            "stance": raw["stance"],
+            "reason": raw["reason"].strip()[:240],
+        }
+        return decision
+    decision["divine_response"] = {
+        "stance": "continue",
+        "reason": "missing_divine_response",
+    }
+    decision["divine_response_synthetic"] = True
+    return decision
 
 
 def normalize_decision(decision, agent_data):
@@ -3387,6 +3503,12 @@ def build_invention_prompt(data):
     )
 
 
+def _format_voice_guidance_line(kind, text):
+    """Binding Voice prompt line for public providence or private omen."""
+    label = "Divine guidance (binding)" if kind == "public" else "Private guidance (binding)"
+    return f"{label}: {text} State whether you follow or continue in divine_response.\n"
+
+
 def build_user_prompt(data, slim=False):
     """Fill in USER_PROMPT_TEMPLATE from the agent/civilization state. When
     slim=True (the context-overflow retry, see run_agent_decision), drop the
@@ -3464,23 +3586,30 @@ def build_user_prompt(data, slim=False):
     # entry) so flag-off / empty-chronicle prompts stay byte-identical.
     chronicle_line_raw = data.get("chronicle_line")
     chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
-    # Sovereign God mode (Phase 3, docs/plan-sovereign-god-mode-v2.md "Bounded
-    # cognition impact"): at most one public providence line and one private
-    # omen line, each rendered ONLY when the engine's Phase-3 fields are set
-    # (GOD_MODE_ENABLED and an active record within its frame window) --
-    # same fold-in-only-when-set pattern as every other optional line above,
-    # so flag-off / no-active-guidance prompts stay byte-identical. The
-    # fixed "You may interpret or ignore it." wording preserves agent
-    # autonomy per the plan's own example lines. These are SEPARATE from
-    # `directive` (elder leadership) both here and in the payload -- never
-    # folded together in either direction.
+    # Sovereign God mode (Phase 3 — Voice binding): public providence and
+    # private omens use binding prompt lines requiring divine_response; Matrix
+    # anoint/bush/story lines keep soft "interpret or ignore" wording.
     divine_lines_parts = []
     divine_public_raw = data.get("divine_public_line")
     if divine_public_raw:
-        divine_lines_parts.append(f"Divine omen: {divine_public_raw} You may interpret or ignore it.\n")
+        divine_lines_parts.append(_format_voice_guidance_line("public", divine_public_raw))
     divine_private_raw = data.get("divine_private_line")
     if divine_private_raw:
-        divine_lines_parts.append(f"Private omen: {divine_private_raw} You may interpret or ignore it.\n")
+        divine_lines_parts.append(_format_voice_guidance_line("private", divine_private_raw))
+    divine_bush_raw = data.get("divine_burning_bush_line")
+    if divine_bush_raw:
+        divine_lines_parts.append(
+            f"Divine audience: {divine_bush_raw} You may respond in talk or reason.\n")
+    divine_anoint_raw = data.get("divine_anointment_line")
+    if divine_anoint_raw:
+        divine_lines_parts.append(
+            f"Anointed destiny: {divine_anoint_raw} You may interpret or ignore it.\n")
+    divine_event_raw = data.get("divine_public_event_line")
+    if divine_event_raw:
+        divine_lines_parts.append(f"Divine story: {divine_event_raw} You may interpret or ignore it.\n")
+    truth_raw = data.get("divine_simulation_truth_line")
+    if truth_raw:
+        divine_lines_parts.append(f"{truth_raw}\n")
     divine_lines = "".join(divine_lines_parts)
     council_digest_raw = data.get("council_digest_line")
     council_digest_line = (
@@ -3703,6 +3832,18 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
             payload["presence_penalty"] = ROUTINE_PRESENCE_PENALTY
     if response_format is not None:
         payload["response_format"] = response_format
+    divine_sampling = data.get("divine_sampling")
+    if isinstance(divine_sampling, dict):
+        model_key = divine_sampling.get("model")
+        if model_key == "sim-fast":
+            payload["model"] = MODEL_FAST
+        elif model_key == "sim-smart":
+            payload["model"] = MODEL_SMART_SYS if omit_system_prompt else MODEL_SMART
+        if "temperature" in divine_sampling:
+            payload["temperature"] = divine_sampling["temperature"]
+        for key in ("top_p", "top_k", "min_p"):
+            if key in divine_sampling:
+                payload[key] = divine_sampling[key]
     return payload
 
 
@@ -3950,7 +4091,10 @@ def run_agent_decision(data):
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
                                           error=error_kind or "bad_response")
 
-        decision = score_belief_pitch_decision(normalize_decision(decision, agent_data), data)
+        decision = synthesize_divine_response(
+            score_belief_pitch_decision(normalize_decision(decision, agent_data), data),
+            agent_data,
+        )
 
         log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=error_kind)
         return decision
@@ -4035,6 +4179,9 @@ _ENGINE_DEPS = {
     "canonical_effect_vector": canonical_effect_vector,
     "run_piano_module": run_piano_module,
     "run_meta_update": run_meta_update,
+    "normalize_decision": normalize_decision,
+    "synthesize_divine_response": synthesize_divine_response,
+    "build_agent_data": build_agent_data,
 }
 
 _roster_env = os.environ.get("SIM_AGENTS")
@@ -4198,9 +4345,18 @@ def control_resume():
     return jsonify({"ok": True, "paused": False})
 
 
+_RESET_PASSWORD_RAW = os.environ.get("SIM_RESET_PASSWORD", "").strip()
+RESET_PASSWORD = _RESET_PASSWORD_RAW if _RESET_PASSWORD_RAW else "reset"
+
+
 @app.route("/control/reset", methods=["POST"])
 def control_reset():
     body = request.get_json(force=True, silent=True) or {}
+    supplied = body.get("password", "")
+    if not isinstance(supplied, str):
+        supplied = ""
+    if not hmac.compare_digest(supplied, RESET_PASSWORD):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     agents = body.get("agents")
     try:
         agents = int(agents) if agents else None
@@ -4280,6 +4436,10 @@ def control_god_capabilities():
                                      "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
                                      "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES}},
                 "reversibilityClass": "irreversible",
+                "notes": (
+                    "Chronicle/activity proclamation plus auto-applies as timed "
+                    "providence (same text, default duration, replace slot)."
+                ),
             },
             # Sovereign God mode Phase 3 (docs/plan-sovereign-god-mode-v2.md
             # "Voice and providence").
@@ -4307,6 +4467,399 @@ def control_god_capabilities():
                                        "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
                 },
                 "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 1: batch whisper campaign (private omens per target).
+            "whisper_campaign": {
+                "applyable": True,
+                "payload": {
+                    "theme": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                              "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                    "whispers": {
+                        "type": "array",
+                        "maxItems": _sim_engine.GOD_WHISPER_CAMPAIGN_MAX_TARGETS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "targetId": {"type": "integer"},
+                                "text": {"type": "string",
+                                         "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                         "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                            },
+                        },
+                    },
+                },
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 2: per-agent LLM sampling overlay (private).
+            "agent_sampling": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "model": {"type": "string", "enum": list(_sim_engine.GOD_AGENT_SAMPLING_MODELS),
+                              "optional": True, "default": "sim-smart"},
+                    "temperature": {"type": "number",
+                                    "min": _sim_engine.GOD_AGENT_SAMPLING_TEMP_MIN,
+                                    "max": _sim_engine.GOD_AGENT_SAMPLING_TEMP_MAX},
+                    "top_p": {"type": "number", "optional": True,
+                              "min": _sim_engine.GOD_AGENT_SAMPLING_TOP_P_MIN,
+                              "max": _sim_engine.GOD_AGENT_SAMPLING_TOP_P_MAX},
+                    "top_k": {"type": "integer", "optional": True,
+                              "min": _sim_engine.GOD_AGENT_SAMPLING_TOP_K_MIN,
+                              "max": _sim_engine.GOD_AGENT_SAMPLING_TOP_K_MAX},
+                    "min_p": {"type": "number", "optional": True,
+                              "min": _sim_engine.GOD_AGENT_SAMPLING_MIN_P_MIN,
+                              "max": _sim_engine.GOD_AGENT_SAMPLING_MIN_P_MAX},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": (
+                    f"at most {_sim_engine.GOD_AGENT_SAMPLING_FAST_DECISION_CAP} living agent "
+                    "may use sim-fast for decisions at once (PIANO pool contention)."
+                ),
+            },
+            "revoke_agent_sampling": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 3: memory surgery (private, irreversible).
+            "memory_insert": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "salience": {"type": "number", "min": 0.0, "max": 1.0,
+                                 "optional": True, "default": 0.7},
+                    "kind": {"type": "string", "optional": True,
+                             "default": _sim_engine.GOD_MEMORY_DEFAULT_KIND,
+                             "maxLen": _sim_engine.GOD_MEMORY_KIND_MAX_LEN},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "never in public activity/chronicle; outcomes omit memory text.",
+            },
+            "memory_delete": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "keyword": {"type": "string", "optional": True},
+                    "frameFrom": {"type": "integer", "optional": True},
+                    "frameTo": {"type": "integer", "optional": True},
+                    "kinds": {"type": "array", "optional": True, "items": {"type": "string"}},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "at least one of keyword/frameFrom/frameTo/kinds required; "
+                         "outcome is deletedCount only.",
+            },
+            "belief_plant": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "beliefId": {"type": "string", "optional": True},
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES, "optional": True},
+                    "plantInMemeTexts": {"type": "boolean"},
+                    "salience": {"type": "number", "min": 0.0, "max": 1.0,
+                                 "optional": True, "default": 0.7},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "at least one of beliefId or text; never in public logs.",
+            },
+            # Divine Matrix Phase 4: reality distortion / context masks (private).
+            "context_mask": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "mode": {"type": "string",
+                             "enum": sorted(_sim_engine.GOD_CONTEXT_MASK_MODES)},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                    "dreamSnapshot": {
+                        "type": "object", "optional": True,
+                        "allowedKeys": sorted(_sim_engine.GOD_CONTEXT_MASK_DREAM_KEYS),
+                        "notes": "required when mode=dream; unknown keys rejected",
+                    },
+                    "forgedConversations": {
+                        "type": "array", "optional": True,
+                        "maxItems": _sim_engine.GOD_CONTEXT_MASK_FORGED_MAX,
+                        "notes": "required when mode=whisper_chain",
+                    },
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "mutates think payload only; cancel via god_cancel on mask id.",
+            },
+            # Divine Matrix Phase 5: decision gate / possession pipeline (private).
+            "decision_compulsion": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "pinnedDecision": {"type": "object", "notes": "must include action; validated via normalize_decision"},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES},
+                    "remainingTurns": {"type": "integer", "optional": True, "min": 1},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "at least one of durationFrames or remainingTurns required; cancel via god_cancel.",
+            },
+            "decision_veto_arm": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+            },
+            "decision_veto_resolve": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "resolution": {"type": "string", "enum": ["approve", "reject", "rewrite"]},
+                    "rewrittenDecision": {"type": "object", "optional": True},
+                },
+                "reversibilityClass": "irreversible",
+            },
+            "agent_possession": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "pinnedDecision": {"type": "object", "optional": True},
+                    "queue": {"type": "array", "optional": True, "maxItems": 8},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "skips LLM when active; pinnedDecision or queue required.",
+            },
+            "revoke_decision_gate": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 6: Burning Bush + Merovingian Bargain (private).
+            "burning_bush_message": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "private thread; never in /state; Sight shows messageCount only.",
+            },
+            "burning_bush_close": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "cancellable",
+            },
+            "merovingian_bargain": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "termsText": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                  "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "successPredicate": {
+                        "type": "object",
+                        "kindEnum": sorted(_sim_engine.GOD_BARGAIN_PREDICATES),
+                    },
+                    "failurePredicate": {
+                        "type": "object", "optional": True,
+                        "kindEnum": sorted(_sim_engine.GOD_BARGAIN_PREDICATES),
+                    },
+                    "rewardPrimitive": {
+                        "type": "object", "optional": True,
+                        "kindEnum": sorted(_sim_engine.GOD_BARGAIN_PRIMITIVE_KINDS),
+                    },
+                    "punishPrimitive": {
+                        "type": "object", "optional": True,
+                        "kindEnum": sorted(_sim_engine.GOD_BARGAIN_PRIMITIVE_KINDS),
+                    },
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "predicates allowlisted only; auto-settle on tick; grant rewards are public.",
+            },
+            "bargain_settle": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "outcome": {"type": "string", "enum": ["success", "failure"]},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "manual settle; tick auto-settle is primary path.",
+            },
+            # Divine Matrix Phase 7: Anointed (destiny private, stigmata in neighbor prompts).
+            "anoint": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "destinyText": {"type": "string",
+                                    "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                    "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "stigmataTags": {
+                        "type": "array", "optional": True,
+                        "maxItems": _sim_engine.GOD_ANOINT_STIGMATA_MAX,
+                        "items": {"type": "string",
+                                  "maxChars": _sim_engine.GOD_ANOINT_STIGMATA_TAG_MAX_CHARS},
+                    },
+                    "oracleHints": {
+                        "type": "array", "optional": True,
+                        "maxItems": _sim_engine.GOD_ANOINT_ORACLE_HINTS_MAX,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string",
+                                         "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                         "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                                "revealFrame": {"type": "integer", "min": 0},
+                            },
+                        },
+                    },
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "destiny/oracle private; stigmata in nearby-agent prompt only; "
+                         "cancel via god_cancel or revoke_anoint.",
+            },
+            "revoke_anoint": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 8: Identity Forge (persona/personality/role).
+            "identity_edit": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "persona": {
+                        "type": "string", "optional": True,
+                        "maxChars": _sim_engine.GOD_IDENTITY_PERSONA_MAX_CHARS,
+                    },
+                    "personality": {
+                        "type": "string", "optional": True,
+                        "maxChars": _sim_engine.GOD_IDENTITY_PERSONALITY_MAX_CHARS,
+                        "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES,
+                    },
+                    "role": {"type": "string", "optional": True,
+                             "description": "must exist in roles.json"},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "timed edits restore snapshot on expiry/cancel; permanent edits are consequential.",
+            },
+            "identity_copy_overwrite": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "sourceId": {"type": "integer"},
+                    "ratePerThink": {"type": "number", "min": 0.0, "max": 1.0},
+                    "syncMemories": {"type": "boolean", "optional": True, "default": False},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "blends persona/personality each think; optional syncMemories plants up to 3 source memories.",
+            },
+            "identity_forge_cancel": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "irreversible",
+                "notes": "restores snapshot taken at apply; clears active forge.",
+            },
+            # Divine Matrix Phase 9: Architect Zones (paint / door / limbo).
+            "architect_zone": {
+                "applyable": True,
+                "payload": {
+                    "zoneKind": {"type": "string", "enum": ["paint", "door", "limbo"]},
+                    "districtId": {"type": "string", "optional": True},
+                    "cells": {
+                        "type": "array",
+                        "maxItems": _sim_engine.GOD_ARCHITECT_ZONE_MAX_CELLS,
+                        "description": 'gx,gy strings or {gx1,gy1,gx2,gy2} bounds',
+                    },
+                    "paintTerrain": {
+                        "type": "string", "optional": True,
+                        "enum": sorted(_sim_engine.GOD_ARCHITECT_PAINT_TERRAINS),
+                    },
+                    "keyId": {"type": "string", "optional": True,
+                              "maxChars": _sim_engine.GOD_ARCHITECT_KEY_MAX_LEN},
+                    "grantKeyAgentIds": {"type": "array", "optional": True,
+                                         "items": {"type": "integer"}},
+                    "holdAgentIds": {"type": "array", "optional": True,
+                                     "items": {"type": "integer"}},
+                    "reversible": {"type": "boolean", "optional": True, "default": True},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "paint is public/world-visible; door/limbo audit private. grantKeyAgentIds grants godKeys tags on apply.",
+            },
+            "architect_zone_cancel": {
+                "applyable": True,
+                "payload": {"zoneId": {"type": "string"}},
+                "reversibilityClass": "cancellable",
+            },
+            "architect_release_hold": {
+                "applyable": True,
+                "payload": {
+                    "zoneId": {"type": "string"},
+                    "agentIds": {"type": "array", "optional": True,
+                                 "items": {"type": "integer"}},
+                },
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 10: Reload / Déjà Vu checkpoints.
+            "checkpoint_create": {
+                "applyable": True,
+                "payload": {
+                    "label": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                              "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "replaceOldest": {"type": "boolean", "optional": True, "default": False},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": (
+                    f"cap {_sim_engine.GOD_CHECKPOINT_MAX} checkpoints; "
+                    "reject at preview when full unless replaceOldest is true."
+                ),
+            },
+            "checkpoint_restore": {
+                "applyable": True,
+                "payload": {"checkpointId": {"type": "string"}},
+                "reversibilityClass": "irreversible",
+                "notes": "irreversible world replace — copies checkpoint state.db + memory_store.json, then restore_state().",
+            },
+            "deja_vu_replay": {
+                "applyable": False,
+                "payload": {},
+                "reversibilityClass": "irreversible",
+                "notes": "stub — rejected unless GOD_DEJA_VU_REPLAY flag is on; not implemented even when on.",
             },
             "revoke_guidance": {
                 "applyable": True,

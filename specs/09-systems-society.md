@@ -580,18 +580,34 @@ anything else, at a negligible cost (~80 extra short strings in `/state` and
 `state.db`).
 
 **Divine communication (Sovereign God mode, `GOD_MODE_ENABLED`):** an applied
-`proclamation` or `providence` command pushes to all three of `activity`,
+`proclamation` (which auto-applies as timed providence) or standalone
+`providence` command pushes to all three of `activity`,
 `conversationLog` (`kind="divine_proclamation"`/`"divine_providence"`), and
 Chronicle (`kind="divine"`) in one call, each entry carrying explicit
 `source="divine"` attribution so it never masquerades as emergent agent
 speech. `providence`'s expiry and `revoke_guidance` targeting it additionally
 push one plain `activity` line ("fades"/"is revoked") with no matching
-Chronicle/communication duplication. **Private omens are the deliberate
-opposite:** a `private_omen` apply, replace, expiry, or revocation never
-writes to `activity`, `conversationLog`, or the Chronicle under any
+Chronicle/communication duplication.
+
+**Voice adherence (`divine_response`).** When an agent's think records a valid
+or synthesized `divine_response` against active binding guidance, the engine
+appends one `conversationLog` entry (`kind="divine_response"`,
+`source="divine"`, `from` = agent name, `to` = `"divine"`, `message` =
+`"{stance}: {reason}"`, `outcome` = the applied `action`) and one plain
+`activity` line summarizing stance + agent + guidance kind (e.g. "Ash
+continued private guidance: …"). These are **public** audit surfaces — they
+expose adherence stance and the agent's stated reason, never the private omen
+text itself. Synthetic `missing_divine_response` records use the same shape
+with `synthetic: true` in the divine-response log ([02](02-engine-core.md)).
+No Chronicle milestone — routine adherence stays in `activity`/
+`conversation.jsonl`.
+
+**Private omens are the deliberate opposite for guidance text:** a
+`private_omen` apply, replace, expiry, or revocation never writes the omen
+text to `activity`, `conversationLog`, or the Chronicle under any
 circumstance — the only place its content is ever readable outside the
 target's own (eventual, exactly-once) memory is the authenticated
-`/control/god/sight` route (see [02](02-engine-core.md#sovereign-god-mode-phase-3--voice-and-providence)
+`/control/god/sight` route (see [02](02-engine-core.md#sovereign-god-mode-phase-3--voice-binding-guidance)
 and [06](06-agents.md)). `snapshot()`'s `god.recentPublicInterventions` is
 filtered to `"public": True` records for the same reason — a private omen's
 outcome record is written with `"public": False` and is excluded from
@@ -655,6 +671,23 @@ never a valid target — attempts log a rejection note and do nothing.
 Contact radius `CONFRONT_CONTACT_DIST = 80` px (matches heal/bury/trade
 adjacency). Out of range: action sets movement toward target (same pattern as
 `trade_resource` / `heal_agent`).
+
+### Divine Matrix Phase 5: decision-gate attribution
+
+Compelled, possessed, and veto-resolved actions that mutate the world must not
+read as emergent agent initiative. The engine writes explicit
+`source="divine"` entries to `conversationLog` (kinds like `divine_compulsion`,
+`divine_possession`, `divine_veto_hold`, `divine_veto_resolve`) and to
+`chronicle` for consequential actions (not plain `rest` / `talk_to_nearby`).
+Routine `apply_decision` activity lines may still describe the mechanical
+outcome; divine attribution is additive via the communication/chronicle path
+(same discipline as `agent_vitals` / `grant_resource` in Phase 4).
+
+**Anointed (Phase 7):** destiny and oracle hints are cognition-only — they
+must not appear in `activity`, `conversationLog`, or `chronicle`. Stigmata tags
+are folded into neighbor **prompt** text only (`format_nearby_agents`); they
+are not broadcast proclamations and must not masquerade as emergent social
+status on `/state`.
 
 On contact, deterministic order:
 

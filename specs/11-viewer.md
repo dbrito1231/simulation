@@ -65,7 +65,10 @@ world state beyond a cached palette/season key.
 - Controls (Pause/Resume/Reset) POST to `/control/pause|resume|reset` via
   `postControl()` (`viewer.js`) with optimistic local flips
   reconciled by the next poll; keyboard shortcut `R` also resets
-  (`viewer.js`).
+  (`viewer.js`), ignored while focus is in an input, textarea, select, or
+  contenteditable field. Reset additionally prompts for the `SIM_RESET_PASSWORD`
+  value (default `reset` when unset) after the confirm dialog; cancel/empty
+  aborts, and HTTP 401 shows an alert — see [04-http-api.md](04-http-api.md).
 
 ## Canvas / world rendering
 
@@ -751,13 +754,67 @@ conflict the same way — see this phase's report for the underlying gap.
   every other panel already reads) plus a Refresh button that calls
   `GET /control/god/sight` and renders the selected agent's health/hunger/
   incapacitated/district/resources/last action, private-omen status
-  (active + countdown only, never the omen text — matching `god_sight()`'s
-  own restraint), and every active effect from the authenticated
+  (active + countdown + `unacked` flag only, never the omen text — matching
+  `god_sight()`'s own restraint), every active effect from the authenticated
   `activeEvents` list (including private-visibility ones, tagged with a
-  `private` badge) with a countdown each.
-- **Voice** — three independent subforms (`proclamation`, `providence` with
-  a duration field, `private_omen` with an agent selector and duration),
-  each following the Preview → Apply contract above.
+  `private` badge) with a countdown each, and a **Voice adherence** subsection
+  listing `recentDivineResponses` entries for the selected agent (newest first,
+  capped display): agent name, guidance kind/id, `follow`/`continue` stance,
+  reason (including `missing_divine_response` when synthetic), frame, and the
+  applied `action`. Private omen text never appears in this list.
+- **Voice** — four independent subforms (`proclamation`, `providence` with
+  a duration field, `private_omen` with an agent selector and duration, and
+  `whisper_campaign` with shared theme + per-agent whisper rows up to 12),
+  each following the Preview → Apply contract above. **Proclamation** applies
+  as timed providence (same slot, duration, revoke) per
+  [02-engine-core.md](02-engine-core.md); capabilities echoes optional
+  `durationFrames` on the proclamation kind.
+- **Voice Adherence** — a dedicated panel section (reachable from the Voice
+  feature window and cross-linked from Sight) that renders the full authenticated
+  `recentDivineResponses` ring from the latest `god_sight()` refresh: all
+  agents, newest first, with stance/reason/synthetic flag/guidance kind/action/
+  frame. This is the operator's primary adherence surface; it never shows private
+  omen text, only each agent's stated reason. Refresh reuses the same Sight fetch.
+- **Matrix** — brain, memory, distortion, possession, dialogue, identity, zone,
+  and checkpoint interventions (see phase list below). Each tool fieldset shows
+  an always-visible `.divine-help` blurb under its legend plus `data-tip`
+  tooltips on labels, controls, and Preview/Apply buttons (same delegated
+  `#tooltip` handler as Voice). The panel opens with a short intro paragraph;
+  tools are grouped under section headings (Brain, Memory, Distortion,
+  Possession, Dialogue & Bargain, Identity, Zones, Reload). Phase 2 ships **Brain / Temperature
+  Dial** (`agent_sampling`: agent + model + temperature slider + optional
+  `top_p`/`top_k`/`min_p` + duration; `revoke_agent_sampling` to clear).
+  Phase 3 adds **Memory Surgery** (`memory_insert`, `memory_delete`,
+  `belief_plant` — three independent fieldsets with agent selectors).
+  Phase 4 adds **Reality distortion** (`context_mask`: agent + mode radio
+  — blue pill / red pill / dream / whisper chain — plus duration; dream and
+  whisper modes accept JSON field inputs). Phase 5 adds **Possession pipeline**
+  fieldsets: `decision_compulsion` (agent + pin action + duration/turns),
+  `decision_veto_arm`, `decision_veto_resolve` (approve/reject/rewrite),
+  `agent_possession` (agent + pin action + duration), and `revoke_decision_gate`.
+  Phase 6 adds **Burning Bush** (`burning_bush_message`, `burning_bush_close`)
+  and **Merovingian Bargain** (`merovingian_bargain`, `bargain_settle`) with
+  predicate dropdowns and grant/vitals primitive fields. Pin actions use a curated `GOD_PIN_ACTIONS` select (labels from
+  `ACTION_LABELS`). Preview → Apply via `wireDivineForm`. Sight shows gate
+  status (`decisionGate`, `divineHold`) and pinned action summary; never
+  `decisionGates` map contents on `/state`. Whisper campaigns remain under Voice.
+  Phase 7 adds **Anoint** (`anoint`: agent + destiny + comma-separated stigmata
+  tags + oracle hints textarea `revealFrame|text` per line + duration; `revoke_anoint`
+  for one agent). Destiny/oracle never in `/state`; Sight shows anointment status
+  summary only. Phase 8 adds **Identity** (`identity_edit`: agent + optional
+  persona/personality/role + duration; `identity_copy_overwrite`: target + source
+  + rate + optional sync memories + duration; `identity_forge_cancel` for one
+  agent). `identityForges` never in `/state`; Sight shows forge progress summary.
+  Phase 9 adds **Architect Zones** (`architect_zone`: kind select paint/door/limbo,
+  district + cells textarea, paint terrain, key id, grant-key / limbo-hold agent
+  multi-selects, duration, reversible paint; `architect_zone_cancel`; `architect_release_hold`).
+  `architectZones` never in `/state`; paint is world-visible via terrain; door/limbo
+  audit `public: false`. Sight: zone summaries + per-agent `architectLimbo` status.
+  Phase 10 adds **Reload** (`checkpoint_create`: label + optional `replaceOldest`;
+  `checkpoint_restore`: checkpoint picker from Sight; irreversible fieldset +
+  strong confirm copy in preview). `checkpoints` never in `/state`; Sight lists
+  id/label/frameTick/createdAt only. **Déjà Vu** fieldset stays disabled unless
+  `GOD_DEJA_VU_REPLAY` (stub — not implemented).
 - **Miracles** — Phase 4 trio (`agent_vitals`, `grant_resource`,
   `structure_condition`) plus town-integrity kinds (`repair_structures`,
   `clear_ruins` — [02-engine-core.md](02-engine-core.md)); all labeled

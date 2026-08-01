@@ -44,7 +44,7 @@ configured; see "Sovereign God mode" below.
 | `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected) | — | `{districts: [...], roadNodes: {...}, roadEdges: [...]}` |
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
 | `/control/resume` | POST | Resume the tick loop | — | `{ok: true, paused: false}` |
-| `/control/reset` | POST | Reset the world, optionally with a new roster size | `{agents?: int}` (optional; omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` |
+| `/control/reset` | POST | Reset the world, optionally with a new roster size (requires password) | `{password: string, agents?: int}` — `password` must match `SIM_RESET_PASSWORD` (server.py, read once at import; default `"reset"` when unset/blank); `agents` optional (omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` on success; `{ok: false, error: "unauthorized"}` with HTTP 401 on wrong/missing password (no reset) |
 | `/control/god/capabilities` | GET | Enabled command/effect names, bounds, duration caps, token status (requires God auth when `GOD_AUTH_REQUIRED`) | — | `{ok, godModeEnabled, tokenConfigured, kinds: {...}, previewTtlSeconds, activeEventsCap, compiler: {enabled, minIntervalSec, sessionCap, promptMaxChars}}` |
 | `/control/god/sight` | GET | Authenticated private inspection, bounded and filterable (requires God auth when `GOD_AUTH_REQUIRED`) | — | `engine.god_sight()` |
 | `/control/god/preview` | POST | Validate and normalize a god command without mutation (requires God auth when `GOD_AUTH_REQUIRED`) | `{kind, payload, expectedFrame?}` | `engine.god_preview(envelope)` |
@@ -83,7 +83,7 @@ engine lock for a consistent read:
 | `activity` | recent activity log entries |
 | `conversation` | last 30 conversation log entries |
 | `config` | `{WORLD_W, WORLD_H, flags: {...}}` — the full flag-value snapshot echoed to the viewer, see specs/01-architecture.md's flag index |
-| `god` | **Present only when `GOD_MODE_ENABLED`.** `{intervened, providence, activePublicEvents, recentPublicInterventions}` (Phase 3 adds `providence`, public by design — [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-and-providence)) — `snapshot()` builds `civ` as an explicit allowlist dict, so this key is opt-in by construction; `privateOmens`, the in-memory idempotency store, and the token can never leak by omission, and `recentPublicInterventions` is additionally filtered to `"public": True` records so a private omen's outcome can never appear here either. See "Sovereign God mode" below. |
+| `god` | **Present only when `GOD_MODE_ENABLED`.** `{intervened, providence, activePublicEvents, recentPublicInterventions}` (Phase 3 adds `providence`, public by design — [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-binding-guidance)) — `snapshot()` builds `civ` as an explicit allowlist dict, so this key is opt-in by construction; `privateOmens`, `recentDivineResponses`, the in-memory idempotency store, and the token can never leak by omission, and `recentPublicInterventions` is additionally filtered to `"public": True` records so a private omen's outcome can never appear here either. See "Sovereign God mode" below. |
 
 ## Server startup/shutdown
 
@@ -98,6 +98,13 @@ Startup order: `engine.start()` (spins up the 30/s tick daemon thread) runs
 accepts connections. Roster size at cold start comes from the `SIM_AGENTS`
 env var (default 8, server.py:3256-3262) — distinct from the `/control/reset`
 body field, which only takes effect on an explicit reset.
+
+**Reset password:** `POST /control/reset` requires a JSON `password` field
+compared with `hmac.compare_digest` against `RESET_PASSWORD` (server.py, read
+once at import from `SIM_RESET_PASSWORD`, defaulting to `"reset"` when unset
+or blank). Wrong or missing password returns `401 {"ok": false, "error":
+"unauthorized"}` and does **not** call `engine.reset()`. This gate is separate
+from Sovereign God mode token auth (`SIM_GOD_TOKEN` / `X-God-Token`).
 
 Graceful shutdown: `atexit.register(_flush_on_exit)` plus `SIGINT`/`SIGTERM`
 handlers (server.py:3421-3441) both call a `threading.Event`-guarded
@@ -153,8 +160,37 @@ one uniform failure shape:
   preview. See [02-engine-core.md](02-engine-core.md) for the full
   preview/idempotency/expiry contract these routes front.
 
-Phase 2 shipped exactly one applyable command kind, `proclamation`; Phase 3
-added `providence`/`private_omen`/`revoke_guidance`; Phase 4 added
+Phase 2 shipped exactly one applyable command kind, `proclamation` (which
+auto-applies as timed providence — see
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-binding-guidance));
+Phase 3 added `providence`/`private_omen`/`revoke_guidance`; Divine Matrix Phase 1 adds
+`whisper_campaign` (batch private omens); Divine Matrix Phase 2 adds
+`agent_sampling` / `revoke_agent_sampling` (per-agent LLM sampling overlay,
+private); Divine Matrix Phase 3 adds `memory_insert` / `memory_delete` /
+`belief_plant` (engine-mediated memory surgery — private, irreversible,
+outcomes are counts/metadata only in Sight); Divine Matrix Phase 4 adds
+`context_mask` (reality-distortion think-payload layer — private, cancellable,
+Sight shows mode/expiry only); Divine Matrix Phase 5 adds
+`decision_compulsion`, `decision_veto_arm`, `decision_veto_resolve`,
+`agent_possession`, and `revoke_decision_gate` (decision gate / possession —
+private, cancellable except `decision_veto_resolve`; Sight shows gate status
+summaries and `pinnedAction` for operator UX); Divine Matrix Phase 6 adds
+`burning_bush_message`, `burning_bush_close`, `merovingian_bargain`, and
+`bargain_settle` (private bush thread + timed bargain with allowlisted
+predicates; Sight shows `messageCount`/`bargainActive` only); Divine Matrix
+Phase 7 adds `anoint` and `revoke_anoint` (private destiny/oracle; stigmata in
+neighbor think prompts only; Sight shows `tagCount`/`nextOracleFrame`/`expiresFrame`
+without secret text); Divine Matrix Phase 8 adds `identity_edit`,
+`identity_copy_overwrite`, and `identity_forge_cancel` (mutate/blend
+persona/personality/role; private map; Sight shows `progress`/`rate`/
+`copyFromId`/`expiresFrame` only; elder role swap warns in preview); Divine
+Matrix Phase 9 adds `architect_zone`, `architect_zone_cancel`, and
+`architect_release_hold` (Path1 terrain paint, keyed door movement gate, limbo
+hold at `GOD_LIMBO_STATION`; `architectZones` omitted from `/state`; Sight
+summaries only; paint audit `public: true`, door/limbo `public: false`); Divine
+Matrix Phase 10 adds `checkpoint_create`, `checkpoint_restore`, and
+`deja_vu_replay` (stub; `GOD_DEJA_VU_REPLAY` gate); checkpoint metadata in
+Sight only, not `/state`; restore is irreversible world replace; Phase 4 added
 `agent_vitals`/`grant_resource`/`structure_condition`; town-integrity adds
 `repair_structures`/`clear_ruins`; Phase 5 adds
 `story_event` (timed modifiers + zero or more Phase 4 primitives + optional
@@ -171,16 +207,24 @@ for the command catalog and stored-text contract, and
 
 **`/control/god/cancel`** is a direct, lock-held mutation with no
 preview/apply step (unlike every other mutating God route). It searches, in
-order, the active `providence` slot, every `privateOmens` record, then every
+order, the active `providence` slot, every `privateOmens` record, every
+`whisperCampaigns` entry (by campaign id — revokes all linked omens), every
+`agentSampling` override (by intervention `id` or via `revoke_agent_sampling`),
+every `contextMasks` entry (by mask intervention `id`), every
+`decisionGates` entry (by gate intervention `id`), every
+`burningBush` session or open `merovingian_bargain` (by bush/bargain `id`), every
+`anointments` entry (by intervention `id`), every `identityForges` entry (by
+intervention `id`), every active `architectZones` entry (by zone `id`), then every
 `"active"` `activeEvents` entry for a matching `id`, closing whichever it
 finds through that record's normal closure path (also closing a
 `story_event`'s linked providence, if any, in the same step) and returning
 `{"ok": true, "cancelled": true, "targetId", "targetKind"}`. No match —
-including an id minted by an irreversible Phase 4 miracle or a one-shot
-`proclamation`, neither of which is ever stored in any of the three searched
-stores — returns `{"ok": true, "cancelled": false, "reason": "nothing to
-cancel", "targetId"}`, so miracle ids are refused by construction rather than
-through a special-cased error. See
+including an id minted by an irreversible Phase 4 miracle, none of which is
+ever stored in any of the searched stores — returns `{"ok": true,
+"cancelled": false, "reason": "nothing to cancel", "targetId"}`, so miracle
+ids are refused by construction rather than through a special-cased error.
+(Proclamation applies as providence and is cancellable when still active.)
+See
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
 for the full Phase 5 contract.
 
@@ -191,9 +235,12 @@ is the first and only client of all five routes. It reads
 `god_preview()`'s response (documented in
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel))
 to drive its preview→apply flow, and reads `god_sight()`'s `agents`/
-`activeEvents`/`recentInterventions` for its Sight tab. No new response shape
-was needed for the viewer — every field it reads was already documented by
-Phases 2–6.
+`activeEvents`/`recentInterventions`/`recentDivineResponses` for its Sight
+and Voice Adherence panels. `/control/god/capabilities` documents that
+`proclamation` applies as timed providence (optional `durationFrames`, same
+slot/revoke/expiry as `providence`). No new response shape was needed for the
+viewer beyond `recentDivineResponses` — every other field it reads was
+already documented by Phases 2–6.
 
 ### Optional Phase 8: `/control/god/compile`
 

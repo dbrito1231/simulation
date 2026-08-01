@@ -13,10 +13,12 @@ from server.py and injected at construction time to avoid a circular import.
 """
 
 import hashlib
+import copy
 import json
 import math
 import os
 import random
+import shutil
 import re
 import secrets
 import sqlite3
@@ -394,15 +396,72 @@ GOD_MODE_ENABLED = str(os.environ.get("SIM_GOD_MODE", "1")).strip().lower() not 
 GOD_AUTH_REQUIRED = str(os.environ.get("SIM_GOD_AUTH", "0")).strip().lower() in (
     "1", "true", "yes", "on",
 )
-GOD_STATE_VERSION = 1               # schema version for civilization["godState"]
+GOD_STATE_VERSION = 2               # schema version for civilization["godState"]
+GOD_WHISPER_CAMPAIGN_MAX_TARGETS = 12  # max agents per whisper_campaign batch
+# Divine Matrix Phase 3: memory surgery kinds (private, never in public logs).
+GOD_MEMORY_DEFAULT_KIND = "divine_false_memory"
+GOD_BELIEF_MEMORY_KIND = "divine_belief"
+GOD_MEMORY_KIND_MAX_LEN = 48
+# Divine Matrix Phase 2: per-agent decision sampling overlay (Temperature Dial).
+GOD_AGENT_SAMPLING_MODELS = frozenset({"sim-smart", "sim-fast"})
+GOD_AGENT_SAMPLING_TEMP_MIN = 0.0
+GOD_AGENT_SAMPLING_TEMP_MAX = 1.5
+GOD_AGENT_SAMPLING_TOP_P_MIN = 0.0
+GOD_AGENT_SAMPLING_TOP_P_MAX = 1.0
+GOD_AGENT_SAMPLING_TOP_K_MIN = 0
+GOD_AGENT_SAMPLING_TOP_K_MAX = 200
+GOD_AGENT_SAMPLING_MIN_P_MIN = 0.0
+GOD_AGENT_SAMPLING_MIN_P_MAX = 1.0
+GOD_AGENT_SAMPLING_FAST_DECISION_CAP = 1  # max living agents on sim-fast decision override
+# Divine Matrix Phase 4: reality distortion / context masks (private cognition layer).
+GOD_CONTEXT_MASK_MODES = frozenset({"dream", "blue_pill", "red_pill", "whisper_chain"})
+GOD_CONTEXT_MASK_DREAM_KEYS = frozenset({
+    "nearby_agents", "resources", "weather_line", "recent_conversations",
+    "district_stocks", "nearby_wildlife", "nearby_wildlife_line",
+    "hunger", "health",
+})
+GOD_CONTEXT_MASK_FORGED_MAX = 8
+# Divine Matrix Phase 5: decision gate (compulsion / thought veto / possession).
+GOD_DECISION_GATE_MODES = frozenset({"compulsion", "veto", "possession"})
+GOD_VETO_HOLD_CAP = 3
 GOD_PREVIEW_CACHE_MAX = 32          # bounded, in-memory, never persisted
 GOD_PREVIEW_TTL_SECONDS = 60        # wall-clock, not frame-based (previews are a request-scoped concept)
 GOD_REQUEST_CACHE_MAX = 100         # bounded, in-memory idempotency store (never persisted -- see docs/plan)
 GOD_RECENT_INTERVENTIONS_CAP = 100  # persisted viewer-history ring inside godState
+GOD_DIVINE_RESPONSE_LOG_MAX = 50    # Voice adherence ring (Sight only, never /state)
 GOD_ACTIVE_EVENTS_CAP = 8           # bounded timed-effect ring (Phase 5 payload; plumbing only in Phase 2)
 GOD_TEXT_MAX_CHARS = 240            # title/narration/proclamation cap (post-NFC-normalization character count)
 GOD_TEXT_MAX_BYTES = 600            # a tighter-than-4x-chars UTF-8 byte cap so the byte check is load-bearing,
                                      # not merely redundant with the character cap (see _normalize_divine_text)
+# Divine Matrix Phase 6: Burning Bush dialogue + Merovingian Bargain (private).
+GOD_BURNING_BUSH_THREAD_MAX = 20
+GOD_BURNING_BUSH_PROMPT_MAX_CHARS = GOD_TEXT_MAX_CHARS * 2
+GOD_BARGAIN_PREDICATES = frozenset({
+    "agent_has_resource", "structure_built", "frame_reached", "agent_health_below",
+})
+GOD_BARGAIN_PRIMITIVE_KINDS = frozenset({"agent_vitals", "grant_resource"})
+# Divine Matrix Phase 7: Anointed (destiny + stigmata + oracle hints — private).
+GOD_ANOINT_STIGMATA_MAX = 6
+GOD_ANOINT_STIGMATA_TAG_MAX_CHARS = 40
+GOD_ANOINT_ORACLE_HINTS_MAX = 8
+GOD_ANOINT_PROMPT_MAX_CHARS = GOD_TEXT_MAX_CHARS * 2
+# Divine Matrix Phase 8: Identity Forge (persona/personality/role mutation).
+GOD_IDENTITY_PERSONA_MAX_CHARS = 200
+GOD_IDENTITY_PERSONALITY_MAX_CHARS = GOD_TEXT_MAX_CHARS
+GOD_IDENTITY_COPY_MEMORIES_MAX = 3
+# Divine Matrix Phase 9: Architect Zones (paint / keyed door / limbo hold).
+GOD_LIMBO_STATION = (140, 500)  # ocean district — Trainman limbo platform
+GOD_ARCHITECT_ZONE_MAX_CELLS = 64
+GOD_ARCHITECT_ZONES_MAX = 16
+GOD_ARCHITECT_KEY_MAX_LEN = 32
+# Divine Matrix Phase 10: Reload / Déjà Vu checkpoints (disk snapshots).
+GOD_CHECKPOINT_MAX = 5
+GOD_CHECKPOINT_ROOT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "backup", "god-checkpoints")
+# Stub-only tick replay — default off; enable via SIM_GOD_DEJA_VU_REPLAY=1.
+GOD_DEJA_VU_REPLAY = str(os.environ.get("SIM_GOD_DEJA_VU_REPLAY", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
 
 # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Optional Phase 8) ---
 # GOD_COMPILER_ENABLED is a SECOND, independent, env-backed, read-once-at-
@@ -432,6 +491,7 @@ GOD_COMPILER_PROSE_MAX_BYTES = 2400    # byte cap scaled to the larger prose cap
 GOD_GUIDANCE_MIN_DURATION_FRAMES = 300      # ~10s at 30 ticks/s
 GOD_GUIDANCE_MAX_DURATION_FRAMES = 54000    # ~30 min at 30 ticks/s
 GOD_GUIDANCE_DEFAULT_DURATION_FRAMES = 5400  # ~3 min, mirrors DIRECTIVE_TTL_FRAMES
+GOD_VETO_HOLD_TIMEOUT_FRAMES = GOD_GUIDANCE_DEFAULT_DURATION_FRAMES
 
 # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 4) ---
 # Immediate miracles: agent_vitals, grant_resource, structure_condition. All
@@ -1637,6 +1697,7 @@ RESOURCE_MIN_TOOL = {
 }
 TOOL_YIELD_BONUS = 1
 TERRAIN_TYPES = ("soil", "rock", "grove", "water")
+GOD_ARCHITECT_PAINT_TERRAINS = frozenset((*TERRAIN_TYPES, "sand"))
 BLOCK_TYPES = {
     "wall": {"cost": {"wood": 1}, "shelter": True},
     "floor": {"cost": {"wood": 1}, "shelter": False},
@@ -2105,6 +2166,11 @@ class SimEngine:
                 "lastHomelessNudgeFrame": None,
                 # Agent-driven reorg: structureId this agent is relocating, or None.
                 "reorgTask": None,
+                # Divine Matrix Phase 5: veto hold pauses movement + think scheduling.
+                "divineHold": False,
+                # Divine Matrix Phase 9: god-granted key tags for architect door zones.
+                "godKeys": set(),
+                "architectLimbo": None,
             }
             if LIFECYCLE_ENABLED:
                 # Phase F: staggered starting ages so the roster isn't a single
@@ -2419,6 +2485,119 @@ class SimEngine:
         except Exception:
             pass
 
+    def _god_memory_insert(self, agent, text, salience, kind=GOD_MEMORY_DEFAULT_KIND):
+        """Divine Matrix Phase 3: insert a false/recall memory for one agent.
+        Mirrors into local working/shortTerm tiers and MemoryStore. Never
+        touches public activity/communication/chronicle."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            salience = max(0.0, min(1.0, float(salience)))
+        except (TypeError, ValueError):
+            salience = 0.5
+        line = text[:280]
+        m = agent["memory"]
+        m["working"].append(line)
+        while len(m["working"]) > WORKING_MEM_CAP:
+            evicted = m["working"].pop(0)
+            if salience >= 0.7:
+                m["shortTerm"].append(evicted)
+                if len(m["shortTerm"]) > SHORT_MEM_CAP:
+                    m["shortTerm"].pop(0)
+        entry = None
+        ms = self.d.get("memory_store")
+        if ms is not None:
+            try:
+                entry = ms.store(agent["name"], line, salience=salience,
+                                 kind=kind or GOD_MEMORY_DEFAULT_KIND,
+                                 frame_tick=self.frameTick)
+            except Exception:
+                pass
+        return entry
+
+    def _god_memory_delete(self, agent, *, keyword=None, frameFrom=None,
+                           frameTo=None, kinds=None):
+        """Delete matching MemoryStore rows and purge keyword hits from local
+        working/shortTerm lists. Requires at least one filter (validated at
+        god envelope). Returns count deleted from MemoryStore."""
+        ms = self.d.get("memory_store")
+        deleted = 0
+        if ms is not None:
+            try:
+                deleted = ms.delete_where(
+                    agent=agent["name"],
+                    keyword=keyword,
+                    frame_from=frameFrom,
+                    frame_to=frameTo,
+                    kinds=kinds,
+                )
+            except Exception:
+                deleted = 0
+        if keyword:
+            kw = keyword.lower()
+            mem = agent.get("memory") or {}
+            for tier in ("working", "shortTerm"):
+                rows = mem.get(tier)
+                if isinstance(rows, list):
+                    mem[tier] = [line for line in rows
+                                 if kw not in (line or "").lower()]
+        return deleted
+
+    def _god_memory_match_count(self, agent, *, keyword=None, frameFrom=None,
+                                frameTo=None, kinds=None):
+        ms = self.d.get("memory_store")
+        if ms is None:
+            return 0
+        try:
+            return ms.count_where(
+                agent=agent["name"],
+                keyword=keyword,
+                frame_from=frameFrom,
+                frame_to=frameTo,
+                kinds=kinds,
+            )
+        except Exception:
+            return 0
+
+    def _god_belief_plant(self, agent, *, belief_id=None, custom_text=None,
+                          salience=0.7, plant_in_meme_texts=False):
+        """Plant a belief on one agent (private). Returns (belief_id, tenet)
+        or (None, reason) on failure."""
+        if not MEMES_ENABLED:
+            return None, "memes disabled"
+        registry = self._belief_registry()
+        tenet = None
+        resolved_id = belief_id
+        if isinstance(custom_text, str) and custom_text.strip():
+            tenet = custom_text.strip()[:160]
+        if resolved_id:
+            if resolved_id not in registry and resolved_id not in MEMES:
+                return None, "unknown belief id"
+            if not tenet:
+                tenet = self._belief_text(resolved_id)
+        else:
+            if not tenet:
+                return None, "belief text is required when beliefId is omitted"
+            digest = hashlib.sha256(tenet.encode("utf-8")).hexdigest()[:8]
+            resolved_id = f"divine_{digest}"
+            if resolved_id not in registry:
+                registry[resolved_id] = {
+                    "id": resolved_id,
+                    "name": "Divine planting",
+                    "tenet": tenet,
+                    "affinity": [],
+                    "authoredBy": "divine",
+                    "createdFrame": self.frameTick,
+                    "seed": False,
+                }
+        if plant_in_meme_texts and tenet:
+            self.civilization.setdefault("memeTexts", {})[resolved_id] = tenet
+        agent.setdefault("beliefs", set()).add(resolved_id)
+        self._god_memory_insert(
+            agent, f"I believe: {tenet}", salience, kind=GOD_BELIEF_MEMORY_KIND)
+        return resolved_id, tenet
+
     def _memory_for_prompt(self, agent):
         m = agent["memory"]
         lines = m["longTerm"][-3:] + m["shortTerm"][-4:] + m["working"][-4:]
@@ -2526,10 +2705,14 @@ class SimEngine:
                 continue
             d = _dist(agent["x"], agent["y"], o["x"], o["y"])
             if d <= NEARBY_RADIUS:
-                near.append((d, {"name": o["name"], "role": o["role"],
-                             "food": o["resources"].get("food", 0),
-                             "wood": o["resources"].get("wood", 0),
-                             "gold": o["resources"].get("gold", 0)}))
+                entry = {"name": o["name"], "role": o["role"],
+                         "food": o["resources"].get("food", 0),
+                         "wood": o["resources"].get("wood", 0),
+                         "gold": o["resources"].get("gold", 0)}
+                stigmata = self._anointment_stigmata_tags(o["id"])
+                if stigmata:
+                    entry["stigmata"] = stigmata
+                near.append((d, entry))
         # C3: sort nearest-first before the MAX_NEARBY_AGENTS_PROMPT cap below
         # so a crowded radius always keeps the closest agents, not an
         # arbitrary iteration-order slice.
@@ -2723,39 +2906,47 @@ class SimEngine:
             self._set_agent_target_to_agent(agent, target_name)
 
     def _move_agent(self, agent, scale=1.0):
+        prior_x, prior_y = agent["x"], agent["y"]
         dx = agent["targetX"] - agent["x"]
         dy = agent["targetY"] - agent["y"]
         dist = math.sqrt(dx * dx + dy * dy)
         # Phase D: wagon holders travel faster (query-time vehicle effect).
         step = agent["speed"] * scale * self._vehicle_speed_mult(agent)
         if dist <= step:
-            agent["x"] = agent["targetX"]
-            agent["y"] = agent["targetY"]
-            waypoints = agent.get("waypoints") or []
-            if waypoints:
-                nxt = waypoints.pop(0)
-                agent["targetX"] = nxt["x"]
-                agent["targetY"] = nxt["y"]
-                agent["idleFrames"] = 0
-            elif DAILY_COUNCIL_ENABLED and agent.get("councilTurn"):
-                # A seated councillor remains at the persisted seat instead of
-                # triggering the ordinary 60-frame idle-wander behavior.
-                agent["idleFrames"] = 0
-            else:
-                agent["idleFrames"] = agent.get("idleFrames", 0) + 1
-                if agent["idleFrames"] >= 60:
-                    cur = agent.get("currentDistrict")
-                    if cur:
-                        wander = cur
-                    else:
-                        wander = random.choice(list(self.civilization["districts"].keys()))
-                    self._set_agent_target(agent, wander)
-                    agent["idleCycles"] = agent.get("idleCycles", 0) + 1
-                    agent["idleFrames"] = 0
+            new_x, new_y = agent["targetX"], agent["targetY"]
+            arrived = True
         else:
-            agent["x"] += (dx / dist) * step
-            agent["y"] += (dy / dist) * step
+            new_x = agent["x"] + (dx / dist) * step
+            new_y = agent["y"] + (dy / dist) * step
+            arrived = False
+        if self._architect_door_blocks_move(agent, prior_x, prior_y, new_x, new_y):
             agent["idleFrames"] = 0
+        else:
+            agent["x"], agent["y"] = new_x, new_y
+            if arrived:
+                waypoints = agent.get("waypoints") or []
+                if waypoints:
+                    nxt = waypoints.pop(0)
+                    agent["targetX"] = nxt["x"]
+                    agent["targetY"] = nxt["y"]
+                    agent["idleFrames"] = 0
+                elif DAILY_COUNCIL_ENABLED and agent.get("councilTurn"):
+                    # A seated councillor remains at the persisted seat instead of
+                    # triggering the ordinary 60-frame idle-wander behavior.
+                    agent["idleFrames"] = 0
+                else:
+                    agent["idleFrames"] = agent.get("idleFrames", 0) + 1
+                    if agent["idleFrames"] >= 60:
+                        cur = agent.get("currentDistrict")
+                        if cur:
+                            wander = cur
+                        else:
+                            wander = random.choice(list(self.civilization["districts"].keys()))
+                        self._set_agent_target(agent, wander)
+                        agent["idleCycles"] = agent.get("idleCycles", 0) + 1
+                        agent["idleFrames"] = 0
+            else:
+                agent["idleFrames"] = 0
         prior_district = agent.get("currentDistrict")
         agent["currentZone"] = get_zone(self.civilization["districts"], agent["x"], agent["y"])
         agent["currentDistrict"] = get_district(self.civilization["districts"], agent["x"], agent["y"])
@@ -2889,6 +3080,7 @@ class SimEngine:
         return responders
 
     def _rush_to_heal(self, agent, target):
+        """Sage-priority emergency heal — bypasses decision gates (survival > story)."""
         agent["goal"] = None
         if self._distance_to(agent, target) > 80:
             self._auto_move_toward_target(agent, target["name"])
@@ -7212,36 +7404,1073 @@ class SimEngine:
     def _divine_prompt_lines(self, agent):
         """Sovereign God mode (Phase 3): the at-most-two divine cognition
         lines for one agent's think payload -- (public_line, private_line),
-        either or both None. Deliberately SEPARATE from _current_directive:
-        elder leadership and divine providence are different fields that
-        must never overwrite or shadow each other (see docs/plan "Bounded
-        cognition impact" + this repo's own directive/providence
-        distinction). Enforces the exact
-        `startFrame <= frameTick < expiresFrame` predicate itself rather
-        than trusting _expire_divine_effects to have already run this same
-        tick -- an expired-but-not-yet-swept record must still never reach a
-        prompt."""
+        either or both None. Only active, unacknowledged binding Voice
+        guidance is injected; Matrix soft lines use separate helpers.
+        Deliberately SEPARATE from _current_directive: elder leadership and
+        divine providence are different fields that must never overwrite or
+        shadow each other."""
         if not GOD_MODE_ENABLED:
             return None, None
         god = self.civilization.get("godState")
         if not isinstance(god, dict):
             return None, None
-        ft = self.frameTick
+        agent_key = str(agent["id"])
         public_line = None
         prov = god.get("providence")
-        if isinstance(prov, dict):
-            start = prov.get("createdFrame", 0)
-            expires = prov.get("expiresFrame")
-            if isinstance(expires, int) and start <= ft < expires:
+        if isinstance(prov, dict) and self._voice_guidance_in_window(prov):
+            acked = prov.get("ackedAgentIds") or {}
+            if not acked.get(agent_key):
                 public_line = prov.get("text")
         private_line = None
-        omen = (god.get("privateOmens") or {}).get(str(agent["id"]))
-        if isinstance(omen, dict):
-            start = omen.get("createdFrame", 0)
-            expires = omen.get("expiresFrame")
-            if isinstance(expires, int) and start <= ft < expires:
+        omen = (god.get("privateOmens") or {}).get(agent_key)
+        if isinstance(omen, dict) and self._voice_guidance_in_window(omen):
+            if not omen.get("acked"):
                 private_line = omen.get("text")
         return public_line, private_line
+
+    def _cancel_voice_blocked_special_turns(self, agent_ids):
+        """Drop pending invention/sprite special turns for Voice-affected agents."""
+        for aid in agent_ids:
+            agent = aid if isinstance(aid, dict) else self._find_agent_by_id(aid)
+            if not agent:
+                continue
+            agent["inventionTurn"] = False
+            agent["inventionRetryUsed"] = False
+            agent["inventionBuildContext"] = None
+            agent["spriteDesignTurn"] = None
+
+    def _voice_guidance_in_window(self, record):
+        if not isinstance(record, dict):
+            return False
+        start = record.get("createdFrame", 0)
+        expires = record.get("expiresFrame")
+        return isinstance(expires, int) and start <= self.frameTick < expires
+
+    def _active_voice_guidance(self, agent):
+        """Active, unacknowledged binding Voice guidance for one agent."""
+        result = {
+            "voice_guidance_active": False,
+            "voice_guidance_id": None,
+            "voice_guidance_text": None,
+            "voice_guidance_public": False,
+            "voice_guidance_private": False,
+            "unacked_guidance": [],
+        }
+        if not GOD_MODE_ENABLED:
+            return result
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return result
+        agent_key = str(agent["id"])
+        unacked = []
+        prov = god.get("providence")
+        if isinstance(prov, dict) and self._voice_guidance_in_window(prov):
+            acked = prov.get("ackedAgentIds") or {}
+            if not acked.get(agent_key):
+                unacked.append({
+                    "id": prov.get("id"),
+                    "kind": "providence",
+                    "public": True,
+                    "text": prov.get("text"),
+                })
+        omen = (god.get("privateOmens") or {}).get(agent_key)
+        if isinstance(omen, dict) and self._voice_guidance_in_window(omen):
+            if not omen.get("acked"):
+                unacked.append({
+                    "id": omen.get("id"),
+                    "kind": "private_omen",
+                    "public": False,
+                    "text": omen.get("text"),
+                })
+        if not unacked:
+            return result
+        result["voice_guidance_active"] = True
+        result["unacked_guidance"] = unacked
+        primary = next((g for g in unacked if g["kind"] == "private_omen"), unacked[0])
+        result["voice_guidance_id"] = primary.get("id")
+        result["voice_guidance_text"] = primary.get("text")
+        result["voice_guidance_public"] = any(g["public"] for g in unacked)
+        result["voice_guidance_private"] = any(not g["public"] for g in unacked)
+        return result
+
+    def _mark_voice_guidance_acked(self, agent, guidance_entries):
+        """Record first response for each (agentId, guidanceId) pair."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        agent_key = str(agent["id"])
+        for entry in guidance_entries:
+            gid = entry.get("id")
+            kind = entry.get("kind")
+            if kind == "providence":
+                prov = god.get("providence")
+                if isinstance(prov, dict) and prov.get("id") == gid:
+                    acked = prov.setdefault("ackedAgentIds", {})
+                    acked[agent_key] = True
+            elif kind == "private_omen":
+                omen = (god.get("privateOmens") or {}).get(agent_key)
+                if isinstance(omen, dict) and omen.get("id") == gid:
+                    omen["acked"] = True
+
+    def _record_divine_response_adherence(self, agent, decision, voice):
+        """Log Voice adherence after a decision is applied. Lock held."""
+        if not voice.get("voice_guidance_active"):
+            return
+        unacked = list(voice.get("unacked_guidance") or [])
+        if not unacked:
+            return
+        divine_response = decision.get("divine_response")
+        if not isinstance(divine_response, dict):
+            divine_response = {
+                "stance": "continue",
+                "reason": "missing_divine_response",
+            }
+            synthetic = True
+        else:
+            synthetic = bool(decision.get("divine_response_synthetic"))
+        stance = divine_response.get("stance")
+        if stance not in ("follow", "continue"):
+            stance = "continue"
+            synthetic = True
+        reason = divine_response.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            reason = "missing_divine_response"
+            synthetic = True
+        else:
+            reason = reason.strip()[:GOD_TEXT_MAX_CHARS]
+        action = decision.get("action") or agent.get("lastAction") or "rest"
+        reaction = decision.get("message")
+        if not isinstance(reaction, str) or not reaction.strip():
+            reaction = reason
+        else:
+            reaction = reaction.strip()[:GOD_TEXT_MAX_CHARS]
+        god = self.civilization["godState"]
+        log_ring = god.setdefault("recentDivineResponses", [])
+        if not isinstance(log_ring, list):
+            log_ring = []
+            god["recentDivineResponses"] = log_ring
+        for entry in unacked:
+            record = {
+                "agentId": agent["id"],
+                "agentName": agent["name"],
+                "guidanceId": entry.get("id"),
+                "guidanceKind": entry.get("kind"),
+                "stance": stance,
+                "reason": reason,
+                "synthetic": synthetic,
+                "frameTick": self.frameTick,
+                "action": action,
+                "public": bool(entry.get("public")),
+            }
+            log_ring.insert(0, record)
+            kind_label = "public guidance" if entry.get("public") else "private guidance"
+            self._push_activity(
+                f'{agent["name"]} {stance}d divine {kind_label}: {reaction}')
+            self._push_communication(
+                "divine_response", agent["name"], "divine",
+                f"{stance}: {reason}", outcome=action, source="divine")
+            self._log_divine(
+                entry.get("id"), None, "voice_adherence",
+                {"agentId": agent["id"], "guidanceKind": entry.get("kind")},
+                {
+                    "stance": stance,
+                    "reason": reason,
+                    "action": action,
+                    "synthetic": synthetic,
+                    "agentName": agent["name"],
+                },
+                "adherence",
+                public=bool(entry.get("public")),
+            )
+        if len(log_ring) > GOD_DIVINE_RESPONSE_LOG_MAX:
+            del log_ring[GOD_DIVINE_RESPONSE_LOG_MAX:]
+        self._mark_voice_guidance_acked(agent, unacked)
+
+    def _active_burning_bush_record(self, agent_id):
+        """Active Burning Bush session for one agent, or None."""
+        if not GOD_MODE_ENABLED:
+            return None
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("burningBush") or {}).get(str(agent_id))
+        if not isinstance(rec, dict) or rec.get("status") != "active":
+            return None
+        return rec
+
+    def _burning_bush_prompt_line(self, agent):
+        """Private Divine-audience thread for one agent's think payload."""
+        rec = self._active_burning_bush_record(agent["id"])
+        if not rec:
+            return None
+        parts = []
+        thread = rec.get("thread") or []
+        if isinstance(thread, list):
+            for entry in thread[-GOD_BURNING_BUSH_THREAD_MAX:]:
+                if not isinstance(entry, dict):
+                    continue
+                text = entry.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                role = entry.get("role")
+                if role == "god":
+                    parts.append(f"Divine audience: {text}")
+                elif role == "agent":
+                    parts.append(f"You replied: {text}")
+        bargain = rec.get("bargain")
+        if isinstance(bargain, dict) and bargain.get("status") == "open":
+            terms = bargain.get("termsText")
+            if isinstance(terms, str) and terms.strip():
+                parts.append(f"Active bargain: {terms}")
+        if not parts:
+            return None
+        combined = " ".join(parts)
+        if len(combined) > GOD_BURNING_BUSH_PROMPT_MAX_CHARS:
+            combined = combined[-GOD_BURNING_BUSH_PROMPT_MAX_CHARS:]
+        return combined
+
+    def _capture_burning_bush_reply(self, agent, decision):
+        """Append agent talk/reasoning to a private Burning Bush thread."""
+        rec = self._active_burning_bush_record(agent["id"])
+        if not rec:
+            return
+        action = decision.get("action")
+        raw = None
+        if action == "talk_to_nearby" and decision.get("message"):
+            raw = decision["message"]
+        elif decision.get("reasoning"):
+            raw = decision["reasoning"]
+        if not isinstance(raw, str) or not raw.strip():
+            return
+        text, reason = self._normalize_divine_text(raw)
+        if reason:
+            text = raw.strip()[:GOD_TEXT_MAX_CHARS]
+        thread = rec.setdefault("thread", [])
+        if not isinstance(thread, list):
+            rec["thread"] = thread = []
+        thread.append({
+            "role": "agent", "text": text, "frame": self.frameTick,
+        })
+        if len(thread) > GOD_BURNING_BUSH_THREAD_MAX:
+            del thread[:-GOD_BURNING_BUSH_THREAD_MAX]
+
+    def _god_active_anointment_record(self, agent_id):
+        """Active anointment for one agent, or None if absent/expired."""
+        if not GOD_MODE_ENABLED:
+            return None
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("anointments") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        agent = self._find_agent_by_id(agent_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return None
+        return rec
+
+    def _anointment_stigmata_tags(self, agent_id):
+        """Public-facing stigmata tags for neighbors (never includes destiny)."""
+        rec = self._god_active_anointment_record(agent_id)
+        if not rec:
+            return []
+        tags = rec.get("stigmataTags") or []
+        if not isinstance(tags, list):
+            return []
+        out = []
+        for tag in tags[:GOD_ANOINT_STIGMATA_MAX]:
+            if isinstance(tag, str) and tag.strip():
+                out.append(tag.strip())
+        return out
+
+    def _anointment_next_oracle_frame(self, rec):
+        """Earliest unrevealed oracle revealFrame, or None."""
+        hints = rec.get("oracleHints") or []
+        if not isinstance(hints, list):
+            return None
+        ft = self.frameTick
+        pending = []
+        for hint in hints:
+            if not isinstance(hint, dict):
+                continue
+            reveal = hint.get("revealFrame")
+            text = hint.get("text")
+            if not isinstance(reveal, int) or reveal <= ft:
+                continue
+            if not isinstance(text, str) or not text.strip():
+                continue
+            pending.append(reveal)
+        return min(pending) if pending else None
+
+    def _god_active_identity_forge_record(self, agent_id):
+        """Active identity-forge record for one agent, or None if absent/expired."""
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("identityForges") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        return rec
+
+    def _identity_forge_snapshot(self, agent):
+        """Capture persona/personality/role for forge restore."""
+        return {
+            "persona": agent.get("persona") or "",
+            "personality": agent.get("personality") or "",
+            "role": agent.get("role") or "",
+        }
+
+    def _restore_identity_forge_snapshot(self, agent, snapshot):
+        """Restore one agent's identity fields from a forge snapshot. Lock held."""
+        if not isinstance(snapshot, dict):
+            return
+        agent["persona"] = snapshot.get("persona") or ""
+        agent["personality"] = snapshot.get("personality") or ""
+        role = snapshot.get("role")
+        if isinstance(role, str) and role.strip():
+            agent["role"] = role.strip()
+        self._mark_context_dirty(agent)
+
+    def _blend_identity_field(self, baseline, target, progress):
+        """Blend two identity strings toward target by progress in [0, 1]."""
+        progress = max(0.0, min(1.0, float(progress)))
+        baseline = baseline or ""
+        target = target or ""
+        if progress <= 0.0:
+            return baseline
+        if progress >= 1.0:
+            return target
+        if baseline == target:
+            return baseline
+        base_chars = max(0, int(len(baseline) * (1.0 - progress)))
+        tgt_chars = max(0, int(len(target) * progress))
+        blended = (baseline[:base_chars] + target[:tgt_chars]).strip()
+        return blended or baseline or target
+
+    def _god_role_valid(self, role):
+        return isinstance(role, str) and role.strip() in self.d.get("ROLES", {})
+
+    def _god_elder_swap_warning(self, agent, new_role):
+        """Warn in preview when an identity edit would swap elder role."""
+        if not isinstance(new_role, str) or not new_role.strip():
+            return None
+        new_role = new_role.strip()
+        old_role = agent.get("role")
+        if old_role == new_role:
+            return None
+        if old_role == "elder" or new_role == "elder":
+            return (f"Elder role swap: {old_role} -> {new_role}. "
+                    "May affect council, invention, and emergency systems.")
+        return None
+
+    def _god_plant_copy_memories(self, target, source):
+        """Optional one-shot memory sync for identity copy (not a full clone)."""
+        mem = source.get("memory") or {}
+        lines = []
+        for tier in ("working", "shortTerm"):
+            for line in reversed(mem.get(tier) or []):
+                if isinstance(line, str) and line.strip():
+                    lines.append(line.strip())
+                if len(lines) >= GOD_IDENTITY_COPY_MEMORIES_MAX:
+                    break
+            if len(lines) >= GOD_IDENTITY_COPY_MEMORIES_MAX:
+                break
+        planted = 0
+        for line in lines[:GOD_IDENTITY_COPY_MEMORIES_MAX]:
+            if self._god_memory_insert(target, line, 0.6, kind=GOD_MEMORY_DEFAULT_KIND):
+                planted += 1
+        return planted
+
+    def _advance_identity_forge_on_think(self, agent):
+        """Advance identity-copy blend after one think completes. Lock held."""
+        rec = self._god_active_identity_forge_record(agent["id"])
+        if not rec or not rec.get("copyFromId"):
+            return
+        source = self._find_agent_by_id(rec["copyFromId"])
+        if source is None or source.get("deathFrame") is not None:
+            return
+        baseline = rec.get("baseline") or rec.get("snapshot") or {}
+        rate = float(rec.get("rate") or 0.0)
+        progress = float(rec.get("progress") or 0.0)
+        new_progress = min(1.0, progress + rate)
+        rec["progress"] = new_progress
+        agent["persona"] = self._blend_identity_field(
+            baseline.get("persona") or "",
+            source.get("persona") or "",
+            new_progress,
+        )[:GOD_IDENTITY_PERSONA_MAX_CHARS]
+        agent["personality"] = self._blend_identity_field(
+            baseline.get("personality") or "",
+            source.get("personality") or "",
+            new_progress,
+        )[:GOD_IDENTITY_PERSONALITY_MAX_CHARS]
+        self._mark_context_dirty(agent)
+
+    def _close_identity_forge(self, key, status):
+        """Restore snapshot and remove one identity-forge record. Lock held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        forges = god.get("identityForges")
+        if not isinstance(forges, dict):
+            return None
+        rec = forges.pop(key, None)
+        if not isinstance(rec, dict):
+            return None
+        agent = self._find_agent_by_id(int(key))
+        if agent is not None:
+            self._restore_identity_forge_snapshot(agent, rec.get("snapshot"))
+        kind = "identity_copy_overwrite" if rec.get("copyFromId") else "identity_edit"
+        self._log_divine(rec.get("id"), None, kind, rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _god_current_outgoing_identity_forge_id(self, target_id):
+        rec = (self.civilization.get("godState") or {}).get("identityForges", {}).get(
+            str(target_id))
+        return rec.get("id") if isinstance(rec, dict) else None
+
+    # --- Divine Matrix Phase 9: Architect Zones ---
+    def _god_active_architect_zones(self):
+        zones = (self.civilization.get("godState") or {}).get("architectZones") or []
+        return [z for z in zones if isinstance(z, dict) and z.get("status") == "active"]
+
+    def _god_architect_zone_by_id(self, zone_id):
+        if not isinstance(zone_id, str) or not zone_id.strip():
+            return None
+        zone_id = zone_id.strip()
+        for zone in self._god_active_architect_zones():
+            if zone.get("id") == zone_id:
+                return zone
+        return None
+
+    def _expand_architect_cells(self, cells):
+        """Expand cells list into a bounded set of (gx, gy) grid coords."""
+        if not isinstance(cells, list) or not cells:
+            return None, "cells must be a non-empty list"
+        out = set()
+        for entry in cells:
+            if isinstance(entry, str):
+                parts = entry.split(",")
+                if len(parts) != 2:
+                    return None, "each cell string must be gx,gy"
+                try:
+                    gx, gy = int(parts[0].strip()), int(parts[1].strip())
+                except ValueError:
+                    return None, "cell coordinates must be integers"
+            elif isinstance(entry, dict):
+                if all(k in entry for k in ("gx1", "gy1", "gx2", "gy2")):
+                    try:
+                        gx1, gy1 = int(entry["gx1"]), int(entry["gy1"])
+                        gx2, gy2 = int(entry["gx2"]), int(entry["gy2"])
+                    except (TypeError, ValueError):
+                        return None, "bounds coordinates must be integers"
+                    lo_gx, hi_gx = sorted((gx1, gx2))
+                    lo_gy, hi_gy = sorted((gy1, gy2))
+                    for gx in range(lo_gx, hi_gx + 1):
+                        for gy in range(lo_gy, hi_gy + 1):
+                            if len(out) >= GOD_ARCHITECT_ZONE_MAX_CELLS:
+                                return None, f"cells exceed cap of {GOD_ARCHITECT_ZONE_MAX_CELLS}"
+                            out.add((gx, gy))
+                    continue
+                return None, "each bounds object must include gx1, gy1, gx2, gy2"
+            else:
+                return None, "cells entries must be gx,gy strings or bounds objects"
+            if not (0 <= gx < PATH1_GRID_COLS and 0 <= gy < PATH1_GRID_ROWS):
+                return None, f"cell ({gx},{gy}) out of grid bounds"
+            if len(out) >= GOD_ARCHITECT_ZONE_MAX_CELLS:
+                return None, f"cells exceed cap of {GOD_ARCHITECT_ZONE_MAX_CELLS}"
+            out.add((gx, gy))
+        if not out:
+            return None, "cells must resolve to at least one grid cell"
+        return sorted(out), None
+
+    def _architect_zone_covers_cell(self, zone, district_id, gx, gy):
+        if zone.get("districtId") != district_id:
+            return False
+        cells = zone.get("cells")
+        expanded, _ = self._expand_architect_cells(cells)
+        if not expanded:
+            return False
+        return (gx, gy) in expanded
+
+    def _world_pos_to_district_grid(self, x, y):
+        did = get_district(self.civilization["districts"], x, y)
+        if not did:
+            return None, None, None
+        d = self.civilization["districts"][did]
+        b = d["bounds"]
+        gx = int((x - b["x1"]) // TILE_CELL)
+        gy = int((y - b["y1"]) // TILE_CELL)
+        gx = max(0, min(PATH1_GRID_COLS - 1, gx))
+        gy = max(0, min(PATH1_GRID_ROWS - 1, gy))
+        return did, gx, gy
+
+    def _agent_has_god_key(self, agent, key_id):
+        keys = agent.get("godKeys") or set()
+        return isinstance(key_id, str) and key_id in keys
+
+    def _grant_god_key(self, agent, key_id):
+        keys = agent.get("godKeys")
+        if not isinstance(keys, set):
+            keys = set(keys or ())
+            agent["godKeys"] = keys
+        keys.add(key_id)
+
+    def _architect_door_blocks_move(self, agent, prior_x, prior_y, new_x, new_y):
+        if not GOD_MODE_ENABLED:
+            return False
+        new_did, new_gx, new_gy = self._world_pos_to_district_grid(new_x, new_y)
+        if not new_did:
+            return False
+        prior_did, prior_gx, prior_gy = self._world_pos_to_district_grid(prior_x, prior_y)
+        if (new_did, new_gx, new_gy) == (prior_did, prior_gx, prior_gy):
+            return False
+        for zone in self._god_active_architect_zones():
+            if zone.get("kind") != "door":
+                continue
+            if not self._architect_zone_covers_cell(zone, new_did, new_gx, new_gy):
+                continue
+            key_id = zone.get("keyId")
+            if isinstance(key_id, str) and self._agent_has_god_key(agent, key_id):
+                continue
+            return True
+        return False
+
+    def _architect_paint_snapshot(self, district_id, cells, paint_terrain):
+        district = self.civilization["districts"].get(district_id)
+        if not district:
+            return {}
+        self._ensure_district_terrain(district)
+        terrain = district["terrain"]
+        snap = {}
+        for gx, gy in cells:
+            key = self._tile_key(gx, gy)
+            snap[key] = terrain.get(key, "soil")
+            terrain[key] = paint_terrain
+        return snap
+
+    def _architect_revert_paint(self, zone):
+        snap = zone.get("revertSnapshot")
+        district_id = zone.get("districtId")
+        if not zone.get("reversible", True) or not isinstance(snap, dict) or not district_id:
+            return
+        district = self.civilization["districts"].get(district_id)
+        if not district:
+            return
+        self._ensure_district_terrain(district)
+        terrain = district["terrain"]
+        for key, value in snap.items():
+            if isinstance(key, str) and isinstance(value, str):
+                terrain[key] = value
+
+    def _park_agent_in_limbo(self, agent, zone):
+        limbo_x, limbo_y = GOD_LIMBO_STATION
+        hold = {
+            "zoneId": zone.get("id"),
+            "priorX": agent["x"],
+            "priorY": agent["y"],
+            "priorTargetX": agent["targetX"],
+            "priorTargetY": agent["targetY"],
+            "priorDistrict": agent.get("currentDistrict"),
+        }
+        agent["architectLimbo"] = hold
+        agent["divineHold"] = True
+        agent["x"] = limbo_x
+        agent["y"] = limbo_y
+        agent["targetX"] = limbo_x
+        agent["targetY"] = limbo_y
+        agent["waypoints"] = []
+        agent["currentZone"] = get_zone(self.civilization["districts"], limbo_x, limbo_y)
+        agent["currentDistrict"] = get_district(self.civilization["districts"], limbo_x, limbo_y)
+        zone.setdefault("limboHolds", {})[str(agent["id"])] = hold
+
+    def _release_architect_limbo_agent(self, agent, zone=None):
+        hold = agent.get("architectLimbo")
+        if not isinstance(hold, dict):
+            return False
+        if zone is not None and hold.get("zoneId") != zone.get("id"):
+            return False
+        agent["x"] = hold.get("priorX", agent["x"])
+        agent["y"] = hold.get("priorY", agent["y"])
+        agent["targetX"] = hold.get("priorTargetX", agent["x"])
+        agent["targetY"] = hold.get("priorTargetY", agent["y"])
+        agent["architectLimbo"] = None
+        if zone is not None:
+            holds = zone.get("limboHolds")
+            if isinstance(holds, dict):
+                holds.pop(str(agent["id"]), None)
+        if self._god_active_decision_gate_record(agent["id"]) is None:
+            agent["divineHold"] = False
+        agent["currentZone"] = get_zone(self.civilization["districts"], agent["x"], agent["y"])
+        agent["currentDistrict"] = get_district(self.civilization["districts"], agent["x"], agent["y"])
+        return True
+
+    def _release_architect_limbo_zone(self, zone, agent_ids=None):
+        released = []
+        hold_ids = zone.get("holdAgentIds") or []
+        if agent_ids is not None:
+            hold_ids = [aid for aid in hold_ids if aid in agent_ids]
+        for agent_id in hold_ids:
+            agent = self._find_agent_by_id(agent_id)
+            if agent is None:
+                continue
+            if self._release_architect_limbo_agent(agent, zone):
+                released.append(agent_id)
+        return released
+
+    def _close_architect_zone(self, zone_id, status):
+        """Close one architect zone exactly once. Lock held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        zones = god.get("architectZones")
+        if not isinstance(zones, list):
+            return None
+        closed = None
+        for idx, zone in enumerate(zones):
+            if not isinstance(zone, dict) or zone.get("id") != zone_id:
+                continue
+            if zone.get("status") != "active":
+                return None
+            zone = dict(zone)
+            zone["status"] = status
+            if zone.get("kind") == "paint":
+                self._architect_revert_paint(zone)
+            elif zone.get("kind") == "limbo":
+                self._release_architect_limbo_zone(zone)
+            zones[idx] = zone
+            closed = zone
+            break
+        if closed is None:
+            return None
+        public = closed.get("kind") == "paint"
+        self._log_divine(closed.get("id"), None, "architect_zone", closed,
+                         {"status": status, "zoneKind": closed.get("kind")},
+                         status, public=public)
+        return closed
+
+    def _validate_god_architect_zone(self, payload):
+        zone_kind = payload.get("zoneKind")
+        if zone_kind not in ("paint", "door", "limbo"):
+            return None, 'zoneKind must be "paint", "door", or "limbo"'
+        district_id = payload.get("districtId")
+        if zone_kind in ("paint", "door"):
+            if not isinstance(district_id, str) or not district_id.strip():
+                return None, "districtId is required for paint and door zones"
+            district_id = district_id.strip()
+            if district_id not in self.civilization.get("districts", {}):
+                return None, "unknown district id"
+        else:
+            district_id = district_id.strip() if isinstance(district_id, str) and district_id.strip() else None
+        cells_raw = payload.get("cells")
+        cells_expanded, reason = self._expand_architect_cells(cells_raw)
+        if reason:
+            return None, reason
+        duration = payload.get("durationFrames")
+        if duration is None:
+            duration = GOD_GUIDANCE_DEFAULT_DURATION_FRAMES
+        elif isinstance(duration, bool) or not isinstance(duration, int):
+            return None, "durationFrames must be an integer"
+        elif not (GOD_GUIDANCE_MIN_DURATION_FRAMES <= duration <= GOD_GUIDANCE_MAX_DURATION_FRAMES):
+            return None, (
+                f"durationFrames must be between {GOD_GUIDANCE_MIN_DURATION_FRAMES} "
+                f"and {GOD_GUIDANCE_MAX_DURATION_FRAMES}")
+        reversible_raw = payload.get("reversible")
+        if reversible_raw is None:
+            reversible = True
+        elif not isinstance(reversible_raw, bool):
+            return None, "reversible must be a boolean"
+        else:
+            reversible = reversible_raw
+        normalized = {
+            "zoneKind": zone_kind,
+            "cells": cells_raw,
+            "cellsExpanded": cells_expanded,
+            "durationFrames": duration,
+            "reversible": reversible,
+        }
+        if district_id is not None:
+            normalized["districtId"] = district_id
+        if zone_kind == "paint":
+            if not path1_on("TERRAIN_TILES_ENABLED"):
+                return None, "terrain tiles disabled"
+            paint_terrain = payload.get("paintTerrain")
+            if not isinstance(paint_terrain, str) or paint_terrain not in GOD_ARCHITECT_PAINT_TERRAINS:
+                allowed = ", ".join(sorted(GOD_ARCHITECT_PAINT_TERRAINS))
+                return None, f"paintTerrain must be one of: {allowed}"
+            normalized["paintTerrain"] = paint_terrain
+        if zone_kind == "door":
+            key_id = payload.get("keyId")
+            if not isinstance(key_id, str) or not key_id.strip():
+                return None, "keyId is required for door zones"
+            key_id = key_id.strip()
+            if len(key_id) > GOD_ARCHITECT_KEY_MAX_LEN:
+                return None, f"keyId exceeds {GOD_ARCHITECT_KEY_MAX_LEN} characters"
+            normalized["keyId"] = key_id
+            grant_ids = []
+            for raw_id in payload.get("grantKeyAgentIds") or []:
+                if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                    return None, "grantKeyAgentIds entries must be integer agent ids"
+                agent = self._find_agent_by_id(raw_id)
+                if agent is None:
+                    return None, f"unknown grantKeyAgentIds agent {raw_id}"
+                if agent.get("deathFrame") is not None:
+                    return None, f"grantKeyAgentIds agent {raw_id} is deceased"
+                grant_ids.append(raw_id)
+            if grant_ids:
+                normalized["grantKeyAgentIds"] = grant_ids
+        if zone_kind == "limbo":
+            hold_ids = []
+            for raw_id in payload.get("holdAgentIds") or []:
+                if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                    return None, "holdAgentIds entries must be integer agent ids"
+                agent = self._find_agent_by_id(raw_id)
+                if agent is None:
+                    return None, f"unknown holdAgentIds agent {raw_id}"
+                if agent.get("deathFrame") is not None:
+                    return None, f"holdAgentIds agent {raw_id} is deceased"
+                hold_ids.append(raw_id)
+            if not hold_ids:
+                return None, "holdAgentIds must include at least one living agent"
+            normalized["holdAgentIds"] = hold_ids
+        active = self._god_active_architect_zones()
+        if len(active) >= GOD_ARCHITECT_ZONES_MAX:
+            return None, f"active architect zone cap of {GOD_ARCHITECT_ZONES_MAX} reached"
+        return normalized, None
+
+    def _god_apply_architect_zone(self, payload):
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        zone = {
+            "id": intervention_id,
+            "kind": payload["zoneKind"],
+            "cells": payload["cells"],
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "reversible": payload.get("reversible", True),
+            "status": "active",
+            "holdAgentIds": list(payload.get("holdAgentIds") or []),
+            "limboHolds": {},
+        }
+        if payload.get("districtId"):
+            zone["districtId"] = payload["districtId"]
+        if payload.get("paintTerrain"):
+            zone["paintTerrain"] = payload["paintTerrain"]
+        if payload.get("keyId"):
+            zone["keyId"] = payload["keyId"]
+        god = self.civilization["godState"]
+        if zone["kind"] == "paint":
+            snap = self._architect_paint_snapshot(
+                zone["districtId"], payload["cellsExpanded"], zone["paintTerrain"])
+            zone["revertSnapshot"] = snap
+            self._push_activity(
+                f"A divine architect repainted {len(payload['cellsExpanded'])} cells "
+                f"in {zone['districtId']} as {zone['paintTerrain']}.")
+        elif zone["kind"] == "door":
+            for agent_id in payload.get("grantKeyAgentIds") or []:
+                agent = self._find_agent_by_id(agent_id)
+                if agent is not None:
+                    self._grant_god_key(agent, zone["keyId"])
+        elif zone["kind"] == "limbo":
+            for agent_id in zone["holdAgentIds"]:
+                agent = self._find_agent_by_id(agent_id)
+                if agent is not None:
+                    self._park_agent_in_limbo(agent, zone)
+        god.setdefault("architectZones", []).append(zone)
+        is_public = zone["kind"] == "paint"
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "architect_zone", "frameTick": self.frameTick,
+            "zoneKind": zone["kind"], "districtId": zone.get("districtId"),
+            "cellCount": len(payload["cellsExpanded"]),
+            "expiresFrame": expires_frame, "status": "applied", "public": is_public,
+        })
+        self._log_divine(intervention_id, None, "architect_zone", payload,
+                         {"zoneKind": zone["kind"], "districtId": zone.get("districtId"),
+                          "cellCount": len(payload["cellsExpanded"]),
+                          "holdCount": len(zone["holdAgentIds"])},
+                         "applied", public=is_public)
+        return {
+            "interventionId": intervention_id,
+            "kind": "architect_zone",
+            "zoneKind": zone["kind"],
+            "districtId": zone.get("districtId"),
+            "cellCount": len(payload["cellsExpanded"]),
+            "expiresFrame": expires_frame,
+            "holdAgentIds": list(zone["holdAgentIds"]),
+        }
+
+    def _god_apply_architect_zone_cancel(self, payload):
+        zone_id = payload.get("zoneId")
+        if not isinstance(zone_id, str) or not zone_id.strip():
+            return None, "zoneId is required"
+        closed = self._close_architect_zone(zone_id.strip(), "cancelled")
+        if closed is None:
+            return None, "architect zone not found or already inactive"
+        intervention_id = self._next_intervention_id()
+        is_public = closed.get("kind") == "paint"
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "architect_zone_cancel", "frameTick": self.frameTick,
+            "zoneId": closed.get("id"), "zoneKind": closed.get("kind"),
+            "status": "applied", "public": is_public,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "architect_zone_cancel",
+            "zoneId": closed.get("id"),
+            "zoneKind": closed.get("kind"),
+        }, None
+
+    def _god_apply_architect_release_hold(self, payload):
+        zone_id = payload.get("zoneId")
+        if not isinstance(zone_id, str) or not zone_id.strip():
+            return None, "zoneId is required"
+        zone = self._god_architect_zone_by_id(zone_id.strip())
+        if zone is None or zone.get("kind") != "limbo":
+            return None, "no active limbo architect zone for zoneId"
+        agent_ids = None
+        if payload.get("agentIds") is not None:
+            agent_ids = []
+            for raw_id in payload["agentIds"]:
+                if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                    return None, "agentIds entries must be integer agent ids"
+                agent_ids.append(raw_id)
+        released = self._release_architect_limbo_zone(zone, agent_ids)
+        if not released:
+            return None, "no limbo holds released for this zone"
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "architect_release_hold", "frameTick": self.frameTick,
+            "zoneId": zone.get("id"), "releasedAgentIds": released,
+            "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "architect_release_hold",
+            "zoneId": zone.get("id"),
+            "releasedAgentIds": released,
+        }, None
+
+    # --- Divine Matrix Phase 10: Reload / Déjà Vu checkpoints ---
+    def _god_checkpoint_root_abs(self):
+        override = getattr(self, "god_checkpoint_root", None)
+        if isinstance(override, str) and override.strip():
+            return override.strip()
+        return GOD_CHECKPOINT_ROOT
+
+    def _god_checkpoint_rel_path(self, checkpoint_id):
+        return f"backup/god-checkpoints/{checkpoint_id}"
+
+    def _god_memory_store_file_path(self):
+        ms = self.d.get("memory_store")
+        path = getattr(ms, "path", None) if ms is not None else None
+        if isinstance(path, str) and path.strip():
+            return path.strip()
+        return None
+
+    def _god_checkpoint_by_id(self, checkpoint_id):
+        for rec in (self.civilization.get("godState") or {}).get("checkpoints") or []:
+            if isinstance(rec, dict) and rec.get("id") == checkpoint_id:
+                return rec
+        return None
+
+    def _god_checkpoint_dir_from_record(self, rec):
+        checkpoint_id = rec.get("id") if isinstance(rec, dict) else None
+        if isinstance(checkpoint_id, str) and checkpoint_id.strip():
+            root_candidate = os.path.join(
+                self._god_checkpoint_root_abs(), checkpoint_id.strip())
+            if os.path.isdir(root_candidate):
+                return root_candidate
+        rel = rec.get("path") if isinstance(rec, dict) else None
+        if isinstance(rel, str) and rel.strip():
+            rel_norm = rel.strip().replace("\\", "/")
+            if rel_norm.startswith("backup/"):
+                module_dir = os.path.dirname(os.path.abspath(__file__))
+                legacy = os.path.normpath(
+                    os.path.join(module_dir, rel_norm.replace("/", os.sep)))
+                if os.path.isdir(legacy):
+                    return legacy
+        return None
+
+    def _god_delete_checkpoint_files(self, rec):
+        abs_dir = self._god_checkpoint_dir_from_record(rec)
+        if abs_dir and os.path.isdir(abs_dir):
+            try:
+                shutil.rmtree(abs_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _god_copy_checkpoint_db_to_live(self, src_db):
+        for suffix in ("-wal", "-shm"):
+            sidecar = DB_PATH + suffix
+            if os.path.exists(sidecar):
+                try:
+                    os.remove(sidecar)
+                except OSError:
+                    pass
+        shutil.copy2(src_db, DB_PATH)
+
+    def _god_copy_checkpoint_memory_to_live(self, src_mem):
+        dst = self._god_memory_store_file_path()
+        if not dst:
+            return
+        tmp = dst + ".tmp"
+        try:
+            shutil.copy2(src_mem, tmp)
+            os.replace(tmp, dst)
+        except OSError:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+
+    def _god_apply_checkpoint_create(self, payload):
+        label = payload["label"]
+        replace_oldest = bool(payload.get("replaceOldest"))
+        god = self.civilization["godState"]
+        checkpoints = god.get("checkpoints")
+        if not isinstance(checkpoints, list):
+            checkpoints = []
+            god["checkpoints"] = checkpoints
+
+        was_paused = self.paused
+        self.paused = True
+        self.save_state()
+        ms = self.d.get("memory_store")
+        if ms is not None:
+            try:
+                ms._persist()
+            except Exception:
+                pass
+
+        checkpoint_id = f"ckpt-{secrets.token_urlsafe(8)}"
+        rel_path = self._god_checkpoint_rel_path(checkpoint_id)
+        abs_dir = os.path.join(self._god_checkpoint_root_abs(), checkpoint_id)
+        try:
+            os.makedirs(abs_dir, exist_ok=True)
+            shutil.copy2(DB_PATH, os.path.join(abs_dir, "state.db"))
+            ms_path = self._god_memory_store_file_path()
+            if ms_path and os.path.exists(ms_path):
+                shutil.copy2(ms_path, os.path.join(abs_dir, "memory_store.json"))
+        except OSError:
+            self.paused = was_paused
+            return None, "checkpoint file copy failed"
+
+        if len(checkpoints) >= GOD_CHECKPOINT_MAX and replace_oldest:
+            oldest = checkpoints[0]
+            self._god_delete_checkpoint_files(oldest)
+            checkpoints.pop(0)
+
+        frame_tick = self.frameTick
+        created_at = datetime.now(timezone.utc).isoformat()
+        meta = {
+            "id": checkpoint_id,
+            "label": label,
+            "frameTick": frame_tick,
+            "path": rel_path,
+            "createdAt": created_at,
+        }
+        checkpoints.append(meta)
+
+        self.paused = was_paused
+
+        intervention_id = self._next_intervention_id()
+        self._log_divine(intervention_id, None, "checkpoint_create", payload,
+                         {"checkpointId": checkpoint_id, "label": label,
+                          "frameTick": frame_tick, "path": rel_path},
+                         "applied", public=True)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "checkpoint_create", "frameTick": self.frameTick,
+            "checkpointId": checkpoint_id, "label": label, "status": "applied", "public": True,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "checkpoint_create",
+            "checkpointId": checkpoint_id,
+            "label": label,
+            "frameTick": frame_tick,
+            "path": rel_path,
+            "checkpointCount": len(checkpoints),
+        }, None
+
+    def _god_apply_checkpoint_restore(self, payload):
+        checkpoint_id = payload["checkpointId"]
+        rec = self._god_checkpoint_by_id(checkpoint_id)
+        if rec is None:
+            return None, "checkpoint not found"
+        abs_dir = self._god_checkpoint_dir_from_record(rec)
+        if not abs_dir:
+            return None, "checkpoint path invalid"
+        ckpt_db = os.path.join(abs_dir, "state.db")
+        if not os.path.isfile(ckpt_db):
+            return None, "checkpoint state.db missing on disk"
+
+        was_paused = self.paused
+        self.paused = True
+        try:
+            self._god_copy_checkpoint_db_to_live(ckpt_db)
+            ckpt_mem = os.path.join(abs_dir, "memory_store.json")
+            if os.path.isfile(ckpt_mem):
+                self._god_copy_checkpoint_memory_to_live(ckpt_mem)
+            if not self.restore_state():
+                self.paused = was_paused
+                return None, "checkpoint restore failed: state.db unreadable"
+        except OSError:
+            self.paused = was_paused
+            return None, "checkpoint restore file operation failed"
+
+        self.paused = was_paused
+
+        intervention_id = self._next_intervention_id()
+        restored_tick = self.frameTick
+        self._log_divine(intervention_id, None, "checkpoint_restore", payload,
+                         {"checkpointId": checkpoint_id, "label": rec.get("label"),
+                          "restoredFrameTick": restored_tick},
+                         "applied", public=True)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "checkpoint_restore", "frameTick": self.frameTick,
+            "checkpointId": checkpoint_id, "label": rec.get("label"),
+            "restoredFrameTick": restored_tick, "status": "applied", "public": True,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "checkpoint_restore",
+            "checkpointId": checkpoint_id,
+            "label": rec.get("label"),
+            "restoredFrameTick": restored_tick,
+        }, None
+
+    def _anointment_prompt_line(self, agent):
+        """Private destiny + due oracle hints for the anointed target."""
+        rec = self._god_active_anointment_record(agent["id"])
+        if not rec:
+            return None
+        parts = []
+        destiny = rec.get("destinyText")
+        if isinstance(destiny, str) and destiny.strip():
+            parts.append(f"Your anointed destiny: {destiny.strip()}")
+        hints = rec.get("oracleHints") or []
+        if isinstance(hints, list):
+            due = []
+            for hint in hints[:GOD_ANOINT_ORACLE_HINTS_MAX]:
+                if not isinstance(hint, dict):
+                    continue
+                reveal = hint.get("revealFrame")
+                text = hint.get("text")
+                if not isinstance(reveal, int) or reveal > self.frameTick:
+                    continue
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                due.append(text.strip())
+            if due:
+                parts.append("Oracle: " + " | ".join(due))
+        if not parts:
+            return None
+        combined = " ".join(parts)
+        if len(combined) > GOD_ANOINT_PROMPT_MAX_CHARS:
+            combined = combined[:GOD_ANOINT_PROMPT_MAX_CHARS]
+        return combined
 
     def _is_idle(self, agent):
         return agent["role"] != "elder" and (
@@ -13413,6 +14642,7 @@ class SimEngine:
                       "reject_blueprint", "sage_review_blueprint",
                       "council_speak", "council_propose", "council_vote"}:
             self._mark_all_context_dirty()
+        self._capture_burning_bush_reply(agent, decision)
         return summary
 
     def _resolve_talk_target(self, agent, decision):
@@ -13567,7 +14797,7 @@ class SimEngine:
                 ballot = council.get("ballot") or {}
                 succession = ballot.get("kind") == "succession"
                 candidates = ", ".join(ballot.get("candidates") or [])
-                self.apply_decision(agent, {
+                self._apply_gated_decision(agent, {
                     "action": "council_speak",
                     "message": (
                         f"We should compare {candidates} by judgment, care, and service."
@@ -13580,7 +14810,7 @@ class SimEngine:
                 })
                 return
             if phase == "proposal" and not council.get("ballot"):
-                self.apply_decision(agent, {
+                self._apply_gated_decision(agent, {
                     "action": "council_propose", "kind": "idea",
                     "title": "Protect essentials",
                     "detail": "Keep food and health secure while finishing the most-stalled project.",
@@ -13589,13 +14819,13 @@ class SimEngine:
                 return
             if phase == "voting" and agent["name"] not in (
                     (council.get("ballot") or {}).get("votes") or {}):
-                self.apply_decision(agent, {
+                self._apply_gated_decision(agent, {
                     "action": "council_vote", "vote": "abstain",
                     "reasoning": "Deterministic offline council fallback.",
                 })
                 return
             if phase == "verdict":
-                self.apply_decision(agent, {
+                self._apply_gated_decision(agent, {
                     "action": "council_speak",
                     "message": f"The council ratifies: "
                                f"{(council.get('verdict') or {}).get('outcome', 'the result')}.",
@@ -13649,9 +14879,11 @@ class SimEngine:
 
         actives = self._active_project_districts()
         invention_required = self._invention_required()
+        voice_guidance = self._active_voice_guidance(agent)
+        voice_guidance_active = bool(voice_guidance.get("voice_guidance_active"))
         # One-shot invention-only turn (set by _maybe_invention_backstop):
         # the server swaps in a slim, proposal-only prompt for this call.
-        invention_turn = bool(agent.get("inventionTurn"))
+        invention_turn = bool(agent.get("inventionTurn")) and not voice_guidance_active
         # inventionBuildContext deliberately survives past this point (unlike
         # inventionTurn) -- it's read later in apply_decision's propose_blueprint
         # branch, which runs after the async LLM round-trip, and clearing it
@@ -13660,7 +14892,11 @@ class SimEngine:
             if invention_turn and agent.get("inventionBuildContext") else None
         if invention_turn:
             agent["inventionTurn"] = False
-        sprite_design_turn = bool(agent.get("spriteDesignTurn"))
+        elif voice_guidance_active:
+            self._cancel_voice_blocked_special_turns([agent["id"]])
+        sprite_design_turn = bool(agent.get("spriteDesignTurn")) and not voice_guidance_active
+        if voice_guidance_active and agent.get("spriteDesignTurn"):
+            agent["spriteDesignTurn"] = None
         # A saved mid-meeting session may still exist after the rollback flag
         # is switched off. Treat it as inert: no council prompt/actions may be
         # offered until the feature is explicitly re-enabled.
@@ -14316,7 +15552,7 @@ class SimEngine:
                     f"Nearby wildlife (hunt_wildlife target=id): {parts}"
                 )
 
-        return {
+        think_payload = {
             "agent_name": agent["name"],
             "frame_tick": self.frameTick,
             "role": agent["role"],
@@ -14355,6 +15591,12 @@ class SimEngine:
             # directive line, in either direction.
             "divine_public_line": divine_public_line,
             "divine_private_line": divine_private_line,
+            "voice_guidance_active": voice_guidance_active,
+            "voice_guidance_id": voice_guidance.get("voice_guidance_id"),
+            "voice_guidance_text": voice_guidance.get("voice_guidance_text"),
+            "divine_burning_bush_line": self._burning_bush_prompt_line(agent),
+            "divine_anointment_line": self._anointment_prompt_line(agent),
+            "divine_sampling": self._god_divine_sampling_for_think(agent),
             "invention_only": invention_turn,
             "council_turn": council_turn,
             "council_seated": council_seated,
@@ -14459,7 +15701,10 @@ class SimEngine:
             "settlement_stores_line": self._format_settlement_stores_for_prompt(agent),
             "high_stakes_reason": high_stakes_reason,
             "available_actions": available_actions,
+            "divine_public_event_line": self._divine_public_event_line(agent),
         }
+        self._apply_context_mask(agent, think_payload)
+        return think_payload
 
     def _recent_conversations_text(self):
         if not self.conversationLog:
@@ -14722,6 +15967,11 @@ class SimEngine:
         if result and result.get("persona"):
             agent["persona"] = result["persona"]
 
+    def _finish_think_identity_forge(self, agent):
+        """Advance identity-copy blend after one think cycle completes."""
+        if agent is not None:
+            self._advance_identity_forge_on_think(agent)
+
     def _think_job(self, agent_name):
         """Runs in the worker pool. Build payload under lock, do the network
         call OUTSIDE the lock, then apply the result UNDER the lock."""
@@ -14730,6 +15980,12 @@ class SimEngine:
                 agent = self._find_agent(agent_name)
                 if not agent or agent["incapacitated"]:
                     return
+                gate = self._god_active_decision_gate_record(agent["id"])
+                possession_skip = (
+                    isinstance(gate, dict)
+                    and gate.get("mode") == "possession"
+                    and gate.get("bypassLlm")
+                )
                 payload = self._build_think_payload(agent)
                 self_prompt = (agent.get("persona") or "").strip() if META_SYSTEM else ""
                 payload["self_prompt"] = self_prompt
@@ -14740,6 +15996,31 @@ class SimEngine:
                     piano_context = self._piano_module_context(agent, payload)
                     piano_modules = dict(agent.get("modules") or {})
                     piano_tick = int(agent.get("moduleTick") or 0)
+            if possession_skip:
+                with self.lock:
+                    agent = self._find_agent(agent_name)
+                    if not agent:
+                        return
+                    em = self._sage_emergency()
+                    if em and agent is not em and not agent["incapacitated"] \
+                            and agent["name"] in self._sage_responders(em):
+                        self._rush_to_heal(agent, em)
+                        return
+                    gate = self._god_active_decision_gate_record(agent["id"])
+                    if gate:
+                        pinned_raw = self._god_decision_gate_pinned(agent, gate)
+                        pinned, _ = self._god_normalize_pinned_decision(agent, pinned_raw)
+                        if pinned:
+                            self._apply_divine_possessed_decision(agent, pinned, gate)
+                            self._advance_possession_queue(gate)
+                            agent["goal"] = self._goal_for_decision(pinned)
+                            self._log_benchmark("divine_possession_skip", 1.0, {
+                                "agent": agent["name"],
+                                "action": pinned.get("action"),
+                                "divine_possession": True,
+                            })
+                            self._finish_think_identity_forge(agent)
+                return
             if PIANO_MODULES:
                 # Module fan-out dispatches onto self.piano_workers (its own
                 # PIANO_CONCURRENT_LLM-sized pool, see _run_piano_modules) --
@@ -14785,13 +16066,16 @@ class SimEngine:
                 if not decision or decision.get("error") == "llm offline":
                     self.lmStatus = "offline"
                     self._apply_rule_based_fallback(agent)
+                    self._finish_think_identity_forge(agent)
                 elif decision.get("error") == "compute_error":
                     self.lmStatus = "compute_error"
                     self.llm_cooldown_until = time.time() + 30.0
                     self._apply_rule_based_fallback(agent)
+                    self._finish_think_identity_forge(agent)
                 elif decision.get("error"):
                     self.lmStatus = "online"
-                    self.apply_decision(agent, {"action": "rest"})
+                    self._apply_gated_decision(agent, {"action": "rest"})
+                    self._finish_think_identity_forge(agent)
                 else:
                     self.lmStatus = "online"
                     self.llm_cooldown_until = 0.0
@@ -14846,17 +16130,21 @@ class SimEngine:
                             agent["inventionRetryUsed"] = True
                             agent["inventionTurn"] = True
                             agent["goal"] = None
-                            self.apply_decision(agent, {"action": "rest"})
+                            self._apply_gated_decision(agent, {"action": "rest"})
                             retried_invention = True
+                            self._finish_think_identity_forge(agent)
                     if not retried_invention:
-                        self.apply_decision(agent, decision)
-                        agent["goal"] = self._goal_for_decision(decision)
+                        applied = self._apply_gated_decision(agent, decision)
+                        if applied:
+                            agent["goal"] = self._goal_for_decision(decision)
+                        self._finish_think_identity_forge(agent)
         except Exception:
             with self.lock:
                 agent = self._find_agent(agent_name)
                 if agent:
                     self.lmStatus = "offline"
                     self._apply_rule_based_fallback(agent)
+                    self._finish_think_identity_forge(agent)
         finally:
             with self.lock:
                 a = self._find_agent(agent_name)
@@ -14870,6 +16158,8 @@ class SimEngine:
         retry soon (THINK_RETRY_FRAMES) instead of waiting a full
         thinkInterval, so a busy worker pool doesn't silently cost an agent
         an entire cycle."""
+        if agent.get("divineHold"):
+            return False
         if agent["name"] in self._inflight:
             return False
         if len(self._inflight) >= MAX_CONCURRENT_LLM:
@@ -14995,6 +16285,8 @@ class SimEngine:
                 self._sample_benchmarks()
 
             for a in self.agents:
+                if a.get("divineHold"):
+                    continue
                 if not a["incapacitated"]:
                     self._move_agent(a, MOVE_SCALE)
             if WILDLIFE_ENABLED:
@@ -15018,6 +16310,8 @@ class SimEngine:
                     if a["messageTimer"] == 0:
                         a["message"] = None
                 if a["incapacitated"]:
+                    continue
+                if a.get("divineHold"):
                     continue
                 daily = (self.civilization.get("dailyCouncil")
                          if DAILY_COUNCIL_ENABLED else None)
@@ -15107,9 +16401,10 @@ class SimEngine:
             civ[key] = sorted(c.get(key, set()))
         agents = []
         for a in self.agents:
-            ad = {k: v for k, v in a.items() if k not in ("beliefs", "isThinking")}
+            ad = {k: v for k, v in a.items() if k not in ("beliefs", "godKeys", "isThinking")}
             ad = json.loads(json.dumps(ad, default=str))
             ad["beliefs"] = sorted(a.get("beliefs", set()))
+            ad["godKeys"] = sorted(a.get("godKeys", set()))
             agents.append(ad)
         memory = []
         ms = self.d.get("memory_store")
@@ -15469,6 +16764,9 @@ class SimEngine:
                     a.setdefault("lastTreatyRejection", None)
                     a.setdefault("lastNightNote", None)
                     a.setdefault("reorgTask", None)
+                    a.setdefault("divineHold", False)
+                    a.setdefault("architectLimbo", None)
+                    a["godKeys"] = set(a.get("godKeys") or ())
                     if isinstance(a.get("resources"), dict):
                         a["resources"].setdefault("coin", 0)
                     a.setdefault("persona", "")
@@ -15615,6 +16913,17 @@ class SimEngine:
             "privateOmens": {},
             "activeEvents": [],
             "recentInterventions": [],
+            "recentDivineResponses": [],
+            # Divine Matrix interventions (godState v2) — whisperCampaigns + agentSampling live.
+            "whisperCampaigns": {},
+            "agentSampling": {},  # Phase 2: live per-agent LLM sampling overrides
+            "contextMasks": {},
+            "decisionGates": {},
+            "burningBush": {},
+            "anointments": {},
+            "identityForges": {},
+            "architectZones": [],
+            "checkpoints": [],
         }
 
     def _normalize_god_state(self, raw):
@@ -15663,6 +16972,78 @@ class SimEngine:
             [r for r in recent if isinstance(r, dict)][-GOD_RECENT_INTERVENTIONS_CAP:]
             if isinstance(recent, list) else []
         )
+        divine_responses = raw.get("recentDivineResponses")
+        out["recentDivineResponses"] = (
+            [r for r in divine_responses if isinstance(r, dict)][-GOD_DIVINE_RESPONSE_LOG_MAX:]
+            if isinstance(divine_responses, list) else []
+        )
+        if isinstance(out.get("providence"), dict):
+            out["providence"].setdefault("ackedAgentIds", {})
+        for omen in out.get("privateOmens", {}).values():
+            if isinstance(omen, dict):
+                omen.setdefault("acked", False)
+        # godState v2: Matrix intervention maps — setdefault/backfill; drop malformed
+        # entries conservatively (same discipline as privateOmens above).
+        campaigns_raw = raw.get("whisperCampaigns")
+        campaigns = {}
+        if isinstance(campaigns_raw, dict):
+            for k, v in campaigns_raw.items():
+                if not isinstance(k, str) or not isinstance(v, dict):
+                    continue
+                targets_raw = v.get("targets")
+                if not isinstance(targets_raw, dict):
+                    continue
+                targets = {}
+                for tk, omen_id in targets_raw.items():
+                    if isinstance(tk, (str, int)) and isinstance(omen_id, str) and omen_id.strip():
+                        targets[str(tk)] = omen_id.strip()
+                if not all(kk in v for kk in ("id", "theme", "createdFrame", "expiresFrame")):
+                    continue
+                v = dict(v)
+                v["targets"] = targets
+                v.setdefault("status", "active")
+                campaigns[k] = v
+        out["whisperCampaigns"] = campaigns
+        sampling_raw = raw.get("agentSampling")
+        sampling = {}
+        if isinstance(sampling_raw, dict):
+            for k, v in sampling_raw.items():
+                if not isinstance(k, str) or not isinstance(v, dict):
+                    continue
+                if not all(kk in v for kk in ("id", "targetId", "model", "temperature", "createdFrame")):
+                    continue
+                if v.get("model") not in GOD_AGENT_SAMPLING_MODELS:
+                    continue
+                temp = v.get("temperature")
+                if not isinstance(temp, (int, float)) or not math.isfinite(temp):
+                    continue
+                if not (GOD_AGENT_SAMPLING_TEMP_MIN <= float(temp) <= GOD_AGENT_SAMPLING_TEMP_MAX):
+                    continue
+                sampling[k] = dict(v)
+        out["agentSampling"] = sampling
+        for map_key in ("contextMasks", "decisionGates",
+                        "burningBush", "anointments", "identityForges"):
+            mraw = raw.get(map_key)
+            cleaned = {}
+            if isinstance(mraw, dict):
+                for k, v in mraw.items():
+                    if isinstance(k, str) and isinstance(v, dict):
+                        cleaned[k] = v
+            out[map_key] = cleaned
+        zones_raw = raw.get("architectZones")
+        out["architectZones"] = (
+            [e for e in zones_raw if isinstance(e, dict)] if isinstance(zones_raw, list) else []
+        )
+        checkpoints_raw = raw.get("checkpoints")
+        checkpoints = []
+        if isinstance(checkpoints_raw, list):
+            for e in checkpoints_raw:
+                if not isinstance(e, dict):
+                    continue
+                if not all(k in e for k in ("id", "label", "frameTick", "path", "createdAt")):
+                    continue
+                checkpoints.append(dict(e))
+        out["checkpoints"] = checkpoints
         return out
 
     # --- stored-text contract ---
@@ -15847,6 +17228,801 @@ class SimEngine:
             return GOD_GUIDANCE_DEFAULT_DURATION_FRAMES
         return max(GOD_GUIDANCE_MIN_DURATION_FRAMES,
                    min(GOD_GUIDANCE_MAX_DURATION_FRAMES, raw))
+
+    # --- Divine Matrix Phase 2: per-agent sampling overlay ---
+    def _god_sampling_optional_float(self, raw, label, lo, hi):
+        if raw is None:
+            return None, None
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None, f"{label} must be a number"
+        if not math.isfinite(raw):
+            return None, f"{label} must be finite"
+        val = float(raw)
+        if not (lo <= val <= hi):
+            return None, f"{label} must be between {lo} and {hi}"
+        return val, None
+
+    def _god_sampling_optional_int(self, raw, label, lo, hi):
+        if raw is None:
+            return None, None
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return None, f"{label} must be an integer"
+        if not (lo <= raw <= hi):
+            return None, f"{label} must be between {lo} and {hi}"
+        return raw, None
+
+    def _god_active_agent_sampling_record(self, agent_id):
+        """Active sampling override for agent_id, or None if absent/expired."""
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("agentSampling") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        agent = self._find_agent_by_id(agent_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return None
+        return rec
+
+    def _god_fast_sampling_override_count(self, exclude_target_id=None):
+        """Living agents with an active sim-fast decision override, optionally
+        excluding one target (replace semantics for the fast-route cap)."""
+        god = self.civilization.get("godState") or {}
+        sampling = god.get("agentSampling") or {}
+        count = 0
+        if not isinstance(sampling, dict):
+            return 0
+        exclude_key = str(exclude_target_id) if exclude_target_id is not None else None
+        for key, rec in sampling.items():
+            if exclude_key is not None and key == exclude_key:
+                continue
+            if not isinstance(rec, dict) or rec.get("model") != "sim-fast":
+                continue
+            expires = rec.get("expiresFrame")
+            if isinstance(expires, int) and self.frameTick >= expires:
+                continue
+            agent = self._find_agent_by_id(rec.get("targetId"))
+            if agent is None or agent.get("deathFrame") is not None:
+                continue
+            count += 1
+        return count
+
+    def _validate_god_agent_sampling(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+
+        model = payload.get("model", "sim-smart")
+        if not isinstance(model, str):
+            return None, "model must be a string"
+        model = model.strip()
+        if model not in GOD_AGENT_SAMPLING_MODELS:
+            return None, 'model must be "sim-smart" or "sim-fast"'
+
+        temperature, reason = self._god_sampling_optional_float(
+            payload.get("temperature"), "temperature",
+            GOD_AGENT_SAMPLING_TEMP_MIN, GOD_AGENT_SAMPLING_TEMP_MAX)
+        if reason:
+            return None, reason
+        if temperature is None:
+            return None, "temperature is required"
+
+        top_p, reason = self._god_sampling_optional_float(
+            payload.get("top_p"), "top_p",
+            GOD_AGENT_SAMPLING_TOP_P_MIN, GOD_AGENT_SAMPLING_TOP_P_MAX)
+        if reason:
+            return None, reason
+        top_k, reason = self._god_sampling_optional_int(
+            payload.get("top_k"), "top_k",
+            GOD_AGENT_SAMPLING_TOP_K_MIN, GOD_AGENT_SAMPLING_TOP_K_MAX)
+        if reason:
+            return None, reason
+        min_p, reason = self._god_sampling_optional_float(
+            payload.get("min_p"), "min_p",
+            GOD_AGENT_SAMPLING_MIN_P_MIN, GOD_AGENT_SAMPLING_MIN_P_MAX)
+        if reason:
+            return None, reason
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None:
+            if isinstance(duration_raw, bool) or not isinstance(duration_raw, int):
+                return None, "durationFrames must be an integer"
+
+        if model == "sim-fast":
+            if (self._god_fast_sampling_override_count(exclude_target_id=target_id)
+                    >= GOD_AGENT_SAMPLING_FAST_DECISION_CAP):
+                return None, (
+                    f"at most {GOD_AGENT_SAMPLING_FAST_DECISION_CAP} living agent may "
+                    "use sim-fast for decisions at once")
+
+        normalized = {
+            "targetId": target_id,
+            "model": model,
+            "temperature": temperature,
+        }
+        if top_p is not None:
+            normalized["top_p"] = top_p
+        if top_k is not None:
+            normalized["top_k"] = top_k
+        if min_p is not None:
+            normalized["min_p"] = min_p
+        if duration_raw is not None:
+            normalized["durationFrames"] = self._clamp_god_duration(duration_raw)
+        return normalized, None
+
+    def _god_divine_sampling_for_think(self, agent):
+        """Think-payload overlay for build_decision_payload; no secrets."""
+        if not GOD_MODE_ENABLED:
+            return None
+        rec = self._god_active_agent_sampling_record(agent["id"])
+        if rec is None:
+            return None
+        out = {"model": rec["model"], "temperature": rec["temperature"]}
+        for key in ("top_p", "top_k", "min_p"):
+            if key in rec:
+                out[key] = rec[key]
+        return out
+
+    def _god_active_context_mask_record(self, agent_id):
+        """Active context mask for agent_id, or None if absent/expired."""
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("contextMasks") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        agent = self._find_agent_by_id(agent_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return None
+        return rec
+
+    def _god_current_outgoing_context_mask_id(self, target_id):
+        rec = (self.civilization.get("godState") or {}).get("contextMasks", {}).get(str(target_id))
+        return rec.get("id") if isinstance(rec, dict) else None
+
+    def _validate_god_dream_snapshot(self, raw):
+        if not isinstance(raw, dict) or not raw:
+            return None, "dreamSnapshot must be a non-empty object"
+        unknown = set(raw.keys()) - GOD_CONTEXT_MASK_DREAM_KEYS
+        if unknown:
+            return None, f"dreamSnapshot has unknown keys: {sorted(unknown)}"
+        out = {}
+        for key, val in raw.items():
+            if key == "nearby_agents":
+                if not isinstance(val, list):
+                    return None, "dreamSnapshot.nearby_agents must be a list"
+                out[key] = [dict(e) if isinstance(e, dict) else e for e in val]
+            elif key == "resources":
+                if not isinstance(val, dict):
+                    return None, "dreamSnapshot.resources must be an object"
+                out[key] = {str(k): v for k, v in val.items()}
+            elif key == "nearby_wildlife":
+                if not isinstance(val, list):
+                    return None, "dreamSnapshot.nearby_wildlife must be a list"
+                out[key] = [dict(e) if isinstance(e, dict) else e for e in val]
+            elif key in ("weather_line", "recent_conversations", "district_stocks",
+                           "nearby_wildlife_line"):
+                if val is not None and not isinstance(val, str):
+                    return None, f"dreamSnapshot.{key} must be a string or null"
+                if isinstance(val, str):
+                    text, reason = self._normalize_divine_text(
+                        val, max_chars=GOD_TEXT_MAX_CHARS * 2, max_bytes=GOD_TEXT_MAX_BYTES * 2)
+                    if reason:
+                        return None, f"dreamSnapshot.{key} {reason}"
+                    out[key] = text
+                else:
+                    out[key] = val
+            elif key in ("hunger", "health"):
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    return None, f"dreamSnapshot.{key} must be a number"
+                if not math.isfinite(val):
+                    return None, f"dreamSnapshot.{key} must be finite"
+                out[key] = float(val)
+        return out, None
+
+    def _validate_god_forged_conversations(self, raw):
+        if not isinstance(raw, list) or not raw:
+            return None, "forgedConversations must be a non-empty list"
+        if len(raw) > GOD_CONTEXT_MASK_FORGED_MAX:
+            return None, (
+                f"forgedConversations may include at most {GOD_CONTEXT_MASK_FORGED_MAX} entries")
+        out = []
+        for idx, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                return None, f"forgedConversations[{idx}] must be an object"
+            frm = entry.get("from")
+            to = entry.get("to")
+            if not isinstance(frm, str) or not frm.strip():
+                return None, f"forgedConversations[{idx}].from must be a non-empty string"
+            if not isinstance(to, str) or not to.strip():
+                return None, f"forgedConversations[{idx}].to must be a non-empty string"
+            msg, reason = self._normalize_divine_text(entry.get("message"))
+            if reason:
+                return None, f"forgedConversations[{idx}].message {reason}"
+            out.append({"from": frm.strip(), "to": to.strip(), "message": msg})
+        return out, None
+
+    def _validate_god_context_mask(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        mode = payload.get("mode")
+        if not isinstance(mode, str) or mode not in GOD_CONTEXT_MASK_MODES:
+            return None, 'mode must be one of "dream", "blue_pill", "red_pill", "whisper_chain"'
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+        normalized = {"targetId": target_id, "mode": mode, "durationFrames": duration}
+        if mode == "dream":
+            snapshot, reason = self._validate_god_dream_snapshot(payload.get("dreamSnapshot"))
+            if reason:
+                return None, reason
+            normalized["dreamSnapshot"] = snapshot
+        elif mode == "whisper_chain":
+            forged, reason = self._validate_god_forged_conversations(
+                payload.get("forgedConversations"))
+            if reason:
+                return None, reason
+            normalized["forgedConversations"] = forged
+        return normalized, None
+
+    def _validate_god_pinned_decision_fields(self, agent, raw, label="pinnedDecision"):
+        if not isinstance(raw, dict):
+            return None, f"{label} must be an object"
+        normalized, reason = self._god_normalize_pinned_decision(agent, raw)
+        if reason:
+            return None, f"{label} {reason}"
+        return normalized, None
+
+    def _validate_god_decision_compulsion(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        pinned, reason = self._validate_god_pinned_decision_fields(
+            agent, payload.get("pinnedDecision"))
+        if reason:
+            return None, reason
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        remaining = payload.get("remainingTurns")
+        if remaining is not None:
+            if isinstance(remaining, bool) or not isinstance(remaining, int):
+                return None, "remainingTurns must be an integer"
+            if remaining <= 0:
+                return None, "remainingTurns must be positive"
+        if duration_raw is None and remaining is None:
+            return None, "at least one of durationFrames or remainingTurns is required"
+        normalized = {
+            "targetId": target_id,
+            "pinnedDecision": pinned,
+        }
+        if duration_raw is not None:
+            normalized["durationFrames"] = self._clamp_god_duration(duration_raw)
+        if remaining is not None:
+            normalized["remainingTurns"] = remaining
+        return normalized, None
+
+    def _validate_god_decision_veto_arm(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+        return {"targetId": target_id, "durationFrames": duration}, None
+
+    def _validate_god_decision_veto_resolve(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        resolution = payload.get("resolution")
+        if resolution not in ("approve", "reject", "rewrite"):
+            return None, 'resolution must be "approve", "reject", or "rewrite"'
+        gate = self._god_active_decision_gate_record(target_id)
+        if gate is None or gate.get("mode") != "veto" or gate.get("status") != "holding":
+            return None, "no pending veto hold for this agent"
+        normalized = {"targetId": target_id, "resolution": resolution}
+        if resolution == "rewrite":
+            rewritten, reason = self._validate_god_pinned_decision_fields(
+                agent, payload.get("rewrittenDecision"), label="rewrittenDecision")
+            if reason:
+                return None, reason
+            normalized["rewrittenDecision"] = rewritten
+        return normalized, None
+
+    def _validate_god_agent_possession(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+        queue_raw = payload.get("queue")
+        pinned_raw = payload.get("pinnedDecision")
+        if queue_raw is not None:
+            if not isinstance(queue_raw, list) or not queue_raw:
+                return None, "queue must be a non-empty list"
+            if len(queue_raw) > 8:
+                return None, "queue may include at most 8 decisions"
+            queue = []
+            for idx, entry in enumerate(queue_raw):
+                norm, reason = self._validate_god_pinned_decision_fields(
+                    agent, entry, label=f"queue[{idx}]")
+                if reason:
+                    return None, reason
+                queue.append(norm)
+            return {
+                "targetId": target_id,
+                "queue": queue,
+                "durationFrames": duration,
+            }, None
+        if pinned_raw is None:
+            return None, "pinnedDecision or queue is required"
+        pinned, reason = self._validate_god_pinned_decision_fields(agent, pinned_raw)
+        if reason:
+            return None, reason
+        return {
+            "targetId": target_id,
+            "pinnedDecision": pinned,
+            "durationFrames": duration,
+        }, None
+
+    def _validate_god_revoke_decision_gate(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        gate = (self.civilization.get("godState") or {}).get("decisionGates", {}).get(str(target_id))
+        if not isinstance(gate, dict):
+            return None, "no active decision gate for this agent"
+        return {"targetId": target_id}, None
+
+    def _normalize_stigmata_tag(self, raw):
+        """Short public tag for stigmata (neighbor-visible, not destiny)."""
+        if not isinstance(raw, str):
+            return None, "must be a string"
+        text, reason = self._normalize_divine_text(
+            raw, max_chars=GOD_ANOINT_STIGMATA_TAG_MAX_CHARS,
+            max_bytes=GOD_ANOINT_STIGMATA_TAG_MAX_CHARS * 3)
+        return text, reason
+
+    def _validate_god_anoint(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+
+        destiny, reason = self._normalize_divine_text(payload.get("destinyText"))
+        if reason:
+            return None, f"destinyText {reason}"
+
+        stigmata_raw = payload.get("stigmataTags")
+        stigmata_tags = []
+        if stigmata_raw is not None:
+            if not isinstance(stigmata_raw, list):
+                return None, "stigmataTags must be an array"
+            if len(stigmata_raw) > GOD_ANOINT_STIGMATA_MAX:
+                return None, f"stigmataTags may have at most {GOD_ANOINT_STIGMATA_MAX} entries"
+            for i, tag_raw in enumerate(stigmata_raw):
+                tag, tag_reason = self._normalize_stigmata_tag(tag_raw)
+                if tag_reason:
+                    return None, f"stigmataTags[{i}] {tag_reason}"
+                if tag:
+                    stigmata_tags.append(tag)
+
+        hints_raw = payload.get("oracleHints")
+        oracle_hints = []
+        if hints_raw is not None:
+            if not isinstance(hints_raw, list):
+                return None, "oracleHints must be an array"
+            if len(hints_raw) > GOD_ANOINT_ORACLE_HINTS_MAX:
+                return None, (f"oracleHints may have at most "
+                              f"{GOD_ANOINT_ORACLE_HINTS_MAX} entries")
+            for i, hint_raw in enumerate(hints_raw):
+                if not isinstance(hint_raw, dict):
+                    return None, f"oracleHints[{i}] must be an object"
+                reveal = hint_raw.get("revealFrame")
+                if isinstance(reveal, bool) or not isinstance(reveal, int) or reveal < 0:
+                    return None, f"oracleHints[{i}].revealFrame must be a non-negative integer"
+                text, text_reason = self._normalize_divine_text(hint_raw.get("text"))
+                if text_reason:
+                    return None, f"oracleHints[{i}].text {text_reason}"
+                oracle_hints.append({"text": text, "revealFrame": reveal})
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None:
+            if isinstance(duration_raw, bool) or not isinstance(duration_raw, int):
+                return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+
+        normalized = {
+            "targetId": target_id,
+            "destinyText": destiny,
+            "stigmataTags": stigmata_tags,
+            "oracleHints": oracle_hints,
+            "durationFrames": duration,
+        }
+        return normalized, None
+
+    def _validate_god_identity_edit(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+
+        persona = None
+        if payload.get("persona") is not None:
+            persona, reason = self._normalize_divine_text(
+                payload.get("persona"),
+                max_chars=GOD_IDENTITY_PERSONA_MAX_CHARS,
+                max_bytes=GOD_IDENTITY_PERSONA_MAX_CHARS * 3,
+            )
+            if reason:
+                return None, f"persona {reason}"
+
+        personality = None
+        if payload.get("personality") is not None:
+            personality, reason = self._normalize_divine_text(
+                payload.get("personality"),
+                max_chars=GOD_IDENTITY_PERSONALITY_MAX_CHARS,
+                max_bytes=GOD_TEXT_MAX_BYTES,
+            )
+            if reason:
+                return None, f"personality {reason}"
+
+        role = None
+        if payload.get("role") is not None:
+            if not isinstance(payload.get("role"), str) or not payload.get("role").strip():
+                return None, "role must be a non-empty string"
+            role = payload.get("role").strip()
+            if not self._god_role_valid(role):
+                return None, "role must exist in roles.json"
+
+        if persona is None and personality is None and role is None:
+            return None, "at least one of persona, personality, or role is required"
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None:
+            if isinstance(duration_raw, bool) or not isinstance(duration_raw, int):
+                return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw) if duration_raw is not None else None
+
+        normalized = {"targetId": target_id}
+        if persona is not None:
+            normalized["persona"] = persona
+        if personality is not None:
+            normalized["personality"] = personality
+        if role is not None:
+            normalized["role"] = role
+        if duration is not None:
+            normalized["durationFrames"] = duration
+        return normalized, None
+
+    def _validate_god_identity_copy_overwrite(self, payload):
+        target_id = payload.get("targetId")
+        source_id = payload.get("sourceId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        if isinstance(source_id, bool) or not isinstance(source_id, int):
+            return None, "sourceId must be an integer agent id"
+        if target_id == source_id:
+            return None, "targetId and sourceId must differ"
+        target = self._find_agent_by_id(target_id)
+        if target is None:
+            return None, "unknown target agent"
+        if target.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        source = self._find_agent_by_id(source_id)
+        if source is None:
+            return None, "unknown source agent"
+        if source.get("deathFrame") is not None:
+            return None, "source agent is deceased"
+        rate_raw = payload.get("ratePerThink")
+        if isinstance(rate_raw, bool) or not isinstance(rate_raw, (int, float)):
+            return None, "ratePerThink must be a number"
+        if not math.isfinite(rate_raw):
+            return None, "ratePerThink must be finite"
+        rate = max(0.0, min(1.0, float(rate_raw)))
+        sync_raw = payload.get("syncMemories")
+        if sync_raw is not None and not isinstance(sync_raw, bool):
+            return None, "syncMemories must be a boolean"
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None:
+            if isinstance(duration_raw, bool) or not isinstance(duration_raw, int):
+                return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw) if duration_raw is not None else None
+        normalized = {
+            "targetId": target_id,
+            "sourceId": source_id,
+            "ratePerThink": rate,
+            "syncMemories": bool(sync_raw),
+        }
+        if duration is not None:
+            normalized["durationFrames"] = duration
+        return normalized, None
+
+    def _validate_god_bargain_predicate(self, raw, target_id, label="predicate"):
+        """Validate one allowlisted bargain predicate. Returns (normalized, reason)."""
+        if not isinstance(raw, dict):
+            return None, f"{label} must be an object"
+        kind = raw.get("kind")
+        if not isinstance(kind, str) or kind not in GOD_BARGAIN_PREDICATES:
+            return None, (f"{label}.kind must be one of "
+                          f"{sorted(GOD_BARGAIN_PREDICATES)}")
+        if kind == "agent_has_resource":
+            resource_id = raw.get("resourceId")
+            if not isinstance(resource_id, str) or not resource_id.strip():
+                return None, f"{label}.resourceId is required"
+            resource_id = resource_id.strip()
+            if resource_id not in self.civilization.get("resourceRegistry", {}):
+                return None, f"{label}.resourceId is unknown"
+            amount = raw.get("amount", 1)
+            if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+                return None, f"{label}.amount must be a positive integer"
+            return {"kind": kind, "resourceId": resource_id, "amount": amount}, None
+        if kind == "structure_built":
+            structure_type = raw.get("structureType")
+            if not isinstance(structure_type, str) or not structure_type.strip():
+                return None, f"{label}.structureType is required"
+            structure_type = structure_type.strip()
+            registry = self.civilization.get("projectRegistry") or {}
+            if structure_type not in registry:
+                return None, f"{label}.structureType is unknown"
+            return {"kind": kind, "structureType": structure_type}, None
+        if kind == "frame_reached":
+            frame = raw.get("frame")
+            if isinstance(frame, bool) or not isinstance(frame, int) or frame < 0:
+                return None, f"{label}.frame must be a non-negative integer"
+            return {"kind": kind, "frame": frame}, None
+        if kind == "agent_health_below":
+            threshold = raw.get("threshold")
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                return None, f"{label}.threshold must be a number"
+            if not math.isfinite(threshold):
+                return None, f"{label}.threshold must be finite"
+            threshold = float(threshold)
+            if not (0.0 <= threshold <= 100.0):
+                return None, f"{label}.threshold must be between 0 and 100"
+            return {"kind": kind, "threshold": threshold}, None
+        return None, f"unknown {label} kind"
+
+    def _validate_god_bargain_primitive(self, raw, label):
+        if raw is None:
+            return None, None
+        if not isinstance(raw, dict):
+            return None, f"{label} must be an object"
+        kind = raw.get("kind")
+        if kind not in GOD_BARGAIN_PRIMITIVE_KINDS:
+            return None, (f"{label}.kind must be one of "
+                          f"{sorted(GOD_BARGAIN_PRIMITIVE_KINDS)}")
+        prim_normalized, reason = self._validate_god_envelope(
+            {"kind": kind, "payload": raw.get("payload") or {}})
+        if reason:
+            return None, f"{label}: {reason}"
+        return {"kind": kind, "payload": prim_normalized["payload"]}, None
+
+    def _validate_god_merovingian_bargain(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        terms_text, reason = self._normalize_divine_text(payload.get("termsText"))
+        if reason:
+            return None, f"merovingian_bargain termsText {reason}"
+        success_pred, reason = self._validate_god_bargain_predicate(
+            payload.get("successPredicate"), target_id, label="successPredicate")
+        if reason:
+            return None, reason
+        failure_pred = None
+        if payload.get("failurePredicate") is not None:
+            failure_pred, reason = self._validate_god_bargain_predicate(
+                payload.get("failurePredicate"), target_id, label="failurePredicate")
+            if reason:
+                return None, reason
+        reward_prim, reason = self._validate_god_bargain_primitive(
+            payload.get("rewardPrimitive"), "rewardPrimitive")
+        if reason:
+            return None, reason
+        punish_prim, reason = self._validate_god_bargain_primitive(
+            payload.get("punishPrimitive"), "punishPrimitive")
+        if reason:
+            return None, reason
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+        key = str(target_id)
+        bush = (self.civilization.get("godState") or {}).get("burningBush", {}).get(key)
+        if isinstance(bush, dict):
+            bargain = bush.get("bargain")
+            if isinstance(bargain, dict) and bargain.get("status") == "open":
+                return None, "target already has an open bargain"
+        normalized = {
+            "targetId": target_id,
+            "termsText": terms_text,
+            "successPredicate": success_pred,
+            "durationFrames": duration,
+        }
+        if failure_pred is not None:
+            normalized["failurePredicate"] = failure_pred
+        if reward_prim is not None:
+            normalized["rewardPrimitive"] = reward_prim
+        if punish_prim is not None:
+            normalized["punishPrimitive"] = punish_prim
+        return normalized, None
+
+    def _evaluate_god_bargain_predicate(self, predicate, target_id):
+        if not isinstance(predicate, dict):
+            return False
+        kind = predicate.get("kind")
+        agent = self._find_agent_by_id(target_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return False
+        if kind == "agent_has_resource":
+            rid = predicate.get("resourceId")
+            amount = predicate.get("amount", 1)
+            held = agent.get("resources", {}).get(rid, 0)
+            stock = self.civilization.get("stockpile", {}).get(rid, 0)
+            return (held + stock) >= amount
+        if kind == "structure_built":
+            return self._structure_type_built(predicate.get("structureType"))
+        if kind == "frame_reached":
+            frame = predicate.get("frame")
+            return isinstance(frame, int) and self.frameTick >= frame
+        if kind == "agent_health_below":
+            threshold = predicate.get("threshold")
+            return isinstance(threshold, (int, float)) and agent.get("health", 100) < threshold
+        return False
+
+    def _divine_public_event_line(self, agent):
+        """Active public story-event narration for think payload (blue_pill strips)."""
+        if not GOD_MODE_ENABLED:
+            return None
+        god = self.civilization.get("godState") or {}
+        ft = self.frameTick
+        lines = []
+        for event in god.get("activeEvents") or []:
+            if not isinstance(event, dict) or event.get("status") != "active":
+                continue
+            if event.get("visibility", "public") != "public":
+                continue
+            expires = event.get("expiresFrame")
+            if isinstance(expires, int) and ft >= expires:
+                continue
+            text = event.get("narration") or event.get("title")
+            if text:
+                lines.append(str(text))
+        if not lines:
+            return None
+        combined = " | ".join(lines[:3])
+        if len(combined) > GOD_TEXT_MAX_CHARS:
+            combined = combined[:GOD_TEXT_MAX_CHARS]
+        return combined
+
+    def _filter_divine_conversations_text(self, conv_text):
+        if not conv_text or conv_text == "none":
+            return "none"
+        parts = [p for p in conv_text.split(" | ")
+                 if p and not p.lower().startswith("divine ->")]
+        return " | ".join(parts) if parts else "none"
+
+    def _build_red_pill_truth_line(self, agent):
+        """Simulation-truth injection — never includes other agents' private omens."""
+        parts = [
+            "SIMULATION TRUTH: You are an agent in a server-authoritative village simulation.",
+            f"Your id is {agent['id']}; your role is {agent.get('role')}.",
+        ]
+        god = self.civilization.get("godState") or {}
+        if god.get("intervened"):
+            parts.append("A divine operator has actively intervened in this world.")
+        public_stories = []
+        for event in god.get("activeEvents") or []:
+            if (isinstance(event, dict) and event.get("status") == "active"
+                    and event.get("visibility", "public") == "public"):
+                title = event.get("title")
+                if title:
+                    public_stories.append(str(title))
+        if public_stories:
+            parts.append("Active public divine stories: " + ", ".join(public_stories[:3]) + ".")
+        flags = []
+        if MEMES_ENABLED:
+            flags.append("memes")
+        if WEATHER_ENABLED:
+            flags.append("weather")
+        if TECH_TREE_ENABLED:
+            flags.append("tech_tree")
+        if flags:
+            parts.append("Enabled systems: " + ", ".join(flags) + ".")
+        text = " ".join(parts)
+        if len(text) > GOD_TEXT_MAX_CHARS:
+            text = text[:GOD_TEXT_MAX_CHARS]
+        return text
+
+    def _apply_context_mask(self, agent, payload):
+        """Reality-distortion layer on the think snapshot only — never mutates world logs."""
+        if not GOD_MODE_ENABLED:
+            return
+        rec = self._god_active_context_mask_record(agent["id"])
+        if rec is None:
+            return
+        mode = rec.get("mode")
+        if mode == "blue_pill":
+            payload["divine_public_line"] = None
+            payload["divine_private_line"] = None
+            payload["divine_public_event_line"] = None
+            conv = payload.get("recent_conversations")
+            if conv:
+                payload["recent_conversations"] = self._filter_divine_conversations_text(conv)
+        elif mode == "red_pill":
+            payload["divine_simulation_truth_line"] = self._build_red_pill_truth_line(agent)
+        elif mode == "dream":
+            for key, val in (rec.get("dreamSnapshot") or {}).items():
+                if isinstance(val, (dict, list)):
+                    payload[key] = copy.deepcopy(val)
+                else:
+                    payload[key] = val
+        elif mode == "whisper_chain":
+            forged = rec.get("forgedConversations") or []
+            if forged:
+                payload["recent_conversations"] = " | ".join(
+                    f"{e['from']} -> {e['to']}: {e['message']}" for e in forged)
 
     # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 6) ---
     def _god_active_weather_override(self, exclude_id=None):
@@ -16105,6 +18281,388 @@ class SimEngine:
             return {"kind": "private_omen",
                     "payload": {"targetId": target_id, "text": text,
                                "durationFrames": duration}}, None
+
+        if kind == "whisper_campaign":
+            theme, reason = self._normalize_divine_text(payload.get("theme"))
+            if reason:
+                return None, f"whisper_campaign theme {reason}"
+            whispers_raw = payload.get("whispers")
+            if not isinstance(whispers_raw, list) or not whispers_raw:
+                return None, "whispers must be a non-empty list"
+            if len(whispers_raw) > GOD_WHISPER_CAMPAIGN_MAX_TARGETS:
+                return None, (
+                    f"whispers may include at most {GOD_WHISPER_CAMPAIGN_MAX_TARGETS} targets")
+            seen_targets = set()
+            whispers = []
+            for idx, entry in enumerate(whispers_raw):
+                if not isinstance(entry, dict):
+                    return None, f"whispers[{idx}] must be an object"
+                target_id = entry.get("targetId")
+                if isinstance(target_id, bool) or not isinstance(target_id, int):
+                    return None, f"whispers[{idx}].targetId must be an integer agent id"
+                if target_id in seen_targets:
+                    return None, "duplicate targetId in whispers"
+                agent = self._find_agent_by_id(target_id)
+                if agent is None:
+                    return None, f"whispers[{idx}]: unknown target agent"
+                if agent.get("deathFrame") is not None:
+                    return None, f"whispers[{idx}]: target agent is deceased"
+                text, reason = self._normalize_divine_text(entry.get("text"))
+                if reason:
+                    return None, f"whispers[{idx}].text {reason}"
+                seen_targets.add(target_id)
+                whispers.append({"targetId": target_id, "text": text})
+            duration_raw = payload.get("durationFrames")
+            if duration_raw is not None and (
+                isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+            ):
+                return None, "durationFrames must be an integer"
+            duration = self._clamp_god_duration(duration_raw)
+            return {"kind": "whisper_campaign",
+                    "payload": {"theme": theme, "whispers": whispers,
+                                "durationFrames": duration}}, None
+
+        if kind == "agent_sampling":
+            normalized, reason = self._validate_god_agent_sampling(payload)
+            if reason:
+                return None, reason
+            return {"kind": "agent_sampling", "payload": normalized}, None
+
+        if kind == "revoke_agent_sampling":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            if self._god_active_agent_sampling_record(target_id) is None:
+                return None, "no active sampling override for target agent"
+            return {"kind": "revoke_agent_sampling",
+                    "payload": {"targetId": target_id}}, None
+
+        if kind == "memory_insert":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"memory_insert text {reason}"
+            salience_raw = payload.get("salience")
+            if salience_raw is None:
+                salience = 0.7
+            elif isinstance(salience_raw, bool) or not isinstance(salience_raw, (int, float)):
+                return None, "salience must be a number"
+            elif not math.isfinite(salience_raw):
+                return None, "salience must be finite"
+            else:
+                salience = max(0.0, min(1.0, float(salience_raw)))
+            mem_kind = payload.get("kind")
+            if mem_kind is None:
+                mem_kind = GOD_MEMORY_DEFAULT_KIND
+            elif not isinstance(mem_kind, str) or not mem_kind.strip():
+                return None, "kind must be a non-empty string"
+            else:
+                mem_kind = mem_kind.strip()
+                if len(mem_kind) > GOD_MEMORY_KIND_MAX_LEN:
+                    return None, f"kind exceeds {GOD_MEMORY_KIND_MAX_LEN} characters"
+            return {"kind": "memory_insert",
+                    "payload": {"targetId": target_id, "text": text,
+                                "salience": salience, "kind": mem_kind}}, None
+
+        if kind == "memory_delete":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            keyword = payload.get("keyword")
+            if keyword is not None:
+                if not isinstance(keyword, str) or not keyword.strip():
+                    return None, "keyword must be a non-empty string"
+                keyword = keyword.strip()
+            frame_from = payload.get("frameFrom")
+            if frame_from is not None and (
+                isinstance(frame_from, bool) or not isinstance(frame_from, int)
+            ):
+                return None, "frameFrom must be an integer"
+            frame_to = payload.get("frameTo")
+            if frame_to is not None and (
+                isinstance(frame_to, bool) or not isinstance(frame_to, int)
+            ):
+                return None, "frameTo must be an integer"
+            kinds_raw = payload.get("kinds")
+            kinds = None
+            if kinds_raw is not None:
+                if not isinstance(kinds_raw, list) or not kinds_raw:
+                    return None, "kinds must be a non-empty list"
+                kinds = []
+                for idx, entry in enumerate(kinds_raw):
+                    if not isinstance(entry, str) or not entry.strip():
+                        return None, f"kinds[{idx}] must be a non-empty string"
+                    kinds.append(entry.strip())
+            if not any(x is not None for x in (keyword, frame_from, frame_to, kinds)):
+                return None, "at least one of keyword/frameFrom/frameTo/kinds is required"
+            normalized = {"targetId": target_id}
+            if keyword is not None:
+                normalized["keyword"] = keyword
+            if frame_from is not None:
+                normalized["frameFrom"] = frame_from
+            if frame_to is not None:
+                normalized["frameTo"] = frame_to
+            if kinds is not None:
+                normalized["kinds"] = kinds
+            return {"kind": "memory_delete", "payload": normalized}, None
+
+        if kind == "context_mask":
+            normalized, reason = self._validate_god_context_mask(payload)
+            if reason:
+                return None, reason
+            return {"kind": "context_mask", "payload": normalized}, None
+
+        if kind == "decision_compulsion":
+            normalized, reason = self._validate_god_decision_compulsion(payload)
+            if reason:
+                return None, reason
+            return {"kind": "decision_compulsion", "payload": normalized}, None
+
+        if kind == "decision_veto_arm":
+            normalized, reason = self._validate_god_decision_veto_arm(payload)
+            if reason:
+                return None, reason
+            return {"kind": "decision_veto_arm", "payload": normalized}, None
+
+        if kind == "decision_veto_resolve":
+            normalized, reason = self._validate_god_decision_veto_resolve(payload)
+            if reason:
+                return None, reason
+            return {"kind": "decision_veto_resolve", "payload": normalized}, None
+
+        if kind == "agent_possession":
+            normalized, reason = self._validate_god_agent_possession(payload)
+            if reason:
+                return None, reason
+            return {"kind": "agent_possession", "payload": normalized}, None
+
+        if kind == "revoke_decision_gate":
+            normalized, reason = self._validate_god_revoke_decision_gate(payload)
+            if reason:
+                return None, reason
+            return {"kind": "revoke_decision_gate", "payload": normalized}, None
+
+        if kind == "burning_bush_message":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"burning_bush_message text {reason}"
+            return {"kind": "burning_bush_message",
+                    "payload": {"targetId": target_id, "text": text}}, None
+
+        if kind == "burning_bush_close":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            key = str(target_id)
+            bush = (self.civilization.get("godState") or {}).get("burningBush", {}).get(key)
+            if not isinstance(bush, dict) or bush.get("status") != "active":
+                return None, "no active burning bush session for target agent"
+            return {"kind": "burning_bush_close",
+                    "payload": {"targetId": target_id}}, None
+
+        if kind == "merovingian_bargain":
+            normalized, reason = self._validate_god_merovingian_bargain(payload)
+            if reason:
+                return None, reason
+            return {"kind": "merovingian_bargain", "payload": normalized}, None
+
+        if kind == "bargain_settle":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            outcome = payload.get("outcome")
+            if outcome not in ("success", "failure"):
+                return None, 'outcome must be "success" or "failure"'
+            key = str(target_id)
+            bush = (self.civilization.get("godState") or {}).get("burningBush", {}).get(key)
+            if not isinstance(bush, dict):
+                return None, "no burning bush session for target agent"
+            bargain = bush.get("bargain")
+            if not isinstance(bargain, dict) or bargain.get("status") != "open":
+                return None, "no open bargain for target agent"
+            return {"kind": "bargain_settle",
+                    "payload": {"targetId": target_id, "outcome": outcome}}, None
+
+        if kind == "anoint":
+            normalized, reason = self._validate_god_anoint(payload)
+            if reason:
+                return None, reason
+            return {"kind": "anoint", "payload": normalized}, None
+
+        if kind == "revoke_anoint":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            if self._god_active_anointment_record(target_id) is None:
+                return None, "no active anointment for target agent"
+            return {"kind": "revoke_anoint",
+                    "payload": {"targetId": target_id}}, None
+
+        if kind == "identity_edit":
+            normalized, reason = self._validate_god_identity_edit(payload)
+            if reason:
+                return None, reason
+            return {"kind": "identity_edit", "payload": normalized}, None
+
+        if kind == "identity_copy_overwrite":
+            normalized, reason = self._validate_god_identity_copy_overwrite(payload)
+            if reason:
+                return None, reason
+            return {"kind": "identity_copy_overwrite", "payload": normalized}, None
+
+        if kind == "identity_forge_cancel":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            if self._god_active_identity_forge_record(target_id) is None:
+                return None, "no active identity forge for target agent"
+            return {"kind": "identity_forge_cancel",
+                    "payload": {"targetId": target_id}}, None
+
+        if kind == "checkpoint_create":
+            label_raw = payload.get("label")
+            label, reason = self._normalize_divine_text(label_raw)
+            if reason:
+                return None, f"checkpoint_create label {reason}"
+            replace_raw = payload.get("replaceOldest")
+            if replace_raw is not None and not isinstance(replace_raw, bool):
+                return None, "replaceOldest must be a boolean when provided"
+            replace_oldest = bool(replace_raw)
+            checkpoints = (self.civilization.get("godState") or {}).get("checkpoints") or []
+            if len(checkpoints) >= GOD_CHECKPOINT_MAX and not replace_oldest:
+                return None, (
+                    f"checkpoint cap ({GOD_CHECKPOINT_MAX}) reached; "
+                    "set replaceOldest to true to drop the oldest checkpoint"
+                )
+            return {"kind": "checkpoint_create",
+                    "payload": {"label": label, "replaceOldest": replace_oldest}}, None
+
+        if kind == "checkpoint_restore":
+            checkpoint_id = payload.get("checkpointId")
+            if not isinstance(checkpoint_id, str) or not checkpoint_id.strip():
+                return None, "checkpointId is required"
+            checkpoint_id = checkpoint_id.strip()
+            if self._god_checkpoint_by_id(checkpoint_id) is None:
+                return None, "checkpoint not found"
+            return {"kind": "checkpoint_restore",
+                    "payload": {"checkpointId": checkpoint_id}}, None
+
+        if kind == "deja_vu_replay":
+            if not GOD_DEJA_VU_REPLAY:
+                return None, "deja vu replay is not enabled (GOD_DEJA_VU_REPLAY flag off)"
+            return None, "deja vu replay is not implemented"
+
+        if kind == "architect_zone":
+            normalized, reason = self._validate_god_architect_zone(payload)
+            if reason:
+                return None, reason
+            return {"kind": "architect_zone", "payload": normalized}, None
+
+        if kind == "architect_zone_cancel":
+            zone_id = payload.get("zoneId")
+            if not isinstance(zone_id, str) or not zone_id.strip():
+                return None, "zoneId is required"
+            if self._god_architect_zone_by_id(zone_id.strip()) is None:
+                return None, "architect zone not found or already inactive"
+            return {"kind": "architect_zone_cancel",
+                    "payload": {"zoneId": zone_id.strip()}}, None
+
+        if kind == "architect_release_hold":
+            zone_id = payload.get("zoneId")
+            if not isinstance(zone_id, str) or not zone_id.strip():
+                return None, "zoneId is required"
+            zone = self._god_architect_zone_by_id(zone_id.strip())
+            if zone is None or zone.get("kind") != "limbo":
+                return None, "no active limbo architect zone for zoneId"
+            agent_ids = None
+            if payload.get("agentIds") is not None:
+                if not isinstance(payload.get("agentIds"), list):
+                    return None, "agentIds must be a list when provided"
+                agent_ids = []
+                for raw_id in payload["agentIds"]:
+                    if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                        return None, "agentIds entries must be integer agent ids"
+                    agent_ids.append(raw_id)
+            normalized = {"zoneId": zone_id.strip()}
+            if agent_ids is not None:
+                normalized["agentIds"] = agent_ids
+            return {"kind": "architect_release_hold", "payload": normalized}, None
+
+        if kind == "belief_plant":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            if not MEMES_ENABLED:
+                return None, "memes disabled"
+            belief_id = payload.get("beliefId")
+            if belief_id is not None:
+                if not isinstance(belief_id, str) or not belief_id.strip():
+                    return None, "beliefId must be a non-empty string"
+                belief_id = belief_id.strip()
+            text_raw = payload.get("text")
+            custom_text = None
+            if text_raw is not None:
+                custom_text, reason = self._normalize_divine_text(text_raw)
+                if reason:
+                    return None, f"belief_plant text {reason}"
+            if not belief_id and not custom_text:
+                return None, "at least one of beliefId or text is required"
+            plant_raw = payload.get("plantInMemeTexts")
+            if not isinstance(plant_raw, bool):
+                return None, "plantInMemeTexts must be a boolean"
+            salience_raw = payload.get("salience")
+            if salience_raw is None:
+                salience = 0.7
+            elif isinstance(salience_raw, bool) or not isinstance(salience_raw, (int, float)):
+                return None, "salience must be a number"
+            elif not math.isfinite(salience_raw):
+                return None, "salience must be finite"
+            else:
+                salience = max(0.0, min(1.0, float(salience_raw)))
+            if belief_id:
+                registry = self._belief_registry()
+                if belief_id not in registry and belief_id not in MEMES:
+                    return None, "unknown belief id"
+            normalized = {
+                "targetId": target_id,
+                "plantInMemeTexts": plant_raw,
+                "salience": salience,
+            }
+            if belief_id:
+                normalized["beliefId"] = belief_id
+            if custom_text:
+                normalized["text"] = custom_text
+            return {"kind": "belief_plant", "payload": normalized}, None
 
         if kind == "revoke_guidance":
             guidance_id = payload.get("id")
@@ -16574,6 +19132,207 @@ class SimEngine:
                 "wouldKill": new_hp <= 0,
                 "wasAlive": bool(cre.get("alive")),
             }
+        if kind == "memory_insert":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "salience": payload["salience"],
+                "kind": payload["kind"],
+            }
+        if kind == "memory_delete":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "wouldDelete": self._god_memory_match_count(
+                    agent,
+                    keyword=payload.get("keyword"),
+                    frameFrom=payload.get("frameFrom"),
+                    frameTo=payload.get("frameTo"),
+                    kinds=payload.get("kinds"),
+                ),
+            }
+        if kind == "belief_plant":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            belief_count = len(agent.get("beliefs") or ())
+            would_add = 1
+            if payload.get("beliefId") and payload["beliefId"] in (agent.get("beliefs") or ()):
+                would_add = 0
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "beliefId": payload.get("beliefId"),
+                "beliefCount": belief_count,
+                "wouldAddBelief": bool(would_add),
+            }
+        if kind == "context_mask":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "mode": payload["mode"],
+                "durationFrames": payload["durationFrames"],
+            }
+        if kind == "decision_compulsion":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "mode": "compulsion",
+                "pinnedAction": payload["pinnedDecision"].get("action"),
+                "expiresFrame": (self.frameTick + payload["durationFrames"]
+                                 if payload.get("durationFrames") else None),
+                "remainingTurns": payload.get("remainingTurns"),
+            }
+        if kind == "decision_veto_arm":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "mode": "veto",
+                "armed": True,
+                "expiresFrame": self.frameTick + payload["durationFrames"],
+            }
+        if kind == "decision_veto_resolve":
+            gate = self._god_active_decision_gate_record(payload["targetId"])
+            pending = gate.get("pendingDecision") if isinstance(gate, dict) else None
+            return {
+                "targetId": payload["targetId"],
+                "resolution": payload["resolution"],
+                "pendingAction": (pending or {}).get("action"),
+            }
+        if kind == "agent_possession":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            pin = payload.get("pinnedDecision") or (payload.get("queue") or [{}])[0]
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "mode": "possession",
+                "bypassLlm": True,
+                "pinnedAction": pin.get("action"),
+                "queueLength": len(payload.get("queue") or []),
+                "expiresFrame": self.frameTick + payload["durationFrames"],
+            }
+        if kind == "revoke_decision_gate":
+            agent = self._find_agent_by_id(payload["targetId"])
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"] if agent else None,
+            }
+        if kind == "identity_edit":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            outcome = {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "currentRole": agent.get("role"),
+                "fields": [k for k in ("persona", "personality", "role") if k in payload],
+                "expiresFrame": (self.frameTick + payload["durationFrames"]
+                                 if payload.get("durationFrames") else None),
+            }
+            warning = self._god_elder_swap_warning(agent, payload.get("role"))
+            if warning:
+                outcome["warning"] = warning
+            if payload.get("role"):
+                outcome["newRoleSkill"] = self.d["ROLE_SKILLS"].get(
+                    payload["role"], "helps the village")
+            return outcome
+        if kind == "identity_copy_overwrite":
+            target = self._find_agent_by_id(payload["targetId"])
+            source = self._find_agent_by_id(payload["sourceId"])
+            if target is None or source is None:
+                return None
+            thinks_to_complete = None
+            rate = payload.get("ratePerThink")
+            if isinstance(rate, (int, float)) and rate > 0:
+                thinks_to_complete = int(math.ceil(1.0 / float(rate)))
+            return {
+                "targetId": payload["targetId"],
+                "targetName": target["name"],
+                "sourceId": payload["sourceId"],
+                "sourceName": source["name"],
+                "ratePerThink": rate,
+                "thinksToComplete": thinks_to_complete,
+                "syncMemories": bool(payload.get("syncMemories")),
+                "expiresFrame": (self.frameTick + payload["durationFrames"]
+                                 if payload.get("durationFrames") else None),
+            }
+        if kind == "identity_forge_cancel":
+            agent = self._find_agent_by_id(payload["targetId"])
+            rec = self._god_active_identity_forge_record(payload["targetId"])
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"] if agent else None,
+                "forgeKind": ("copy" if isinstance(rec, dict) and rec.get("copyFromId")
+                              else "edit"),
+                "progress": (rec or {}).get("progress"),
+            }
+        if kind == "architect_zone":
+            return {
+                "zoneKind": payload["zoneKind"],
+                "districtId": payload.get("districtId"),
+                "cellCount": len(payload.get("cellsExpanded") or []),
+                "expiresFrame": self.frameTick + payload["durationFrames"],
+                "reversible": payload.get("reversible", True),
+                "paintTerrain": payload.get("paintTerrain"),
+                "keyId": payload.get("keyId"),
+                "holdAgentIds": list(payload.get("holdAgentIds") or []),
+                "grantKeyAgentIds": list(payload.get("grantKeyAgentIds") or []),
+            }
+        if kind == "architect_zone_cancel":
+            zone = self._god_architect_zone_by_id(payload["zoneId"])
+            return {
+                "zoneId": payload["zoneId"],
+                "zoneKind": zone.get("kind") if isinstance(zone, dict) else None,
+                "cellCount": len((zone or {}).get("cells") or []),
+            }
+        if kind == "architect_release_hold":
+            zone = self._god_architect_zone_by_id(payload["zoneId"])
+            hold_ids = (zone or {}).get("holdAgentIds") or []
+            if payload.get("agentIds"):
+                hold_ids = [aid for aid in hold_ids if aid in payload["agentIds"]]
+            return {
+                "zoneId": payload["zoneId"],
+                "wouldRelease": hold_ids,
+            }
+        if kind == "checkpoint_create":
+            checkpoints = (self.civilization.get("godState") or {}).get("checkpoints") or []
+            return {
+                "label": payload["label"],
+                "frameTick": self.frameTick,
+                "checkpointCount": len(checkpoints),
+                "willReplaceOldest": (
+                    len(checkpoints) >= GOD_CHECKPOINT_MAX and payload.get("replaceOldest")
+                ),
+            }
+        if kind == "checkpoint_restore":
+            rec = self._god_checkpoint_by_id(payload["checkpointId"])
+            return {
+                "checkpointId": payload["checkpointId"],
+                "label": rec.get("label") if isinstance(rec, dict) else None,
+                "checkpointFrameTick": rec.get("frameTick") if isinstance(rec, dict) else None,
+                "currentFrameTick": self.frameTick,
+                "irreversibleWarning": (
+                    "Irreversible world replace — the live world and godState "
+                    "will be replaced by this checkpoint snapshot."
+                ),
+            }
         return None
 
     def _god_custom_rule_gather_context(self):
@@ -16613,8 +19372,32 @@ class SimEngine:
         those are irreversible mutations by their own nature (docs/plan
         "Honest reversibility" -- the third, consequential, class)."""
         kind = normalized_command["kind"] if isinstance(normalized_command, dict) else normalized_command
-        if kind in ("providence", "private_omen"):
+        if kind in ("providence", "private_omen", "whisper_campaign"):
             return "cancellable"
+        if kind in ("agent_sampling", "revoke_agent_sampling"):
+            return "cancellable"
+        if kind == "context_mask":
+            return "cancellable"
+        if kind in ("decision_compulsion", "decision_veto_arm", "agent_possession",
+                    "revoke_decision_gate"):
+            return "cancellable"
+        if kind in ("anoint", "revoke_anoint"):
+            return "cancellable"
+        if kind == "identity_forge_cancel":
+            return "irreversible"
+        if kind == "identity_copy_overwrite":
+            return "cancellable"
+        if kind == "identity_edit":
+            payload = (normalized_command.get("payload") or {}
+                       if isinstance(normalized_command, dict) else {})
+            return ("cancellable" if payload.get("durationFrames") is not None
+                    else "consequential")
+        if kind in ("architect_zone", "architect_zone_cancel", "architect_release_hold"):
+            return "cancellable"
+        if kind in ("checkpoint_create", "checkpoint_restore"):
+            return "irreversible"
+        if kind == "decision_veto_resolve":
+            return "irreversible"
         if kind == "story_event":
             payload = normalized_command["payload"] if isinstance(normalized_command, dict) else {}
             return "consequential" if payload.get("primitives") else "cancellable"
@@ -16669,8 +19452,28 @@ class SimEngine:
         if kind in ("providence", "private_omen"):
             return {"outgoingId": self._god_current_outgoing_guidance_id(
                 kind, normalized_command["payload"])}
+        if kind == "whisper_campaign":
+            outgoing = {}
+            for whisper in normalized_command["payload"]["whispers"]:
+                tid = whisper["targetId"]
+                omen = (self.civilization.get("godState") or {}).get("privateOmens", {}).get(str(tid))
+                outgoing[str(tid)] = omen.get("id") if isinstance(omen, dict) else None
+            return {"outgoingIds": outgoing}
         if kind == "revoke_guidance":
             return self._god_current_revoke_target(normalized_command["payload"]["id"])
+        if kind == "context_mask":
+            return {"outgoingId": self._god_current_outgoing_context_mask_id(
+                normalized_command["payload"]["targetId"])}
+        if kind in ("decision_compulsion", "decision_veto_arm", "agent_possession",
+                    "revoke_decision_gate", "decision_veto_resolve"):
+            return {"outgoingId": self._god_current_outgoing_decision_gate_id(
+                normalized_command["payload"]["targetId"])}
+        if kind == "anoint":
+            return {"outgoingId": self._god_current_outgoing_anointment_id(
+                normalized_command["payload"]["targetId"])}
+        if kind in ("identity_edit", "identity_copy_overwrite"):
+            return {"outgoingId": self._god_current_outgoing_identity_forge_id(
+                normalized_command["payload"]["targetId"])}
         return {}
 
     def _god_check_fingerprint(self, normalized_command, fingerprint):
@@ -16684,10 +19487,44 @@ class SimEngine:
             if current != fingerprint.get("outgoingId"):
                 return f"{kind} changed since preview -- re-preview to see the current guidance"
             return None
+        if kind == "whisper_campaign":
+            current = {}
+            for whisper in normalized_command["payload"]["whispers"]:
+                tid = whisper["targetId"]
+                omen = (self.civilization.get("godState") or {}).get("privateOmens", {}).get(str(tid))
+                current[str(tid)] = omen.get("id") if isinstance(omen, dict) else None
+            if current != fingerprint.get("outgoingIds"):
+                return "whisper targets changed since preview -- re-preview to see current omens"
+            return None
         if kind == "revoke_guidance":
             current = self._god_current_revoke_target(normalized_command["payload"]["id"])
             if current != fingerprint:
                 return "guidance target changed since preview -- re-preview to see the current state"
+            return None
+        if kind == "context_mask":
+            current = self._god_current_outgoing_context_mask_id(
+                normalized_command["payload"]["targetId"])
+            if current != fingerprint.get("outgoingId"):
+                return "context mask changed since preview -- re-preview to see the current mask"
+            return None
+        if kind in ("decision_compulsion", "decision_veto_arm", "agent_possession",
+                    "revoke_decision_gate", "decision_veto_resolve"):
+            current = self._god_current_outgoing_decision_gate_id(
+                normalized_command["payload"]["targetId"])
+            if current != fingerprint.get("outgoingId"):
+                return "decision gate changed since preview -- re-preview to see the current gate"
+            return None
+        if kind == "anoint":
+            current = self._god_current_outgoing_anointment_id(
+                normalized_command["payload"]["targetId"])
+            if current != fingerprint.get("outgoingId"):
+                return "anointment changed since preview -- re-preview to see the current record"
+            return None
+        if kind in ("identity_edit", "identity_copy_overwrite"):
+            current = self._god_current_outgoing_identity_forge_id(
+                normalized_command["payload"]["targetId"])
+            if current != fingerprint.get("outgoingId"):
+                return "identity forge changed since preview -- re-preview to see the current record"
             return None
         return None
 
@@ -16782,6 +19619,7 @@ class SimEngine:
         del omens[key]
         self._log_divine(omen.get("id"), None, "private_omen", omen,
                          {"status": status}, status, public=False)
+        self._sweep_whisper_campaigns()
         return omen
 
     # --- expiry (rule: "Expiry ownership") ---
@@ -16843,6 +19681,100 @@ class SimEngine:
                 if isinstance(expires_frame, int) and ft >= expires_frame:
                     status = "restore-closed" if restore else "expired"
                     self._close_omen(key, status)
+
+        self._sweep_whisper_campaigns(restore=restore)
+
+        sampling = god.get("agentSampling")
+        if isinstance(sampling, dict) and sampling:
+            for key in list(sampling.keys()):
+                rec = sampling.get(key)
+                if not isinstance(rec, dict):
+                    continue
+                expires_frame = rec.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_agent_sampling(key, status)
+
+        masks = god.get("contextMasks")
+        if isinstance(masks, dict) and masks:
+            for key in list(masks.keys()):
+                rec = masks.get(key)
+                if not isinstance(rec, dict):
+                    continue
+                expires_frame = rec.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_context_mask(key, status)
+
+        self._expire_decision_gates(restore=restore)
+        self._tick_divine_bargains(restore=restore)
+
+        anointments = god.get("anointments")
+        if isinstance(anointments, dict) and anointments:
+            for key in list(anointments.keys()):
+                rec = anointments.get(key)
+                if not isinstance(rec, dict):
+                    continue
+                expires_frame = rec.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_anointment(key, status)
+
+        forges = god.get("identityForges")
+        if isinstance(forges, dict) and forges:
+            for key in list(forges.keys()):
+                rec = forges.get(key)
+                if not isinstance(rec, dict):
+                    continue
+                expires_frame = rec.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_identity_forge(key, status)
+
+        zones = god.get("architectZones")
+        if isinstance(zones, list) and zones:
+            for zone in list(zones):
+                if not isinstance(zone, dict) or zone.get("status") != "active":
+                    continue
+                expires_frame = zone.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_architect_zone(zone.get("id"), status)
+                    if not restore and zone.get("kind") == "paint":
+                        self._push_activity("A divine architect zone fades — painted terrain reverts.")
+
+    def _tick_divine_bargains(self, restore=False):
+        """Settle open Merovingian bargains on tick. Lock held."""
+        if restore or not GOD_MODE_ENABLED:
+            return
+        god = self.civilization.get("godState") or {}
+        bushes = god.get("burningBush") or {}
+        if not isinstance(bushes, dict):
+            return
+        ft = self.frameTick
+        for key, bush in list(bushes.items()):
+            if not isinstance(bush, dict):
+                continue
+            bargain = bush.get("bargain")
+            if not isinstance(bargain, dict) or bargain.get("status") != "open":
+                continue
+            try:
+                target_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            fail_pred = bargain.get("failurePredicate")
+            if isinstance(fail_pred, dict) and self._evaluate_god_bargain_predicate(
+                    fail_pred, target_id):
+                self._settle_bargain(key, bush, "failure", "failure_predicate")
+                continue
+            succ_pred = bargain.get("successPredicate")
+            if isinstance(succ_pred, dict) and self._evaluate_god_bargain_predicate(
+                    succ_pred, target_id):
+                self._settle_bargain(key, bush, "success", "predicate")
+                continue
+            expires = bargain.get("expiresFrame")
+            if isinstance(expires, int) and ft >= expires:
+                self._settle_bargain(key, bush, "failure", "expiry")
 
     # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Optional
     # Phase 8: free-prose story compiler) ---
@@ -17138,6 +20070,58 @@ class SimEngine:
             return self._god_apply_providence(normalized["payload"]), None
         if kind == "private_omen":
             return self._god_apply_private_omen(normalized["payload"]), None
+        if kind == "whisper_campaign":
+            return self._god_apply_whisper_campaign(normalized["payload"]), None
+        if kind == "agent_sampling":
+            return self._god_apply_agent_sampling(normalized["payload"]), None
+        if kind == "revoke_agent_sampling":
+            return self._god_apply_revoke_agent_sampling(normalized["payload"])
+        if kind == "memory_insert":
+            return self._god_apply_memory_insert(normalized["payload"]), None
+        if kind == "memory_delete":
+            return self._god_apply_memory_delete(normalized["payload"]), None
+        if kind == "belief_plant":
+            return self._god_apply_belief_plant(normalized["payload"]), None
+        if kind == "context_mask":
+            return self._god_apply_context_mask(normalized["payload"]), None
+        if kind == "decision_compulsion":
+            return self._god_apply_decision_compulsion(normalized["payload"]), None
+        if kind == "decision_veto_arm":
+            return self._god_apply_decision_veto_arm(normalized["payload"]), None
+        if kind == "decision_veto_resolve":
+            return self._god_apply_decision_veto_resolve(normalized["payload"])
+        if kind == "agent_possession":
+            return self._god_apply_agent_possession(normalized["payload"]), None
+        if kind == "revoke_decision_gate":
+            return self._god_apply_revoke_decision_gate(normalized["payload"])
+        if kind == "burning_bush_message":
+            return self._god_apply_burning_bush_message(normalized["payload"]), None
+        if kind == "burning_bush_close":
+            return self._god_apply_burning_bush_close(normalized["payload"]), None
+        if kind == "merovingian_bargain":
+            return self._god_apply_merovingian_bargain(normalized["payload"]), None
+        if kind == "bargain_settle":
+            return self._god_apply_bargain_settle(normalized["payload"])
+        if kind == "anoint":
+            return self._god_apply_anoint(normalized["payload"]), None
+        if kind == "revoke_anoint":
+            return self._god_apply_revoke_anoint(normalized["payload"])
+        if kind == "identity_edit":
+            return self._god_apply_identity_edit(normalized["payload"]), None
+        if kind == "identity_copy_overwrite":
+            return self._god_apply_identity_copy_overwrite(normalized["payload"]), None
+        if kind == "identity_forge_cancel":
+            return self._god_apply_identity_forge_cancel(normalized["payload"])
+        if kind == "architect_zone":
+            return self._god_apply_architect_zone(normalized["payload"]), None
+        if kind == "architect_zone_cancel":
+            return self._god_apply_architect_zone_cancel(normalized["payload"])
+        if kind == "architect_release_hold":
+            return self._god_apply_architect_release_hold(normalized["payload"])
+        if kind == "checkpoint_create":
+            return self._god_apply_checkpoint_create(normalized["payload"])
+        if kind == "checkpoint_restore":
+            return self._god_apply_checkpoint_restore(normalized["payload"])
         if kind == "revoke_guidance":
             return self._god_apply_revoke_guidance(normalized["payload"]["id"])
         if kind == "agent_vitals":
@@ -17173,6 +20157,14 @@ class SimEngine:
             "frameTick": self.frameTick, "text": text, "status": "applied",
             "public": True,
         })
+        self._god_apply_providence({
+            "text": text,
+            "durationFrames": GOD_GUIDANCE_DEFAULT_DURATION_FRAMES,
+        })
+        living_ids = [
+            a["id"] for a in self.agents if a.get("deathFrame") is None
+        ]
+        self._cancel_voice_blocked_special_turns(living_ids)
         return {"interventionId": intervention_id, "kind": "proclamation", "text": text}
 
     def _god_apply_providence(self, payload):
@@ -17190,6 +20182,7 @@ class SimEngine:
         god["providence"] = {
             "id": intervention_id, "text": text, "createdFrame": self.frameTick,
             "expiresFrame": expires_frame, "visibility": "public",
+            "ackedAgentIds": {},
         }
         self._push_activity(f'A divine providence settles over the village: "{text}"')
         self._push_communication("divine_providence", "divine", "everyone", text,
@@ -17200,6 +20193,10 @@ class SimEngine:
             "text": text, "expiresFrame": expires_frame, "status": "applied",
             "public": True,
         })
+        living_ids = [
+            a["id"] for a in self.agents if a.get("deathFrame") is None
+        ]
+        self._cancel_voice_blocked_special_turns(living_ids)
         return {"interventionId": intervention_id, "kind": "providence", "text": text,
                 "expiresFrame": expires_frame,
                 "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None}
@@ -17225,15 +20222,1049 @@ class SimEngine:
             "targetName": agent["name"] if agent else None,
             "text": text, "createdFrame": self.frameTick,
             "expiresFrame": expires_frame, "memoryWritten": False,
+            "acked": False,
         }
         self._god_record_intervention({
             "id": intervention_id, "kind": "private_omen", "frameTick": self.frameTick,
             "targetId": target_id, "text": text, "expiresFrame": expires_frame,
             "status": "applied", "public": False,
         })
+        self._cancel_voice_blocked_special_turns([target_id])
         return {"interventionId": intervention_id, "kind": "private_omen",
                 "targetId": target_id, "expiresFrame": expires_frame,
                 "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None}
+
+    def _god_apply_whisper_campaign(self, payload):
+        """Batch private omens under one campaign id. Each whisper reuses the
+        private_omen machinery (one omen per agent, replace semantics unchanged).
+        Campaign theme and per-target texts never appear in snapshot() god
+        allowlist; only per-agent omen text reaches _divine_prompt_lines."""
+        god = self.civilization["godState"]
+        campaign_id = self._next_intervention_id()
+        duration = payload["durationFrames"]
+        expires_frame = self.frameTick + duration
+        targets = {}
+        for whisper in payload["whispers"]:
+            outcome = self._god_apply_private_omen({
+                "targetId": whisper["targetId"],
+                "text": whisper["text"],
+                "durationFrames": duration,
+            })
+            targets[str(whisper["targetId"])] = outcome["interventionId"]
+        god["whisperCampaigns"][campaign_id] = {
+            "id": campaign_id,
+            "theme": payload["theme"],
+            "targets": targets,
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "status": "active",
+        }
+        self._god_record_intervention({
+            "id": campaign_id, "kind": "whisper_campaign", "frameTick": self.frameTick,
+            "theme": payload["theme"], "targetIds": [w["targetId"] for w in payload["whispers"]],
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": campaign_id,
+            "kind": "whisper_campaign",
+            "theme": payload["theme"],
+            "targets": targets,
+            "expiresFrame": expires_frame,
+        }
+
+    def _ensure_burning_bush_session(self, target_id):
+        """Return active bush record for target, creating one if needed."""
+        god = self.civilization["godState"]
+        bushes = god.setdefault("burningBush", {})
+        key = str(target_id)
+        rec = bushes.get(key)
+        if isinstance(rec, dict) and rec.get("status") == "active":
+            return rec
+        intervention_id = self._next_intervention_id()
+        agent = self._find_agent_by_id(target_id)
+        rec = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "thread": [],
+            "createdFrame": self.frameTick,
+            "status": "active",
+        }
+        bushes[key] = rec
+        return rec
+
+    def _close_burning_bush(self, key, status):
+        """Close a Burning Bush session. Lock held."""
+        god = self.civilization.get("godState") or {}
+        bushes = god.get("burningBush") or {}
+        rec = bushes.get(key)
+        if not isinstance(rec, dict) or rec.get("status") != "active":
+            return None
+        rec["status"] = status
+        rec["closedFrame"] = self.frameTick
+        bargain = rec.get("bargain")
+        if isinstance(bargain, dict) and bargain.get("status") == "open":
+            bargain["status"] = "cancelled"
+            bargain["settledFrame"] = self.frameTick
+        self._log_divine(rec.get("id"), None, "burning_bush_close", rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _god_apply_burning_bush_message(self, payload):
+        """Append a private God line to one agent's Burning Bush thread."""
+        target_id = payload["targetId"]
+        key = str(target_id)
+        rec = self._ensure_burning_bush_session(target_id)
+        intervention_id = rec["id"]
+        text = payload["text"]
+        thread = rec.setdefault("thread", [])
+        if not isinstance(thread, list):
+            rec["thread"] = thread = []
+        thread.append({"role": "god", "text": text, "frame": self.frameTick})
+        if len(thread) > GOD_BURNING_BUSH_THREAD_MAX:
+            del thread[:-GOD_BURNING_BUSH_THREAD_MAX]
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "burning_bush_message",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "messageCount": len(thread), "status": "applied", "public": False,
+        })
+        self._log_divine(intervention_id, None, "burning_bush_message",
+                         {"targetId": target_id, "text": text},
+                         {"targetId": target_id, "messageCount": len(thread)},
+                         "applied", public=False)
+        return {
+            "interventionId": intervention_id,
+            "kind": "burning_bush_message",
+            "targetId": target_id,
+            "messageCount": len(thread),
+        }
+
+    def _god_apply_burning_bush_close(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        rec = self._close_burning_bush(key, "closed")
+        if rec is None:
+            return {"interventionId": None, "kind": "burning_bush_close",
+                    "targetId": target_id, "status": "noop"}
+        return {
+            "interventionId": rec.get("id"),
+            "kind": "burning_bush_close",
+            "targetId": target_id,
+            "status": "closed",
+        }
+
+    def _god_apply_merovingian_bargain(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        rec = self._ensure_burning_bush_session(target_id)
+        bargain_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        bargain = {
+            "id": bargain_id,
+            "termsText": payload["termsText"],
+            "successPredicate": payload["successPredicate"],
+            "status": "open",
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        if payload.get("failurePredicate") is not None:
+            bargain["failurePredicate"] = payload["failurePredicate"]
+        if payload.get("rewardPrimitive") is not None:
+            bargain["rewardPrimitive"] = payload["rewardPrimitive"]
+        if payload.get("punishPrimitive") is not None:
+            bargain["punishPrimitive"] = payload["punishPrimitive"]
+        rec["bargain"] = bargain
+        self._god_record_intervention({
+            "id": bargain_id, "kind": "merovingian_bargain",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        self._log_divine(bargain_id, None, "merovingian_bargain",
+                         {"targetId": target_id, "termsText": payload["termsText"],
+                          "successPredicate": payload["successPredicate"]},
+                         {"targetId": target_id, "expiresFrame": expires_frame},
+                         "applied", public=False)
+        return {
+            "interventionId": bargain_id,
+            "kind": "merovingian_bargain",
+            "targetId": target_id,
+            "expiresFrame": expires_frame,
+        }
+
+    def _god_apply_bargain_primitive(self, primitive):
+        if not isinstance(primitive, dict):
+            return None
+        kind = primitive.get("kind")
+        payload = primitive.get("payload") or {}
+        if kind == "grant_resource":
+            return self._god_apply_grant_resource(payload)
+        if kind == "agent_vitals":
+            return self._god_apply_agent_vitals(payload)
+        return None
+
+    def _settle_bargain(self, key, bush, outcome, trigger):
+        """Settle an open bargain. Lock held. outcome: success|failure."""
+        bargain = bush.get("bargain")
+        if not isinstance(bargain, dict) or bargain.get("status") != "open":
+            return None
+        bargain["status"] = outcome
+        bargain["settledFrame"] = self.frameTick
+        bargain["settleTrigger"] = trigger
+        primitive = (bargain.get("rewardPrimitive") if outcome == "success"
+                       else bargain.get("punishPrimitive"))
+        prim_outcome = self._god_apply_bargain_primitive(primitive)
+        target_id = bush.get("targetId")
+        record_public = isinstance(primitive, dict) and primitive.get("kind") == "grant_resource"
+        settle_id = bargain.get("id") or self._next_intervention_id()
+        self._god_record_intervention({
+            "id": settle_id, "kind": "bargain_settle",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "outcome": outcome, "trigger": trigger,
+            "primitiveKind": primitive.get("kind") if isinstance(primitive, dict) else None,
+            "status": "applied", "public": record_public,
+        })
+        self._log_divine(settle_id, None, "bargain_settle",
+                         {"targetId": target_id, "outcome": outcome, "trigger": trigger},
+                         {"outcome": outcome, "primitiveOutcome": prim_outcome},
+                         "applied", public=record_public)
+        return {
+            "outcome": outcome,
+            "trigger": trigger,
+            "primitiveOutcome": prim_outcome,
+        }
+
+    def _god_apply_bargain_settle(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        god = self.civilization["godState"]
+        bush = (god.get("burningBush") or {}).get(key)
+        if not isinstance(bush, dict):
+            return None, "no burning bush session for target agent"
+        outcome = payload["outcome"]
+        settled = self._settle_bargain(key, bush, outcome, "manual")
+        if settled is None:
+            return None, "no open bargain for target agent"
+        return settled, None
+
+    def _god_current_outgoing_anointment_id(self, target_id):
+        rec = (self.civilization.get("godState") or {}).get("anointments", {}).get(str(target_id))
+        return rec.get("id") if isinstance(rec, dict) else None
+
+    def _close_anointment(self, key, status):
+        """Clear one anointment record exactly once. Lock held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        anointments = god.get("anointments")
+        rec = anointments.get(key) if isinstance(anointments, dict) else None
+        if not isinstance(rec, dict):
+            return None
+        if isinstance(anointments, dict):
+            anointments.pop(key, None)
+        self._log_divine(rec.get("id"), None, "anoint", rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _god_apply_anoint(self, payload):
+        """Mark one agent anointed — destiny/oracle private, stigmata in prompts."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = (self._close_anointment(key, "replaced")
+                    if key in god.get("anointments", {}) else None)
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "destinyText": payload["destinyText"],
+            "stigmataTags": list(payload.get("stigmataTags") or []),
+            "oracleHints": list(payload.get("oracleHints") or []),
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        god.setdefault("anointments", {})[key] = record
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "anoint", "frameTick": self.frameTick,
+            "targetId": target_id, "tagCount": len(record["stigmataTags"]),
+            "oracleHintCount": len(record["oracleHints"]),
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        self._log_divine(intervention_id, None, "anoint",
+                         {"targetId": target_id,
+                          "destinyText": payload["destinyText"],
+                          "stigmataTags": record["stigmataTags"],
+                          "oracleHints": record["oracleHints"]},
+                         {"targetId": target_id, "tagCount": len(record["stigmataTags"]),
+                          "oracleHintCount": len(record["oracleHints"])},
+                         "applied", public=False)
+        return {
+            "interventionId": intervention_id,
+            "kind": "anoint",
+            "targetId": target_id,
+            "tagCount": len(record["stigmataTags"]),
+            "oracleHintCount": len(record["oracleHints"]),
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_revoke_anoint(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        closed = self._close_anointment(key, "revoked")
+        if closed is None:
+            return None, "no active anointment for target agent"
+        return {
+            "interventionId": closed.get("id"),
+            "kind": "revoke_anoint",
+            "targetId": target_id,
+        }, None
+
+    def _god_apply_identity_values(self, agent, *, persona=None, personality=None, role=None):
+        """Apply one or more identity fields on a living agent. Lock held."""
+        if persona is not None:
+            agent["persona"] = persona
+        if personality is not None:
+            agent["personality"] = personality
+        if role is not None:
+            agent["role"] = role
+        self._mark_context_dirty(agent)
+
+    def _god_apply_identity_edit(self, payload):
+        """Mutate persona/personality/role with forge snapshot for restore."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        agent = self._find_agent_by_id(target_id)
+        key = str(target_id)
+        outgoing = (self._close_identity_forge(key, "replaced")
+                    if key in god.get("identityForges", {}) else None)
+        snapshot = self._identity_forge_snapshot(agent)
+        self._god_apply_identity_values(
+            agent,
+            persona=payload.get("persona"),
+            personality=payload.get("personality"),
+            role=payload.get("role"),
+        )
+        intervention_id = self._next_intervention_id()
+        expires_frame = None
+        if payload.get("durationFrames") is not None:
+            expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "snapshot": snapshot,
+            "baseline": dict(snapshot),
+            "progress": 1.0,
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        god.setdefault("identityForges", {})[key] = record
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "identity_edit", "frameTick": self.frameTick,
+            "targetId": target_id, "fields": [k for k in ("persona", "personality", "role")
+                                             if k in payload],
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        self._log_divine(intervention_id, None, "identity_edit", payload,
+                         {"targetId": target_id,
+                          "fields": [k for k in ("persona", "personality", "role") if k in payload]},
+                         "applied", public=False)
+        return {
+            "interventionId": intervention_id,
+            "kind": "identity_edit",
+            "targetId": target_id,
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_identity_copy_overwrite(self, payload):
+        """Start gradual persona/personality copy from source to target."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        source_id = payload["sourceId"]
+        target = self._find_agent_by_id(target_id)
+        key = str(target_id)
+        outgoing = (self._close_identity_forge(key, "replaced")
+                    if key in god.get("identityForges", {}) else None)
+        snapshot = self._identity_forge_snapshot(target)
+        intervention_id = self._next_intervention_id()
+        expires_frame = None
+        if payload.get("durationFrames") is not None:
+            expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "copyFromId": source_id,
+            "rate": payload["ratePerThink"],
+            "progress": 0.0,
+            "snapshot": snapshot,
+            "baseline": dict(snapshot),
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        god.setdefault("identityForges", {})[key] = record
+        memories_planted = 0
+        if payload.get("syncMemories"):
+            source = self._find_agent_by_id(source_id)
+            if source is not None:
+                memories_planted = self._god_plant_copy_memories(target, source)
+        self._advance_identity_forge_on_think(target)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "identity_copy_overwrite",
+            "frameTick": self.frameTick, "targetId": target_id, "sourceId": source_id,
+            "ratePerThink": payload["ratePerThink"], "memoriesPlanted": memories_planted,
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        self._log_divine(intervention_id, None, "identity_copy_overwrite", payload,
+                         {"targetId": target_id, "sourceId": source_id,
+                          "memoriesPlanted": memories_planted},
+                         "applied", public=False)
+        return {
+            "interventionId": intervention_id,
+            "kind": "identity_copy_overwrite",
+            "targetId": target_id,
+            "sourceId": source_id,
+            "progress": record.get("progress"),
+            "memoriesPlanted": memories_planted,
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_identity_forge_cancel(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        closed = self._close_identity_forge(key, "cancelled")
+        if closed is None:
+            return None, "no active identity forge for target agent"
+        return {
+            "interventionId": closed.get("id"),
+            "kind": "identity_forge_cancel",
+            "targetId": target_id,
+        }, None
+
+    def _god_apply_agent_sampling(self, payload):
+        """Set one active LLM sampling override for a living agent. Private —
+        never in snapshot() god allowlist."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = (self._close_agent_sampling(key, "replaced")
+                    if key in god.get("agentSampling", {}) else None)
+        intervention_id = self._next_intervention_id()
+        expires_frame = None
+        if "durationFrames" in payload:
+            expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "model": payload["model"],
+            "temperature": payload["temperature"],
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "sourceId": intervention_id,
+        }
+        for opt in ("top_p", "top_k", "min_p"):
+            if opt in payload:
+                record[opt] = payload[opt]
+        god.setdefault("agentSampling", {})[key] = record
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "agent_sampling", "frameTick": self.frameTick,
+            "targetId": target_id, "model": payload["model"],
+            "temperature": payload["temperature"],
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "agent_sampling",
+            "targetId": target_id,
+            "model": payload["model"],
+            "temperature": payload["temperature"],
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_revoke_agent_sampling(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        closed = self._close_agent_sampling(key, "revoked")
+        if closed is None:
+            return None, "no active sampling override for target agent"
+        return {
+            "interventionId": closed.get("id"),
+            "kind": "revoke_agent_sampling",
+            "targetId": target_id,
+        }, None
+
+    def _god_apply_memory_insert(self, payload):
+        agent = self._find_agent_by_id(payload["targetId"])
+        entry = self._god_memory_insert(
+            agent, payload["text"], payload["salience"], payload["kind"])
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "memory_insert",
+            "frameTick": self.frameTick, "targetId": payload["targetId"],
+            "salience": payload["salience"], "memoryKind": payload["kind"],
+            "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "memory_insert",
+            "targetId": payload["targetId"],
+            "targetName": agent["name"] if agent else None,
+            "memoryEntryId": entry.get("id") if isinstance(entry, dict) else None,
+            "salience": payload["salience"],
+            "memoryKind": payload["kind"],
+        }
+
+    def _god_apply_memory_delete(self, payload):
+        agent = self._find_agent_by_id(payload["targetId"])
+        deleted = self._god_memory_delete(
+            agent,
+            keyword=payload.get("keyword"),
+            frameFrom=payload.get("frameFrom"),
+            frameTo=payload.get("frameTo"),
+            kinds=payload.get("kinds"),
+        )
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "memory_delete",
+            "frameTick": self.frameTick, "targetId": payload["targetId"],
+            "deletedCount": deleted, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "memory_delete",
+            "targetId": payload["targetId"],
+            "targetName": agent["name"] if agent else None,
+            "deletedCount": deleted,
+        }
+
+    def _god_apply_belief_plant(self, payload):
+        agent = self._find_agent_by_id(payload["targetId"])
+        belief_id, tenet_or_reason = self._god_belief_plant(
+            agent,
+            belief_id=payload.get("beliefId"),
+            custom_text=payload.get("text"),
+            salience=payload["salience"],
+            plant_in_meme_texts=payload["plantInMemeTexts"],
+        )
+        if belief_id is None:
+            return None, tenet_or_reason
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "belief_plant",
+            "frameTick": self.frameTick, "targetId": payload["targetId"],
+            "beliefId": belief_id, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "belief_plant",
+            "targetId": payload["targetId"],
+            "targetName": agent["name"] if agent else None,
+            "beliefId": belief_id,
+            "beliefCount": len(agent.get("beliefs") or ()),
+        }
+
+    def _god_apply_context_mask(self, payload):
+        """Set one active context mask for a living agent (replace semantics)."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = (self._close_context_mask(key, "replaced")
+                    if key in god.get("contextMasks", {}) else None)
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": payload["mode"],
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        if payload["mode"] == "dream":
+            record["dreamSnapshot"] = copy.deepcopy(payload["dreamSnapshot"])
+        elif payload["mode"] == "whisper_chain":
+            record["forgedConversations"] = list(payload["forgedConversations"])
+        god.setdefault("contextMasks", {})[key] = record
+        agent = self._find_agent_by_id(target_id)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "context_mask", "frameTick": self.frameTick,
+            "targetId": target_id, "mode": payload["mode"],
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "context_mask",
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "mode": payload["mode"],
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_set_decision_gate(self, target_id, record, kind_label):
+        god = self.civilization["godState"]
+        key = str(target_id)
+        outgoing = (self._close_decision_gate(key, "replaced")
+                    if key in god.get("decisionGates", {}) else None)
+        god.setdefault("decisionGates", {})[key] = record
+        agent = self._find_agent_by_id(target_id)
+        if agent is not None:
+            agent["divineHold"] = False
+        intervention_id = record["id"]
+        self._god_record_intervention({
+            "id": intervention_id, "kind": kind_label, "frameTick": self.frameTick,
+            "targetId": target_id, "mode": record.get("mode"),
+            "expiresFrame": record.get("expiresFrame"),
+            "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": kind_label,
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "mode": record.get("mode"),
+            "expiresFrame": record.get("expiresFrame"),
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_decision_compulsion(self, payload):
+        target_id = payload["targetId"]
+        intervention_id = self._next_intervention_id()
+        expires_frame = None
+        if payload.get("durationFrames") is not None:
+            expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": "compulsion",
+            "pinnedDecision": copy.deepcopy(payload["pinnedDecision"]),
+            "createdFrame": self.frameTick,
+        }
+        if expires_frame is not None:
+            record["expiresFrame"] = expires_frame
+        if payload.get("remainingTurns") is not None:
+            record["remainingTurns"] = payload["remainingTurns"]
+        return self._god_set_decision_gate(target_id, record, "decision_compulsion")
+
+    def _god_apply_decision_veto_arm(self, payload):
+        target_id = payload["targetId"]
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": "veto",
+            "armed": True,
+            "status": "armed",
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        return self._god_set_decision_gate(target_id, record, "decision_veto_arm")
+
+    def _god_apply_decision_veto_resolve(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        gate = (self.civilization.get("godState") or {}).get("decisionGates", {}).get(key)
+        if not isinstance(gate, dict):
+            return None, "no active decision gate for this agent"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        pending = gate.get("pendingDecision") or {}
+        resolution = payload["resolution"]
+        if resolution == "approve":
+            decision = dict(pending)
+        elif resolution == "reject":
+            decision = {"action": "rest", "reasoning": "Divine veto rejected."}
+        else:
+            decision = dict(payload["rewrittenDecision"])
+        agent["divineHold"] = False
+        self._apply_divine_possessed_decision(agent, decision, gate, gate_kind="veto_resolve")
+        outgoing_id = gate.get("id")
+        self._close_decision_gate(key, "resolved")
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "decision_veto_resolve",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "resolution": resolution, "appliedAction": decision.get("action"),
+            "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "decision_veto_resolve",
+            "targetId": target_id,
+            "targetName": agent["name"],
+            "resolution": resolution,
+            "appliedAction": decision.get("action"),
+            "gateId": outgoing_id,
+        }, None
+
+    def _god_apply_agent_possession(self, payload):
+        target_id = payload["targetId"]
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": "possession",
+            "bypassLlm": True,
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "queueIndex": 0,
+        }
+        if payload.get("queue"):
+            record["queue"] = copy.deepcopy(payload["queue"])
+        else:
+            record["pinnedDecision"] = copy.deepcopy(payload["pinnedDecision"])
+        return self._god_set_decision_gate(target_id, record, "agent_possession")
+
+    def _god_apply_revoke_decision_gate(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = self._close_decision_gate(key, "revoked")
+        if outgoing is None:
+            return None, "no active decision gate for this agent"
+        intervention_id = self._next_intervention_id()
+        agent = self._find_agent_by_id(target_id)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "revoke_decision_gate",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "revokedGateId": outgoing.get("id"), "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "revoke_decision_gate",
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "revokedGateId": outgoing.get("id"),
+        }, None
+
+    def _close_agent_sampling(self, key, status):
+        """Remove one agentSampling entry exactly once. Must be called with
+        self.lock already held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        sampling = god.get("agentSampling")
+        if not isinstance(sampling, dict):
+            return None
+        rec = sampling.pop(key, None)
+        if not isinstance(rec, dict):
+            return None
+        self._log_divine(rec.get("id"), None, "agent_sampling", rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _close_context_mask(self, key, status):
+        """Remove one contextMasks entry exactly once. Must be called with
+        self.lock already held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        masks = god.get("contextMasks")
+        if not isinstance(masks, dict):
+            return None
+        rec = masks.pop(key, None)
+        if not isinstance(rec, dict):
+            return None
+        self._log_divine(rec.get("id"), None, "context_mask", rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _god_active_decision_gate_record(self, agent_id):
+        """Active decision gate for agent_id, or None if absent/expired."""
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("decisionGates") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        agent = self._find_agent_by_id(agent_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return None
+        return rec
+
+    def _god_current_outgoing_decision_gate_id(self, target_id):
+        rec = (self.civilization.get("godState") or {}).get("decisionGates", {}).get(str(target_id))
+        return rec.get("id") if isinstance(rec, dict) else None
+
+    def _god_veto_hold_count(self):
+        gates = (self.civilization.get("godState") or {}).get("decisionGates") or {}
+        count = 0
+        for rec in gates.values():
+            if isinstance(rec, dict) and rec.get("mode") == "veto" and rec.get("status") == "holding":
+                count += 1
+        return count
+
+    def _god_decision_gate_pinned(self, agent, gate):
+        """Pinned decision for compulsion/possession (queue advances for possession)."""
+        queue = gate.get("queue")
+        if isinstance(queue, list) and queue:
+            idx = int(gate.get("queueIndex") or 0)
+            if idx >= len(queue):
+                return dict(queue[-1])
+            return dict(queue[idx])
+        pinned = gate.get("pinnedDecision")
+        if isinstance(pinned, dict):
+            return dict(pinned)
+        return {"action": "rest", "reasoning": "Divine gate default."}
+
+    def _god_agent_data_for_decision_norm(self, agent):
+        """Think-payload slice for normalize_decision during god preview/apply."""
+        payload = self._build_think_payload(agent)
+        build_fn = self.d.get("build_agent_data")
+        if build_fn is None:
+            return payload
+        return build_fn(
+            payload,
+            payload.get("nearby_agents_formatted") or payload.get("nearby_agents"),
+            payload.get("known_resources") or [],
+            payload.get("pending_blueprints") or [],
+            payload.get("approved_custom_projects") or [],
+            payload.get("rejected_blueprints") or [],
+        )
+
+    def _god_normalize_pinned_decision(self, agent, raw):
+        if not isinstance(raw, dict):
+            return None, "pinnedDecision must be an object"
+        action = raw.get("action")
+        if not isinstance(action, str) or not action.strip():
+            return None, "pinnedDecision.action is required"
+        norm_fn = self.d.get("normalize_decision")
+        if norm_fn is not None:
+            agent_data = self._god_agent_data_for_decision_norm(agent)
+            normalized = norm_fn(dict(raw), agent_data)
+            requested = action.strip()
+            if normalized.get("action") != requested:
+                note = (
+                    normalized.get("rejection_note")
+                    or normalized.get("council_rejection_note")
+                    or normalized.get("terraform_rejection_note")
+                    or normalized.get("upgrade_rejection_note")
+                    or normalized.get("sprite_rejection_note")
+                    or "normalize_decision substituted a fallback"
+                )
+                return None, f"invalid pinned decision: {note}"
+            return normalized, None
+        if action.strip() not in self.d.get("AVAILABLE_ACTIONS", []):
+            return None, f"unknown action {action.strip()}"
+        return dict(raw), None
+
+    def _close_decision_gate(self, key, status):
+        """Remove one decisionGates entry exactly once. Lock held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        gates = god.get("decisionGates")
+        if not isinstance(gates, dict):
+            return None
+        rec = gates.pop(key, None)
+        if not isinstance(rec, dict):
+            return None
+        agent = self._find_agent_by_id(int(key))
+        if agent is not None:
+            agent["divineHold"] = False
+        self._log_divine(rec.get("id"), None, rec.get("mode") or "decision_gate", rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _advance_possession_queue(self, gate):
+        if not isinstance(gate.get("queue"), list):
+            return
+        idx = int(gate.get("queueIndex") or 0) + 1
+        gate["queueIndex"] = idx
+        if idx >= len(gate["queue"]):
+            gate["queueIndex"] = len(gate["queue"]) - 1
+
+    def _dec_compulsion_turn(self, gate):
+        remaining = gate.get("remainingTurns")
+        if remaining is None:
+            return
+        if not isinstance(remaining, int) or remaining <= 0:
+            return
+        remaining -= 1
+        gate["remainingTurns"] = remaining
+        if remaining <= 0:
+            key = str(gate.get("targetId"))
+            if key in (self.civilization.get("godState") or {}).get("decisionGates", {}):
+                self._close_decision_gate(key, "completed")
+
+    def _apply_divine_possessed_decision(self, agent, decision, gate, gate_kind=None):
+        """Apply a compelled/possessed decision with explicit divine attribution."""
+        kind = gate_kind or gate.get("mode") or "possession"
+        action = decision.get("action") or "rest"
+        self.apply_decision(agent, decision)
+        label = f"Divine {kind}: {agent['name']} — {action}"
+        self._push_communication(f"divine_{kind}", "divine", agent["name"], label, source="divine")
+        if action not in ("rest", "talk_to_nearby"):
+            self._push_chronicle(label, kind="divine", source="divine")
+        self._log_benchmark("divine_decision_gate", 1.0, {
+            "kind": kind, "agent": agent["name"], "action": action,
+        })
+
+    def _apply_gated_decision(self, agent, decision, bypass_gate=False):
+        """Decision gate hook immediately before apply_decision on the LLM path.
+
+        Sage emergency rush-heal and in-flight Sage discard call apply_decision
+        directly (bypass_gate=True) so survival stays authoritative over story."""
+        voice = self._active_voice_guidance(agent)
+        if voice.get("voice_guidance_active"):
+            divine_response = decision.get("divine_response")
+            if not isinstance(divine_response, dict):
+                divine_response = {
+                    "stance": "continue",
+                    "reason": "missing_divine_response",
+                }
+                decision["divine_response"] = divine_response
+                decision["divine_response_synthetic"] = True
+            if divine_response.get("stance") == "follow":
+                agent["goal"] = None
+                agent["assignedTask"] = None
+        if bypass_gate:
+            self.apply_decision(agent, decision)
+            if voice.get("voice_guidance_active"):
+                self._record_divine_response_adherence(agent, decision, voice)
+            return True
+        gate = self._god_active_decision_gate_record(agent["id"])
+        if not gate:
+            self.apply_decision(agent, decision)
+            if voice.get("voice_guidance_active"):
+                self._record_divine_response_adherence(agent, decision, voice)
+            return True
+        mode = gate.get("mode")
+        if mode == "possession":
+            pinned_raw = self._god_decision_gate_pinned(agent, gate)
+            pinned, _ = self._god_normalize_pinned_decision(agent, pinned_raw)
+            if pinned:
+                self._apply_divine_possessed_decision(agent, pinned, gate)
+                self._advance_possession_queue(gate)
+            return True
+        if mode == "compulsion":
+            pinned_raw = gate.get("pinnedDecision")
+            if isinstance(pinned_raw, dict):
+                pinned, _ = self._god_normalize_pinned_decision(agent, pinned_raw)
+                if pinned:
+                    self._apply_divine_possessed_decision(agent, pinned, gate, gate_kind="compulsion")
+                    self._dec_compulsion_turn(gate)
+            return True
+        if mode == "veto":
+            status = gate.get("status") or "armed"
+            if status == "holding":
+                return False
+            if gate.get("armed"):
+                if self._god_veto_hold_count() >= GOD_VETO_HOLD_CAP:
+                    self.apply_decision(agent, {
+                        "action": "rest",
+                        "reasoning": "Divine veto hold cap reached — auto-rest.",
+                    })
+                    return True
+                gate["pendingDecision"] = copy.deepcopy(decision)
+                gate["status"] = "holding"
+                gate["holdFrame"] = self.frameTick
+                gate["holdExpiresFrame"] = self.frameTick + GOD_VETO_HOLD_TIMEOUT_FRAMES
+                agent["divineHold"] = True
+                self._push_activity(
+                    f"{agent['name']} is held for divine veto review (action withheld)")
+                self._push_communication(
+                    "divine_veto_hold", "divine", agent["name"],
+                    f"Divine veto: {agent['name']}'s decision is withheld for operator review",
+                    source="divine")
+                return False
+        self.apply_decision(agent, decision)
+        if voice.get("voice_guidance_active"):
+            self._record_divine_response_adherence(agent, decision, voice)
+        return True
+
+    def _expire_decision_gates(self, restore=False):
+        """Expire decision gates and resolve veto hold timeouts. Lock held."""
+        god = self.civilization.get("godState") or {}
+        gates = god.get("decisionGates")
+        if not isinstance(gates, dict) or not gates:
+            return
+        ft = self.frameTick
+        for key in list(gates.keys()):
+            rec = gates.get(key)
+            if not isinstance(rec, dict):
+                gates.pop(key, None)
+                continue
+            if rec.get("mode") == "veto" and rec.get("status") == "holding":
+                hold_expires = rec.get("holdExpiresFrame")
+                if isinstance(hold_expires, int) and ft >= hold_expires:
+                    agent = self._find_agent_by_id(int(key))
+                    if agent is not None:
+                        agent["divineHold"] = False
+                        self._apply_divine_possessed_decision(
+                            agent, {"action": "rest", "reasoning": "Divine veto timed out."},
+                            rec, gate_kind="veto_timeout")
+                    self._close_decision_gate(key, "restore-closed" if restore else "veto-timeout")
+                    continue
+            expires = rec.get("expiresFrame")
+            if isinstance(expires, int) and ft >= expires:
+                agent = self._find_agent_by_id(int(key))
+                if agent is not None:
+                    agent["divineHold"] = False
+                status = "restore-closed" if restore else "expired"
+                self._close_decision_gate(key, status)
+
+    def _close_whisper_campaign(self, campaign_id, status):
+        """Revoke every linked omen still active and remove the campaign record.
+        Must be called with self.lock already held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        campaigns = god.get("whisperCampaigns")
+        campaign = campaigns.get(campaign_id) if isinstance(campaigns, dict) else None
+        if not isinstance(campaign, dict):
+            return None
+        omens = god.get("privateOmens") or {}
+        for agent_key, omen_id in (campaign.get("targets") or {}).items():
+            omen = omens.get(agent_key) if isinstance(omens, dict) else None
+            if isinstance(omen, dict) and omen.get("id") == omen_id:
+                self._close_omen(agent_key, status)
+        if isinstance(campaigns, dict):
+            campaigns.pop(campaign_id, None)
+        self._log_divine(campaign_id, None, "whisper_campaign", campaign,
+                         {"status": status}, status, public=False)
+        return campaign
+
+    def _maybe_finalize_whisper_campaign(self, campaign_id):
+        """Drop a campaign when every linked omen has already closed."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        campaigns = god.get("whisperCampaigns")
+        campaign = campaigns.get(campaign_id) if isinstance(campaigns, dict) else None
+        if not isinstance(campaign, dict):
+            return
+        omens = god.get("privateOmens") or {}
+        for agent_key, omen_id in (campaign.get("targets") or {}).items():
+            omen = omens.get(agent_key) if isinstance(omens, dict) else None
+            if isinstance(omen, dict) and omen.get("id") == omen_id:
+                return
+        campaigns.pop(campaign_id, None)
+
+    def _sweep_whisper_campaigns(self, restore=False):
+        """Expire or finalize whisper campaigns after omen closures."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        campaigns = god.get("whisperCampaigns")
+        if not isinstance(campaigns, dict) or not campaigns:
+            return
+        ft = self.frameTick
+        for campaign_id in list(campaigns.keys()):
+            campaign = campaigns.get(campaign_id)
+            if not isinstance(campaign, dict):
+                del campaigns[campaign_id]
+                continue
+            expires_frame = campaign.get("expiresFrame")
+            if isinstance(expires_frame, int) and ft >= expires_frame:
+                status = "restore-closed" if restore else "expired"
+                self._close_whisper_campaign(campaign_id, status)
+            else:
+                self._maybe_finalize_whisper_campaign(campaign_id)
 
     def _god_apply_revoke_guidance(self, guidance_id):
         """Ends a providence or omen early by id (docs/plan: "records a
@@ -17848,7 +21879,7 @@ class SimEngine:
                 "createdAt": time.time(),
             }
             self._god_requests_evict()
-            del self._god_preview_cache[preview_id]  # single-use once applied
+            self._god_preview_cache.pop(preview_id, None)  # single-use once applied
             self._log_divine(outcome["interventionId"], request_id, revalidated["kind"],
                              revalidated, outcome, "applied", public=True)
             return response
@@ -17885,6 +21916,75 @@ class SimEngine:
                 if isinstance(omen, dict) and omen.get("id") == target_id:
                     self._close_omen(key, "cancelled")
                     return {"ok": True, "cancelled": True, "targetId": target_id, "targetKind": "private_omen"}
+
+            campaigns = god.get("whisperCampaigns") or {}
+            if isinstance(campaigns, dict) and target_id in campaigns:
+                self._close_whisper_campaign(target_id, "cancelled")
+                return {"ok": True, "cancelled": True, "targetId": target_id,
+                        "targetKind": "whisper_campaign"}
+
+            sampling = god.get("agentSampling") or {}
+            if isinstance(sampling, dict):
+                for key, rec in list(sampling.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_agent_sampling(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "agent_sampling"}
+
+            masks = god.get("contextMasks") or {}
+            if isinstance(masks, dict):
+                for key, rec in list(masks.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_context_mask(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "context_mask"}
+
+            gates = god.get("decisionGates") or {}
+            if isinstance(gates, dict):
+                for key, rec in list(gates.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_decision_gate(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "decision_gate"}
+
+            bushes = god.get("burningBush") or {}
+            if isinstance(bushes, dict):
+                for key, rec in list(bushes.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_burning_bush(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "burning_bush"}
+                    bargain = rec.get("bargain") if isinstance(rec, dict) else None
+                    if isinstance(bargain, dict) and bargain.get("id") == target_id:
+                        if bargain.get("status") == "open":
+                            bargain["status"] = "cancelled"
+                            bargain["settledFrame"] = self.frameTick
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "merovingian_bargain"}
+
+            anointments = god.get("anointments") or {}
+            if isinstance(anointments, dict):
+                for key, rec in list(anointments.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_anointment(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "anoint"}
+
+            forges = god.get("identityForges") or {}
+            if isinstance(forges, dict):
+                for key, rec in list(forges.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_identity_forge(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "identity_forge"}
+
+            zones = god.get("architectZones") or []
+            if isinstance(zones, list):
+                for zone in zones:
+                    if isinstance(zone, dict) and zone.get("id") == target_id and zone.get("status") == "active":
+                        self._close_architect_zone(target_id, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "architect_zone"}
 
             for event in god.get("activeEvents") or []:
                 if (isinstance(event, dict) and event.get("id") == target_id
@@ -17931,7 +22031,152 @@ class SimEngine:
                 omen = omens.get(str(agent_id))
                 if not isinstance(omen, dict):
                     return None
-                return {"active": True, "expiresFrame": omen.get("expiresFrame")}
+                if not self._voice_guidance_in_window(omen):
+                    return None
+                return {
+                    "active": True,
+                    "expiresFrame": omen.get("expiresFrame"),
+                    "unacked": not omen.get("acked"),
+                }
+
+            def _providence_status(agent_id):
+                prov = god.get("providence")
+                if not isinstance(prov, dict) or not self._voice_guidance_in_window(prov):
+                    return None
+                acked = prov.get("ackedAgentIds") or {}
+                return {
+                    "active": True,
+                    "expiresFrame": prov.get("expiresFrame"),
+                    "unacked": not acked.get(str(agent_id)),
+                }
+
+            def _sampling_status(agent_id):
+                rec = self._god_active_agent_sampling_record(agent_id)
+                if rec is None:
+                    return None
+                status = {
+                    "active": True,
+                    "model": rec.get("model"),
+                    "temperature": rec.get("temperature"),
+                }
+                if rec.get("expiresFrame") is not None:
+                    status["expiresFrame"] = rec.get("expiresFrame")
+                return status
+
+            def _mask_status(agent_id):
+                rec = self._god_active_context_mask_record(agent_id)
+                if rec is None:
+                    return None
+                return {
+                    "active": True,
+                    "mode": rec.get("mode"),
+                    "expiresFrame": rec.get("expiresFrame"),
+                }
+
+            def _gate_status(agent_id):
+                rec = self._god_active_decision_gate_record(agent_id)
+                if rec is None:
+                    return None
+                status = {
+                    "active": True,
+                    "mode": rec.get("mode"),
+                    "armed": rec.get("armed"),
+                    "status": rec.get("status"),
+                    "expiresFrame": rec.get("expiresFrame"),
+                    "hasPending": bool(rec.get("pendingDecision")),
+                }
+                pin = rec.get("pinnedDecision")
+                if isinstance(pin, dict) and pin.get("action"):
+                    status["pinnedAction"] = pin.get("action")
+                elif isinstance(rec.get("queue"), list) and rec["queue"]:
+                    status["pinnedAction"] = rec["queue"][0].get("action")
+                return status
+
+            def _burning_bush_status(agent_id):
+                rec = (god.get("burningBush") or {}).get(str(agent_id))
+                if not isinstance(rec, dict) or rec.get("status") != "active":
+                    return None
+                thread = rec.get("thread") or []
+                message_count = len(thread) if isinstance(thread, list) else 0
+                bargain = rec.get("bargain")
+                bargain_active = (
+                    isinstance(bargain, dict) and bargain.get("status") == "open"
+                )
+                status = {
+                    "active": True,
+                    "messageCount": message_count,
+                    "bargainActive": bargain_active,
+                }
+                if bargain_active and isinstance(bargain.get("expiresFrame"), int):
+                    status["expiresFrame"] = bargain.get("expiresFrame")
+                return status
+
+            def _anointment_status(agent_id):
+                rec = self._god_active_anointment_record(agent_id)
+                if rec is None:
+                    return None
+                status = {
+                    "active": True,
+                    "tagCount": len(rec.get("stigmataTags") or []),
+                    "expiresFrame": rec.get("expiresFrame"),
+                }
+                next_oracle = self._anointment_next_oracle_frame(rec)
+                if next_oracle is not None:
+                    status["nextOracleFrame"] = next_oracle
+                return status
+
+            def _identity_forge_status(agent_id):
+                rec = self._god_active_identity_forge_record(agent_id)
+                if rec is None:
+                    return None
+                status = {
+                    "active": True,
+                    "progress": rec.get("progress"),
+                    "expiresFrame": rec.get("expiresFrame"),
+                }
+                if rec.get("copyFromId") is not None:
+                    status["copyFromId"] = rec.get("copyFromId")
+                    status["rate"] = rec.get("rate")
+                return status
+
+            def _architect_limbo_status(agent_id):
+                agent = self._find_agent_by_id(agent_id)
+                hold = agent.get("architectLimbo") if agent else None
+                if not isinstance(hold, dict):
+                    return None
+                return {
+                    "active": True,
+                    "zoneId": hold.get("zoneId"),
+                }
+
+            def _architect_zones_sight_summary():
+                summary = []
+                for zone in self._god_active_architect_zones():
+                    cells_expanded, _ = self._expand_architect_cells(zone.get("cells"))
+                    entry = {
+                        "id": zone.get("id"),
+                        "kind": zone.get("kind"),
+                        "districtId": zone.get("districtId"),
+                        "cellCount": len(cells_expanded or []),
+                        "expiresFrame": zone.get("expiresFrame"),
+                    }
+                    if zone.get("kind") == "limbo":
+                        entry["holdCount"] = len(zone.get("holdAgentIds") or [])
+                    summary.append(entry)
+                return summary
+
+            def _checkpoints_sight_summary():
+                summary = []
+                for rec in (god.get("checkpoints") or []):
+                    if not isinstance(rec, dict):
+                        continue
+                    summary.append({
+                        "id": rec.get("id"),
+                        "label": rec.get("label"),
+                        "frameTick": rec.get("frameTick"),
+                        "createdAt": rec.get("createdAt"),
+                    })
+                return summary
 
             agents = [{
                 "id": a["id"], "name": a["name"], "role": a["role"],
@@ -17944,7 +22189,29 @@ class SimEngine:
                 "lastReasoning": (a.get("lastReasoning") or "")[:240] or None,
                 "currentDistrict": a.get("currentDistrict"),
                 "omen": _omen_status(a["id"]),
+                "providence": _providence_status(a["id"]),
+                "sampling": _sampling_status(a["id"]),
+                "contextMask": _mask_status(a["id"]),
+                "decisionGate": _gate_status(a["id"]),
+                "burningBush": _burning_bush_status(a["id"]),
+                "anointment": _anointment_status(a["id"]),
+                "identityForge": _identity_forge_status(a["id"]),
+                "architectLimbo": _architect_limbo_status(a["id"]),
+                "divineHold": bool(a.get("divineHold")),
+                "memoryCounts": {
+                    "working": len((a.get("memory") or {}).get("working") or []),
+                    "shortTerm": len((a.get("memory") or {}).get("shortTerm") or []),
+                },
+                "beliefCount": len(a.get("beliefs") or ()),
             } for a in self.agents]
+            recent_divine_responses = list(god.get("recentDivineResponses") or [])
+            if isinstance(filters, dict):
+                filter_agent_id = filters.get("agentId")
+                if filter_agent_id is not None:
+                    recent_divine_responses = [
+                        r for r in recent_divine_responses
+                        if isinstance(r, dict) and r.get("agentId") == filter_agent_id
+                    ]
             return {
                 "ok": True,
                 "frameTick": self.frameTick,
@@ -17952,6 +22219,9 @@ class SimEngine:
                 "providence": god.get("providence"),
                 "activeEvents": list(god.get("activeEvents") or [])[:GOD_ACTIVE_EVENTS_CAP],
                 "recentInterventions": list(god.get("recentInterventions") or [])[-GOD_RECENT_INTERVENTIONS_CAP:],
+                "recentDivineResponses": recent_divine_responses[:GOD_DIVINE_RESPONSE_LOG_MAX],
+                "architectZones": _architect_zones_sight_summary(),
+                "checkpoints": _checkpoints_sight_summary(),
                 "agents": agents,
             }
 
@@ -18230,6 +22500,7 @@ class SimEngine:
                         # below, by contrast, is opt-in ONLY when enabled.
                         "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
                         "GOD_AUTH_REQUIRED": GOD_AUTH_REQUIRED,
+                        "GOD_DEJA_VU_REPLAY": GOD_DEJA_VU_REPLAY,
                     },
                 },
             }

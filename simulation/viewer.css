@@ -770,6 +770,15 @@
   .divine-section-title {
     margin: 0 0 10px; font-size: 13px; font-weight: 700; color: #ffd27a; letter-spacing: 0.02em;
   }
+  .divine-help {
+    margin: 0 0 8px; font-size: 11px; line-height: 1.45; color: #8a8a98;
+  }
+  .divine-help-intro { margin-bottom: 14px; }
+  .divine-matrix-section {
+    margin: 18px 0 4px; padding-top: 10px; border-top: 1px solid #252530;
+  }
+  .divine-matrix-section:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
+  .divine-matrix-section .divine-section-title { margin-bottom: 8px; }
   .divine-preview-strip {
     display: none; align-items: center; gap: 10px; flex-wrap: wrap;
     padding: 10px 18px; border-bottom: 1px solid #282831;
@@ -837,6 +846,32 @@
   .divine-history-badge { font-size: 9px; padding: 0 4px; border-radius: 2px; margin-right: 4px; }
   .divine-history-public { background: #1e3a2a; color: #b3ffcf; }
   .divine-history-private { background: #3a1e3a; color: #e0b3ff; }
+  .divine-voice-adherence-section {
+    margin-top: 18px; padding-top: 10px; border-top: 1px solid #252530;
+  }
+  .divine-voice-adherence-section .divine-section-title { margin-bottom: 6px; }
+  .divine-voice-adherence-list { margin-top: 8px; overflow-x: auto; }
+  .divine-voice-adherence-sight { margin-top: 10px; }
+  .divine-voice-adherence-xlink { margin: 6px 0 0; }
+  .divine-voice-adherence-table {
+    width: 100%; border-collapse: collapse; font-size: 11px; line-height: 1.45;
+  }
+  .divine-voice-adherence-table th,
+  .divine-voice-adherence-table td {
+    padding: 4px 6px; border-bottom: 1px solid #22222c; text-align: left; vertical-align: top;
+  }
+  .divine-voice-adherence-table th { color: #9a9aa8; font-weight: 600; white-space: nowrap; }
+  .divine-voice-reason { max-width: 220px; word-break: break-word; }
+  .divine-voice-stance-follow { background: #1e3a2a; color: #b3ffcf; border: 1px solid #3a8a5a; }
+  .divine-voice-stance-continue { background: #3a2a12; color: #ffdca0; border: 1px solid #b5883a; }
+  .divine-voice-unacked {
+    display: inline-block; font-size: 9px; padding: 0 4px; border-radius: 2px;
+    background: #4a3a12; color: #ffdca0; border: 1px solid #b5883a; margin-left: 4px;
+  }
+  .divine-voice-synthetic {
+    display: inline-block; font-size: 9px; padding: 0 4px; border-radius: 2px;
+    color: #9a9aa8; border: 1px solid #3a3a48; margin-left: 4px;
+  }
   .divine-primitive-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 4px; padding: 4px; border: 1px dashed #333; border-radius: 3px; }
   .divine-primitive-row select, .divine-primitive-row input { font-size: 11px; padding: 2px 4px; }
   /* Bottom action bar */
