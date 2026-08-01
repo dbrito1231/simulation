@@ -774,6 +774,17 @@
     margin: 0 0 8px; font-size: 11px; line-height: 1.45; color: #8a8a98;
   }
   .divine-help-intro { margin-bottom: 14px; }
+  .divine-feature-guide {
+    margin: 0 0 12px; padding: 10px 12px;
+    border: 1px solid #3a3428; border-radius: 6px;
+    background: linear-gradient(180deg, rgba(74,58,26,.22), rgba(30,24,12,.18));
+  }
+  .divine-feature-guide-title {
+    font: 700 13px system-ui, sans-serif; color: #ffd27a; margin-bottom: 6px;
+  }
+  .divine-feature-guide-body {
+    margin: 0; font-size: 11px; line-height: 1.5; color: #b8b8c4;
+  }
   .divine-matrix-nav {
     position: sticky; top: 0; z-index: 1;
     display: flex; flex-wrap: wrap; gap: 6px;

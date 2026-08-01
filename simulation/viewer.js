@@ -2995,17 +2995,180 @@ const DIVINE_FEATURE_ICONS = {
   history: '<svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>',
   compile: '<svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>',
 };
-const DIVINE_FEATURES = {
-  unlock:  { title: "Unlock the Divine Console", sub: "Authenticate with the God token to enable every other tool.", gated: false },
-  sight:   { title: "Sight — private inspection", sub: "See what agents never expose publicly: vitals, ties, omens, active effects.", gated: true },
-  voice:   { title: "Voice — proclamations & omens", sub: "Speak to the village, or whisper a private omen to one agent.", gated: true },
-  matrix:  { title: "Matrix — brain & world interventions", sub: "Override agent brains, memories, perception, possession, identity, zones, and checkpoints — mostly private; Preview validates, Apply commits.", gated: true },
-  miracles:{ title: "Miracles — direct intervention", sub: "Heal, grant resources, or repair/damage a structure. Irreversible once applied.", gated: true },
-  story:   { title: "Story — timed narrative events", sub: "Compose a titled event from validated effect primitives.", gated: true },
-  laws:    { title: "Laws — temporary world modifiers", sub: "Bend gather yield, hunger, spoilage and more for a bounded time.", gated: true },
-  history: { title: "History — intervention log", sub: "Every applied intervention, public and private, most recent first.", gated: true },
-  compile: { title: "Compile — prose to event", sub: "Turn narrative prose into a typed draft. Experimental — enable with SIM_GOD_COMPILER=1.", gated: true },
+const DIVINE_PREVIEW_TIP = {
+  t: "Preview",
+  d: "Check that this is allowed without changing the village yet.",
 };
+const DIVINE_APPLY_TIP = {
+  t: "Apply",
+  d: "Make it real (uses the last successful check).",
+};
+const DIVINE_APPLY_IRREVERSIBLE_TIP = {
+  t: "Apply",
+  d: "Make it real — cannot be undone.",
+};
+
+function divineTipAttr(tip) {
+  return JSON.stringify(tip).replace(/'/g, "&#39;");
+}
+
+const DIVINE_FEATURES = {
+  unlock: {
+    title: "Unlock",
+    sub: "Enter your secret token to use Divine tools.",
+    guide: [
+      "Sign in with the secret password set when the server starts.",
+      "Only you see this console — villagers never know you are here.",
+      "Remember saves the token until you close this browser tab.",
+      "You can use every other tool after a successful connect.",
+    ],
+    gated: false,
+  },
+  sight: {
+    title: "Sight",
+    sub: "Look at private details villagers do not show each other.",
+    guide: [
+      "Pick a villager to see health, ties, active whispers, and hidden effects.",
+      "This view is for you only — nothing here is announced to the village.",
+      "Refresh updates the panel; it does not change the world.",
+      "Use the quick buttons to jump into Voice, Miracles, or Matrix for that villager.",
+    ],
+    gated: true,
+  },
+  voice: {
+    title: "Voice",
+    sub: "Speak to the whole village, set ongoing guidance, or whisper to one or many.",
+    guide: [
+      "Proclamations and Providence are public — everyone sees them and must respond.",
+      "Omens and whisper campaigns are private — only the targeted villager hears their line.",
+      "Most Voice effects can be cancelled early from History or the bar.",
+      "Check Adherence below to see who followed your guidance and why.",
+    ],
+    gated: true,
+  },
+  matrix: {
+    title: "Matrix",
+    sub: "Change how villagers think, remember, perceive, and move — mostly in secret.",
+    guide: [
+      "These tools nudge minds, memories, perception, identity, and the map.",
+      "Villagers usually cannot tell you intervened; some map changes are visible.",
+      "Preview checks the action; Apply makes it real.",
+      "Timed effects expire on their own — many can also be cancelled.",
+    ],
+    gated: true,
+  },
+  miracles: {
+    title: "Miracles",
+    sub: "Directly change health, goods, or buildings.",
+    guide: [
+      "Heal or hurt a villager, grant resources, or repair or damage structures.",
+      "Effects apply immediately and are permanent — there is no undo.",
+      "Preview shows what will happen; Apply commits it forever.",
+      "Undoing a miracle means issuing the opposite change as a new action.",
+    ],
+    gated: true,
+  },
+  story: {
+    title: "Story",
+    sub: "Run a timed story event with optional world effects.",
+    guide: [
+      "Title and narration can be public for the whole village or private for one villager.",
+      "Timed modifiers bend hunger, gathering, and more while the event runs.",
+      "Adding instant effects makes the story consequential — past changes stay even if you cancel the timer.",
+      "You can cancel an active story event early; that stops future effects, not what already happened.",
+    ],
+    gated: true,
+  },
+  laws: {
+    title: "Laws",
+    sub: "Temporary world rules that change how the village works.",
+    guide: [
+      "Laws scale hunger, gathering, spoilage, and similar rules for a set time.",
+      "A value of 1.0 means normal — the law does nothing.",
+      "Active laws appear above the form; cancel ends one early.",
+      "Laws are cancellable while running; they do not roll back time.",
+    ],
+    gated: true,
+  },
+  history: {
+    title: "History",
+    sub: "A log of what you have done, newest first.",
+    guide: [
+      "Every applied action appears here — public village events and your private moves.",
+      "Filter by kind, villager, or time; export a Markdown summary for notes.",
+      "Re-run fills a form from a past entry — you must Preview again before Apply.",
+      "Revoke last cancellable undoes the newest effect that still allows cancel.",
+    ],
+    gated: true,
+  },
+  compile: {
+    title: "Compile",
+    sub: "Turn a written story idea into a Story draft (optional advanced tool).",
+    guide: [
+      "Paste prose and the compiler suggests a Story event draft.",
+      "Nothing changes until you review in Story and Apply yourself.",
+      "Experimental — your server admin must enable the compiler.",
+      "Compile never applies directly; it only fills the Story form for you.",
+    ],
+    gated: true,
+  },
+};
+
+let divineFeatureGuideEl = null;
+
+function clearDivineFeatureGuide() {
+  if (divineFeatureGuideEl) {
+    divineFeatureGuideEl.remove();
+    divineFeatureGuideEl = null;
+  }
+}
+
+function renderDivineFeatureGuide(name) {
+  clearDivineFeatureGuide();
+  if (!divineModalBodyEl) return;
+  const feature = DIVINE_FEATURES[name];
+  if (!feature || !feature.guide || !feature.guide.length) return;
+  divineFeatureGuideEl = document.createElement("div");
+  divineFeatureGuideEl.id = "divineFeatureGuide";
+  divineFeatureGuideEl.className = "divine-feature-guide";
+  const titleEl = document.createElement("div");
+  titleEl.className = "divine-feature-guide-title";
+  titleEl.textContent = feature.title;
+  divineFeatureGuideEl.appendChild(titleEl);
+  const bodyEl = document.createElement("p");
+  bodyEl.className = "divine-feature-guide-body";
+  bodyEl.textContent = feature.guide.join(" ");
+  divineFeatureGuideEl.appendChild(bodyEl);
+  divineModalBodyEl.insertBefore(divineFeatureGuideEl, divineModalBodyEl.firstChild);
+}
+
+function syncDivineBarTooltips() {
+  if (!divineBarEl) return;
+  divineBarEl.querySelectorAll(".gbtn[data-feature]").forEach((btn) => {
+    const key = btn.dataset.feature;
+    const feature = DIVINE_FEATURES[key];
+    if (!feature) return;
+    btn.setAttribute("data-tip", JSON.stringify({ t: feature.title, d: feature.sub }));
+  });
+}
+
+function reorderDivineModalBodyChildren() {
+  if (!divineModalBodyEl) return;
+  const guide = document.getElementById("divineFeatureGuide");
+  const pin = document.getElementById("divinePinRow");
+  const panel = divineModalOpenFeature
+    ? document.getElementById("divineTab-" + divineModalOpenFeature)
+    : null;
+  if (guide) divineModalBodyEl.insertBefore(guide, divineModalBodyEl.firstChild);
+  if (pin) {
+    const after = guide || divineModalBodyEl.firstChild;
+    if (after === pin) return;
+    divineModalBodyEl.insertBefore(pin, guide ? guide.nextSibling : divineModalBodyEl.firstChild);
+  }
+  if (panel && panel.parentElement === divineModalBodyEl) {
+    divineModalBodyEl.appendChild(panel);
+  }
+}
 
 function godFramesToSeconds(frames) {
   return Math.round((Number(frames) || 0) / 30);
@@ -3241,7 +3404,7 @@ async function godApiFetch(path, opts) {
   let data = null;
   try { data = await res.json(); } catch (err) { data = null; }
   if (res.status === 401) {
-    godLockConsole("Authorization failed — token cleared. Re-enter it to continue.");
+    godLockConsole("Sign-in failed — token cleared. Enter your secret token again.");
   }
   return { ok: res.ok, status: res.status, data: data || { ok: false, reason: `HTTP ${res.status}` } };
 }
@@ -3989,7 +4152,8 @@ function renderGodPinRow() {
     pin = document.createElement("div");
     pin.id = "divinePinRow";
     pin.className = "divine-pin-row";
-    divineModalBodyEl.insertBefore(pin, divineModalBodyEl.firstChild);
+    const guide = document.getElementById("divineFeatureGuide");
+    divineModalBodyEl.insertBefore(pin, guide ? guide.nextSibling : divineModalBodyEl.firstChild);
   }
   let html = "";
   if (godLastAppliedPin) {
@@ -4098,7 +4262,7 @@ function godLockConsole(message) {
   godLastSight = null;
   godLastSightFetchedAt = 0;
   try { sessionStorage.removeItem("godToken"); } catch (err) { /* ignore */ }
-  updateGodAuthStatus(message || "Locked.", "divine-status-locked");
+  updateGodAuthStatus(message || "Locked — enter your secret token.", "divine-status-locked");
   updateDivineBarAuthUi();
   if (GOD_MODE_ENABLED_FLAG) openDivineModal("unlock");
   else {
@@ -4123,7 +4287,7 @@ async function godOpenModeBootstrap() {
 
 async function godConnect(tokenValue) {
   if (!tokenValue) {
-    updateGodAuthStatus("Enter a token first.", "divine-status-locked");
+    updateGodAuthStatus("Enter your secret token first.", "divine-status-locked");
     return;
   }
   godToken = tokenValue;
@@ -4131,7 +4295,7 @@ async function godConnect(tokenValue) {
   if (resp.ok && resp.data && resp.data.ok) {
     godAuthorized = true;
     godCapabilities = resp.data;
-    updateGodAuthStatus("Authorized.", "divine-status-ok");
+    updateGodAuthStatus("Connected — Divine tools unlocked.", "divine-status-ok");
     updateDivineBarAuthUi();
     applyGodCapabilitiesToForms();
     populateGodAgentSelects();
@@ -4140,7 +4304,7 @@ async function godConnect(tokenValue) {
     godToken = null;
     godAuthorized = false;
     updateDivineBarAuthUi();
-    updateGodAuthStatus("Unauthorized — check the token (or god mode may be disabled).", "divine-status-locked");
+    updateGodAuthStatus("Could not connect — check your token.", "divine-status-locked");
   }
 }
 
@@ -4250,6 +4414,62 @@ const DIVINE_WIDE_MODAL_FEATURES = new Set(["matrix", "story", "laws", "compile"
 const godBarButtons = Array.from(document.querySelectorAll("#divineBar .gbtn"));
 let divineModalOpenFeature = null;
 
+function applyDivinePlainTips() {
+  syncDivineBarTooltips();
+  const hold = document.getElementById("divineTabHold");
+  const previewJson = JSON.stringify(DIVINE_PREVIEW_TIP);
+  const applyJson = JSON.stringify(DIVINE_APPLY_TIP);
+  const applyIrrevJson = JSON.stringify(DIVINE_APPLY_IRREVERSIBLE_TIP);
+  const irrevApplyFieldsets = new Set([
+    "godVitalsFieldset", "godGrantFieldset", "godStructureFieldset",
+    "godMassRepairFieldset", "godClearRuinsFieldset",
+  ]);
+  if (hold) {
+    hold.querySelectorAll("[id$='PreviewBtn']").forEach((btn) => btn.setAttribute("data-tip", previewJson));
+    hold.querySelectorAll("[id$='ApplyBtn']").forEach((btn) => {
+      const fs = btn.closest("fieldset");
+      const irrev = fs && (fs.classList.contains("divine-fieldset-irreversible") || irrevApplyFieldsets.has(fs.id));
+      btn.setAttribute("data-tip", irrev ? applyIrrevJson : applyJson);
+    });
+  }
+  const agentFilter = document.getElementById("godAgentFilterWrap");
+  if (agentFilter) {
+    agentFilter.setAttribute("data-tip", JSON.stringify({
+      t: "Villager filter",
+      d: "Narrows villager dropdowns by name or role. Press / while the modal is open to focus.",
+    }));
+  }
+  const pinBtn = document.getElementById("divinePinSectionBtn");
+  if (pinBtn) {
+    pinBtn.setAttribute("data-tip", JSON.stringify({
+      t: "Pin this section",
+      d: "Save a shortcut to this tool (max 4, remembered until you close this browser tab).",
+    }));
+  }
+  const matrixPin = document.getElementById("divineMatrixPinBtn");
+  if (matrixPin) {
+    matrixPin.setAttribute("data-tip", JSON.stringify({
+      t: "Pin Matrix section",
+      d: "Pin the Matrix section currently near the top of the scroll area.",
+    }));
+  }
+  const stripApply = document.getElementById("divinePreviewApplyBtn");
+  if (stripApply) {
+    stripApply.setAttribute("data-tip", JSON.stringify({
+      t: "Apply",
+      d: "Make it real (uses the last successful check).",
+    }));
+  }
+  const stripDiscard = document.getElementById("divinePreviewDiscardBtn");
+  if (stripDiscard) {
+    stripDiscard.setAttribute("data-tip", JSON.stringify({
+      t: "Discard",
+      d: "Clear the last successful check without changing the village.",
+    }));
+  }
+}
+applyDivinePlainTips();
+
 function wireDivineMatrixNav() {
   const nav = document.querySelector("#divineTab-matrix .divine-matrix-nav");
   if (!nav || nav.dataset.wired) return;
@@ -4310,6 +4530,7 @@ document.querySelectorAll(".divine-fieldset legend").forEach((lg) => {
 renderDivineFavoritesBar();
 
 function closeDivineModal() {
+  clearDivineFeatureGuide();
   if (divineModalOpenFeature) {
     const panel = document.getElementById("divineTab-" + divineModalOpenFeature);
     if (panel && divineTabHoldEl) divineTabHoldEl.appendChild(panel);
@@ -4352,6 +4573,7 @@ function openDivineModal(name) {
   divineModalOpenFeature = name;
   if (divineModalEl) divineModalEl.classList.toggle("wide", DIVINE_WIDE_MODAL_FEATURES.has(name));
   if (divineModalScrimEl) divineModalScrimEl.classList.add("open");
+  renderDivineFeatureGuide(name);
   if (name === "sight" && godEffectivelyAuthorized()) refreshGodSight();
   if (name === "voice" && godEffectivelyAuthorized()) {
     if (godLastSight) renderGodVoiceAdherence();
@@ -4360,6 +4582,7 @@ function openDivineModal(name) {
   if (name === "laws") renderGodLawsActive();
   if (name === "history") renderGodHistory();
   renderGodPinRow();
+  reorderDivineModalBodyChildren();
 }
 
 // Thin alias: existing callers (connect→sight, lock→unlock, compile→story) open the modal.
@@ -6483,7 +6706,7 @@ function renderGodLawsActive() {
   godLawsActiveEl.querySelectorAll(".godCancelLawBtn").forEach((btn) => {
     btn.setAttribute("data-tip", JSON.stringify({
       t: "Cancel law",
-      d: "End this timed modifier early. Does not roll back past effects.",
+      d: "End this temporary rule early. Does not undo what already happened.",
     }));
     btn.addEventListener("click", async () => {
       btn.disabled = true;
@@ -6949,9 +7172,9 @@ function renderGodHistory() {
     const assessment = godHistoryRerunAssessment(r);
     const rerunBtn = assessment.ok
       ? `<button type="button" class="god-history-rerun" data-id="${escapeHtml(String(r.id))}" ` +
-        `data-tip='{"t":"Re-run","d":"Fill the owning form from stored fields — Preview required."}'>Re-run</button>`
+        `data-tip='{"t":"Re-run","d":"Fill the form from this log entry — you must Preview again before Apply."}'>Re-run</button>`
       : `<button type="button" class="god-history-rerun" disabled ` +
-        `data-tip='{"t":"Re-run unavailable","d":"${escapeHtml(assessment.reason || "not stored")}"}'>Re-run</button>` +
+        `data-tip='{"t":"Re-run unavailable","d":"${escapeHtml(assessment.reason || "details not saved")}"}'>Re-run</button>` +
         `<span class="divine-history-rerun-note">${escapeHtml(assessment.reason || "")}</span>`;
     let agentMeta = "";
     if (r.targetId != null) agentMeta = `, agent ${escapeHtml(String(r.targetId))}`;

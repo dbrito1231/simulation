@@ -25,6 +25,7 @@
 | **Crowd / dream** | `crowd_compulsion` + `dream_broadcast` batch parents (max 12 targets); cancel-all; Matrix forms |
 | **Village pulse** | Ephemeral `pulse` on Sight (crisis, stockpiles, projects, Sage, weather, events, providence summary) |
 | **Compiler UX** | Solid Compile bar chrome when enabled; compile → Story handoff via `acceptServerPreview`; A/B contention **deferred** |
+| **Plain-language help** | `#divineFeatureGuide` modal intro + everyday `data-tip` / `.divine-help` copy for non-technical operators |
 
 **`GOD_STATE_VERSION` = 3** (digests + crowd/dream parent maps). Village pulse and compiler UX did not bump version.
 

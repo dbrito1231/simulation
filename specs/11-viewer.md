@@ -934,6 +934,17 @@ conflict the same way — see this phase's report for the underlying gap.
   `recentPublicInterventions[].presentation` (setdefault `"soft"`). Chronicle
   list items add `chronicle-presentation-thunder` when `entry.presentation ===
   "thunder"`. Cognition/prompt text is unchanged server-side.
+**Plain-language operator help (Divine Console improvements).** `DIVINE_FEATURES`
+in `viewer.js` is the source of truth for modal title, subtitle, bar tooltip,
+and the always-visible `#divineFeatureGuide` callout (`.divine-feature-guide`)
+inserted at the top of `#divineModalBody` on `openDivineModal()` and removed on
+`closeDivineModal()`. Guide copy uses `textContent` only. Individual controls
+keep delegated `#tooltip` hovers via `data-tip` JSON (`t` title, `d` detail) —
+operator-facing strings use village/villager vocabulary (no API paths, no
+preview/apply protocol jargon); Preview ≈ “check without changing the village”,
+Apply ≈ “make it real”. Irreversible fieldsets retain crimson styling and say
+“cannot be undone” in legend or `.divine-help`.
+
 - **Matrix** — brain, memory, distortion, possession, dialogue, identity, zone,
   and checkpoint interventions (see phase list below). Each tool fieldset shows
   an always-visible `.divine-help` blurb under its legend plus `data-tip`
