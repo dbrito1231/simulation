@@ -154,7 +154,34 @@ one uniform failure shape:
   preview/idempotency/expiry contract these routes front.
 
 Phase 2 shipped exactly one applyable command kind, `proclamation`; Phase 3
-added `providence`/`private_omen`/`revoke_guidance`; Phase 4 added
+added `providence`/`private_omen`/`revoke_guidance`; Divine Matrix Phase 1 adds
+`whisper_campaign` (batch private omens); Divine Matrix Phase 2 adds
+`agent_sampling` / `revoke_agent_sampling` (per-agent LLM sampling overlay,
+private); Divine Matrix Phase 3 adds `memory_insert` / `memory_delete` /
+`belief_plant` (engine-mediated memory surgery — private, irreversible,
+outcomes are counts/metadata only in Sight); Divine Matrix Phase 4 adds
+`context_mask` (reality-distortion think-payload layer — private, cancellable,
+Sight shows mode/expiry only); Divine Matrix Phase 5 adds
+`decision_compulsion`, `decision_veto_arm`, `decision_veto_resolve`,
+`agent_possession`, and `revoke_decision_gate` (decision gate / possession —
+private, cancellable except `decision_veto_resolve`; Sight shows gate status
+summaries and `pinnedAction` for operator UX); Divine Matrix Phase 6 adds
+`burning_bush_message`, `burning_bush_close`, `merovingian_bargain`, and
+`bargain_settle` (private bush thread + timed bargain with allowlisted
+predicates; Sight shows `messageCount`/`bargainActive` only); Divine Matrix
+Phase 7 adds `anoint` and `revoke_anoint` (private destiny/oracle; stigmata in
+neighbor think prompts only; Sight shows `tagCount`/`nextOracleFrame`/`expiresFrame`
+without secret text); Divine Matrix Phase 8 adds `identity_edit`,
+`identity_copy_overwrite`, and `identity_forge_cancel` (mutate/blend
+persona/personality/role; private map; Sight shows `progress`/`rate`/
+`copyFromId`/`expiresFrame` only; elder role swap warns in preview); Divine
+Matrix Phase 9 adds `architect_zone`, `architect_zone_cancel`, and
+`architect_release_hold` (Path1 terrain paint, keyed door movement gate, limbo
+hold at `GOD_LIMBO_STATION`; `architectZones` omitted from `/state`; Sight
+summaries only; paint audit `public: true`, door/limbo `public: false`); Divine
+Matrix Phase 10 adds `checkpoint_create`, `checkpoint_restore`, and
+`deja_vu_replay` (stub; `GOD_DEJA_VU_REPLAY` gate); checkpoint metadata in
+Sight only, not `/state`; restore is irreversible world replace; Phase 4 added
 `agent_vitals`/`grant_resource`/`structure_condition`; town-integrity adds
 `repair_structures`/`clear_ruins`; Phase 5 adds
 `story_event` (timed modifiers + zero or more Phase 4 primitives + optional
@@ -171,7 +198,14 @@ for the command catalog and stored-text contract, and
 
 **`/control/god/cancel`** is a direct, lock-held mutation with no
 preview/apply step (unlike every other mutating God route). It searches, in
-order, the active `providence` slot, every `privateOmens` record, then every
+order, the active `providence` slot, every `privateOmens` record, every
+`whisperCampaigns` entry (by campaign id — revokes all linked omens), every
+`agentSampling` override (by intervention `id` or via `revoke_agent_sampling`),
+every `contextMasks` entry (by mask intervention `id`), every
+`decisionGates` entry (by gate intervention `id`), every
+`burningBush` session or open `merovingian_bargain` (by bush/bargain `id`), every
+`anointments` entry (by intervention `id`), every `identityForges` entry (by
+intervention `id`), every active `architectZones` entry (by zone `id`), then every
 `"active"` `activeEvents` entry for a matching `id`, closing whichever it
 finds through that record's normal closure path (also closing a
 `story_event`'s linked providence, if any, in the same step) and returning

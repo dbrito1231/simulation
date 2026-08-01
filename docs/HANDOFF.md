@@ -1,101 +1,110 @@
-# Handoff — Four Breakthroughs (A / C / B / E)
+# HANDOFF — Divine Matrix Interventions
 
-**Updated:** 2026-07-31
+**Branch:** `feature/divine-matrix-interventions` (open PR into **`feature/god-mode`**, not `main`).
 
-**Branch:** `feature/four-breakthroughs-ace`
+**Status:** Phases 0–10 implemented; Phase 11 handoff complete. Ready for commit stack review and PR.
 
-**HEAD:** `b0584ef docs(sdd): note atmosphere rendering is permanent in specs/11`
+**Plan:** [`docs/plan-divine-matrix-interventions.md`](plan-divine-matrix-interventions.md) — canonical phased spec for all Matrix work.
 
-**Status:** Four breakthroughs **A**, **C**, **B**, and **E** are implemented on this branch (based on the God-mode feature stack). Plan-level exclusions **D** (God Compiler Phase 8) and **F** (`ALWAYS_ON_MODULES` / PIANO re-soak) remain out of scope.
+---
 
-## Start here
+## What landed
 
-Read [CLAUDE.md](../CLAUDE.md) first — server-authoritative architecture, action-sync invariants, and the orchestrator/Sonnet-5 model policy.
+### Shared plumbing (`godState` v2)
 
-Active delivery plan:
+- `GOD_STATE_VERSION = 2` with restore-time `_normalize_god_state` setdefault migration.
+- New private maps on `civilization["godState"]`: `whisperCampaigns`, `agentSampling`, `contextMasks`, `decisionGates`, `burningBush`, `anointments`, `identityForges`, `architectZones`, `checkpoints`.
+- Context-mask pipeline (`_apply_context_mask`) after `_divine_prompt_lines` in `_build_think_payload`.
+- Decision-gate pipeline (compulsion / veto / possession) before `apply_decision`; Sage emergency bypasses gates.
+- `MemoryStore.delete_where` for filtered memory surgery.
+- Preview → apply → cancel/expiry → `divine.jsonl` contract unchanged; Matrix kinds stay **off** the agent `DECISION_ACTIONS` / `apply_decision` action-sync invariant.
 
-- [.cursor/plans/two_sim_breakthroughs_634bb2dd.plan.md](../.cursor/plans/two_sim_breakthroughs_634bb2dd.plan.md) — phased A → C → B → E breakdown, verification gates, and exclusions
+### Ten Matrix interventions (all implemented)
 
-## What landed (this branch)
+| # | Feature | God kinds | Console UI |
+|---|---------|-----------|------------|
+| 1 | **Multi-Voice Whispers** | `whisper_campaign` (+ cancel) | Voice tab — campaign form |
+| 2 | **Temperature Dial** | `agent_sampling`, `revoke_agent_sampling` | Matrix tab — sampling + revoke |
+| 3 | **Memory Surgery** | `memory_insert`, `memory_delete`, `belief_plant` | Matrix tab — insert / delete / belief |
+| 4 | **Reality Distortion** | `context_mask` (+ cancel) | Matrix tab — dream / blue pill / red pill / whisper chain |
+| 5 | **Possession Pipeline** | `decision_compulsion`, `decision_veto_arm`, `decision_veto_resolve`, `agent_possession` (+ revoke) | Matrix tab — compulsion / veto / possession |
+| 6 | **Burning Bush + Merovingian Bargain** | `burning_bush_message`, `burning_bush_close`, `merovingian_bargain`, `bargain_settle` | Matrix tab — bush chat + bargain |
+| 7 | **Anointed** | `anoint`, `revoke_anoint` | Matrix tab — destiny / stigmata / oracle |
+| 8 | **Identity Forge** | `identity_edit`, `identity_copy_overwrite`, `identity_forge_cancel` | Matrix tab — edit / copy / cancel |
+| 9 | **Architect Zones** | `architect_zone`, `architect_zone_cancel`, `architect_release_hold` | Matrix tab — paint / door / limbo forms |
+| 10 | **Reload / Déjà Vu** | `checkpoint_create`, `checkpoint_restore`, `deja_vu_replay` (stub) | Matrix tab — create / restore; Déjà Vu disabled in UI |
 
-Commits since `fad699d` (storm presence pack on main):
+Specs updated in SDD order: `specs/01-architecture.md`, `02-engine-core.md`, `03-cognition.md`, `04-http-api.md`, `09-systems-society.md`, `11-viewer.md`, `12-ops.md`.
 
-| Phase | Breakthrough | Summary |
-|---|---|---|
-| 1 | **A — Town integrity** | Slower decay (`0.025`/goods tick), autonomous repair campaigns + widened critical backstop, in-sim ruin cull, disaster retune (`DISASTER_PROB=0.002`, damage `(30,55)`), God `repair_structures` + `clear_ruins` |
-| 2 | **C — Hunt + conflict** | Stock/wildlife-aware hunter precedence, hunt damage retune (`HUNT_DAMAGE=2`, `HUNT_DAMAGE_HUNTER=4`), forced hunt goals when starving with prey but no gatherable food, bounded PvP via `confront_agent` |
-| 3 | **B — Real trade** | Per-settlement `settlementStores`, authoritative caravan delivery + ocean water pathing, treaty tariffs (`TREATY_TARIFF_MAX=0.25`), new `deliver_caravan` action (full action-sync) |
-| 4 | **E — Atmosphere** | Calendar stretch (`DAY_FRAMES=18000`, `YEAR_FRAMES=432000`, `SEASON_FRAMES=108000`), permanent viewer lighting/seasonal terrain/weather particles/God console chrome |
-
-### A — Town integrity
-
-- `STRUCTURE_DECAY_PER_GOODS_TICK = 0.025` (~23.3 h to disrepair, ~33.3 h to ruin)
-- Repair campaigns: `REPAIR_CAMPAIGN_RUIN_RATIO=0.15`, `WORKING_FRAC=0.5`, `MAX_ASSIGN=2`
-- Ruin cull: `_maybe_cull_ruins()` removes 1–3 aged unaffordable ruins per tick when pressure is high
-- Disaster retune: legacy branch `DISASTER_PROB=0.002`; storm branch unchanged at `STORM_DISASTER_PROB=0.32`
-- God mass-repair: `repair_structures` (batch condition restore / un-ruin) and `clear_ruins` (registry deletion)
-
-### C — Hunt + conflict
-
-- Hunter promoted ahead of unfilled farmer/fisher when wildlife present and meat scarce
-- Forced hunt goals when `hunger ≤ STARVING_HUNGER`, prey in range, no reachable gatherable edible
-- `confront_agent` action: contact-range PvP with rivalry/pressure gating, steal + flee, non-lethal floor unless target already critical
-
-### B — Real trade
-
-- `civilization["settlementStores"][sid]` — local gather overflow and caravan credits prefer settlement store; repair/craft draws own store then village stockpile fallback
-- `_deliver_caravan` debits traveler, credits destination store, applies treaty tariff split
-- Ocean corridor pathing when transit unlocked; `deliver_caravan` in full action-sync chain
-
-### E — Atmosphere
-
-- **Calendar stretch (+33% real-time cadence):** 7.5 → 10 min days, 45 → 60 min seasons, 4 h in-world year (24 day/night cycles)
-- Viewer: stronger day/night lighting, seasonal terrain palettes, weather particles, Divine Console chrome (all permanent defaults when their parent gates are on)
-- Plan docs: `docs/plan-visual-1-day-night-lighting.md`, `docs/plan-visual-2-seasonal-terrain-grading.md`, `docs/plan-visual-atmosphere-systems.md`
+---
 
 ## How to verify
 
-Deterministic smokes (no Ollama, no live `state.db`):
+### Deterministic smokes (no Ollama)
 
 ```bash
-uv run python scripts/sid_parity_smoke.py
-uv run python scripts/path1_smoke.py
-uv run python scripts/god_mode_smoke.py
-uv run python scripts/town_integrity_smoke.py
-uv run python scripts/hunt_conflict_smoke.py
+uv run python scripts/god_mode_smoke.py    # Matrix + full God-mode regression
+uv run python scripts/sid_parity_smoke.py  # unrelated baseline
+uv run python scripts/path1_smoke.py         # unrelated baseline
 ```
 
-Live soak (optional): start server in a titled `simserver` cmd window, open `http://127.0.0.1:5001`, watch browser + `simulation/logs/<timestamp>/`. After any server touch, confirm only one `simulation/server.py` process (see CLAUDE.md).
+`god_mode_smoke.py` covers all ten Matrix phases plus prior God-mode phases (HTTP layer, privacy assertions, checkpoint roundtrip on temp dirs). **Phase 11 result: ALL PASS** (all three scripts green).
 
-Branch change inventory: [changes.md](../changes.md) at repo root.
+### Manual (browser + logs)
 
-## God mode (already implemented upstream)
+1. Start server in a titled `simserver` cmd window (port **5001**); ensure **only one** `simulation/server.py` process.
+2. Open `http://127.0.0.1:5001` — Divine Console → **Matrix** tab (and Voice tab for whisper campaigns).
+3. Exercise preview → apply for at least one intervention per category; confirm Sight summaries update without leaking private text.
+4. Tail `simulation/logs/<session>/divine.jsonl` — each apply records `kind`, `interventionId`, `public` flag, and attribution (`source="divine"`).
+5. Poll `/state` — `god` allowlist exposes only public fields (`providence`, `activePublicEvents`, `recentPublicInterventions`); private maps (whispers, sampling, masks, gates, bush, anointments, forges, architect secrets) must be absent.
 
-This branch builds on the God-mode feature stack already merged upstream of these breakthroughs. The original planning artifacts remain useful context but **implementation is done** — do not treat them as pending work:
+God mode requires `SIM_GOD_MODE=1`; production posture uses `SIM_GOD_AUTH=1` + `SIM_GOD_TOKEN` (see `specs/12-ops.md`).
 
-- [plan-sovereign-god-mode-v2.md](plan-sovereign-god-mode-v2.md) — contract reference (preview/apply, idempotency, modifier arithmetic)
-- [plan-sovereign-god-mode.md](plan-sovereign-god-mode.md) — superseded history
+---
 
-Shipped God-mode surface (unchanged by A/C/B/E except A's mass-repair additions):
+## Checkpoint disk layout
 
-- Startup-only `SIM_GOD_MODE=1` + required `SIM_GOD_TOKEN`
-- Authenticated `/control/god/*` routes (Sight, Voice, Providence, Miracles, Storyteller, Laws)
-- Divine Console in viewer; `divine.jsonl` audit stream
-- `civilization["godState"]` persistence
+Operator checkpoints live outside the live DB:
 
-Phase **A** extended God mode with `repair_structures` and `clear_ruins` (amended specs/02 invariants and updated `god_mode_smoke.py`).
+```
+simulation/backup/god-checkpoints/<checkpoint-id>/
+  state.db
+  memory_store.json
+```
 
-## Exclusions (still out of scope)
+- Metadata in `godState["checkpoints"]` (cap **5**); `path` stored relative (`backup/god-checkpoints/<id>`).
+- Create: pause-safe copy via `save_state` + WAL truncate; restore copies back to live `DB_PATH` + memory store, then `restore_state()`.
+- Sight lists checkpoint summaries (id, label, frameTick) — **no absolute disk paths** in API responses.
+- Smoke tests inject `GOD_CHECKPOINT_ROOT` / per-engine `god_checkpoint_root` to avoid touching live files.
 
-- **D** — God Compiler Phase 8 (free-prose story compiler)
-- **F** — `ALWAYS_ON_MODULES` / PIANO re-soak
+---
 
-## Next-agent checklist
+## Flags
 
-1. Read `CLAUDE.md` and the plan at `.cursor/plans/two_sim_breakthroughs_634bb2dd.plan.md`.
-2. Run all five smokes above before merging or starting new work.
-3. SDD: edit owning specs before code; keep specs synchronized with behavior.
-4. New/changed agent actions require full action-sync (server.py, sim_engine.py, index.html, specs/07).
-5. God routes stay off the agent decision catalog.
-6. Do not commit `state.db`, `simulation/logs/`, or credentials.
-7. Branch stays open until user approves merge/PR to main.
+| Flag | Default | Notes |
+|------|---------|-------|
+| `GOD_DEJA_VU_REPLAY` | **off** (`SIM_GOD_DEJA_VU_REPLAY` env) | Stub only — rejects even when enabled; checkpoint restore is the v1 replay story |
+| `GOD_MODE_ENABLED` | unchanged | Matrix kinds gate behind existing God control plane |
+| `GOD_STATE_VERSION` | `2` | Bumped for Matrix scaffolding |
+
+---
+
+## Known limits / out of scope (per plan)
+
+- **No canvas click-to-paint** — Architect Zones use form-based cell/bounds input only.
+- **No tick-accurate Déjà Vu replay** — `deja_vu_replay` is an honest stub behind `GOD_DEJA_VU_REPLAY` (default off).
+- **No God kinds in agent action sync** — Matrix commands are not in `DECISION_ACTIONS`, `DECISION_SCHEMA`, `SYSTEM_PROMPT`, `apply_decision`, or `ACTION_LABELS`.
+- **No God Compiler expansion** — Phase 8 free-prose compiler unchanged.
+- **No multiplayer / RBAC** beyond existing `X-God-Token`.
+- **Intervened runs not comparable** to untouched autonomous benchmarks — `intervened` marker stays set.
+- **Identity copy** does not auto-clone full memory without explicit Memory Surgery.
+- **`sim-fast` decision routing** capped (documented) — shared Ollama pool with PIANO.
+
+---
+
+## Next steps for orchestrator
+
+1. Review commit stack on `feature/divine-matrix-interventions`.
+2. Push branch; open PR into `feature/god-mode` (not `main`).
+3. PR body: link plan + HANDOFF; list smoke commands; note `GOD_STATE_VERSION` 2 save compatibility; screenshots of Matrix tab flows optional.
+4. Do **not** commit `simulation/logs/`, `state.db`, or credentials.

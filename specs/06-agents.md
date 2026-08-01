@@ -127,6 +127,7 @@ an emergent role, so the single elder role remains a seed-only invariant.
 | Rejection-note fields | `lastBlueprintRejection`, `lastGatherRejection`, `lastUpgradeRejection`, `lastSpriteRejection`, `lastProjectRejection`, `lastTerraformRejection`, `lastCraftRejection`, `lastRepairRejection`, `lastRecipeRejection`, `lastBurialRejection`, `lastTradeRejection`, `lastShelterNote`, `lastHomelessNudgeFrame` — each surfaces *why* the agent's last attempt at that action was rejected, back into its next prompt |
 | Lifecycle (`LIFECYCLE_ENABLED`) | `age` (float, `None` when disabled), `lastQuotaResetFrame`, `gatherCountThisPeriod`, `lastQuotaRejection`, `lastRationingRejection`, `parents`, `deathFrame`, `buried`, `restingPlaceId`, `restingDistrictId` |
 | Culture (`CULTURE_ENABLED`) | `skills` (dict per `SKILL_KINDS`, starts at 0.0), `personalityTraits`, `lastTeachFrame` |
+| Divine Matrix | `divineHold` (bool — veto hold or architect limbo pauses think/move), `godKeys` (set of god-granted key tags for architect door zones; persisted as sorted list), `architectLimbo` (`null` or `{zoneId, priorX, priorY, priorTargetX, priorTargetY, priorDistrict}` — Sight shows active/zoneId only) |
 
 Post-build setup (sim_engine.py:1381-1387) staggers `thinkInterval = 360 + i*60`
 (elder forced to `240`) and `thinkTimer = i*30` per roster index `i`, and sets each
@@ -258,7 +259,33 @@ for the full closure/expiry mechanics.
 in that specific field (the text is still reachable via the same response's
 `recentInterventions`, and only through the authenticated
 `/control/god/sight` route — never `/state`, activity, communication, or the
-Chronicle).
+Chronicle). Divine Matrix Phase 3 adds per-agent `memoryCounts`
+(`working`/`shortTerm` tier lengths) and `beliefCount` — counts only, never
+memory text or planted belief tenets.
+
+## Divine Matrix: memory surgery and belief planting (Phase 3)
+
+`memory_insert` / `memory_delete` / `belief_plant` mutate `agent["memory"]`
+tiers and/or `agent["beliefs"]` only through engine helpers
+(`_god_memory_insert`, `_god_memory_delete`, `_god_belief_plant`). False
+memories use kinds `divine_false_memory` (default insert) or `divine_belief`
+(belief plant). They appear in the think payload's `memory` line like any
+other recalled line, but never in public activity/communication/chronicle.
+`belief_plant` may also write `civilization["memeTexts"]` when
+`plantInMemeTexts` is true. See
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-and-providence)
+for command payloads and `MemoryStore.delete_where`.
+
+## Divine Matrix: Identity Forge (Phase 8)
+
+`identity_edit` / `identity_copy_overwrite` mutate `agent["persona"]`,
+`agent["personality"]`, and/or `agent["role"]` on the live agent object.
+`role` must exist in `roles.json` / `self.d["ROLES"]`. Dead agents are
+rejected at preview. Elder role swaps warn in preview but are allowed at apply.
+Restore state lives in `godState["identityForges"][str(agentId)]` with a
+`snapshot` of the pre-intervention persona/personality/role — never on the
+agent dict itself and never in `/state`. `identity_forge_cancel` and expiry
+call `_restore_identity_forge_snapshot`. Copy mode does not change `role`.
 
 ## Sovereign God mode: `agent_vitals` miracle bounds (Phase 4)
 

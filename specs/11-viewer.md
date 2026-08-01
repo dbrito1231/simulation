@@ -755,9 +755,44 @@ conflict the same way — see this phase's report for the underlying gap.
   own restraint), and every active effect from the authenticated
   `activeEvents` list (including private-visibility ones, tagged with a
   `private` badge) with a countdown each.
-- **Voice** — three independent subforms (`proclamation`, `providence` with
-  a duration field, `private_omen` with an agent selector and duration),
+- **Voice** — four independent subforms (`proclamation`, `providence` with
+  a duration field, `private_omen` with an agent selector and duration, and
+  `whisper_campaign` with shared theme + per-agent whisper rows up to 12),
   each following the Preview → Apply contract above.
+- **Matrix** — phased Matrix interventions. Phase 2 ships **Brain / Temperature
+  Dial** (`agent_sampling`: agent + model + temperature slider + optional
+  `top_p`/`top_k`/`min_p` + duration; `revoke_agent_sampling` to clear).
+  Phase 3 adds **Memory Surgery** (`memory_insert`, `memory_delete`,
+  `belief_plant` — three independent fieldsets with agent selectors).
+  Phase 4 adds **Reality distortion** (`context_mask`: agent + mode radio
+  — blue pill / red pill / dream / whisper chain — plus duration; dream and
+  whisper modes accept JSON field inputs). Phase 5 adds **Possession pipeline**
+  fieldsets: `decision_compulsion` (agent + pin action + duration/turns),
+  `decision_veto_arm`, `decision_veto_resolve` (approve/reject/rewrite),
+  `agent_possession` (agent + pin action + duration), and `revoke_decision_gate`.
+  Phase 6 adds **Burning Bush** (`burning_bush_message`, `burning_bush_close`)
+  and **Merovingian Bargain** (`merovingian_bargain`, `bargain_settle`) with
+  predicate dropdowns and grant/vitals primitive fields. Pin actions use a curated `GOD_PIN_ACTIONS` select (labels from
+  `ACTION_LABELS`). Preview → Apply via `wireDivineForm`. Sight shows gate
+  status (`decisionGate`, `divineHold`) and pinned action summary; never
+  `decisionGates` map contents on `/state`. Whisper campaigns remain under Voice.
+  Phase 7 adds **Anoint** (`anoint`: agent + destiny + comma-separated stigmata
+  tags + oracle hints textarea `revealFrame|text` per line + duration; `revoke_anoint`
+  for one agent). Destiny/oracle never in `/state`; Sight shows anointment status
+  summary only. Phase 8 adds **Identity** (`identity_edit`: agent + optional
+  persona/personality/role + duration; `identity_copy_overwrite`: target + source
+  + rate + optional sync memories + duration; `identity_forge_cancel` for one
+  agent). `identityForges` never in `/state`; Sight shows forge progress summary.
+  Phase 9 adds **Architect Zones** (`architect_zone`: kind select paint/door/limbo,
+  district + cells textarea, paint terrain, key id, grant-key / limbo-hold agent
+  multi-selects, duration, reversible paint; `architect_zone_cancel`; `architect_release_hold`).
+  `architectZones` never in `/state`; paint is world-visible via terrain; door/limbo
+  audit `public: false`. Sight: zone summaries + per-agent `architectLimbo` status.
+  Phase 10 adds **Reload** (`checkpoint_create`: label + optional `replaceOldest`;
+  `checkpoint_restore`: checkpoint picker from Sight; irreversible fieldset +
+  strong confirm copy in preview). `checkpoints` never in `/state`; Sight lists
+  id/label/frameTick/createdAt only. **Déjà Vu** fieldset stays disabled unless
+  `GOD_DEJA_VU_REPLAY` (stub — not implemented).
 - **Miracles** — Phase 4 trio (`agent_vitals`, `grant_resource`,
   `structure_condition`) plus town-integrity kinds (`repair_structures`,
   `clear_ruins` — [02-engine-core.md](02-engine-core.md)); all labeled

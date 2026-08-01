@@ -27,7 +27,10 @@ deep mechanics.
   so every intervention is attributable and replay-auditable, and a run that has
   received one is permanently marked `intervened`. **Intervened runs are not
   comparable to untouched autonomous runs** and must never be cited as evidence
-  of emergent behavior. See [02-engine-core.md](02-engine-core.md) for state and
+  of emergent behavior. The optional **Matrix interventions** expansion (whisper
+  campaigns, temperature dial, memory surgery, and more) extends the same God
+  control plane — not agent `DECISION_ACTIONS` — with phased rollout on branch
+  `feature/divine-matrix-interventions`. See [02-engine-core.md](02-engine-core.md) for state and
   [04-http-api.md](04-http-api.md) for the routes.
 - Not a research-grade multi-agent benchmark — `BENCHMARKS_ENABLED` sampling exists for
   observability, not publishable evaluation.

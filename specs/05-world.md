@@ -310,6 +310,21 @@ are owned by [10-path1.md](10-path1.md).
   tile-cap, or occupied-cell. Shelter blocks count toward night-exposure protection
   (`NIGHT_EXPOSURE_DAMAGE`) alongside houses — see [10-path1.md](10-path1.md).
 
+### Architect Zones (Divine Matrix Phase 9)
+
+God paint/door overlays on the Path1 terrain grid — not composable `tiles` blocks.
+See [02-engine-core.md](02-engine-core.md#architect-zones-divine-matrix-phase-9).
+
+- **Paint:** `architect_zone` with `zoneKind: paint` writes `district["terrain"]`
+  cells (`paintTerrain` ∈ `GOD_ARCHITECT_PAINT_TERRAINS`). Reversible zones store
+  `revertSnapshot` and restore on cancel/expiry.
+- **Door:** `zoneKind: door` with `keyId` — `_move_agent` calls
+  `_architect_door_blocks_move`; agents lacking the matching `godKeys` tag bounce
+  in place (no crash). Optional `grantKeyAgentIds` grants the tag on apply.
+- **Limbo:** `zoneKind: limbo` teleports `holdAgentIds` to `GOD_LIMBO_STATION`
+  `(140, 500)` in the ocean district and sets `divineHold` (think/move pause).
+  `architect_release_hold` or zone cancel/expiry restores prior pose when safe.
+
 ## Weather (`WEATHER_ENABLED`, living-ecosystem Phase 4)
 
 A deterministic, LLM-free state machine advanced on the existing

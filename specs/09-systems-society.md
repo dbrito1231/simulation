@@ -656,6 +656,23 @@ Contact radius `CONFRONT_CONTACT_DIST = 80` px (matches heal/bury/trade
 adjacency). Out of range: action sets movement toward target (same pattern as
 `trade_resource` / `heal_agent`).
 
+### Divine Matrix Phase 5: decision-gate attribution
+
+Compelled, possessed, and veto-resolved actions that mutate the world must not
+read as emergent agent initiative. The engine writes explicit
+`source="divine"` entries to `conversationLog` (kinds like `divine_compulsion`,
+`divine_possession`, `divine_veto_hold`, `divine_veto_resolve`) and to
+`chronicle` for consequential actions (not plain `rest` / `talk_to_nearby`).
+Routine `apply_decision` activity lines may still describe the mechanical
+outcome; divine attribution is additive via the communication/chronicle path
+(same discipline as `agent_vitals` / `grant_resource` in Phase 4).
+
+**Anointed (Phase 7):** destiny and oracle hints are cognition-only — they
+must not appear in `activity`, `conversationLog`, or `chronicle`. Stigmata tags
+are folded into neighbor **prompt** text only (`format_nearby_agents`); they
+are not broadcast proclamations and must not masquerade as emergent social
+status on `/state`.
+
 On contact, deterministic order:
 
 1. **Damage** — subtract `CONFRONT_DAMAGE = 10` from target `health`.

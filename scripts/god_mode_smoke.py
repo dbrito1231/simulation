@@ -108,6 +108,149 @@ def _omen_envelope(target_id, text, duration=None):
     return {"kind": "private_omen", "payload": payload}
 
 
+def _whisper_campaign_envelope(theme, whispers, duration=None):
+    payload = {"theme": theme, "whispers": whispers}
+    if duration is not None:
+        payload["durationFrames"] = duration
+    return {"kind": "whisper_campaign", "payload": payload}
+
+
+def _agent_sampling_envelope(target_id, temperature, model="sim-smart", **extra):
+    payload = {"targetId": target_id, "temperature": temperature, "model": model}
+    payload.update(extra)
+    return {"kind": "agent_sampling", "payload": payload}
+
+
+def _revoke_agent_sampling_envelope(target_id):
+    return {"kind": "revoke_agent_sampling", "payload": {"targetId": target_id}}
+
+
+def _memory_insert_envelope(target_id, text, salience=0.7, kind=None):
+    payload = {"targetId": target_id, "text": text, "salience": salience}
+    if kind is not None:
+        payload["kind"] = kind
+    return {"kind": "memory_insert", "payload": payload}
+
+
+def _memory_delete_envelope(target_id, **filters):
+    payload = {"targetId": target_id}
+    payload.update(filters)
+    return {"kind": "memory_delete", "payload": payload}
+
+
+def _belief_plant_envelope(target_id, *, belief_id=None, text=None,
+                           plant_in_meme_texts=False, salience=0.7):
+    payload = {
+        "targetId": target_id,
+        "plantInMemeTexts": plant_in_meme_texts,
+        "salience": salience,
+    }
+    if belief_id is not None:
+        payload["beliefId"] = belief_id
+    if text is not None:
+        payload["text"] = text
+    return {"kind": "belief_plant", "payload": payload}
+
+
+def _context_mask_envelope(target_id, mode, duration=None, **extra):
+    payload = {"targetId": target_id, "mode": mode}
+    if duration is not None:
+        payload["durationFrames"] = duration
+    payload.update(extra)
+    return {"kind": "context_mask", "payload": payload}
+
+
+def _decision_compulsion_envelope(target_id, action="rest", **extra):
+    payload = {
+        "targetId": target_id,
+        "pinnedDecision": {"action": action, "reasoning": "smoke compulsion"},
+    }
+    payload.update(extra)
+    return {"kind": "decision_compulsion", "payload": payload}
+
+
+def _decision_veto_arm_envelope(target_id, duration=None):
+    payload = {"targetId": target_id}
+    if duration is not None:
+        payload["durationFrames"] = duration
+    return {"kind": "decision_veto_arm", "payload": payload}
+
+
+def _decision_veto_resolve_envelope(target_id, resolution, **extra):
+    payload = {"targetId": target_id, "resolution": resolution}
+    payload.update(extra)
+    return {"kind": "decision_veto_resolve", "payload": payload}
+
+
+def _agent_possession_envelope(target_id, action="rest", duration=None):
+    payload = {
+        "targetId": target_id,
+        "pinnedDecision": {"action": action, "reasoning": "smoke possession"},
+    }
+    if duration is not None:
+        payload["durationFrames"] = duration
+    return {"kind": "agent_possession", "payload": payload}
+
+
+def _revoke_decision_gate_envelope(target_id):
+    return {"kind": "revoke_decision_gate", "payload": {"targetId": target_id}}
+
+
+def _burning_bush_message_envelope(target_id, text):
+    return {"kind": "burning_bush_message",
+            "payload": {"targetId": target_id, "text": text}}
+
+
+def _burning_bush_close_envelope(target_id):
+    return {"kind": "burning_bush_close", "payload": {"targetId": target_id}}
+
+
+def _merovingian_bargain_envelope(target_id, terms_text, success_predicate, **extra):
+    payload = {
+        "targetId": target_id,
+        "termsText": terms_text,
+        "successPredicate": success_predicate,
+    }
+    payload.update(extra)
+    return {"kind": "merovingian_bargain", "payload": payload}
+
+
+def _bargain_settle_envelope(target_id, outcome):
+    return {"kind": "bargain_settle",
+            "payload": {"targetId": target_id, "outcome": outcome}}
+
+
+def _anoint_envelope(target_id, destiny_text, **extra):
+    payload = {"targetId": target_id, "destinyText": destiny_text}
+    payload.update(extra)
+    return {"kind": "anoint", "payload": payload}
+
+
+def _revoke_anoint_envelope(target_id):
+    return {"kind": "revoke_anoint", "payload": {"targetId": target_id}}
+
+
+def make_engine_with_cognition(roster_size=4):
+    """make_engine with server cognition deps for pinned-decision validation."""
+    import server as srv  # noqa: E402
+    engine = make_engine(roster_size=roster_size)
+    engine.d["AVAILABLE_ACTIONS"] = list(srv.AVAILABLE_ACTIONS)
+    engine.d["normalize_decision"] = srv.normalize_decision
+    engine.d["build_agent_data"] = srv.build_agent_data
+    return engine
+
+
+def make_engine_with_memory(roster_size=4):
+    """make_engine plus a real in-process MemoryStore (temp path)."""
+    from server import MemoryStore  # noqa: E402
+
+    store_path = str(Path(tempfile.mkdtemp()) / "memory_store.json")
+    store = MemoryStore(store_path)
+    engine = make_engine(roster_size=roster_size)
+    engine.d["memory_store"] = store
+    return engine, store
+
+
 def _revoke_envelope(guidance_id):
     return {"kind": "revoke_guidance", "payload": {"id": guidance_id}}
 
@@ -212,11 +355,8 @@ def test_flag_on_state_shape():
     try:
         engine = make_engine()
         god = engine.civilization["godState"]
-        assert_true(god == {
-            "version": 1, "intervened": False, "nextInterventionSeq": 1,
-            "providence": None, "privateOmens": {}, "activeEvents": [],
-            "recentInterventions": [],
-        }, god)
+        expected = engine._default_god_state()
+        assert_true(god == expected, god)
         snap = engine.snapshot()
         assert_true(snap["config"]["flags"]["GOD_MODE_ENABLED"] is True, snap["config"]["flags"])
         assert_true(snap["god"] == {
@@ -768,6 +908,964 @@ def test_omen_public_visibility_boundary():
                     "sight should expose the intervention outcome text (authenticated-only view)")
         print("  OK private omen absent from /state/activity/communication/Chronicle; "
               "visible only via authenticated sight")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_whisper_campaign_batch_apply_and_privacy():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 2, "need at least two living agents")
+        a0, a1 = agents[0], agents[1]
+        text0, text1 = "Whisper alpha path.", "Whisper beta path."
+        theme = "Secret campaign theme"
+        preview = engine.god_preview(_whisper_campaign_envelope(
+            theme,
+            [{"targetId": a0["id"], "text": text0}, {"targetId": a1["id"], "text": text1}],
+            duration=1000,
+        ))
+        assert_true(preview.get("ok"), preview)
+        applied = engine.god_apply(preview["previewId"], "req-whisper-1")
+        assert_true(applied.get("ok"), applied)
+        campaign_id = applied["outcome"]["interventionId"]
+        god = engine.civilization["godState"]
+        assert_true(campaign_id in god["whisperCampaigns"], god["whisperCampaigns"])
+        assert_true(god["whisperCampaigns"][campaign_id]["theme"] == theme, god)
+
+        snap = engine.snapshot()
+        dumped = json.dumps(snap)
+        assert_true(theme not in dumped, "whisper campaign theme leaked into /state")
+        assert_true(text0 not in dumped and text1 not in dumped,
+                    "whisper omen text leaked into /state")
+        assert_true("whisperCampaigns" not in dumped,
+                    "whisperCampaigns map leaked into /state god snapshot")
+        assert_true(all(r.get("kind") != "whisper_campaign"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "whisper_campaign leaked into recentPublicInterventions")
+
+        _, priv0 = engine._divine_prompt_lines(a0)
+        _, priv1 = engine._divine_prompt_lines(a1)
+        assert_true(priv0 == text0 and priv1 == text1, (priv0, priv1))
+        assert_true(priv0 != priv1, "each target must see a distinct private whisper line")
+
+        dup_preview = engine.god_preview(_whisper_campaign_envelope(
+            theme,
+            [{"targetId": a0["id"], "text": "x"}, {"targetId": a0["id"], "text": "y"}],
+            duration=1000,
+        ))
+        assert_true(not dup_preview.get("ok"), dup_preview)
+        print("  OK whisper_campaign batch apply; theme/text/campaigns absent from /state; "
+              "per-agent private lines differ")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_whisper_campaign_cancel_clears_linked_omens():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 2, "need at least two living agents")
+        a0, a1 = agents[0], agents[1]
+        preview = engine.god_preview(_whisper_campaign_envelope(
+            "Cancel test theme",
+            [{"targetId": a0["id"], "text": "Cancel whisper A."},
+             {"targetId": a1["id"], "text": "Cancel whisper B."}],
+            duration=5000,
+        ))
+        applied = engine.god_apply(preview["previewId"], "req-whisper-cancel")
+        assert_true(applied.get("ok"), applied)
+        campaign_id = applied["outcome"]["interventionId"]
+        god = engine.civilization["godState"]
+        assert_true(str(a0["id"]) in god["privateOmens"], god["privateOmens"])
+        assert_true(str(a1["id"]) in god["privateOmens"], god["privateOmens"])
+
+        cancelled = engine.god_cancel(campaign_id)
+        assert_true(cancelled.get("cancelled") is True, cancelled)
+        assert_true(cancelled.get("targetKind") == "whisper_campaign", cancelled)
+        assert_true(campaign_id not in god.get("whisperCampaigns", {}), god)
+        assert_true(str(a0["id"]) not in god["privateOmens"], god["privateOmens"])
+        assert_true(str(a1["id"]) not in god["privateOmens"], god["privateOmens"])
+
+        _, priv0 = engine._divine_prompt_lines(a0)
+        _, priv1 = engine._divine_prompt_lines(a1)
+        assert_true(priv0 is None and priv1 is None, (priv0, priv1))
+        print("  OK god_cancel on whisper_campaign id revokes all linked omens and removes campaign")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_agent_sampling_payload_overlay_and_fast_model():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        import server as srv  # noqa: E402
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 1, "need a living agent")
+        agent = agents[0]
+        preview = engine.god_preview(_agent_sampling_envelope(
+            agent["id"], 0.95, top_p=0.55, top_k=15, min_p=0.1))
+        assert_true(preview.get("ok"), preview)
+        applied = engine.god_apply(preview["previewId"], "req-sampling-overlay")
+        assert_true(applied.get("ok"), applied)
+
+        with engine.lock:
+            think = engine._build_think_payload(agent)
+        assert_true(think.get("divine_sampling") == {
+            "model": "sim-smart", "temperature": 0.95,
+            "top_p": 0.55, "top_k": 15, "min_p": 0.1,
+        }, think.get("divine_sampling"))
+
+        payload = srv.build_decision_payload(think, "", srv.build_response_format())
+        assert_true(payload.get("model") == srv.MODEL_SMART, payload)
+        assert_true(payload.get("temperature") == 0.95, payload)
+        assert_true(payload.get("top_p") == 0.55, payload)
+        assert_true(payload.get("top_k") == 15, payload)
+        assert_true(payload.get("min_p") == 0.1, payload)
+        assert_true(srv.model_for_decision(think) == srv.MODEL_SMART, think)
+
+        # Replace with sim-fast on the same agent (allowed — cap excludes self).
+        preview_fast = engine.god_preview(_agent_sampling_envelope(
+            agent["id"], 1.2, model="sim-fast"))
+        assert_true(preview_fast.get("ok"), preview_fast)
+        applied_fast = engine.god_apply(preview_fast["previewId"], "req-sampling-fast")
+        assert_true(applied_fast.get("ok"), applied_fast)
+        with engine.lock:
+            think_fast = engine._build_think_payload(agent)
+        payload_fast = srv.build_decision_payload(think_fast, "", srv.build_response_format())
+        assert_true(payload_fast.get("model") == srv.MODEL_FAST, payload_fast)
+        assert_true(srv.model_for_decision(think_fast) == srv.MODEL_FAST, think_fast)
+        print("  OK agent_sampling overlays build_decision_payload (smart + fast)")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_agent_sampling_expiry_revoke_and_cancel_restore_defaults():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        import server as srv  # noqa: E402
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        agent = agents[0]
+        preview = engine.god_preview(_agent_sampling_envelope(
+            agent["id"], 0.88, durationFrames=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        applied = engine.god_apply(preview["previewId"], "req-sampling-expire")
+        assert_true(applied.get("ok"), applied)
+        intervention_id = applied["outcome"]["interventionId"]
+
+        with engine.lock:
+            think = engine._build_think_payload(agent)
+        assert_true(think.get("divine_sampling") is not None, think)
+
+        with engine.lock:
+            engine.frameTick += se.GOD_GUIDANCE_MIN_DURATION_FRAMES
+            engine._expire_divine_effects()
+            think_after = engine._build_think_payload(agent)
+        assert_true(think_after.get("divine_sampling") is None, think_after)
+        payload_after = srv.build_decision_payload(think_after, "", srv.build_response_format())
+        assert_true(payload_after.get("temperature") == 0.4, payload_after)
+        assert_true(payload_after.get("model") == srv.MODEL_SMART, payload_after)
+
+        preview2 = engine.god_preview(_agent_sampling_envelope(agent["id"], 0.77))
+        applied2 = engine.god_apply(preview2["previewId"], "req-sampling-revoke")
+        assert_true(applied2.get("ok"), applied2)
+        with engine.lock:
+            think_live = engine._build_think_payload(agent)
+        assert_true(think_live.get("divine_sampling") is not None, think_live)
+
+        revoke_preview = engine.god_preview(_revoke_agent_sampling_envelope(agent["id"]))
+        assert_true(revoke_preview.get("ok"), revoke_preview)
+        revoked = engine.god_apply(revoke_preview["previewId"], "req-sampling-revoked")
+        assert_true(revoked.get("ok"), revoked)
+        with engine.lock:
+            think_revoked = engine._build_think_payload(agent)
+        assert_true(think_revoked.get("divine_sampling") is None, think_revoked)
+
+        preview3 = engine.god_preview(_agent_sampling_envelope(agent["id"], 0.66))
+        applied3 = engine.god_apply(preview3["previewId"], "req-sampling-cancel")
+        assert_true(applied3.get("ok"), applied3)
+        cancel_id = applied3["outcome"]["interventionId"]
+        cancelled = engine.god_cancel(cancel_id)
+        assert_true(cancelled.get("cancelled") is True, cancelled)
+        assert_true(cancelled.get("targetKind") == "agent_sampling", cancelled)
+        with engine.lock:
+            think_cancelled = engine._build_think_payload(agent)
+        assert_true(think_cancelled.get("divine_sampling") is None, think_cancelled)
+        print("  OK agent_sampling expiry/revoke/cancel restore default decision payload")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_agent_sampling_fast_route_cap_and_privacy():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 2, "need at least two living agents")
+        a0, a1 = agents[0], agents[1]
+        preview0 = engine.god_preview(_agent_sampling_envelope(a0["id"], 0.5, model="sim-fast"))
+        assert_true(preview0.get("ok"), preview0)
+        applied0 = engine.god_apply(preview0["previewId"], "req-sampling-cap-0")
+        assert_true(applied0.get("ok"), applied0)
+
+        preview1 = engine.god_preview(_agent_sampling_envelope(a1["id"], 0.5, model="sim-fast"))
+        assert_true(not preview1.get("ok"), preview1)
+        assert_true("sim-fast" in (preview1.get("reason") or ""), preview1)
+
+        snap = engine.snapshot()
+        dumped = json.dumps(snap)
+        assert_true("agentSampling" not in dumped, "agentSampling map leaked into /state")
+        assert_true(all(r.get("kind") != "agent_sampling"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "agent_sampling leaked into recentPublicInterventions")
+        print("  OK second sim-fast decision override rejected; agentSampling absent from /state")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_memory_insert_query_and_delete_by_keyword():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine, store = make_engine_with_memory()
+        target = engine.agents[0]
+        target_id = target["id"]
+        secret = "SMOKE_FALSE_MEMORY_ALPHA_42"
+
+        preview = engine.god_preview(_memory_insert_envelope(target_id, secret, salience=0.85))
+        assert_true(preview.get("ok"), preview)
+        assert_true(preview.get("previewOutcome", {}).get("kind") == se.GOD_MEMORY_DEFAULT_KIND,
+                    preview.get("previewOutcome"))
+        applied = engine.god_apply(preview["previewId"], "req-mem-insert-1")
+        assert_true(applied.get("ok"), applied)
+        assert_true(secret not in json.dumps(applied.get("outcome") or {}),
+                    "apply outcome must not echo memory text")
+
+        hits = store.query(agent=target["name"], text=secret, top_k=3)
+        assert_true(any(secret in (e.get("text") or "") for e in hits), hits)
+        assert_true(any(secret in line for line in target["memory"]["working"]), target["memory"])
+
+        preview_del = engine.god_preview(_memory_delete_envelope(target_id, keyword="ALPHA_42"))
+        assert_true(preview_del.get("ok"), preview_del)
+        assert_true(preview_del["previewOutcome"]["wouldDelete"] >= 1, preview_del["previewOutcome"])
+        applied_del = engine.god_apply(preview_del["previewId"], "req-mem-del-1")
+        assert_true(applied_del.get("ok"), applied_del)
+        assert_true(applied_del["outcome"]["deletedCount"] >= 1, applied_del["outcome"])
+        hits_after = store.query(agent=target["name"], text=secret, top_k=3)
+        assert_true(not any(secret in (e.get("text") or "") for e in hits_after), hits_after)
+        assert_true(not any(secret in line for line in target["memory"]["working"]),
+                    "keyword purge should mirror local working tier")
+        print("  OK memory_insert -> query hit; memory_delete by keyword removes store + local tier")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_belief_plant_appears_in_think_payload():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine, _store = make_engine_with_memory()
+        target = engine.agents[0]
+        target_id = target["id"]
+        custom = "The stars whisper that winter will be mild."
+        preview = engine.god_preview(_belief_plant_envelope(
+            target_id, text=custom, plant_in_meme_texts=True))
+        assert_true(preview.get("ok"), preview)
+        applied = engine.god_apply(preview["previewId"], "req-belief-1")
+        assert_true(applied.get("ok"), applied)
+        belief_id = applied["outcome"]["beliefId"]
+        assert_true(belief_id in target["beliefs"], target["beliefs"])
+
+        payload = engine._build_think_payload(target)
+        belief_texts = payload.get("beliefs") or []
+        assert_true(any(custom in t for t in belief_texts), belief_texts)
+        assert_true(belief_id in (payload.get("belief_ids") or []), payload.get("belief_ids"))
+        print("  OK belief_plant adds belief id and tenet to think payload beliefs line")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_memory_surgery_privacy_no_public_leak():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine, _store = make_engine_with_memory()
+        target_id = engine.agents[0]["id"]
+        secret = "SMOKE_DIVINE_MEMORY_SECRET_ZETA"
+        custom_belief = "Secret divine doctrine about hidden treasure."
+
+        preview = engine.god_preview(_memory_insert_envelope(target_id, secret))
+        engine.god_apply(preview["previewId"], "req-mem-privacy-1")
+        preview2 = engine.god_preview(_belief_plant_envelope(
+            target_id, text=custom_belief, plant_in_meme_texts=False))
+        engine.god_apply(preview2["previewId"], "req-mem-privacy-2")
+
+        snap = engine.snapshot()
+        dumped = json.dumps(snap)
+        assert_true(secret not in dumped, "false memory text leaked into /state")
+        assert_true(all(r.get("kind") not in ("memory_insert", "memory_delete", "belief_plant")
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "memory surgery kinds leaked into recentPublicInterventions")
+        assert_true(not any(secret in line for line in engine.activityLog),
+                    "false memory leaked into activity log")
+        assert_true(not any(secret in (c.get("message") or "") for c in engine.conversationLog),
+                    "false memory leaked into conversation log")
+        chronicle = engine.civilization.get("chronicle") or []
+        assert_true(not any(secret in (entry.get("text") or "") for entry in chronicle),
+                    "false memory leaked into chronicle")
+
+        sight = engine.god_sight()
+        sight_agent = next(a for a in sight["agents"] if a["id"] == target_id)
+        assert_true("memoryCounts" in sight_agent, sight_agent)
+        assert_true(sight_agent["beliefCount"] >= 1, sight_agent)
+        sight_dump = json.dumps(sight)
+        assert_true(secret not in sight_dump, "memory text must not appear in sight")
+        print("  OK memory surgery absent from /state activity/chronicle/god public; sight counts only")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_memory_delete_requires_filter():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine, _store = make_engine_with_memory()
+        target_id = engine.agents[0]["id"]
+        rejected = engine.god_preview(_memory_delete_envelope(target_id))
+        assert_true(not rejected.get("ok"), rejected)
+        assert_true("at least one" in (rejected.get("reason") or ""), rejected)
+        print("  OK memory_delete rejected without filters")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_context_mask_blue_pill_strips_divine_lines():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        other = engine.agents[1] if len(engine.agents) > 1 else agent
+
+        prov_preview = engine.god_preview(_providence_envelope("Public providence smoke.", duration=5000))
+        engine.god_apply(prov_preview["previewId"], "req-mask-prov")
+        omen_preview = engine.god_preview(_omen_envelope(agent["id"], "Private omen smoke.", duration=5000))
+        engine.god_apply(omen_preview["previewId"], "req-mask-omen")
+        other_omen = engine.god_preview(_omen_envelope(other["id"], "OTHER_AGENT_SECRET_OMEN", duration=5000))
+        engine.god_apply(other_omen["previewId"], "req-mask-other-omen")
+
+        with engine.lock:
+            before = engine._build_think_payload(agent)
+        assert_true(before.get("divine_public_line"), before)
+        assert_true(before.get("divine_private_line"), before)
+
+        mask_preview = engine.god_preview(_context_mask_envelope(
+            agent["id"], "blue_pill", duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        assert_true(mask_preview.get("ok"), mask_preview)
+        applied = engine.god_apply(mask_preview["previewId"], "req-mask-blue")
+        assert_true(applied.get("ok"), applied)
+
+        with engine.lock:
+            masked = engine._build_think_payload(agent)
+        assert_true(masked.get("divine_public_line") is None, masked)
+        assert_true(masked.get("divine_private_line") is None, masked)
+        assert_true(masked.get("divine_public_event_line") is None, masked)
+        print("  OK blue_pill strips divine public/private/event lines from think payload")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_context_mask_red_pill_truth_without_private_omen_leak():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        import server as srv  # noqa: E402
+        engine = make_engine()
+        target = engine.agents[0]
+        other = engine.agents[1] if len(engine.agents) > 1 else target
+        secret = "OTHER_AGENT_RED_PILL_SECRET_OMEN"
+
+        engine.god_apply(
+            engine.god_preview(_omen_envelope(other["id"], secret, duration=5000))["previewId"],
+            "req-red-other-omen")
+        engine.civilization["godState"]["intervened"] = True
+
+        mask_preview = engine.god_preview(_context_mask_envelope(
+            target["id"], "red_pill", duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        applied = engine.god_apply(mask_preview["previewId"], "req-mask-red")
+        assert_true(applied.get("ok"), applied)
+
+        with engine.lock:
+            payload = engine._build_think_payload(target)
+        truth = payload.get("divine_simulation_truth_line") or ""
+        assert_true("SIMULATION TRUTH" in truth, truth)
+        assert_true(secret not in truth, "red pill leaked another agent's private omen")
+        assert_true(secret not in json.dumps(payload), payload)
+        prompt = srv.build_user_prompt(payload)
+        assert_true("SIMULATION TRUTH" in prompt, prompt)
+        assert_true(secret not in prompt, prompt)
+        print("  OK red_pill injects simulation-truth line without leaking other private omens")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_context_mask_whisper_chain_forges_payload_only():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        true_line = "TRUE_CONVERSATION_LOG_MARKER_XYZ"
+        engine.conversationLog.insert(0, {
+            "from": "Alice", "to": agent["name"], "message": true_line,
+            "kind": "speech", "frame": engine.frameTick,
+        })
+        forged = [{"from": "Morpheus", "to": agent["name"], "message": "Wake up."}]
+
+        preview = engine.god_preview(_context_mask_envelope(
+            agent["id"], "whisper_chain",
+            duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+            forgedConversations=forged))
+        applied = engine.god_apply(preview["previewId"], "req-mask-whisper")
+        assert_true(applied.get("ok"), applied)
+
+        with engine.lock:
+            payload = engine._build_think_payload(agent)
+        assert_true("Morpheus" in (payload.get("recent_conversations") or ""), payload)
+        assert_true(true_line not in (payload.get("recent_conversations") or ""), payload)
+        assert_true(any(true_line in (c.get("message") or "") for c in engine.conversationLog),
+                    "conversationLog must remain unchanged")
+        print("  OK whisper_chain forges recent_conversations in payload only")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_context_mask_dream_replaces_and_rejects_unknown_keys():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        with engine.lock:
+            base = engine._build_think_payload(agent)
+        real_wood = (base.get("resources") or {}).get("wood", 0)
+
+        bad = engine.god_preview(_context_mask_envelope(
+            agent["id"], "dream",
+            dreamSnapshot={"resources": {"wood": 99}, "evil_key": 1}))
+        assert_true(not bad.get("ok"), bad)
+        assert_true("unknown keys" in (bad.get("reason") or ""), bad)
+
+        preview = engine.god_preview(_context_mask_envelope(
+            agent["id"], "dream",
+            duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+            dreamSnapshot={"resources": {"wood": 99}, "hunger": 42.0}))
+        applied = engine.god_apply(preview["previewId"], "req-mask-dream")
+        assert_true(applied.get("ok"), applied)
+
+        with engine.lock:
+            dreamed = engine._build_think_payload(agent)
+        assert_true(dreamed["resources"].get("wood") == 99, dreamed["resources"])
+        assert_true(dreamed.get("hunger") == 42.0, dreamed)
+        assert_true(real_wood != 99 or dreamed["resources"].get("wood") == 99, dreamed)
+        print("  OK dream replaces allowlisted fields; unknown dreamSnapshot keys rejected")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_context_mask_cancel_expiry_and_privacy():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        prov_preview = engine.god_preview(_providence_envelope("Mask cancel providence.", duration=5000))
+        engine.god_apply(prov_preview["previewId"], "req-mask-cancel-prov")
+
+        preview = engine.god_preview(_context_mask_envelope(
+            agent["id"], "blue_pill", duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        applied = engine.god_apply(preview["previewId"], "req-mask-expire")
+        assert_true(applied.get("ok"), applied)
+        mask_id = applied["outcome"]["interventionId"]
+
+        with engine.lock:
+            live = engine._build_think_payload(agent)
+        assert_true(live.get("divine_public_line") is None, live)
+        god = engine.civilization["godState"]
+        assert_true(str(agent["id"]) in god.get("contextMasks", {}), god)
+
+        cancelled = engine.god_cancel(mask_id)
+        assert_true(cancelled.get("cancelled") is True, cancelled)
+        assert_true(str(agent["id"]) not in god.get("contextMasks", {}), god)
+        with engine.lock:
+            after_cancel = engine._build_think_payload(agent)
+        assert_true(after_cancel.get("divine_public_line") == "Mask cancel providence.", after_cancel)
+
+        preview2 = engine.god_preview(_context_mask_envelope(
+            agent["id"], "blue_pill", duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        engine.god_apply(preview2["previewId"], "req-mask-expire2")
+        with engine.lock:
+            engine.frameTick += se.GOD_GUIDANCE_MIN_DURATION_FRAMES
+            engine._expire_divine_effects()
+        assert_true(str(agent["id"]) not in god.get("contextMasks", {}), god)
+
+        snap = engine.snapshot()
+        assert_true("contextMasks" not in json.dumps(snap.get("god") or {}), snap)
+        sight = engine.god_sight()
+        sight_agent = next(a for a in sight["agents"] if a["id"] == agent["id"])
+        assert_true(sight_agent.get("contextMask") is None, sight_agent)
+        assert_true(all(r.get("kind") != "context_mask"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "context_mask leaked into recentPublicInterventions")
+        print("  OK context_mask cancel/expiry clears; absent from /state public god")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_decision_compulsion_forces_pinned_action():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine_with_cognition()
+        agent = engine.agents[0]
+        preview = engine.god_preview(_decision_compulsion_envelope(
+            agent["id"], action="rest", remainingTurns=2))
+        assert_true(preview.get("ok"), preview)
+        engine.god_apply(preview["previewId"], "req-compulsion-1")
+        with engine.lock:
+            engine._apply_gated_decision(agent, {
+                "action": "collect_resource", "reasoning": "would gather",
+            })
+        assert_true(agent.get("lastAction") == "rest", agent)
+        conv = [e for e in engine.conversationLog if e.get("source") == "divine"]
+        assert_true(any("compulsion" in (e.get("message") or "").lower() for e in conv), conv)
+        print("  OK decision_compulsion replaces LLM-path decision with pinned rest")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_agent_possession_skips_llm():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine_with_cognition()
+        agent = engine.agents[0]
+        calls = {"n": 0}
+        engine.d["llm_decide"] = lambda payload: calls.__setitem__("n", calls["n"] + 1) or {
+            "action": "collect_resource", "reasoning": "smoke llm",
+        }
+        preview = engine.god_preview(_agent_possession_envelope(agent["id"], duration=5000))
+        assert_true(preview.get("ok"), preview)
+        engine.god_apply(preview["previewId"], "req-possession-1")
+        engine._think_job(agent["name"])
+        assert_true(calls["n"] == 0, calls)
+        assert_true(agent.get("lastAction") == "rest", agent)
+        bench = engine.lastBenchmarks or {}
+        assert_true(engine.lastBenchmarks.get("divine_possession_skip") == 1.0
+                    or any(
+                        (engine.civilization.get("godState") or {}).get("decisionGates"),
+                    ), agent)
+        print("  OK agent_possession skips llm_decide and applies pinned action")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_veto_hold_and_resolve():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine_with_cognition()
+        agent = engine.agents[0]
+        preview = engine.god_preview(_decision_veto_arm_envelope(agent["id"], duration=5000))
+        engine.god_apply(preview["previewId"], "req-veto-arm-1")
+        with engine.lock:
+            held = engine._apply_gated_decision(agent, {
+                "action": "rest", "reasoning": "candidate",
+            })
+        assert_true(held is False, held)
+        assert_true(agent.get("divineHold"), agent)
+        gate = engine._god_active_decision_gate_record(agent["id"])
+        assert_true(gate.get("status") == "holding", gate)
+        assert_true(gate.get("pendingDecision", {}).get("action") == "rest", gate)
+        resolve_preview = engine.god_preview(_decision_veto_resolve_envelope(
+            agent["id"], "reject"))
+        applied = engine.god_apply(resolve_preview["previewId"], "req-veto-resolve-1")
+        assert_true(applied.get("ok"), applied)
+        assert_true(not agent.get("divineHold"), agent)
+        assert_true(engine._god_active_decision_gate_record(agent["id"]) is None, agent)
+        print("  OK veto arms, holds candidate, resolve clears hold and applies")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_sage_emergency_bypasses_decision_gate():
+    old = se.GOD_MODE_ENABLED
+    old_survival = se.SURVIVAL_ENABLED
+    se.GOD_MODE_ENABLED = True
+    se.SURVIVAL_ENABLED = True
+    try:
+        engine = make_engine_with_cognition()
+        elder = next((a for a in engine.agents if a["role"] == "elder"), None)
+        responder = next((a for a in engine.agents if a["role"] != "elder"), engine.agents[0])
+        if elder is None:
+            elder = engine.agents[0]
+            elder["role"] = "elder"
+        preview = engine.god_preview(_agent_possession_envelope(responder["id"], duration=5000))
+        engine.god_apply(preview["previewId"], "req-sage-bypass-possession")
+        elder["incapacitated"] = True
+        elder["health"] = 5.0
+        with engine.lock:
+            engine._rush_to_heal(responder, elder)
+        assert_true(responder.get("lastAction") == "heal_agent", responder)
+        print("  OK Sage _rush_to_heal bypasses possession gate")
+    finally:
+        se.GOD_MODE_ENABLED = old
+        se.SURVIVAL_ENABLED = old_survival
+
+
+def test_veto_hold_cap():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine_with_cognition(roster_size=5)
+        agents = engine.agents[:4]
+        for i, agent in enumerate(agents[:3]):
+            preview = engine.god_preview(_decision_veto_arm_envelope(agent["id"], duration=5000))
+            engine.god_apply(preview["previewId"], f"req-veto-cap-arm-{i}")
+            with engine.lock:
+                engine._apply_gated_decision(agent, {"action": "rest"})
+        assert_true(engine._god_veto_hold_count() == se.GOD_VETO_HOLD_CAP, engine._god_veto_hold_count())
+        fourth = agents[3]
+        preview = engine.god_preview(_decision_veto_arm_envelope(fourth["id"], duration=5000))
+        engine.god_apply(preview["previewId"], "req-veto-cap-arm-4")
+        with engine.lock:
+            engine._apply_gated_decision(fourth, {"action": "collect_resource"})
+        assert_true(fourth.get("lastAction") == "rest", fourth)
+        print("  OK concurrent veto holds capped at GOD_VETO_HOLD_CAP")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_decision_gate_privacy_and_sight():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine_with_cognition()
+        agent = engine.agents[0]
+        preview = engine.god_preview(_agent_possession_envelope(agent["id"], duration=5000))
+        engine.god_apply(preview["previewId"], "req-gate-privacy")
+        snap = engine.snapshot()
+        assert_true("decisionGates" not in json.dumps(snap.get("god") or {}), snap)
+        assert_true(all(r.get("kind") != "agent_possession"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "agent_possession leaked into recentPublicInterventions")
+        sight = engine.god_sight()
+        sight_agent = next(a for a in sight["agents"] if a["id"] == agent["id"])
+        assert_true(sight_agent.get("decisionGate", {}).get("mode") == "possession", sight_agent)
+        assert_true(sight_agent.get("decisionGate", {}).get("pinnedAction") == "rest", sight_agent)
+        print("  OK decisionGates absent from /state; Sight shows gate status summary")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_burning_bush_message_target_only_and_privacy():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 2, "need two agents")
+        target, other = agents[0], agents[1]
+        secret = "The bush speaks only to you."
+        preview = engine.god_preview(_burning_bush_message_envelope(target["id"], secret))
+        assert_true(preview.get("ok"), preview)
+        applied = engine.god_apply(preview["previewId"], "req-bush-1")
+        assert_true(applied.get("ok"), applied)
+
+        snap = engine.snapshot()
+        dumped = json.dumps(snap)
+        assert_true(secret not in dumped, "burning bush text leaked into /state")
+        assert_true("burningBush" not in dumped, "burningBush map leaked into /state")
+        assert_true(all(r.get("kind") != "burning_bush_message"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "burning_bush_message leaked into recentPublicInterventions")
+
+        target_line = engine._burning_bush_prompt_line(target)
+        other_line = engine._burning_bush_prompt_line(other)
+        assert_true(target_line and secret in target_line, target_line)
+        assert_true(other_line is None, other_line)
+
+        payload = engine._build_think_payload(target)
+        assert_true(secret in (payload.get("divine_burning_bush_line") or ""), payload)
+        other_payload = engine._build_think_payload(other)
+        assert_true(other_payload.get("divine_burning_bush_line") is None, other_payload)
+
+        sight = engine.god_sight()
+        sight_target = next(a for a in sight["agents"] if a["id"] == target["id"])
+        assert_true(sight_target.get("burningBush", {}).get("active") is True, sight_target)
+        assert_true(sight_target.get("burningBush", {}).get("messageCount") == 1, sight_target)
+        assert_true(secret not in json.dumps(sight_target), "thread text leaked into Sight")
+        print("  OK burning_bush_message appears only in target prompt; no /state leak")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_anoint_destiny_stigmata_oracle_and_privacy():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 2, "need two agents")
+        target, neighbor = agents[0], agents[1]
+        target["x"], target["y"] = 100.0, 100.0
+        neighbor["x"], neighbor["y"] = 105.0, 100.0
+
+        destiny = "You will unite the village."
+        stigma = "golden aura"
+        oracle_now = "The river runs backward."
+        oracle_later = "A crown awaits."
+        ft = engine.frameTick
+        preview = engine.god_preview(_anoint_envelope(
+            target["id"], destiny,
+            stigmataTags=[stigma],
+            oracleHints=[
+                {"text": oracle_now, "revealFrame": ft},
+                {"text": oracle_later, "revealFrame": ft + 5000},
+            ],
+            durationFrames=9000,
+        ))
+        assert_true(preview.get("ok"), preview)
+        applied = engine.god_apply(preview["previewId"], "req-anoint-1")
+        assert_true(applied.get("ok"), applied)
+
+        snap = engine.snapshot()
+        dumped = json.dumps(snap)
+        assert_true(destiny not in dumped, "destiny leaked into /state")
+        assert_true(oracle_now not in dumped, "oracle leaked into /state")
+        assert_true("anointments" not in dumped, "anointments map leaked into /state")
+        assert_true(all(r.get("kind") != "anoint"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "anoint leaked into recentPublicInterventions")
+
+        target_line = engine._anointment_prompt_line(target)
+        assert_true(target_line and destiny in target_line, target_line)
+        assert_true(oracle_now in target_line, target_line)
+        assert_true(oracle_later not in target_line, target_line)
+
+        neighbor_payload = engine._build_think_payload(neighbor)
+        nearby = neighbor_payload.get("nearby_agents") or []
+        target_near = next((n for n in nearby if n.get("name") == target["name"]), None)
+        assert_true(target_near is not None, nearby)
+        assert_true(stigma in (target_near.get("stigmata") or []), target_near)
+
+        from server import format_nearby_agents, build_user_prompt  # noqa: E402
+        formatted = format_nearby_agents(nearby)
+        assert_true(stigma in formatted, formatted)
+        assert_true(destiny not in formatted, formatted)
+
+        sight = engine.god_sight()
+        sight_target = next(a for a in sight["agents"] if a["id"] == target["id"])
+        anoint_status = sight_target.get("anointment") or {}
+        assert_true(anoint_status.get("active") is True, sight_target)
+        assert_true(anoint_status.get("tagCount") == 1, sight_target)
+        assert_true(anoint_status.get("nextOracleFrame") == ft + 5000, sight_target)
+        assert_true(destiny not in json.dumps(sight_target), "destiny leaked into Sight")
+
+        revoke_preview = engine.god_preview(_revoke_anoint_envelope(target["id"]))
+        assert_true(revoke_preview.get("ok"), revoke_preview)
+        revoked = engine.god_apply(revoke_preview["previewId"], "req-anoint-revoke")
+        assert_true(revoked.get("ok"), revoked)
+        assert_true(engine._anointment_prompt_line(target) is None, "anoint not cleared")
+        neighbor_after = engine._build_think_payload(neighbor)
+        nearby_after = neighbor_after.get("nearby_agents") or []
+        target_near_after = next((n for n in nearby_after if n.get("name") == target["name"]), None)
+        assert_true(target_near_after is not None, nearby_after)
+        assert_true(not target_near_after.get("stigmata"), target_near_after)
+
+        print("  OK anoint destiny/oracle private; stigmata in neighbor prompt; revoke clears")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def _revoke_anoint_envelope(target_id):
+    return {"kind": "revoke_anoint", "payload": {"targetId": target_id}}
+
+
+def _identity_edit_envelope(target_id, **fields):
+    payload = {"targetId": target_id}
+    payload.update(fields)
+    return {"kind": "identity_edit", "payload": payload}
+
+
+def _identity_copy_envelope(target_id, source_id, rate=0.25, **extra):
+    payload = {"targetId": target_id, "sourceId": source_id, "ratePerThink": rate}
+    payload.update(extra)
+    return {"kind": "identity_copy_overwrite", "payload": payload}
+
+
+def _identity_forge_cancel_envelope(target_id):
+    return {"kind": "identity_forge_cancel", "payload": {"targetId": target_id}}
+
+
+def test_identity_forge_edit_copy_cancel_and_privacy():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine(roster_size=4)
+        roles = _load_roles()
+        target = engine.agents[0]
+        source = engine.agents[1]
+        original_role = target["role"]
+        original_personality = target["personality"]
+        new_role = next(r for r in roles if r != original_role)
+
+        preview = engine.god_preview(_identity_edit_envelope(
+            target["id"], role=new_role, personality="divine-forged personality"))
+        assert_true(preview.get("ok"), preview)
+        outcome = preview.get("previewOutcome") or {}
+        assert_true(outcome.get("newRoleSkill") == roles[new_role].get("skill", "helps"),
+                    outcome)
+        if original_role == "elder" or new_role == "elder":
+            assert_true(outcome.get("warning"), outcome)
+
+        applied = engine.god_apply(preview["previewId"], "req-identity-edit")
+        assert_true(applied.get("ok"), applied)
+        assert_true(target["role"] == new_role, target)
+        assert_true(target["personality"] == "divine-forged personality", target)
+
+        payload = engine._build_think_payload(target)
+        assert_true(payload.get("role") == new_role, payload)
+        assert_true(payload.get("role_skill") == engine.d["ROLE_SKILLS"].get(new_role),
+                    payload)
+
+        snap = engine.snapshot()
+        dumped = json.dumps(snap)
+        assert_true("identityForges" not in dumped, "identityForges leaked into /state")
+        assert_true(all(r.get("kind") != "identity_edit"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "identity_edit leaked into recentPublicInterventions")
+
+        source["persona"] = "SOURCE PERSONA LINE"
+        source["personality"] = "SOURCE PERSONALITY TRAIT"
+        target["persona"] = "TARGET START"
+        target["personality"] = "TARGET START PERSONALITY"
+
+        copy_preview = engine.god_preview(_identity_copy_envelope(
+            target["id"], source["id"], rate=0.25))
+        assert_true(copy_preview.get("ok"), copy_preview)
+        copy_applied = engine.god_apply(copy_preview["previewId"], "req-identity-copy")
+        assert_true(copy_applied.get("ok"), copy_applied)
+
+        forge = engine.civilization["godState"]["identityForges"][str(target["id"])]
+        assert_true(forge.get("progress", 0) > 0, forge)
+        progress_after_apply = forge.get("progress")
+
+        with engine.lock:
+            engine._finish_think_identity_forge(target)
+        progress_after_think = engine.civilization["godState"]["identityForges"][
+            str(target["id"])].get("progress")
+        assert_true(progress_after_think > progress_after_apply, forge)
+        assert_true(target["personality"] != "TARGET START PERSONALITY", target)
+
+        for _ in range(3):
+            with engine.lock:
+                engine._finish_think_identity_forge(target)
+        assert_true(target["personality"] == source["personality"], target)
+
+        sight = engine.god_sight()
+        sight_target = next(a for a in sight["agents"] if a["id"] == target["id"])
+        forge_status = sight_target.get("identityForge") or {}
+        assert_true(forge_status.get("active") is True, sight_target)
+        assert_true(forge_status.get("copyFromId") == source["id"], sight_target)
+        assert_true(forge_status.get("progress") == 1.0, sight_target)
+        assert_true("SOURCE PERSONALITY" not in json.dumps(sight_target),
+                    "personality leaked into Sight")
+
+        cancel_preview = engine.god_preview(_identity_forge_cancel_envelope(target["id"]))
+        assert_true(cancel_preview.get("ok"), cancel_preview)
+        cancelled = engine.god_apply(cancel_preview["previewId"], "req-identity-cancel")
+        assert_true(cancelled.get("ok"), cancelled)
+        assert_true(target["role"] == original_role, target)
+        assert_true(target["personality"] == original_personality, target)
+
+        print("  OK identity edit role_skill; copy progresses; cancel restores; privacy")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_bargain_success_grants_resource():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        resource_id = "wood"
+        held_before = agent["resources"].get(resource_id, 0)
+        agent["resources"][resource_id] = held_before + 3
+        preview = engine.god_preview(_merovingian_bargain_envelope(
+            agent["id"],
+            "Bring wood and be rewarded.",
+            {"kind": "agent_has_resource", "resourceId": resource_id, "amount": 3},
+            durationFrames=5000,
+            rewardPrimitive={
+                "kind": "grant_resource",
+                "payload": {
+                    "resourceId": resource_id,
+                    "amount": 7,
+                    "target": {"agentId": agent["id"]},
+                },
+            },
+        ))
+        assert_true(preview.get("ok"), preview)
+        applied = engine.god_apply(preview["previewId"], "req-bargain-success")
+        assert_true(applied.get("ok"), applied)
+
+        engine._tick_divine_bargains()
+        bargain = engine.civilization["godState"]["burningBush"][str(agent["id"])]["bargain"]
+        assert_true(bargain.get("status") == "success", bargain)
+        assert_true(agent["resources"].get(resource_id, 0) >= held_before + 3 + 7,
+                    agent["resources"])
+        print("  OK bargain success predicate grants resource via tick settler")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_bargain_expiry_settles_failure():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        health_before = agent["health"]
+        preview = engine.god_preview(_merovingian_bargain_envelope(
+            agent["id"],
+            "Fail if you do not comply in time.",
+            {"kind": "frame_reached", "frame": engine.frameTick + 99999},
+            durationFrames=10,
+            punishPrimitive={
+                "kind": "agent_vitals",
+                "payload": {"targetId": agent["id"], "healthDelta": -5, "hungerDelta": 0},
+            },
+        ))
+        assert_true(preview.get("ok"), preview)
+        applied = engine.god_apply(preview["previewId"], "req-bargain-expiry")
+        assert_true(applied.get("ok"), applied)
+
+        engine.frameTick += 301
+        engine._expire_divine_effects()
+        bargain = engine.civilization["godState"]["burningBush"][str(agent["id"])]["bargain"]
+        assert_true(bargain.get("status") == "failure", bargain)
+        assert_true(bargain.get("settleTrigger") == "expiry", bargain)
+        assert_true(agent["health"] < health_before, (health_before, agent["health"]))
+        print("  OK bargain expiry settles failure path with punish primitive")
     finally:
         se.GOD_MODE_ENABLED = old
 
@@ -2773,6 +3871,302 @@ def run_http_tests():
             server.engine.d["lm_complete"] = old_lm_complete
 
 
+def _architect_zone_envelope(zone_kind, district_id, cells, **extra):
+    payload = {"zoneKind": zone_kind, "districtId": district_id, "cells": cells,
+               "durationFrames": 5000}
+    payload.update(extra)
+    return {"kind": "architect_zone", "payload": payload}
+
+
+def test_architect_zone_door_blocks_without_key_allows_with_key():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        district_id = "farm_north"
+        bounds = engine.civilization["districts"][district_id]["bounds"]
+        start_x = bounds["x1"] + 19
+        start_y = bounds["y1"] + 20
+        target_x = bounds["x1"] + 60
+        agent["x"] = start_x
+        agent["y"] = start_y
+        agent["targetX"] = target_x
+        agent["targetY"] = start_y
+        agent["currentDistrict"] = district_id
+        agent["godKeys"] = set()
+
+        preview = engine.god_preview(_architect_zone_envelope(
+            "door", district_id, ["1,0"], keyId="matrix-red-key"))
+        applied = engine.god_apply(preview["previewId"], "req-arch-door")
+        assert_true(applied.get("ok"), applied)
+
+        with engine.lock:
+            engine._move_agent(agent, scale=5.0)
+        blocked_x = agent["x"]
+        assert_true(blocked_x < bounds["x1"] + 40, agent)
+
+        grant_preview = engine.god_preview(_architect_zone_envelope(
+            "door", district_id, ["2,0"], keyId="matrix-red-key",
+            grantKeyAgentIds=[agent["id"]]))
+        engine.god_apply(grant_preview["previewId"], "req-arch-door-grant")
+        assert_true(engine._agent_has_god_key(agent, "matrix-red-key"), agent)
+
+        agent["targetX"] = target_x
+        with engine.lock:
+            engine._move_agent(agent, scale=5.0)
+        assert_true(agent["x"] > blocked_x, agent)
+        print("  OK architect door blocks move without key and allows with godKeys tag")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_architect_zone_limbo_freezes_think_and_release_restores():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        prior_x, prior_y = agent["x"], agent["y"]
+        prior_tx, prior_ty = agent["targetX"], agent["targetY"]
+
+        preview = engine.god_preview(_architect_zone_envelope(
+            "limbo", "ocean", ["0,0"], holdAgentIds=[agent["id"]]))
+        applied = engine.god_apply(preview["previewId"], "req-arch-limbo")
+        assert_true(applied.get("ok"), applied)
+        zone_id = applied["interventionId"]
+
+        assert_true(agent.get("divineHold"), agent)
+        assert_true(agent["x"] == se.GOD_LIMBO_STATION[0], agent)
+        assert_true(agent["y"] == se.GOD_LIMBO_STATION[1], agent)
+        assert_true(not engine._schedule_think(agent), agent)
+
+        release_preview = engine.god_preview({
+            "kind": "architect_release_hold",
+            "payload": {"zoneId": zone_id, "agentIds": [agent["id"]]},
+        })
+        released = engine.god_apply(release_preview["previewId"], "req-arch-release")
+        assert_true(released.get("ok"), released)
+        assert_true(not agent.get("divineHold"), agent)
+        assert_true(abs(agent["x"] - prior_x) < 0.01 and abs(agent["y"] - prior_y) < 0.01, agent)
+        assert_true(agent["targetX"] == prior_tx and agent["targetY"] == prior_ty, agent)
+        print("  OK architect limbo sets divineHold, blocks think, release restores pose")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_architect_zone_paint_cancel_reverts():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        district_id = "farm_north"
+        district = engine.civilization["districts"][district_id]
+        engine._ensure_district_terrain(district)
+        key = engine._tile_key(0, 0)
+        district["terrain"][key] = "soil"
+
+        preview = engine.god_preview(_architect_zone_envelope(
+            "paint", district_id, ["0,0"], paintTerrain="rock", reversible=True))
+        applied = engine.god_apply(preview["previewId"], "req-arch-paint")
+        assert_true(applied.get("ok"), applied)
+        zone_id = applied["interventionId"]
+        assert_true(district["terrain"][key] == "rock", district["terrain"])
+
+        cancel_preview = engine.god_preview({
+            "kind": "architect_zone_cancel",
+            "payload": {"zoneId": zone_id},
+        })
+        engine.god_apply(cancel_preview["previewId"], "req-arch-paint-cancel")
+        assert_true(district["terrain"][key] == "soil", district["terrain"])
+        print("  OK architect paint cancel reverts reversible terrain")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_architect_zone_privacy_and_sight_summary():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        preview = engine.god_preview(_architect_zone_envelope(
+            "door", "farm_north", ["3,0"], keyId="secret-door-key",
+            grantKeyAgentIds=[agent["id"]]))
+        applied = engine.god_apply(preview["previewId"], "req-arch-privacy")
+        assert_true(applied.get("ok"), applied)
+
+        snap = engine.snapshot()
+        dumped = json.dumps(snap)
+        assert_true("architectZones" not in dumped, "architectZones leaked into /state")
+        assert_true(all(r.get("kind") != "architect_zone"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "door architect_zone leaked into recentPublicInterventions")
+        assert_true("secret-door-key" not in dumped, "key id leaked into /state")
+
+        sight = engine.god_sight()
+        assert_true(isinstance(sight.get("architectZones"), list), sight)
+        assert_true(any(z.get("kind") == "door" for z in sight["architectZones"]), sight)
+        assert_true(all("keyId" not in z for z in sight["architectZones"]), sight)
+        print("  OK architect zones stay off /state; Sight has summaries without secrets")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def _checkpoint_create_envelope(label, replace_oldest=False):
+    payload = {"label": label}
+    if replace_oldest:
+        payload["replaceOldest"] = True
+    return {"kind": "checkpoint_create", "payload": payload}
+
+
+def _checkpoint_restore_envelope(checkpoint_id):
+    return {"kind": "checkpoint_restore", "payload": {"checkpointId": checkpoint_id}}
+
+
+def test_checkpoint_create_restore_roundtrip():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    old_db_path = se.DB_PATH
+    old_ckpt_root = se.GOD_CHECKPOINT_ROOT
+    tmpdir = tempfile.mkdtemp()
+    tmp_db = str(Path(tmpdir) / "state.db")
+    tmp_ckpt = str(Path(tmpdir) / "god-checkpoints")
+    try:
+        se.DB_PATH = tmp_db
+        se.GOD_CHECKPOINT_ROOT = tmp_ckpt
+        engine, store = make_engine_with_memory()
+        engine.god_checkpoint_root = tmp_ckpt
+        store.store("Alice", "smoke memory before checkpoint", salience=0.5, kind="event")
+
+        original_tick = engine.frameTick
+        original_wood = engine.civilization["stockpile"].get("wood", 0)
+
+        create_preview = engine.god_preview(_checkpoint_create_envelope("before grant"))
+        assert_true(create_preview.get("ok"), create_preview)
+        assert_true(create_preview.get("reversibilityClass") == "irreversible", create_preview)
+        created = engine.god_apply(create_preview["previewId"], "req-ckpt-create")
+        assert_true(created.get("ok"), created)
+        checkpoint_id = created["outcome"]["checkpointId"]
+        ckpt_dir = Path(tmp_ckpt) / checkpoint_id
+        assert_true((ckpt_dir / "state.db").is_file(), ckpt_dir)
+        assert_true((ckpt_dir / "memory_store.json").is_file(), ckpt_dir)
+
+        grant_preview = engine.god_preview(_grant_envelope("wood", 7, "stockpile"))
+        engine.god_apply(grant_preview["previewId"], "req-ckpt-grant")
+        mutated_wood = engine.civilization["stockpile"].get("wood", 0)
+        assert_true(mutated_wood == original_wood + 7, (original_wood, mutated_wood))
+        engine.frameTick += 50
+
+        restore_preview = engine.god_preview(_checkpoint_restore_envelope(checkpoint_id))
+        assert_true(restore_preview.get("ok"), restore_preview)
+        warning = (restore_preview.get("previewOutcome") or {}).get("irreversibleWarning") or ""
+        assert_true("Irreversible world replace" in warning, restore_preview)
+        restored = engine.god_apply(restore_preview["previewId"], "req-ckpt-restore")
+        assert_true(restored.get("ok"), restored)
+        assert_true(engine.frameTick == original_tick, (original_tick, engine.frameTick))
+        assert_true(engine.civilization["stockpile"].get("wood", 0) == original_wood,
+                    engine.civilization["stockpile"])
+        assert_true(engine._god_preview_cache == {}, engine._god_preview_cache)
+        assert_true("req-ckpt-restore" in engine._god_requests, engine._god_requests)
+
+        snap = engine.snapshot()
+        god_pub = snap.get("god") or {}
+        assert_true("checkpoints" not in god_pub, god_pub)
+        assert_true(any(r.get("kind") == "checkpoint_restore"
+                        for r in god_pub.get("recentPublicInterventions") or []),
+                    god_pub)
+        print("  OK checkpoint create -> mutate -> restore roundtrip on temp paths")
+    finally:
+        se.DB_PATH = old_db_path
+        se.GOD_CHECKPOINT_ROOT = old_ckpt_root
+        se.GOD_MODE_ENABLED = old
+
+
+def test_checkpoint_cap_reject_and_replace_oldest():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    old_db_path = se.DB_PATH
+    old_ckpt_root = se.GOD_CHECKPOINT_ROOT
+    tmpdir = tempfile.mkdtemp()
+    try:
+        se.DB_PATH = str(Path(tmpdir) / "state.db")
+        se.GOD_CHECKPOINT_ROOT = str(Path(tmpdir) / "god-checkpoints")
+        engine = make_engine()
+        engine.god_checkpoint_root = se.GOD_CHECKPOINT_ROOT
+        for i in range(se.GOD_CHECKPOINT_MAX):
+            preview = engine.god_preview(_checkpoint_create_envelope(f"ck{i}"))
+            engine.god_apply(preview["previewId"], f"req-cap-{i}")
+
+        blocked = engine.god_preview(_checkpoint_create_envelope("one too many"))
+        assert_true(not blocked.get("ok"), blocked)
+        assert_true("cap" in (blocked.get("reason") or "").lower(), blocked)
+
+        replace_preview = engine.god_preview(_checkpoint_create_envelope("replacement", True))
+        assert_true(replace_preview.get("ok"), replace_preview)
+        replaced = engine.god_apply(replace_preview["previewId"], "req-cap-replace")
+        assert_true(replaced.get("ok"), replaced)
+        checkpoints = engine.civilization["godState"]["checkpoints"]
+        assert_true(len(checkpoints) == se.GOD_CHECKPOINT_MAX, len(checkpoints))
+        assert_true(checkpoints[0]["label"] == "ck1", checkpoints)
+        assert_true(checkpoints[-1]["label"] == "replacement", checkpoints)
+        print("  OK checkpoint cap rejects preview unless replaceOldest")
+    finally:
+        se.DB_PATH = old_db_path
+        se.GOD_CHECKPOINT_ROOT = old_ckpt_root
+        se.GOD_MODE_ENABLED = old
+
+
+def test_checkpoint_sight_privacy():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    old_db_path = se.DB_PATH
+    old_ckpt_root = se.GOD_CHECKPOINT_ROOT
+    tmpdir = tempfile.mkdtemp()
+    try:
+        se.DB_PATH = str(Path(tmpdir) / "state.db")
+        se.GOD_CHECKPOINT_ROOT = str(Path(tmpdir) / "god-checkpoints")
+        engine = make_engine()
+        engine.god_checkpoint_root = se.GOD_CHECKPOINT_ROOT
+        preview = engine.god_preview(_checkpoint_create_envelope("privacy ck"))
+        engine.god_apply(preview["previewId"], "req-ckpt-privacy")
+        sight = engine.god_sight()
+        dumped = json.dumps(sight)
+        assert_true("backup/god-checkpoints" not in dumped, "checkpoint path leaked in sight")
+        assert_true(isinstance(sight.get("checkpoints"), list), sight)
+        assert_true(sight["checkpoints"][0].get("label") == "privacy ck", sight)
+        assert_true("path" not in sight["checkpoints"][0], sight["checkpoints"][0])
+        print("  OK checkpoint Sight summaries omit disk paths")
+    finally:
+        se.DB_PATH = old_db_path
+        se.GOD_CHECKPOINT_ROOT = old_ckpt_root
+        se.GOD_MODE_ENABLED = old
+
+
+def test_deja_vu_replay_rejects_when_flag_off():
+    old = se.GOD_MODE_ENABLED
+    old_replay = se.GOD_DEJA_VU_REPLAY
+    se.GOD_MODE_ENABLED = True
+    se.GOD_DEJA_VU_REPLAY = False
+    try:
+        engine = make_engine()
+        preview = engine.god_preview({"kind": "deja_vu_replay", "payload": {}})
+        assert_true(not preview.get("ok"), preview)
+        assert_true("GOD_DEJA_VU_REPLAY" in (preview.get("reason") or ""), preview)
+        print("  OK deja_vu_replay rejects cleanly when GOD_DEJA_VU_REPLAY is off")
+    finally:
+        se.GOD_DEJA_VU_REPLAY = old_replay
+        se.GOD_MODE_ENABLED = old
+
+
+def run_matrix_phase10_smoke():
+    print("Divine Matrix Phase 10 smoke -- Reload / Déjà Vu checkpoints")
+    test_checkpoint_create_restore_roundtrip()
+    test_checkpoint_cap_reject_and_replace_oldest()
+    test_checkpoint_sight_privacy()
+    test_deja_vu_replay_rejects_when_flag_off()
+
+
 def main():
     print("Sovereign God mode Phase 2 smoke")
     test_flag_off_inert()
@@ -2796,6 +4190,41 @@ def main():
     test_providence_set_replace_revoke_expire()
     test_omen_lifecycle_and_memory_contract()
     test_omen_public_visibility_boundary()
+    test_whisper_campaign_batch_apply_and_privacy()
+    test_whisper_campaign_cancel_clears_linked_omens()
+    test_agent_sampling_payload_overlay_and_fast_model()
+    test_agent_sampling_expiry_revoke_and_cancel_restore_defaults()
+    test_agent_sampling_fast_route_cap_and_privacy()
+    print("Divine Matrix Phase 3 smoke -- memory surgery")
+    test_memory_insert_query_and_delete_by_keyword()
+    test_belief_plant_appears_in_think_payload()
+    test_memory_surgery_privacy_no_public_leak()
+    test_memory_delete_requires_filter()
+    print("Divine Matrix Phase 4 smoke -- reality distortion / context masks")
+    test_context_mask_blue_pill_strips_divine_lines()
+    test_context_mask_red_pill_truth_without_private_omen_leak()
+    test_context_mask_whisper_chain_forges_payload_only()
+    test_context_mask_dream_replaces_and_rejects_unknown_keys()
+    test_context_mask_cancel_expiry_and_privacy()
+    print("Divine Matrix Phase 5 smoke -- decision gate / possession pipeline")
+    test_decision_compulsion_forces_pinned_action()
+    test_agent_possession_skips_llm()
+    test_veto_hold_and_resolve()
+    test_sage_emergency_bypasses_decision_gate()
+    test_veto_hold_cap()
+    test_decision_gate_privacy_and_sight()
+    print("Divine Matrix Phase 6 smoke -- Burning Bush + Merovingian Bargain")
+    test_burning_bush_message_target_only_and_privacy()
+    test_anoint_destiny_stigmata_oracle_and_privacy()
+    test_identity_forge_edit_copy_cancel_and_privacy()
+    print("Divine Matrix Phase 9 smoke -- Architect Zones")
+    test_architect_zone_door_blocks_without_key_allows_with_key()
+    test_architect_zone_limbo_freezes_think_and_release_restores()
+    test_architect_zone_paint_cancel_reverts()
+    test_architect_zone_privacy_and_sight_summary()
+    run_matrix_phase10_smoke()
+    test_bargain_success_grants_resource()
+    test_bargain_expiry_settles_failure()
     test_directive_and_providence_stay_separate()
     test_prompt_lines_frame_window()
     test_prompt_size_cap_and_divine_lines_render()

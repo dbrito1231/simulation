@@ -257,7 +257,9 @@ carried in **separate keys**, never folded into or read from
 `godState["providence"]` / `godState["privateOmens"][str(agent["id"])]` is
 present, rather than trusting `_expire_divine_effects` to have already swept
 that exact tick — an expired-but-not-yet-closed record must never reach a
-prompt. Both are `None` outright when `GOD_MODE_ENABLED` is off.
+prompt. Whisper campaigns apply one private omen per target; each agent's
+`divine_private_line` reflects only their own omen text (campaign theme is
+operator metadata, not injected). Both are `None` outright when `GOD_MODE_ENABLED` is off.
 
 `build_user_prompt` (server.py) folds each into its own line, rendered ONLY
 when set — the same fold-in-only-when-set pattern as `weather_line` above, so
@@ -275,6 +277,14 @@ The fixed "You may interpret or ignore it." suffix is verbatim per the plan's
 about accepting a decision governed by a divine line differs from an
 ordinary decision; there is no separate compliance check. At most one public
 line and one private line, each already capped at `GOD_TEXT_MAX_CHARS = 240`
+
+**Divine Matrix memory surgery (Phase 3).** `memory_insert` and `belief_plant`
+write into the same `memory` slice `_memory_for_prompt` composes — via
+`_god_memory_insert` with kinds `divine_false_memory` / `divine_belief` —
+without ever touching public activity/communication/chronicle. `memory_delete`
+removes matching `MemoryStore` rows and keyword-matching local tier lines.
+These are distinct from private omens: false memories are ordinary recall
+lines immediately, not deferred until omen closure.
 characters (`GOD_TEXT_MAX_BYTES = 600` bytes) by `_normalize_divine_text` at
 write time (sim_engine.py, [02](02-engine-core.md)), so the two lines add a
 small, precisely bounded amount of prompt text even at maximum omen length —
@@ -293,6 +303,106 @@ Ollama-required and has not been run as part of this phase's deterministic
 delivery — `SIM_GOD_MODE` ships dark (see [01](01-architecture.md)), so no
 default-on run is affected, but treat this as open before recommending an
 always-on god-guided deployment.
+
+### Divine Matrix Phase 2: per-agent sampling overlay (Temperature Dial)
+
+`_build_think_payload` may attach `divine_sampling` when
+`godState["agentSampling"][str(agentId)]` is active (not expired, agent
+living). Shape: `{model: "sim-smart"|"sim-fast", temperature, top_p?, top_k?,
+min_p?}` — status metadata only; never prompt text.
+
+`build_decision_payload` (server.py) applies routine defaults first (model via
+`model_for_decision` / `MODEL_SMART_SYS` when `SYSTEM_PROMPT_AT_LOAD_TIME`,
+`temperature` 0.4, `NON_THINKING_SAMPLING` or `THINKING_SAMPLING`), then
+**overlays** `divine_sampling` when present: `sim-fast` forces `MODEL_FAST`;
+`sim-smart` uses `MODEL_SMART_SYS` on the load-time-system path else
+`MODEL_SMART`; temperature and any supplied `top_p`/`top_k`/`min_p` replace
+the defaults. `model_for_decision(data)` honors `divine_sampling["model"]` for
+callers that read the model id outside `build_decision_payload` (timeout
+selection, etc.). This path affects **agent decision turns only** — PIANO,
+`lm_complete`, sprite/invention prompts are unchanged.
+
+**Concurrency risk:** routing decisions to `sim-fast` contends with PIANO on the
+same Ollama pool. Preview/apply refuses a second living agent's `sim-fast`
+override while one is already active (cap = 1). Prefer `sim-smart` for routine
+operator overrides.
+
+### Divine Matrix Phase 4: context masks (Reality Distortion)
+
+After `_build_think_payload` builds the true snapshot and attaches
+`divine_public_line` / `divine_private_line` (via `_divine_prompt_lines`) plus
+`divine_public_event_line` (active public `story_event` narration), the engine
+calls `_apply_context_mask(agent, payload)` before returning. This layer reads
+`godState["contextMasks"][str(agentId)]` when active (same frame-window /
+expiry discipline as omens). Mask modes:
+
+- **`blue_pill`** — nulls divine cognition lines and filters divine chat from
+  the `recent_conversations` string in the payload only.
+- **`red_pill`** — sets `divine_simulation_truth_line` (capped at
+  `GOD_TEXT_MAX_CHARS`); `build_user_prompt` renders it as its own line. Never
+  includes other agents' private omen text.
+- **`dream`** — overwrites allowlisted payload keys from the stored
+  `dreamSnapshot` record (deep-copied values).
+- **`whisper_chain`** — replaces `recent_conversations` with forged
+  `from -> to: message` slices from `forgedConversations`.
+
+`contextMasks` is private — absent from `/state` god allowlist. Sight exposes
+per-agent status only: `{active, mode, expiresFrame}`.
+
+### Divine Matrix Phase 5: decision gate (Possession pipeline)
+
+After the think payload is built (and optional context mask applied), the
+decision path branches:
+
+1. **Pre-LLM** — if `decisionGates[agentId].mode == "possession"` and
+   `bypassLlm`, `_think_job` skips `llm_decide` entirely and applies the
+   pinned/queued decision under lock (`_log_benchmark("divine_possession_skip")`
+   records the skip).
+2. **Post-LLM** — `_apply_gated_decision(agent, decision)` runs immediately
+   before every normal `apply_decision` on the LLM path (including error→`rest`
+   and rule-based fallback council branches). Compulsion replaces; veto holds;
+   possession forces pin.
+
+Pinned decisions are validated at god preview/apply via `normalize_decision`
+(engine deps: `normalize_decision`, `build_agent_data` from `server.py`).
+`decisionGates` is private. Sight exposes per-agent gate status:
+`{active, mode, armed?, status?, expiresFrame?, hasPending?, pinnedAction?}`
+plus `divineHold` on the agent row — never full pinned JSON in `/state`.
+
+### Divine Matrix Phase 6: Burning Bush + Merovingian Bargain
+
+`_build_think_payload` adds `divine_burning_bush_line` from
+`_burning_bush_prompt_line(agent)` — distinct from `divine_private_line`
+(omens) and `divine_public_line` (providence). `build_user_prompt` renders
+it as `Divine audience: … You may respond in talk or reason.` Active bargain
+terms are folded into the same line. Thread text never appears in `/state`.
+
+Agent replies are captured when `apply_decision` runs talk or when reasoning is
+present (`_capture_burning_bush_reply`). Bargain auto-settlement runs on tick
+via `_tick_divine_bargains` (see [02-engine-core.md](02-engine-core.md)).
+
+### Divine Matrix Phase 7: Anointed
+
+`_build_think_payload` adds `divine_anointment_line` from
+`_anointment_prompt_line(agent)` — private destiny plus oracle hints whose
+`revealFrame <= frameTick`. `build_user_prompt` renders it as
+`Anointed destiny: … You may interpret or ignore it.` Stigmata tags on
+**other** agents appear only in `nearby_agents` / `format_nearby_agents`
+(`signs: tag1, tag2`) via `_get_nearby_detailed`; they never appear in
+`/state` or on the anointed agent's own prompt line. Thread/oracle scheduling
+and expiry: [02-engine-core.md](02-engine-core.md#anointed-divine-matrix-phase-7).
+
+### Divine Matrix Phase 8: Identity Forge
+
+`identity_edit` mutates `agent["persona"]`, `agent["personality"]`, and/or
+`agent["role"]` immediately. `_build_think_payload` reflects changes on the next
+think: `personality` via `_personality_with_drift(agent)`, `role` and
+`role_skill` from the updated role, and `self_prompt` from `agent["persona"]`
+when `META_SYSTEM` is on (set in `_think_job` before the LLM call).
+`identity_copy_overwrite` blends persona/personality toward a source agent each
+think (`_advance_identity_forge_on_think`). Optional `syncMemories` plants up
+to three source memory lines — never a full clone. Restore semantics:
+[02-engine-core.md](02-engine-core.md#identity-forge-divine-matrix-phase-8).
 
 ### Sovereign God mode (Optional Phase 8): free-prose story compiler
 

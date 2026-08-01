@@ -29,6 +29,7 @@ simulation/memory_store.json.tmp
 
 # Manual state backups
 archive/
+simulation/backup/
 
 # Local agent/tool state (not part of the repo)
 .codex/
