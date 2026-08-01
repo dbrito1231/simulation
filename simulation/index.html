@@ -758,6 +758,9 @@
   body.divine-bar-visible {
     --divine-bar-clearance: 92px;
   }
+  body.divine-bar-visible.divine-chrome-v2 {
+    --divine-bar-clearance: 100px;
+  }
   body.divine-bar-visible #wrap {
     height: calc(100vh - var(--divine-bar-clearance));
   }
@@ -837,6 +840,47 @@
     letter-spacing: .06em; text-transform: uppercase;
   }
   .bar-brand .b2 { font: 600 10px ui-monospace, monospace; color: #6f6f7c; margin-top: 2px; }
+  .bar-brand .b3 { font: 500 9px ui-monospace, monospace; color: #5a5a66; margin-top: 3px; }
+  body.divine-chrome-v2 .divine-bar { padding: 12px 14px; min-height: 80px; align-items: center; }
+  body.divine-chrome-v2 .gbtn.active {
+    background: #4a3a1a; color: #ffd27a; border-color: #b5883a;
+    box-shadow: inset 0 -2px 0 #ffd27a;
+  }
+  body.divine-chrome-v2 .divine-fieldset { padding: 12px 10px 14px; margin-bottom: 14px; }
+  body.divine-chrome-v2 .divine-fieldset legend { font-size: 12px; font-weight: 700; }
+  body.divine-chrome-v2 .divine-fieldset-irreversible { border-left: 3px solid #a24545; padding-left: 12px; }
+  body.divine-chrome-v2 .divine-section-title {
+    margin: 0 0 10px; font-size: 13px; font-weight: 700; color: #ffd27a; letter-spacing: 0.02em;
+  }
+  body.divine-chrome-v2 .divine-preview-strip {
+    display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 18px; border-bottom: 1px solid #282831;
+    background: linear-gradient(180deg, rgba(74,58,26,.35), rgba(30,24,12,.25));
+    position: sticky; top: 0; z-index: 2;
+  }
+  body.divine-chrome-v2 .divine-preview-strip.visible { display: flex; }
+  body.divine-chrome-v2 .divine-preview-strip .preview-label {
+    font: 600 12px system-ui, sans-serif; color: #ffd27a; flex: 1 1 auto;
+  }
+  body.divine-chrome-v2 .divine-preview-strip .preview-actions { display: flex; gap: 8px; }
+  body.divine-chrome-v2 .divine-preview-strip button {
+    padding: 5px 12px; font: 600 12px system-ui, sans-serif; border-radius: 4px; cursor: pointer;
+  }
+  body.divine-chrome-v2 .divine-preview-strip .preview-apply {
+    background: #4a3a1a; color: #ffd27a; border: 1px solid #b5883a;
+  }
+  body.divine-chrome-v2 .divine-preview-strip .preview-discard {
+    background: transparent; color: #9a9aa8; border: 1px solid #3a3a48;
+  }
+  body.divine-chrome-v2 .divine-preview-panel { margin-bottom: 12px; }
+  body.divine-chrome-v2 .divine-preview-panel summary {
+    cursor: pointer; font: 600 11px system-ui, sans-serif; color: #d9b96e; margin-bottom: 6px;
+  }
+  body.divine-chrome-v2 .divine-pin-row {
+    padding: 8px 10px; margin-bottom: 12px; border: 1px solid #3a3a48; border-radius: 6px;
+    background: rgba(30,58,42,.35); font-size: 11px; color: #ccc;
+  }
+  body.divine-chrome-v2 .divine-pin-row a { color: #ffd27a; cursor: pointer; text-decoration: underline; }
   .bar-buttons { display: flex; gap: 6px; flex: 1 1 auto; flex-wrap: wrap; }
   .gbtn {
     display: flex; flex-direction: column; align-items: center; gap: 5px;
@@ -1061,6 +1105,7 @@
   <div class="bar-brand">
     <span class="b1">Divine</span>
     <span class="b2" id="divineBarBrandState">locked</span>
+    <span class="b3" id="divineBarInterventionCount"></span>
   </div>
   <div class="bar-buttons">
     <button type="button" class="gbtn unlock" data-feature="unlock" data-tab="unlock" data-state="locked"
@@ -1121,6 +1166,13 @@
       </div>
       <div class="spacer"></div>
       <button type="button" class="modal-close" id="divineModalClose" aria-label="Close">✕</button>
+    </div>
+    <div id="divinePreviewStrip" class="divine-preview-strip" aria-live="polite">
+      <span class="preview-label" id="divinePreviewStripLabel">Preview ready</span>
+      <div class="preview-actions">
+        <button type="button" class="preview-discard" id="divinePreviewDiscardBtn">Discard</button>
+        <button type="button" class="preview-apply" id="divinePreviewApplyBtn">Apply</button>
+      </div>
     </div>
     <div class="modal-body" id="divineModalBody"></div>
   </div>
@@ -1245,7 +1297,7 @@
             </label>
             <label data-tip='{"t":"Ruin ids","d":"Comma-separated ruin ids when mode is Explicit ids."}'>Ruin ids <input type="text" id="godClearRuinsIds" placeholder="1,2,3" /></label></div>
             <div class="divine-row"><label data-tip='{"t":"District","d":"Required when mode is Aged in district."}'>District <select id="godClearRuinsDistrict"></select></label>
-              <label data-tip='{"t":"Min age","d":"Minimum ruin age in frames (default one sim day)."}'>Min age (frames) <input type="number" id="godClearRuinsMinAge" placeholder="13500" /></label></div>
+              <label data-tip='{"t":"Min age","d":"Minimum ruin age in frames (default one sim day). Esc closes modal; Ctrl+Enter applies when preview is valid."}'>Min age (frames) <input type="number" id="godClearRuinsMinAge" placeholder="18000" /></label></div>
             <div class="divine-actions">
               <button type="button" id="godClearRuinsPreviewBtn">Preview</button>
               <button type="button" id="godClearRuinsApplyBtn" disabled>Apply</button>
@@ -1430,7 +1482,78 @@ let lastSeasonRendered = null; // season the terrain cache was last tinted for; 
 // key the terrain cache was last built with -- same invalidation mechanism
 // as lastSeasonRendered above, just keyed on stage instead of season.
 let lastEcologyStageKeyRendered = null;
+let lastTerrainVisualKeyRendered = null;
 const worldLoadingEl = document.getElementById("worldLoading");
+
+const STAGE_TINT_FACTOR = { lush: 1.0, healthy: 0.85, sparse: 0.65, barren: 0.45 };
+const BARREN_EXTRA_BROWN = "rgba(90,70,50,0.08)";
+
+function terrainVisualCacheKey(season, ecologyStageKey) {
+  const v = VISUAL_SEASONAL_TERRAIN_ENABLED ? "v2" : "v1";
+  return `${season || "summer"}|${ecologyStageKey || ""}|${v}`;
+}
+
+function districtTintAlpha(base, factor) {
+  return Math.min(1, Math.max(0, base * factor));
+}
+
+function applyDistrictTintRect(ctx, bounds, op, rgba, factor) {
+  if (!bounds || factor <= 0) return;
+  const m = rgba.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+  if (!m) return;
+  const alpha = districtTintAlpha(parseFloat(m[4] || "1"), factor);
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(bounds.x1, bounds.y1, bounds.x2 - bounds.x1, bounds.y2 - bounds.y1);
+  ctx.clip();
+  ctx.globalCompositeOperation = op;
+  ctx.fillStyle = `rgba(${m[1]},${m[2]},${m[3]},${alpha.toFixed(3)})`;
+  ctx.fillRect(bounds.x1, bounds.y1, bounds.x2 - bounds.x1, bounds.y2 - bounds.y1);
+  ctx.restore();
+}
+
+// Per terrain-kind seasonal grading (VISUAL_SEASONAL_TERRAIN_ENABLED v2).
+function applySeasonTintForKind(ctx, season, kind, stage, bounds) {
+  if (!season || season === "summer" || kind === "ocean") return;
+  const factor = STAGE_TINT_FACTOR[stage] || STAGE_TINT_FACTOR.healthy;
+  const k = kind || "village";
+  if (season === "spring") {
+    if (k === "forest") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(60,200,80,0.12)", factor);
+    else if (k === "farm") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(180,210,80,0.10)", factor);
+    else if (k === "beach") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(220,190,120,0.06)", factor);
+    else if (k === "quarry") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(120,150,100,0.08)", factor);
+    else applyDistrictTintRect(ctx, bounds, "overlay", "rgba(60,200,80,0.10)", factor);
+  } else if (season === "autumn") {
+    if (k === "forest") {
+      applyDistrictTintRect(ctx, bounds, "multiply", "rgba(200,140,40,0.22)", factor);
+      applyDistrictTintRect(ctx, bounds, "overlay", "rgba(120,80,30,0.08)", factor);
+    } else if (k === "farm") applyDistrictTintRect(ctx, bounds, "multiply", "rgba(200,150,40,0.20)", factor);
+    else if (k === "beach") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(200,140,80,0.10)", factor);
+    else if (k === "quarry") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(160,90,50,0.12)", factor);
+    else applyDistrictTintRect(ctx, bounds, "multiply", "rgba(200,140,40,0.16)", factor);
+  } else if (season === "winter") {
+    if (k === "beach") {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.25)", factor);
+    } else if (k === "forest") {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.55)", factor);
+      applyDistrictTintRect(ctx, bounds, "overlay", "rgba(150,175,235,0.25)", factor);
+    } else if (k === "farm") {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.40)", factor);
+      applyDistrictTintRect(ctx, bounds, "overlay", "rgba(110,85,60,0.15)", factor);
+    } else if (k === "quarry") {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.45)", factor);
+      applyDistrictTintRect(ctx, bounds, "lighter", "rgba(200,210,230,0.15)", factor);
+    } else {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.50)", factor);
+      applyDistrictTintRect(ctx, bounds, "overlay", "rgba(150,175,235,0.22)", factor);
+    }
+  }
+  if (stage === "barren") applyDistrictTintRect(ctx, bounds, "overlay", BARREN_EXTRA_BROWN, 1);
+  if (season === "summer" && k === "farm") {
+    applyDistrictTintRect(ctx, bounds, "lighter", "rgba(255,230,150,0.08)", factor);
+  }
+}
 
 // Seasonal color grading applied once to the terrain cache (and ocean foam
 // frames) at build time -- not per frame. Composite-mode passes over the
@@ -1591,6 +1714,10 @@ let CROP_GROWTH_ENABLED = true;
 let WILDLIFE_ENABLED = true;
 let CARAVAN_VISUALS_ENABLED = true;
 let WEATHER_ENABLED = true;
+let VISUAL_LIGHTING_V2_ENABLED = true;
+let VISUAL_SEASONAL_TERRAIN_ENABLED = true;
+let WEATHER_PARTICLES_V2_ENABLED = true;
+let GOD_CONSOLE_CHROME_V2_ENABLED = true;
 
 // --- Viewer-only display toggles (client-side, not server flags). Flipping
 // either to true fully restores that section with no other edits. ---
@@ -1780,14 +1907,18 @@ function buildTerrainCache() {
   const [ecologyStages, ecologyStageKey] = ecologyStagesForTerrain();
 
   const drawT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
+  const terrainVisualOpts = VISUAL_SEASONAL_TERRAIN_ENABLED
+    ? { seasonalV2: true, applyDistrictTint: applySeasonTintForKind }
+    : null;
   drawTiledWorld(tctx, WORLD_W, WORLD_H, 0, null, districts,
-                 districtsData.roadNodes, districtsData.roadEdges, season || "summer", ecologyStages, stageTimings);
+                 districtsData.roadNodes, districtsData.roadEdges, season || "summer", ecologyStages, stageTimings, terrainVisualOpts);
   const drawTiledWorldMs = VIEWER_LOAD_DEBUG ? performance.now() - drawT0 : 0;
 
   const tintT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
-  applySeasonTint(terrainCanvas, season);
+  if (!VISUAL_SEASONAL_TERRAIN_ENABLED) applySeasonTint(terrainCanvas, season);
   const seasonTintMs = VIEWER_LOAD_DEBUG ? performance.now() - tintT0 : 0;
   lastEcologyStageKeyRendered = ecologyStageKey;
+  lastTerrainVisualKeyRendered = terrainVisualCacheKey(season, ecologyStageKey);
 
   // The ocean's animated foam strip is scoped to the ocean district's own
   // bounds (not the full world height) -- with the much larger world, a
@@ -1805,7 +1936,7 @@ function buildTerrainCache() {
     const octx = oc.getContext("2d");
     octx.imageSmoothingEnabled = false;
     fillRectWithTile(octx, 0, 0, ow, oh, oceanTile(phase));
-    applySeasonTint(oc, season);
+    if (!VISUAL_SEASONAL_TERRAIN_ENABLED) applySeasonTint(oc, season);
     oceanFrames.frames.push(oc);
   }
   const oceanFramesMs = VIEWER_LOAD_DEBUG ? performance.now() - oceanT0 : 0;
@@ -1838,8 +1969,22 @@ const DOCK_RECT = { x: 150, y: 470, w: 144, h: 36 };
 // Night lighting: a cool translucent overlay whose alpha follows the day
 // phase (calendar.dayFraction; night is the last 25% of each day). Dusk
 // ramps in over 0.70-0.80, deep night holds to 0.95, dawn ramps out.
+// VISUAL_LIGHTING_V2_ENABLED widens twilight bands and deepens peak alpha.
 const MAX_NIGHT_ALPHA = 0.45;
-function nightAlpha(cal) {
+const MAX_NIGHT_ALPHA_V2 = 0.58;
+const TWILIGHT_START_V2 = 0.62;
+const TWILIGHT_END_DUSK_V2 = 0.78;
+const TWILIGHT_START_DAWN_V2 = 0.92;
+const GOLDEN_HOUR_MAX_V2 = 0.22;
+const LIGHT_GLOW_RADIUS_V2 = 200;
+const LIGHT_GLOW_HALO_RADIUS_V2 = 280;
+const NIGHT_DESAT_ALPHA_V2 = 0.08;
+
+function maxNightAlphaForLighting() {
+  return VISUAL_LIGHTING_V2_ENABLED ? MAX_NIGHT_ALPHA_V2 : MAX_NIGHT_ALPHA;
+}
+
+function nightAlphaLegacy(cal) {
   if (!cal) return 0;
   const f = cal.dayFraction;
   if (f == null) return cal.isNight ? MAX_NIGHT_ALPHA : 0;
@@ -1849,9 +1994,25 @@ function nightAlpha(cal) {
   return MAX_NIGHT_ALPHA * (1.00 - f) / 0.05;
 }
 
-// ENV_EFFECTS_ENABLED's golden-hour extension shares the night overlay's
-// transition windows without changing calendar state or adding another flag.
-function goldenHourAlpha(cal) {
+function nightAlphaV2(cal) {
+  if (!cal) return 0;
+  const f = cal.dayFraction;
+  if (f == null) return cal.isNight ? MAX_NIGHT_ALPHA_V2 : 0;
+  if (f < TWILIGHT_START_V2) return 0;
+  if (f < TWILIGHT_END_DUSK_V2) {
+    const t = (f - TWILIGHT_START_V2) / (TWILIGHT_END_DUSK_V2 - TWILIGHT_START_V2);
+    return MAX_NIGHT_ALPHA_V2 * (t * t);
+  }
+  if (f < TWILIGHT_START_DAWN_V2) return MAX_NIGHT_ALPHA_V2;
+  const t = (1.0 - f) / (1.0 - TWILIGHT_START_DAWN_V2);
+  return MAX_NIGHT_ALPHA_V2 * (1 - (1 - t) * (1 - t));
+}
+
+function nightAlpha(cal) {
+  return VISUAL_LIGHTING_V2_ENABLED ? nightAlphaV2(cal) : nightAlphaLegacy(cal);
+}
+
+function goldenHourAlphaLegacy(cal) {
   if (!ENV_EFFECTS_ENABLED || !cal || cal.dayFraction == null) return 0;
   const f = cal.dayFraction;
   const band = (start, end) => {
@@ -1859,6 +2020,49 @@ function goldenHourAlpha(cal) {
     return Math.sin(((f - start) / (end - start)) * Math.PI);
   };
   return 0.13 * Math.max(band(0.70, 0.80), band(0.95, 1.00));
+}
+
+function goldenHourAlphaV2(cal) {
+  if (!ENV_EFFECTS_ENABLED || !cal || cal.dayFraction == null) return 0;
+  const f = cal.dayFraction;
+  const band = (start, end) => {
+    if (f < start || f >= end) return 0;
+    return Math.sin(((f - start) / (end - start)) * Math.PI);
+  };
+  return GOLDEN_HOUR_MAX_V2 * Math.max(
+    band(TWILIGHT_START_V2, TWILIGHT_END_DUSK_V2),
+    band(TWILIGHT_START_DAWN_V2, 1.00)
+  );
+}
+
+function goldenHourAlpha(cal) {
+  if (!ENV_EFFECTS_ENABLED || !cal || cal.dayFraction == null) return 0;
+  return VISUAL_LIGHTING_V2_ENABLED ? goldenHourAlphaV2(cal) : goldenHourAlphaLegacy(cal);
+}
+
+function drawGoldenHourOverlay(ctx, cal) {
+  const gha = goldenHourAlpha(cal);
+  if (gha <= 0) return;
+  ctx.fillStyle = `rgba(255, 177, 78, ${gha.toFixed(3)})`;
+  ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+  if (!VISUAL_LIGHTING_V2_ENABLED) return;
+  const f = cal.dayFraction;
+  const edgeBand = (start, end) => {
+    if (f < start || f >= end) return 0;
+    return Math.sin(((f - start) / (end - start)) * Math.PI);
+  };
+  const rimAlpha = GOLDEN_HOUR_MAX_V2 * 0.45 * Math.max(
+    edgeBand(TWILIGHT_START_V2, TWILIGHT_START_V2 + 0.04),
+    edgeBand(TWILIGHT_END_DUSK_V2 - 0.04, TWILIGHT_END_DUSK_V2),
+    edgeBand(TWILIGHT_START_DAWN_V2, TWILIGHT_START_DAWN_V2 + 0.04),
+    edgeBand(0.98, 1.00)
+  );
+  if (rimAlpha <= 0) return;
+  const prevOp = ctx.globalCompositeOperation;
+  ctx.globalCompositeOperation = "lighter";
+  ctx.fillStyle = `rgba(255, 140, 160, ${rimAlpha.toFixed(3)})`;
+  ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+  ctx.globalCompositeOperation = prevOp;
 }
 
 // Weather sky tint (WEATHER_ENABLED, living-ecosystem Phase 4): darkens the
@@ -1888,10 +2092,15 @@ function weatherSkyAlpha(weather, nightA) {
 // drawShipments use), not world area -- the world is much larger than any
 // one screen, especially fully zoomed out.
 const WEATHER_STATE_INTENSITY = { clear: 0, gathering: 0, storm: 1, clearing: 0.45 };
+const WEATHER_STATE_INTENSITY_V2 = { clear: 0, gathering: 0.18, storm: 1, clearing: 0.45 };
 const WEATHER_PARTICLE_DENSITY_DIVISOR = 14000; // visible px^2 per particle at intensity 1 (storm uses STORM divisor)
 const WEATHER_STORM_DENSITY_DIVISOR = 9500;
 const WEATHER_PARTICLE_CAP = 260;
+const WEATHER_PARTICLE_DENSITY_DIVISOR_V2 = 11000;
+const WEATHER_STORM_DENSITY_DIVISOR_V2 = 7200;
+const WEATHER_PARTICLE_CAP_V2 = 380;
 const WEATHER_SHEET_EVERY_N = 9; // every Nth rain particle draws a thicker "sheet" streak
+const WEATHER_SHEET_EVERY_N_V2 = 6;
 const LIGHTNING_BUCKET_FRAMES = 540; // 540 local frames ≈ ~9s at 60fps — rare full-canvas flash windows
 function weatherParticleHash(i) {
   let h = (2166136261 ^ i) >>> 0;
@@ -1901,9 +2110,32 @@ function weatherParticleHash(i) {
   h ^= h >>> 16;
   return (h >>> 0) / 4294967295;
 }
-function drawWeatherParticles(ctx, frameTick, weather, cal) {
-  if (!WEATHER_ENABLED || !weather) return;
-  const intensity = WEATHER_STATE_INTENSITY[weather.state] || 0;
+function weatherParticleConfig() {
+  if (WEATHER_PARTICLES_V2_ENABLED) {
+    return {
+      intensityMap: WEATHER_STATE_INTENSITY_V2,
+      densityDivisor: WEATHER_PARTICLE_DENSITY_DIVISOR_V2,
+      stormDivisor: WEATHER_STORM_DENSITY_DIVISOR_V2,
+      cap: WEATHER_PARTICLE_CAP_V2,
+      sheetEvery: WEATHER_SHEET_EVERY_N_V2,
+      snowFallPeriod: 650,
+      rainFallPeriod: 130,
+    };
+  }
+  return {
+    intensityMap: WEATHER_STATE_INTENSITY,
+    densityDivisor: WEATHER_PARTICLE_DENSITY_DIVISOR,
+    stormDivisor: WEATHER_STORM_DENSITY_DIVISOR,
+    cap: WEATHER_PARTICLE_CAP,
+    sheetEvery: WEATHER_SHEET_EVERY_N,
+    snowFallPeriod: 500,
+    rainFallPeriod: 130,
+  };
+}
+
+function drawWeatherParticleBatch(ctx, frameTick, weather, cal, layerOpts) {
+  const cfg = weatherParticleConfig();
+  const intensity = cfg.intensityMap[weather.state] || 0;
   if (intensity <= 0) return;
   const left = canvasWrapEl.scrollLeft / zoomLevel;
   const top = canvasWrapEl.scrollTop / zoomLevel;
@@ -1911,18 +2143,39 @@ function drawWeatherParticles(ctx, frameTick, weather, cal) {
   const h = canvasWrapEl.clientHeight / zoomLevel;
   if (w <= 0 || h <= 0) return;
   const isSnow = !!(cal && cal.season === "winter");
-  const densityDiv = intensity >= 1 ? WEATHER_STORM_DENSITY_DIVISOR : WEATHER_PARTICLE_DENSITY_DIVISOR;
-  const count = Math.min(WEATHER_PARTICLE_CAP, Math.floor((w * h / densityDiv) * intensity));
-  const fallPeriod = isSnow ? 500 : 130; // frames for one particle to cross the visible band
+  const densityDiv = intensity >= 1 ? cfg.stormDivisor : cfg.densityDivisor;
+  const countMult = layerOpts && layerOpts.countMult != null ? layerOpts.countMult : 1;
+  const alphaMult = layerOpts && layerOpts.alphaMult != null ? layerOpts.alphaMult : 1;
+  const fallMult = layerOpts && layerOpts.fallMult != null ? layerOpts.fallMult : 1;
+  const count = Math.min(cfg.cap, Math.floor((w * h / densityDiv) * intensity * countMult));
+  const fallPeriod = (isSnow ? cfg.snowFallPeriod : cfg.rainFallPeriod) * fallMult;
+  const v2 = WEATHER_PARTICLES_V2_ENABLED;
   for (let i = 0; i < count; i++) {
     const hx = weatherParticleHash(i * 2 + 1);
     const hy = weatherParticleHash(i * 2 + 2);
     const x = left + hx * w;
     const yFrac = ((frameTick + hy * fallPeriod) % fallPeriod) / fallPeriod;
     const y = top + yFrac * h;
-    const sheet = !isSnow && (i % WEATHER_SHEET_EVERY_N === 0);
-    drawWeatherParticle(ctx, isSnow ? "snow" : "rain", x, y, i, sheet ? { sheet: true } : null);
+    const sheet = !isSnow && (i % cfg.sheetEvery === 0);
+    drawWeatherParticle(ctx, isSnow ? "snow" : "rain", x, y, i, {
+      sheet,
+      v2,
+      alphaMult,
+      frameTick,
+      windHash: weatherParticleHash(i * 3 + 7),
+      lenHash: weatherParticleHash(i * 5 + 11),
+    });
   }
+}
+
+function drawWeatherParticles(ctx, frameTick, weather, cal) {
+  if (!WEATHER_ENABLED || !weather) return;
+  if (WEATHER_PARTICLES_V2_ENABLED) {
+    drawWeatherParticleBatch(ctx, frameTick, weather, cal, { countMult: 0.6, alphaMult: 0.5, fallMult: 0.85 });
+    drawWeatherParticleBatch(ctx, frameTick, weather, cal, { countMult: 0.4, alphaMult: 1.0, fallMult: 1.0 });
+    return;
+  }
+  drawWeatherParticleBatch(ctx, frameTick, weather, cal, null);
 }
 
 function districtWeatherSeed(id) {
@@ -1952,6 +2205,7 @@ function drawDistrictStormVeil(ctx, weather) {
 
 function drawDistrictStormRain(ctx, frameTick, weather, cal) {
   if (!WEATHER_ENABLED || !weather) return;
+  if (WEATHER_PARTICLES_V2_ENABLED) return; // v2 merges district rain into the global layer
   const state = weather.state;
   if (state !== "storm" && state !== "clearing") return;
   if (cal && cal.season === "winter") return; // snow uses the global layer only
@@ -2016,7 +2270,7 @@ function drawLightningFlash(ctx, renderFrame, weather) {
 // data-driven — a no-op when the server hasn't sent `light`/`litDistricts`
 // yet (older payload), so it's safe regardless of rollout order.
 const LIGHT_GLOW_RADIUS = 140;
-function drawLightGlows(cal) {
+function drawLightGlowsLegacy(cal) {
   if (!ENV_EFFECTS_ENABLED) return;
   const na = nightAlpha(cal);
   if (na <= 0) return;
@@ -2042,6 +2296,46 @@ function drawLightGlows(cal) {
     ctx.fill();
   }
   ctx.globalCompositeOperation = prevOp;
+}
+
+function drawLightGlowsV2(cal) {
+  if (!ENV_EFFECTS_ENABLED) return;
+  const na = nightAlpha(cal);
+  if (na <= 0) return;
+  const civ = getCiv();
+  const litDistricts = civ.litDistricts;
+  if (!litDistricts || !litDistricts.length) return;
+  const structures = civ.structures || [];
+  const strength = na / MAX_NIGHT_ALPHA_V2;
+  const prevOp = ctx.globalCompositeOperation;
+  ctx.globalCompositeOperation = "lighter";
+  const drawGlow = (cx, cy, radius, centerAlpha, midAlpha) => {
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+    grad.addColorStop(0, `rgba(255, 200, 100, ${centerAlpha.toFixed(3)})`);
+    grad.addColorStop(0.45, `rgba(255, 190, 90, ${midAlpha.toFixed(3)})`);
+    grad.addColorStop(1, "rgba(255, 190, 90, 0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  for (const s of structures) {
+    if (!s || s.light !== true) continue;
+    if (!litDistricts.includes(s.districtId)) continue;
+    const size = getStructureRenderSize(s);
+    const cx = s.x + size.width / 2;
+    const cy = s.y + size.height / 2;
+    drawGlow(cx, cy, LIGHT_GLOW_RADIUS_V2, 0.55 * strength, 0.22 * strength);
+    if (na >= 0.4 * MAX_NIGHT_ALPHA_V2) {
+      drawGlow(cx, cy, LIGHT_GLOW_HALO_RADIUS_V2, 0.12 * strength, 0.04 * strength);
+    }
+  }
+  ctx.globalCompositeOperation = prevOp;
+}
+
+function drawLightGlows(cal) {
+  if (VISUAL_LIGHTING_V2_ENABLED) drawLightGlowsV2(cal);
+  else drawLightGlowsLegacy(cal);
 }
 
 function drawWorld(ctx, frameTick) {
@@ -3206,9 +3500,12 @@ function calendarPhase(cal) {
   if (!cal) return null;
   const f = cal.dayFraction;
   if (f == null) return cal.isNight ? "night" : "day";
-  if (f < 0.70) return "day";
-  if (f < 0.80) return "dusk";
-  if (f < 0.95) return "night";
+  const duskStart = VISUAL_LIGHTING_V2_ENABLED ? TWILIGHT_START_V2 : 0.70;
+  const duskEnd = VISUAL_LIGHTING_V2_ENABLED ? TWILIGHT_END_DUSK_V2 : 0.80;
+  const nightEnd = VISUAL_LIGHTING_V2_ENABLED ? TWILIGHT_START_DAWN_V2 : 0.95;
+  if (f < duskStart) return "day";
+  if (f < duskEnd) return "dusk";
+  if (f < nightEnd) return "night";
   return "dawn";
 }
 
@@ -3805,8 +4102,13 @@ function applyFlags(flags) {
   if ("WILDLIFE_ENABLED" in flags) WILDLIFE_ENABLED = !!flags.WILDLIFE_ENABLED;
   if ("CARAVAN_VISUALS_ENABLED" in flags) CARAVAN_VISUALS_ENABLED = !!flags.CARAVAN_VISUALS_ENABLED;
   if ("WEATHER_ENABLED" in flags) WEATHER_ENABLED = !!flags.WEATHER_ENABLED;
+  if ("VISUAL_LIGHTING_V2_ENABLED" in flags) VISUAL_LIGHTING_V2_ENABLED = !!flags.VISUAL_LIGHTING_V2_ENABLED;
+  if ("VISUAL_SEASONAL_TERRAIN_ENABLED" in flags) VISUAL_SEASONAL_TERRAIN_ENABLED = !!flags.VISUAL_SEASONAL_TERRAIN_ENABLED;
+  if ("WEATHER_PARTICLES_V2_ENABLED" in flags) WEATHER_PARTICLES_V2_ENABLED = !!flags.WEATHER_PARTICLES_V2_ENABLED;
+  if ("GOD_CONSOLE_CHROME_V2_ENABLED" in flags) GOD_CONSOLE_CHROME_V2_ENABLED = !!flags.GOD_CONSOLE_CHROME_V2_ENABLED;
   if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
   if ("GOD_AUTH_REQUIRED" in flags) GOD_AUTH_REQUIRED_FLAG = !!flags.GOD_AUTH_REQUIRED;
+  document.body.classList.toggle("divine-chrome-v2", !!GOD_CONSOLE_CHROME_V2_ENABLED);
 }
 
 // Bounded viewer-only social pass. The engine has already filtered and
@@ -3946,6 +4248,16 @@ async function pollState() {
     }
     applyFlags(snapshot.config && snapshot.config.flags);
     setSeasonalAgentAccentsEnabled(SEASONAL_AGENTS_ENABLED);
+    if (terrainCanvas && !terrainBuildScheduled) {
+      const [, ecologyStageKey] = ecologyStagesForTerrain();
+      const seasonNow = snapshot.calendar && snapshot.calendar.season;
+      const visualKey = terrainVisualCacheKey(seasonNow, ecologyStageKey);
+      if (visualKey !== lastTerrainVisualKeyRendered) {
+        terrainCanvas = null;
+        terrainBuildScheduled = false;
+        scheduleTerrainCacheBuild();
+      }
+    }
     renderDailyCouncil((snapshot.civilization || {}).dailyCouncil);
     syncPauseButton();
     if (terrainCanvas) hideWorldLoading();
@@ -4093,6 +4405,13 @@ function tickBody() {
   }
 
   const na = nightAlpha(world.calendar);
+  if (VISUAL_LIGHTING_V2_ENABLED && na > 0.35) {
+    const prevOp = ctx.globalCompositeOperation;
+    ctx.globalCompositeOperation = "saturation";
+    ctx.fillStyle = `rgba(128, 128, 128, ${NIGHT_DESAT_ALPHA_V2.toFixed(3)})`;
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+    ctx.globalCompositeOperation = prevOp;
+  }
   if (na > 0) {
     ctx.fillStyle = `rgba(10, 16, 48, ${na.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
@@ -4108,11 +4427,7 @@ function tickBody() {
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
   drawLightningFlash(ctx, renderFrame, world.weather);
-  const gha = goldenHourAlpha(world.calendar);
-  if (gha > 0) {
-    ctx.fillStyle = `rgba(255, 177, 78, ${gha.toFixed(3)})`;
-    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
-  }
+  drawGoldenHourOverlay(ctx, world.calendar);
   drawLightGlows(world.calendar);
   drawDistrictStormVeil(ctx, world.weather);
   drawWeatherParticles(ctx, world.frameTick, world.weather, world.calendar);
@@ -4174,6 +4489,11 @@ const godConnectBtn = document.getElementById("godConnectBtn");
 const godAuthStatusEl = document.getElementById("godAuthStatus");
 const divineBarEl = document.getElementById("divineBar");
 const divineBarBrandStateEl = document.getElementById("divineBarBrandState");
+const divineBarInterventionCountEl = document.getElementById("divineBarInterventionCount");
+const divinePreviewStripEl = document.getElementById("divinePreviewStrip");
+const divinePreviewStripLabelEl = document.getElementById("divinePreviewStripLabel");
+const divinePreviewApplyBtnEl = document.getElementById("divinePreviewApplyBtn");
+const divinePreviewDiscardBtnEl = document.getElementById("divinePreviewDiscardBtn");
 const divineUnlockPipEl = document.getElementById("divineUnlockPip");
 const divineModalScrimEl = document.getElementById("divineModalScrim");
 const divineModalBodyEl = document.getElementById("divineModalBody");
@@ -4300,6 +4620,74 @@ function godEffectivelyAuthorized() {
   return godAuthorized || !GOD_AUTH_REQUIRED_FLAG;
 }
 
+function godDefaultDayFrames() {
+  const cfg = world.config || {};
+  if (cfg.DAY_FRAMES != null) return Number(cfg.DAY_FRAMES) || 18000;
+  return 18000;
+}
+
+function godInterventionCount() {
+  const pub = (world.god && world.god.recentPublicInterventions) || [];
+  if (pub.length) return pub.length;
+  const gs = (getCiv().godState && getCiv().godState.recentInterventions) || [];
+  return gs.length;
+}
+
+let divinePreviewController = null;
+let divinePreviewOwnerForm = null;
+let godLastAppliedPin = null;
+
+function clearDivinePreviewStrip() {
+  divinePreviewController = null;
+  divinePreviewOwnerForm = null;
+  if (divinePreviewStripEl) divinePreviewStripEl.classList.remove("visible");
+}
+
+function showDivinePreviewStrip(label, data, applyFn, discardFn) {
+  if (!GOD_CONSOLE_CHROME_V2_ENABLED || !divinePreviewStripEl) return;
+  divinePreviewController = { label, data, applyFn, discardFn };
+  if (divinePreviewStripLabelEl) {
+    const kind = data.normalizedCommand && data.normalizedCommand.kind;
+    divinePreviewStripLabelEl.innerHTML =
+      godReversibilityBadge(data.reversibilityClass) +
+      `<span>${escapeHtml(label || kind || "command")} — preview ready</span>`;
+  }
+  divinePreviewStripEl.classList.add("visible");
+}
+
+function renderGodPinRow() {
+  if (!GOD_CONSOLE_CHROME_V2_ENABLED || !divineModalBodyEl || !godLastAppliedPin) return;
+  let pin = document.getElementById("divinePinRow");
+  if (!pin) {
+    pin = document.createElement("div");
+    pin.id = "divinePinRow";
+    pin.className = "divine-pin-row";
+    divineModalBodyEl.insertBefore(pin, divineModalBodyEl.firstChild);
+  }
+  const p = godLastAppliedPin;
+  pin.innerHTML = `Last applied: <strong>${escapeHtml(p.label)}</strong> (id ${escapeHtml(String(p.id))}) — ` +
+    `<a href="#" id="divinePinHistoryLink">View in History</a>`;
+  const link = document.getElementById("divinePinHistoryLink");
+  if (link) {
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      openDivineModal("history");
+    });
+  }
+}
+
+if (divinePreviewApplyBtnEl) {
+  divinePreviewApplyBtnEl.addEventListener("click", () => {
+    if (divinePreviewController && divinePreviewController.applyFn) divinePreviewController.applyFn();
+  });
+}
+if (divinePreviewDiscardBtnEl) {
+  divinePreviewDiscardBtnEl.addEventListener("click", () => {
+    if (divinePreviewController && divinePreviewController.discardFn) divinePreviewController.discardFn();
+    clearDivinePreviewStrip();
+  });
+}
+
 function updateDivineBarAuthUi() {
   if (divineBarBrandStateEl) {
     if (!GOD_AUTH_REQUIRED_FLAG) {
@@ -4326,6 +4714,16 @@ function updateDivineBarAuthUi() {
     } else {
       divineUnlockPipEl.style.display = "";
       divineUnlockPipEl.textContent = godAuthorized ? "ready" : "locked";
+    }
+  }
+  if (divineBarInterventionCountEl) {
+    if (GOD_CONSOLE_CHROME_V2_ENABLED && GOD_MODE_ENABLED_FLAG) {
+      const n = godInterventionCount();
+      divineBarInterventionCountEl.textContent = n ? `${n} intervention${n === 1 ? "" : "s"}` : "no interventions yet";
+      divineBarInterventionCountEl.style.display = "";
+    } else {
+      divineBarInterventionCountEl.textContent = "";
+      divineBarInterventionCountEl.style.display = "none";
     }
   }
   if (!divineBarEl) return;
@@ -4485,6 +4883,7 @@ function closeDivineModal() {
   if (divineModalScrimEl) divineModalScrimEl.classList.remove("open");
   godBarButtons.forEach((btn) => btn.classList.remove("active"));
   hideDivineTip();
+  clearDivinePreviewStrip();
 }
 
 function openDivineModal(name) {
@@ -4519,6 +4918,7 @@ function openDivineModal(name) {
   if (name === "sight" && godEffectivelyAuthorized()) refreshGodSight();
   if (name === "laws") renderGodLawsActive();
   if (name === "history") renderGodHistory();
+  renderGodPinRow();
 }
 
 // Thin alias: existing callers (connect→sight, lock→unlock, compile→story) open the modal.
@@ -4542,6 +4942,13 @@ if (divineModalScrimEl) {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && divineModalScrimEl && divineModalScrimEl.classList.contains("open")) {
     closeDivineModal();
+    return;
+  }
+  if (GOD_CONSOLE_CHROME_V2_ENABLED && (e.ctrlKey || e.metaKey) && e.key === "Enter"
+      && divineModalScrimEl && divineModalScrimEl.classList.contains("open")
+      && divinePreviewController) {
+    e.preventDefault();
+    divinePreviewController.applyFn();
   }
 });
 
@@ -4596,6 +5003,14 @@ document.addEventListener("focusout", (e) => {
 
 if (!GOD_AUTH_REQUIRED_FLAG) godAuthorized = true;
 updateDivineBarAuthUi();
+document.body.classList.toggle("divine-chrome-v2", !!GOD_CONSOLE_CHROME_V2_ENABLED);
+if (GOD_CONSOLE_CHROME_V2_ENABLED) {
+  ["godVitalsFieldset", "godGrantFieldset", "godStructureFieldset", "godMassRepairFieldset", "godClearRuinsFieldset"]
+    .forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.classList.add("divine-fieldset-irreversible");
+    });
+}
 
 // --- Preview -> Apply generic wiring ------------------------------------
 // One reusable helper per mutating form (docs/plan: "no Apply before a
@@ -4612,9 +5027,38 @@ function wireDivineForm(formSelector, opts) {
   function invalidate() {
     previewState = null;
     applyBtn.disabled = true;
+    if (GOD_CONSOLE_CHROME_V2_ENABLED && divinePreviewOwnerForm === formEl) clearDivinePreviewStrip();
   }
   formEl.addEventListener("input", invalidate);
   formEl.addEventListener("change", invalidate);
+
+  async function doApply() {
+    if (!previewState) return;
+    applyBtn.disabled = true;
+    const requestId = (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ("req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+    const resp = await godApiFetch("/control/god/apply", {
+      method: "POST",
+      body: { previewId: previewState.previewId, requestId },
+    });
+    previewState = null;
+    clearDivinePreviewStrip();
+    if (!resp.data || !resp.data.ok) {
+      renderGodError(resultEl, (resp.data && resp.data.reason) || "apply failed");
+      return;
+    }
+    resultEl.innerHTML = renderGodAppliedHtml(resp.data);
+    if (GOD_CONSOLE_CHROME_V2_ENABLED) {
+      godLastAppliedPin = {
+        label: opts.label || (resp.data.outcome && resp.data.outcome.kind) || "intervention",
+        id: resp.data.interventionId,
+      };
+      renderGodPinRow();
+    }
+    if (opts.onApplied) opts.onApplied(resp.data);
+    refreshGodSightIfOpen();
+  }
 
   previewBtn.addEventListener("click", async () => {
     invalidate();
@@ -4632,27 +5076,13 @@ function wireDivineForm(formSelector, opts) {
     previewState = resp.data;
     resultEl.innerHTML = renderGodPreviewHtml(resp.data, opts.label);
     applyBtn.disabled = false;
+    if (GOD_CONSOLE_CHROME_V2_ENABLED) {
+      divinePreviewOwnerForm = formEl;
+      showDivinePreviewStrip(opts.label, resp.data, doApply, invalidate);
+    }
   });
 
-  applyBtn.addEventListener("click", async () => {
-    if (!previewState) return;
-    applyBtn.disabled = true;
-    const requestId = (window.crypto && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : ("req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
-    const resp = await godApiFetch("/control/god/apply", {
-      method: "POST",
-      body: { previewId: previewState.previewId, requestId },
-    });
-    previewState = null;
-    if (!resp.data || !resp.data.ok) {
-      renderGodError(resultEl, (resp.data && resp.data.reason) || "apply failed");
-      return;
-    }
-    resultEl.innerHTML = renderGodAppliedHtml(resp.data);
-    if (opts.onApplied) opts.onApplied(resp.data);
-    refreshGodSightIfOpen();
-  });
+  applyBtn.addEventListener("click", doApply);
 }
 
 function refreshGodSightIfOpen() {
@@ -4934,9 +5364,9 @@ wireDivineForm("#godClearRuinsFieldset", {
       const districtId = document.getElementById("godClearRuinsDistrict").value;
       if (!districtId) return { error: "select a district" };
       payload.districtId = districtId;
-      if (!("minAgeFrames" in payload)) payload.minAgeFrames = 13500;
+      if (!("minAgeFrames" in payload)) payload.minAgeFrames = godDefaultDayFrames();
     } else {
-      if (!("minAgeFrames" in payload)) payload.minAgeFrames = 13500;
+      if (!("minAgeFrames" in payload)) payload.minAgeFrames = godDefaultDayFrames();
     }
     return { envelope: { kind: "clear_ruins", payload } };
   },
@@ -5396,6 +5826,7 @@ function renderDivineConsole() {
   if (key === godLastStateKey) return;
   godLastStateKey = key;
   renderGodPublicBanner();
+  updateDivineBarAuthUi();
   if (godActiveTab === "history") renderGodHistory();
   if (godActiveTab === "laws" && !(godLastSight && godLastSight.activeEvents)) renderGodLawsActive();
 }
