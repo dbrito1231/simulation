@@ -102,6 +102,11 @@ HUNTING (when hunt_wildlife is available):
    collect_resource (zone gathering). Hunters deal more damage per hit and specialize
    in meat.
 
+CONFLICT (when confront_agent is available):
+12c. Use confront_agent only against a named rival or under night/wildlife pressure.
+   Target must be a living villager (never the elder). On contact: damage, possible
+   steal of one edible, then disengage. Friendly/neutral pairs reject.
+
 CRAFTING (recipe tree):
 13. Some advanced builds need crafted goods. Use craft_item with target set to the item
    id; you must be in the recipe's station zone and hold its inputs.
@@ -118,7 +123,8 @@ SAGE PRIORITY (absolute):
 PATH 1 (when enabled):
 P1. Some resources need tools: stone needs wooden_pick, copper_ore needs stone_pick, iron_ore needs iron_pick (craft picks at workshop; smelt ores at kiln via craft_item after building kiln). No pick? dig_terrain digs stone from soil tool-free.
 P2. place_block/remove_block build 2D tiles in your district (wall/floor/door/fence). dig_terrain/plant_terrain mutate local terrain (dig yields stone; plant costs wood).
-P3. propose_treaty/vote_treaty govern inter-settlement trade pacts (reuse rule object with kind treaty).
+P3. propose_treaty/vote_treaty govern inter-settlement trade pacts (reuse rule object with kind treaty; optional tariff 0–0.25).
+P4. deliver_caravan starts a caravan run when you hold a cart/wagon and enough cargo — goods transfer on arrival at the destination settlement.
 
 EMERGENT ROLES:
 16. Your role is not fixed. If "Incoming messages" or a NOTE says the village

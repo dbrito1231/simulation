@@ -1037,8 +1037,10 @@ DECISION_ACTIONS = [
     # Path 1: composable tiles, terrain mutation, diplomacy treaties.
     "place_block", "remove_block", "dig_terrain", "plant_terrain",
     "propose_treaty", "vote_treaty",
+    "deliver_caravan",
     # Huntable wildlife (WILDLIFE_ENABLED): engine offers only when prey is in range.
     "hunt_wildlife",
+    "confront_agent",
     # Daily Council Assembly. Offered only to a seated attendee in-session.
     "council_speak", "council_propose", "council_vote",
 ]
@@ -1107,6 +1109,7 @@ DECISION_SCHEMA = {
                 "kind": {"type": "string"},
                 "value": {"type": ["number", "string", "null"]},
                 "description": {"type": ["string", "null"]},
+                "tariff": {"type": ["number", "null"], "minimum": 0, "maximum": 0.25},
                 "supersedes": {"type": ["string", "null"]},
                 "effect": {
                     "type": ["object", "null"],
@@ -3482,6 +3485,8 @@ def build_user_prompt(data, slim=False):
         path1_parts.append(data["path1_industry_line"])
     if data.get("path1_neighbor_line"):
         path1_parts.append(data["path1_neighbor_line"])
+    if data.get("settlement_stores_line"):
+        path1_parts.append(f"Settlement stores: {data['settlement_stores_line']}")
     path1_lines = ("\n".join(path1_parts) + "\n") if path1_parts else ""
 
     return USER_PROMPT_TEMPLATE.format(
@@ -4338,6 +4343,35 @@ def control_god_capabilities():
                 },
                 "reversibilityClass": "irreversible",
                 "notes": "positive delta repairs, negative delta damages (may reach ruin).",
+            },
+            "repair_structures": {
+                "applyable": True,
+                "payload": {
+                    "scope": {"type": "string | object",
+                              "enum": ["ids", "all_critical"],
+                              "description": '"ids", "all_critical", or {"districtId": "<id>"}'},
+                    "structureIds": {"type": "array", "optional": True,
+                                    "description": "required when scope is ids"},
+                    "conditionTarget": {"type": "number", "optional": True,
+                                       "min": 0, "max": 100},
+                    "unRuin": {"type": "boolean", "optional": True, "default": True},
+                },
+                "reversibilityClass": "irreversible",
+                "batchMax": _sim_engine.GOD_REPAIR_STRUCTURES_BATCH_MAX,
+                "conditionMax": _sim_engine.GOD_REPAIR_STRUCTURES_CONDITION_MAX,
+                "notes": "batch restore / un-ruin; only this command and agent repair_structure may un-ruin.",
+            },
+            "clear_ruins": {
+                "applyable": True,
+                "payload": {
+                    "structureIds": {"type": "array", "optional": True},
+                    "minAgeFrames": {"type": "integer", "optional": True,
+                                    "default": _sim_engine.RUIN_CULL_AGE_FRAMES},
+                    "districtId": {"type": "string", "optional": True},
+                },
+                "reversibilityClass": "irreversible",
+                "batchMax": _sim_engine.GOD_CLEAR_RUINS_BATCH_MAX,
+                "notes": "delete selected or aged ruins; mirrors engine cull cleanup.",
             },
             # Sovereign God mode Phase 5 (docs/plan-sovereign-god-mode-v2.md
             # "Storyteller events" + "Timed lawgiver modifiers"). Reversibility

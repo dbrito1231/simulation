@@ -132,6 +132,26 @@ def _structure_envelope(structure_id, delta):
     return {"kind": "structure_condition", "payload": {"structureId": structure_id, "delta": delta}}
 
 
+def _repair_structures_envelope(scope, *, structure_ids=None, un_ruin=True, condition_target=None):
+    payload = {"scope": scope, "unRuin": un_ruin}
+    if scope == "ids":
+        payload["structureIds"] = list(structure_ids or [])
+    if condition_target is not None:
+        payload["conditionTarget"] = condition_target
+    return {"kind": "repair_structures", "payload": payload}
+
+
+def _clear_ruins_envelope(*, structure_ids=None, district_id=None, min_age_frames=None):
+    payload = {}
+    if structure_ids is not None:
+        payload["structureIds"] = list(structure_ids)
+    if district_id is not None:
+        payload["districtId"] = district_id
+    if min_age_frames is not None:
+        payload["minAgeFrames"] = min_age_frames
+    return {"kind": "clear_ruins", "payload": payload}
+
+
 def _weather_envelope(state, districts=None, duration=None, replace_effect_id=None):
     payload = {"state": state}
     if districts is not None:
@@ -1147,12 +1167,13 @@ def test_structure_condition_damage_crosses_ruin_with_homeless_handling():
         assert_true(any("homeless" in line for line in new_activity), engine.activityLog[:5])
         assert_true(any("collapsed into a ruin" in line for line in new_activity), engine.activityLog[:5])
 
-        # A ruined structure is now rejected by validation (repair cannot
-        # recreate a destroyed structure through this miracle).
+        # Single-target structure_condition still rejects already-ruined
+        # structures; batch repair_structures is the operator un-ruin path.
         already_ruin = engine.god_preview(_structure_envelope(s["id"], 10))
         assert_true(already_ruin == {"ok": False, "reason": "structure is already ruined"}, already_ruin)
         print("  OK structure_condition damage crossing the ruin threshold uses the normal ruin "
-              "path (homeOf/homeStructureId cleared, homeless narration, decay-identical transition)")
+              "path (homeOf/homeStructureId cleared, homeless narration, decay-identical transition); "
+              "single-target repair still rejects ruins")
     finally:
         se.GOD_MODE_ENABLED = old
 
@@ -1176,6 +1197,87 @@ def test_structure_condition_rejections():
         zero_delta = engine.god_preview(_structure_envelope(s["id"], 0))
         assert_true(zero_delta == {"ok": False, "reason": "delta must be non-zero"}, zero_delta)
         print("  OK structure_condition rejects unknown/already-ruined structures and out-of-range delta")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_repair_structures_batch_un_ruins_preview_and_apply():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        ruined = _add_test_structure(engine, condition=0.0)
+        ruined["isRuin"] = True
+        ruined["ruinedSinceFrame"] = engine.frameTick
+        worn = _add_test_structure(engine, condition=40.0)
+
+        preview = engine.god_preview(_repair_structures_envelope(
+            "ids", structure_ids=[ruined["id"], worn["id"]]))
+        assert_true(preview["ok"] and preview["reversibilityClass"] == "irreversible", preview)
+        outcome = preview["previewOutcome"]
+        assert_true(outcome["count"] == 2, outcome)
+        by_id = {row["structureId"]: row for row in outcome["structures"]}
+        assert_true(by_id[ruined["id"]]["unRuined"] is True, by_id[ruined["id"]])
+        assert_true(by_id[ruined["id"]]["newCondition"] >= se.REPAIR_CONDITION_RESTORE,
+                    by_id[ruined["id"]])
+        assert_true(by_id[worn["id"]]["newCondition"] > worn["condition"], by_id[worn["id"]])
+
+        applied = engine.god_apply(preview["previewId"], "req-repair-structures-batch")
+        assert_true(applied["ok"], applied)
+        assert_true(not ruined["isRuin"] and ruined["condition"] >= se.REPAIR_CONDITION_RESTORE, ruined)
+        assert_true(worn["condition"] == by_id[worn["id"]]["newCondition"], (worn, applied))
+        assert_true(applied["outcome"]["count"] == preview["previewOutcome"]["count"],
+                    "applied count must equal previewed count")
+        print("  OK repair_structures batch un-ruins ruined + restores worn; applied == previewed")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_repair_structures_rejects_ruins_when_un_ruin_false():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        ruined = _add_test_structure(engine, condition=0.0)
+        ruined["isRuin"] = True
+        rejected = engine.god_preview(_repair_structures_envelope(
+            "ids", structure_ids=[ruined["id"]], un_ruin=False))
+        assert_true(rejected == {"ok": False, "reason": "unRuin must be true to include ruined structures"},
+                    rejected)
+        print("  OK repair_structures with unRuin=false rejects ruined targets")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_clear_ruins_deletes_registry_preview_and_apply():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        owner = engine.agents[0]
+        ruin_a = _add_test_structure(engine, condition=0.0, home_of=owner["name"])
+        ruin_a["isRuin"] = True
+        owner["homeStructureId"] = ruin_a["id"]
+        ruin_b = _add_test_structure(engine, condition=0.0)
+        ruin_b["isRuin"] = True
+        kept = _add_test_structure(engine, condition=80.0)
+
+        preview = engine.god_preview(_clear_ruins_envelope(structure_ids=[ruin_a["id"], ruin_b["id"]]))
+        assert_true(preview["ok"] and preview["reversibilityClass"] == "irreversible", preview)
+        assert_true(preview["previewOutcome"]["count"] == 2, preview["previewOutcome"])
+        assert_true(set(preview["previewOutcome"]["structureIds"]) == {ruin_a["id"], ruin_b["id"]},
+                    preview["previewOutcome"])
+
+        applied = engine.god_apply(preview["previewId"], "req-clear-ruins")
+        assert_true(applied["ok"], applied)
+        remaining_ids = {s["id"] for s in engine.civilization["structures"]}
+        assert_true(ruin_a["id"] not in remaining_ids and ruin_b["id"] not in remaining_ids,
+                    remaining_ids)
+        assert_true(kept["id"] in remaining_ids, remaining_ids)
+        assert_true(owner["homeStructureId"] is None, owner)
+        assert_true(applied["outcome"]["removed"] == preview["previewOutcome"]["count"],
+                    (applied, preview))
+        print("  OK clear_ruins preview/apply deletes selected ruins and clears homeStructureId")
     finally:
         se.GOD_MODE_ENABLED = old
 
@@ -2708,6 +2810,9 @@ def main():
     test_structure_condition_repair_and_damage()
     test_structure_condition_damage_crosses_ruin_with_homeless_handling()
     test_structure_condition_rejections()
+    test_repair_structures_batch_un_ruins_preview_and_apply()
+    test_repair_structures_rejects_ruins_when_un_ruin_false()
+    test_clear_ruins_deletes_registry_preview_and_apply()
     test_phase4_miracles_irreversible_and_refuse_cancellation()
     test_phase4_duplicate_request_and_expired_preview()
 

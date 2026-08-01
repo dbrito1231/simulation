@@ -3,7 +3,7 @@
 **The action catalog** — the sole source for every decision action an agent can be
 offered. No other spec lists actions.
 
-**Canonical for:** all 43 `DECISION_ACTIONS`: params, flag gate/preconditions,
+**Canonical for:** all 45 `DECISION_ACTIONS`: params, flag gate/preconditions,
 effect, validation. The build pipeline and blueprint two-stage flow as the core
 game loop.
 **See also:** [01-architecture.md](01-architecture.md#action-sync-invariant) for the
@@ -16,7 +16,7 @@ for districts/terrain/structures referenced by params; [08](08-systems-economy.m
 [09](09-systems-society.md)/[10](10-path1.md) for the flag semantics gating many
 of these actions.
 
-Fact source: `DECISION_ACTIONS` (server.py, 43 entries after the Daily Council
+Fact source: `DECISION_ACTIONS` (server.py, 45 entries after the Daily Council
 actions below, listed
 here in declaration order). Params legend: `target` (agent name / district id /
 structure id / wildlife creature id / grid `"gx,gy"` depending on action),
@@ -31,7 +31,8 @@ structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 | `move_to_district` | `target` or `target_district` | none | Sets movement target to the resolved district; accepts either param since models commonly put the id in `target_district` |
 | `move_to_agent` | `target` (agent name) | none | Moves toward the named agent, or the nearest agent if `target` is missing/unresolved |
 | `collect_resource` | `target` (resource id, optional), `target_district` | none | Gathers a resource in-zone (subject to ecology gate, [05](05-world.md)); if no active project district resolves, falls through to `start_project` |
-| `hunt_wildlife` | `target` (creature id, optional) | `WILDLIFE_ENABLED`; living huntable prey in range (`HUNT_RADIUS`); `bee` is never valid | Multi-hit fauna combat ([02](02-engine-core.md), [08](08-systems-economy.md)): resolves optional `target` to a living non-decorative creature within range, else nearest valid prey; deals role-based damage (`HUNT_DAMAGE_HUNTER` if actor role `hunter`, else `HUNT_DAMAGE`); forces flee retarget on hit; on `hp <= 0` marks dead, schedules respawn, grants kill yield (`meat` for forest/farm kinds, `fish` for beach kinds — never land→`food`); rejected if flag off, no prey, out of range, or target is decorative/`bee` |
+| `hunt_wildlife` | `target` (creature id, optional) | `WILDLIFE_ENABLED`; living huntable prey in range (`HUNT_RADIUS = 90`); `bee` is never valid | Multi-hit fauna combat ([02](02-engine-core.md), [08](08-systems-economy.md)): resolves optional `target` to a living non-decorative creature within range, else nearest valid prey; deals role-based damage (`HUNT_DAMAGE_HUNTER = 4` if actor role `hunter`, else `HUNT_DAMAGE = 2`); forces flee retarget on every hit; on `hp <= 0` marks dead, schedules respawn, grants kill yield (`meat` for forest/farm kinds, `fish` for beach kinds — never land→`food`); rejected if flag off, no prey, out of range, or target is decorative/`bee` |
+| `confront_agent` | `target` (agent name, required) | `SURVIVAL_ENABLED`; living, non-incapacitated target within contact range (`CONFRONT_CONTACT_DIST = 80`, same radius as heal/bury/trade adjacency); actor not a Sage-emergency responder; **social gate:** actor holds `rival` toward target **or** Path-1 pressure context applies (see [09](09-systems-society.md#bounded-agent-conflict-confront_agent)); pair not on `confrontCooldowns` cooldown; target is not Sage (`role == "elder"`) | Bounded deterministic PvP ([09](09-systems-society.md)): moves toward target if not adjacent; on contact applies `CONFRONT_DAMAGE = 10` HP loss (clamped — cannot drop target below `CONFRONT_INCAP_HEALTH = 1` unless target was already at or below `CONFRONT_LETHAL_THRESHOLD = 15`, in which case incapacitation via `health <= 0` is allowed); may steal one held edible (`food`/`fish`/`meat`, preferring the target's most-abundant edible) when target holds more than `EDIBLE_RESERVE`; actor then retargets away (`CONFRONT_FLEE_DIST ≈ 60px`); writes activity line, applies a relationship hit (`rival` reinforced or neutral→rival), stamps pair cooldown `CONFRONT_COOLDOWN_FRAMES = STALL_THRESHOLD * 4` (~4 min). No free-for-all — friendly/neutral pairs reject. Death never bypasses existing incapacitation/lifecycle paths. |
 | `talk_to_nearby` | `target` (recipient or "everyone"), `message`, optional `belief_pitch` (`belief_id`/`pitch`) | `AGENT_MESSAGING` for delivery ([06](06-agents.md)); a pitch requires an existing adjacent (≤80px) recipient + speaker-held belief | Sets `agent["message"]`, logs conversation, delivers to inbox, may teach; ordinary distant talk retains move/delivery behavior, but an explicit belief pitch cannot score or persuade until adjacent ([09](09-systems-society.md)) |
 | `found_belief` | `belief` (`id`/`name`/`tenet`/`affinity`) | `MEMES_ENABLED`; any agent may author; live registry below `MAX_BELIEFS` | Validates and persists an authored belief, adds it to the founder, and logs/memorializes the founding ([09](09-systems-society.md)) |
 | `trade_resource` | `target` (agent name) | `ECONOMY_ENABLED` for priced trade | Moves toward target if not adjacent; within 80px, trades the agent's most-abundant resource — priced via market if `ECONOMY_ENABLED` and a market is active, else 1-for-nothing barter |
@@ -65,8 +66,9 @@ structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 | `remove_block` | `target` (`"gx,gy"`, optional — defaults to agent's cell) | `COMPOSABLE_BUILD_ENABLED` | Refunds the block's cost, clears the tile |
 | `dig_terrain` | — (acts on agent's current cell) | `TERRAIN_TILES_ENABLED`; tool-free by design (bootstrap stone source) | Converts `grove`→`soil` (or similar) at the agent's grid cell, yields a resource |
 | `plant_terrain` | — (acts on agent's current cell) | `TERRAIN_TILES_ENABLED`; needs 1 wood; cell must be `soil` or `rock` | Converts the cell toward a planted/vegetated kind, consumes 1 wood |
-| `propose_treaty` | `rule` (id/name/value/description) | `PATH1_DIPLOMACY_ENABLED`; rule must have `id`+`name` | Adds a `kind: "treaty"` entry to `pendingRules` with proposer auto-yes, tallies immediately |
-| `vote_treaty` | `target` (treaty id), `vote` | `PATH1_DIPLOMACY_ENABLED`; treaty must be pending | Records vote; on enactment appends to `civilization["treaties"]` ([10](10-path1.md)) |
+| `propose_treaty` | `rule` (id/name/value/description/`tariff`?) | `PATH1_DIPLOMACY_ENABLED`; rule must have `id`+`name`; optional `tariff` fraction `0`–`0.25` (default `0`) | Adds a `kind: "treaty"` entry to `pendingRules` with proposer auto-yes, tallies immediately; `tariff` persists on enactment ([10-path1.md](10-path1.md#treaty-tariffs)) |
+| `vote_treaty` | `target` (treaty id), `vote` | `PATH1_DIPLOMACY_ENABLED`; treaty must be pending | Records vote; on enactment appends to `civilization["treaties"]` ([10-path1.md](10-path1.md)) |
+| `deliver_caravan` | `target_district` (optional — defaults to the other settlement's first district) | `PATH1_DIPLOMACY_ENABLED`; ≥2 settlements; actor holds cart/wagon and ≥ `CARAVAN_CARRY_MIN` total resources | Assigns or refreshes a `caravan` goal toward the destination district; authoritative goods transfer runs on arrival via `_deliver_caravan` ([08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)). **Action-sync:** must appear in `DECISION_ACTIONS`, `DECISION_SCHEMA`, `SYSTEM_PROMPT`, `apply_decision`, `available_actions`, and `ACTION_LABELS` together in Phase 3b. |
 | `council_speak` | `message` (required), `feeling` (short free text), `topic` (agenda reference) | `DAILY_COUNCIL_ENABLED`; a Daily Council is active and actor is seated | Appends the actor's opinion and feeling to the live transcript, stages their speech bubble, and advances the deterministic speaking order; no world state changes beyond the meeting record/bubble |
 | `council_propose` | `kind` (`rule`/`blueprint`/`idea`), then existing `rule` or `blueprint` payload, or `title` + `detail` for an idea | active Daily Council; actor seated; rule/blueprint must pass the existing validators | Opens the council ballot and transitions to voting. Rule and blueprint proposals retain all existing validation; an idea is advisory-only and has no direct mechanical effect |
 | `council_vote` | ordinary ballot: `vote` (`yes`/`no`/`abstain`); succession ballot: `candidate` (current candidate name) or `vote: "abstain"` | active Daily Council; actor seated; ballot open | Ordinary ballots retain majority/elder-tie behavior and validated enactment paths. Succession records one candidate choice per voter in the normal transcript/tally; after all eligible votes or TTL, highest votes wins and an exact tie uses lowest stable agent id. The leaderless village declares the result and office changes only through `_enact_succession_winner()` |
@@ -80,7 +82,12 @@ requires `CEMETERY_ENABLED`; `repeal_rule` requires `RULES_ENABLED`;
 `place_block`/`remove_block` require `COMPOSABLE_BUILD_ENABLED`;
 `dig_terrain`/`plant_terrain` require `TERRAIN_TILES_ENABLED`;
 `propose_treaty`/`vote_treaty` require `PATH1_DIPLOMACY_ENABLED`;
-`hunt_wildlife` requires `WILDLIFE_ENABLED`; the three role
+`deliver_caravan` requires `PATH1_DIPLOMACY_ENABLED` and further filters
+per-agent when fewer than two settlements exist or the actor lacks a
+vehicle/minimum cargo;
+`hunt_wildlife` requires `WILDLIFE_ENABLED`; `confront_agent` requires
+`SURVIVAL_ENABLED` and further filters per-agent by social/pressure gates
+(see action table); the three role
 proposal actions require `EMERGENT_ROLES`. All other
 actions in the table are always offered (subject to `DECISION_SCHEMA`'s fixed
 enum superset — [03-cognition.md](03-cognition.md)). Invalid or disallowed choices

@@ -276,8 +276,9 @@ WILDLIFE_SPEED = {
 }
 HUNT_RADIUS = 90
 WILDLIFE_FLEE_RADIUS = 120
-HUNT_DAMAGE = 1
-HUNT_DAMAGE_HUNTER = 2
+# Retuned Phase 2b: hunters clear 1–4 HP prey in one hit; boar/seal need two.
+HUNT_DAMAGE = 2
+HUNT_DAMAGE_HUNTER = 4
 WILDLIFE_RESPAWN_FRAMES = 600
 WILDLIFE_POP_TICK_FRAMES = 600
 WILDLIFE_MIGRATE_CHECK_FRAMES = 600
@@ -465,6 +466,10 @@ GOD_GRANT_SESSION_CAP = 2000
 # transitions -- including the homeOf homeless handling -- fire through their
 # normal narration rather than a parallel code path.
 GOD_STRUCTURE_DELTA_MAX = 100
+# Town-integrity mass structure commands (repair_structures / clear_ruins).
+GOD_REPAIR_STRUCTURES_CONDITION_MAX = 100
+GOD_REPAIR_STRUCTURES_BATCH_MAX = 10
+GOD_CLEAR_RUINS_BATCH_MAX = 10
 
 # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 5) ---
 # Timed lawgiver modifiers + storyteller events. "One active value per key":
@@ -690,6 +695,8 @@ COLLAPSE_REGEN = 0.5
 COLLAPSE_REVIVE_HEALTH = 15
 REVIVE_HUNGER = 35          # hunger floor on revival, else 0-hunger re-collapse in ~8s
 EDIBLE_RESERVE = 3          # food/fish/meat an agent keeps back from builds/sharing
+EDIBLE_SCARCITY_THRESHOLD = 3   # village-wide edible scarcity (matches council threshold)
+MEAT_SCARCITY_CAP = 12          # ecology branch meat ratio denominator (~one boar + reserve)
 SHARE_RADIUS = 120          # auto-share edibles with a starving neighbour within this range
 STARVING_HUNGER = 10        # below this, a foodless agent deterministically seeks the nearest food zone
 
@@ -1009,12 +1016,12 @@ SPOILAGE_RATIO = 0.25
 # Cart (the first vehicle): holding one raises the carry cap query-time, the
 # same pattern as _gather_yield_bonus. COLLECT_CAP itself stays unchanged.
 CART_CARRY_BONUS = 20
-# Shelter: one night per DAY_FRAMES (~7.5 min real time). Each *working* house
+# Shelter: one night per DAY_FRAMES (~10.0 min real time). Each *working* house
 # shelters HOUSE_SHELTER_OCCUPANTS; unsheltered agents lose a little hunger --
 # a nudge, never a punishment: ~1/7 of one meal (FOOD_RESTORE 45), floored at
 # SHELTER_HUNGER_FLOOR (20), i.e. a night outside can never push anyone into
 # the starvation-reflex band (STARVING_HUNGER 10).
-DAY_FRAMES = 13500
+DAY_FRAMES = 18000
 HOUSE_SHELTER_OCCUPANTS = 2
 SHELTER_HUNGER_PENALTY = 6
 SHELTER_HUNGER_FLOOR = 20
@@ -1027,15 +1034,29 @@ SHELTER_HUNGER_FLOOR = 20
 # Mid retune 0.1/tick (~5.8h to disrepair, ~8.3h to ruin) still failed the
 # 2026-07-10 morning soak on a reset world: ruins 11→154 over ~13.5h real /
 # ~8.6h sim while agents were heal-spamming, all 15 houses non-working, births
-# stalled (pop 16→5). Now 0.05/tick: ~11.7h of neglect to disrepair, ~16.7h to
-# ruin -- survives one unattended overnight; sprawl still decays across days.
+# stalled (pop 16→5). 0.05/tick (~11.7h to disrepair, ~16.7h to ruin) still
+# outran repair under soak. Town-integrity retune 0.025/tick: ~23.3h to
+# disrepair, ~33.3h to ruin -- paired with repair campaigns, critical backstop
+# widening, and ruin cull so sprawl decays across days without offline prune.
 # Paired with _maybe_repair_critical (house category) so zero working houses
 # can't permanently lock the population cap. A ruin is rebuilt via
 # repair_structure for half the original needs (min 1 each) -- cheaper than
 # new, the deterministic escape.
-STRUCTURE_DECAY_PER_GOODS_TICK = 0.05
+STRUCTURE_DECAY_PER_GOODS_TICK = 0.025
 STRUCTURE_DISREPAIR_THRESHOLD = 30
 REPAIR_CONDITION_RESTORE = 50
+# Repair campaigns: autonomous repair goals when village-wide pressure rises.
+REPAIR_CAMPAIGN_RUIN_RATIO = 0.15
+REPAIR_CAMPAIGN_WORKING_FRAC = 0.5
+REPAIR_CAMPAIGN_MAX_ASSIGN = 2
+REPAIR_CAMPAIGN_GOAL_TTL = STALL_THRESHOLD * 2
+REPAIR_CAMPAIGN_CRITICAL_TYPES = (
+    "house", "market", "workshop", "foundry", "granary", "farm_plot",
+)
+# Ruin cull: in-sim registry deletion for aged, unaffordable ruins.
+RUIN_CULL_AGE_FRAMES = DAY_FRAMES
+RUIN_CULL_MIN_PER_CALL = 1
+RUIN_CULL_MAX_PER_CALL = 3
 
 
 def structure_condition_tier(structure):
@@ -1048,22 +1069,24 @@ def structure_condition_tier(structure):
     if condition < 60:
         return "worn"
     return "pristine"
-# Disaster: rare random damage so decay isn't perfectly predictable. 0.005 per
-# ~30s goods tick => expected roughly once per 100 minutes of runtime.
-DISASTER_PROB = 0.005
-DISASTER_DAMAGE = (40, 70)
+# Disaster: rare random damage so decay isn't perfectly predictable.
+# Town-integrity retune: 0.002 per ~30s goods tick => ~once per 250 real min;
+# damage softened to (30, 55). STORM_DISASTER_PROB unchanged.
+DISASTER_PROB = 0.002
+DISASTER_DAMAGE = (30, 55)
 # Seasons: a four-season clock derived purely from frameTick (no extra state to
-# persist). YEAR_FRAMES is the single canonical in-world year -- 3 real hours
+# persist). YEAR_FRAMES is the single canonical in-world year -- 4 real hours
 # = exactly 24 day/night cycles (DAY_FRAMES) -- and seasons and aging both
 # derive from it, so the GUI calendar, the season clock, and agent ages stay
-# in sync. One season = YEAR_FRAMES/4 (~45 min = exactly 6 day/night cycles;
+# in sync. One season = YEAR_FRAMES/4 (~60 min = exactly 6 day/night cycles;
 # an overnight soak sees several winters). The season multiplies district
 # stock regrowth: spring booms, winter stops regrowth entirely. Escapes:
 # stores/granary capacity built before winter (spoilage permitting), and the
-# season simply turning. Note: winter lengthened 30->45 min in the 2026-07-14
-# year unification -- watch food runway across winter on the next soak.
-YEAR_FRAMES = 324_000
-SEASON_FRAMES = YEAR_FRAMES // 4  # 81_000: one season = 45 min = exactly 6 day/night cycles
+# season simply turning. Note: calendar stretch 2026-07-31 (+33% real-time
+# cadence: 7.5->10 min days, 45->60 min seasons) -- watch food runway across
+# winter on the next soak.
+YEAR_FRAMES = 432_000
+SEASON_FRAMES = YEAR_FRAMES // 4  # 108_000: one season = 60 min = exactly 6 day/night cycles
 SEASONS = ["spring", "summer", "autumn", "winter"]
 SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}
 
@@ -1184,12 +1207,12 @@ LIFECYCLE_ENABLED = True
 # cohorts overnight; 0.005 (~1y/33min) still felt too fast -- retuned to
 # 0.001 (~1y/2.8h, 0→90 in ~10.4 days) so multi-day 24/7 soaks see gradual
 # turnover, not near-extinction every night. 2026-07-14: derived from
-# YEAR_FRAMES instead of a hand-tuned constant (~1y/3.0h, 0→90 in ~11.25
+# YEAR_FRAMES instead of a hand-tuned constant (~1y/4.0h, 0→90 in ~15.0
 # days) so aging stays locked to the same canonical year as the season clock
 # and GUI calendar. Smoke-testing forces this by temporarily shrinking the
 # gate/increment, never by waiting.
 LIFECYCLE_TICK_FRAMES = 300
-AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES  # = 1/1080: exactly 1 year per YEAR_FRAMES (3.0 h)
+AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES  # = 1/1440: exactly 1 year per YEAR_FRAMES (4.0 h)
 ADULT_AGE = 18                      # below this, an agent cannot be a birth parent or election candidate
 ELDER_AGE = 55                      # life-stage label switches to "elder" (age word only, not the elder ROLE)
 MAX_LIFE_EXPECTANCY = 90            # death chance saturates approaching this age
@@ -1294,6 +1317,14 @@ PERSONALITY_DRIFT_CAP = 3
 # for LIFECYCLE_ENABLED's permanent death.
 CEMETERY_ENABLED = True
 BURY_CONTACT_DIST = 80                # matches heal_agent's contact radius
+CONFRONT_CONTACT_DIST = 80            # bounded PvP adjacency (heal/bury/trade parity)
+CONFRONT_DAMAGE = 10
+CONFRONT_INCAP_HEALTH = 1             # non-lethal floor unless target already critical
+CONFRONT_LETHAL_THRESHOLD = 15
+CONFRONT_FLEE_DIST = 60
+CONFRONT_COOLDOWN_FRAMES = STALL_THRESHOLD * 4
+CONFRONT_PRESSURE_WINDOW_FRAMES = STALL_THRESHOLD * 2
+FORCED_HUNT_GOAL_TTL = STALL_THRESHOLD
 BURIAL_BACKSTOP_FRAMES = STALL_THRESHOLD * 3  # ~1 min grace for organic bury_agent before the backstop buries directly
 
 # --- Path 1: Minecraft-like world depth (PATH1_ENABLED) ---
@@ -1619,6 +1650,8 @@ WILDLIFE_GUARD_RADIUS = 120
 SETTLEMENT_STRUCT_THRESHOLD = 5
 SETTLEMENT_POP_THRESHOLD = 6
 CARAVAN_CARRY_MIN = 3
+CARAVAN_VEHICLE_RESOURCES = frozenset({"cart", "wagon"})
+TREATY_TARIFF_MAX = 0.25
 PATH1_GRID_COLS = 8
 PATH1_GRID_ROWS = 8
 
@@ -2239,6 +2272,7 @@ class SimEngine:
             "nextGeneratedAgentId": 1000,  # synthetic ids for generated villagers once AGENT_DEFS is exhausted
             "nextWildlifeId": 1,           # huntable fauna creature ids (WILDLIFE_ENABLED)
             "wildlife": [],                # civilization["wildlife"] fauna records
+            "confrontCooldowns": {},       # pairKey -> frameTick when cooldown expires
             "pendingSuccession": None,     # {electionId, candidates:[names], startFrame, deadline}
             "lastSuccessionActivityFrame": 0,
             "harvestQuotas": {},            # rule id -> {"district": id|None, "resource": id|None, "value": n}
@@ -2262,6 +2296,7 @@ class SimEngine:
             "settlements": [],
             "treaties": [],
             "caravanLog": [],
+            "settlementStores": {},
             "path1Placements": 0,
             "path1TerrainMutations": 0,
             # Agent-driven structure reorganization (footprint-overlap fixup):
@@ -4505,6 +4540,7 @@ class SimEngine:
                 f"working until someone uses repair_structure")
         if new_cond <= 0:
             s["isRuin"] = True
+            s.setdefault("ruinedSinceFrame", self.frameTick)
             self._push_activity(
                 f"The {name} in {did} has collapsed into a ruin! "
                 f"repair_structure can rebuild it for half the original materials")
@@ -4775,36 +4811,19 @@ class SimEngine:
             return f"{agent['name']} found nothing that needs repair"
         cost = self._repair_cost(s)
         name = s.get("name") or s.get("type")
-        # Fund each resource from the agent's inventory first, then the village
-        # stockpile (2026-07-07 audit: repairs drew from personal inventory
-        # only, so 320 repair attempts failed while the stockpile held 29k
-        # planks -- the gather->contribute loop could never fund the escape
-        # hatch). Refuse only when both together fall short.
-        c = self.civilization
-        plan = {}
-        missing = []
-        for res, amt in cost.items():
-            held = agent["resources"].get(res, 0)
-            from_agent = min(held, amt)
-            from_stock = amt - from_agent
-            if from_stock > int(c["stockpile"].get(res, 0)):
-                missing.append(res)
-            else:
-                plan[res] = (from_agent, from_stock)
+        paid, missing = self._pay_local_cost(agent, cost)
         if missing:
             cost_str = ", ".join(f"{amt} {res}" for res, amt in cost.items())
             agent["lastRepairRejection"] = {
-                "reason": (f"repairing the {name} needs {cost_str} -- you and the "
-                           f"village stockpile together lack {', '.join(missing)}"),
+                "reason": (f"repairing the {name} needs {cost_str} -- you, your settlement store, "
+                           f"and the village stockpile together lack {', '.join(missing)}"),
                 "frame": self.frameTick}
             return f"{agent['name']} lacks {', '.join(missing)} to repair the {name}"
-        stock_parts = []
-        for res, (from_agent, from_stock) in plan.items():
-            if from_agent:
-                agent["resources"][res] -= from_agent
-            if from_stock:
-                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
-                stock_parts.append(f"{from_stock} {res}")
+        store_parts, stock_parts = paid
+        if store_parts:
+            self._push_activity(
+                f"The {self._settlement_for_agent(agent)} settlement store supplied "
+                f"{', '.join(store_parts)} for {agent['name']}'s repair of the {name}")
         if stock_parts:
             self._push_activity(
                 f"The village stockpile supplied {', '.join(stock_parts)} for "
@@ -5041,32 +5060,20 @@ class SimEngine:
         return total
 
     def _pay_upgrade_cost(self, agent, cost, name):
-        c = self.civilization
-        plan = {}
-        missing = []
-        for res, amt in cost.items():
-            held = agent["resources"].get(res, 0)
-            from_agent = min(held, amt)
-            from_stock = amt - from_agent
-            if from_stock > int(c["stockpile"].get(res, 0)):
-                missing.append(res)
-            else:
-                plan[res] = (from_agent, from_stock)
+        paid, missing = self._pay_local_cost(agent, cost)
         if missing:
             cost_str = ", ".join(f"{amt} {res}" for res, amt in cost.items())
             agent["lastUpgradeRejection"] = {
-                "reason": (f"upgrading {name} needs {cost_str} -- you and the stockpile "
-                           f"together lack {', '.join(missing)}"),
+                "reason": (f"upgrading {name} needs {cost_str} -- you, your settlement store, "
+                           f"and the stockpile together lack {', '.join(missing)}"),
                 "frame": self.frameTick,
             }
             return False
-        stock_parts = []
-        for res, (from_agent, from_stock) in plan.items():
-            if from_agent:
-                agent["resources"][res] -= from_agent
-            if from_stock:
-                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
-                stock_parts.append(f"{from_stock} {res}")
+        store_parts, stock_parts = paid
+        if store_parts:
+            self._push_activity(
+                f"The {self._settlement_for_agent(agent)} settlement store supplied "
+                f"{', '.join(store_parts)} for {agent['name']}'s upgrade of the {name}")
         if stock_parts:
             self._push_activity(
                 f"The village stockpile supplied {', '.join(stock_parts)} for "
@@ -5359,8 +5366,20 @@ class SimEngine:
             reason = "a divine hand stills the harvest"
             agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
             return f"{agent['name']} found nothing — {reason}"
-        amount = max(1, min(amount, self._carry_cap(agent) - agent["resources"].get(resource, 0)))
-        agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
+        intended = amount
+        room = max(0, self._carry_cap(agent) - agent["resources"].get(resource, 0))
+        agent_add = min(intended, room)
+        overflow = intended - agent_add
+        if agent_add <= 0 and overflow <= 0 and intended > 0:
+            overflow = intended
+        elif agent_add <= 0 and room > 0:
+            agent_add = min(intended, max(1, room))
+            overflow = intended - agent_add
+        amount = agent_add + overflow
+        if agent_add:
+            agent["resources"][resource] = agent["resources"].get(resource, 0) + agent_add
+        if overflow:
+            self._credit_settlement_overflow(agent, resource, overflow)
         c["collectSuccesses"] += 1
         self._path1_tool_benchmark(resource, True)
         if ECOLOGY_ENABLED:
@@ -5376,7 +5395,10 @@ class SimEngine:
         bonus_note = ""
         if amount > 1:
             bonus_note = " (structure effects boosted the harvest)"
-        return f"{agent['name']} collected {resource}" + (f" x{amount}{bonus_note}" if amount > 1 else "")
+        summary = f"{agent['name']} collected {resource}" + (f" x{amount}{bonus_note}" if amount > 1 else "")
+        if overflow:
+            summary += f" ({overflow} overflow to settlement store)"
+        return summary
 
     # --- Path 1: tool tiers ---
     def _gather_tool_tier(self, agent):
@@ -5698,6 +5720,271 @@ class SimEngine:
             c["districts"][did].setdefault("settlementId", "home")
         c.setdefault("treaties", [])
         c.setdefault("caravanLog", [])
+        stores = c.setdefault("settlementStores", {})
+        for sid in (s["id"] for s in c["settlements"]):
+            stores.setdefault(sid, {})
+
+    def _ensure_settlement_stores(self):
+        self._init_settlements()
+        stores = self.civilization.setdefault("settlementStores", {})
+        for sid in (s["id"] for s in self.civilization["settlements"]):
+            stores.setdefault(sid, {})
+
+    def _settlement_store_bucket(self, settlement_id):
+        self._ensure_settlement_stores()
+        return self.civilization["settlementStores"].setdefault(settlement_id, {})
+
+    def _credit_settlement_overflow(self, agent, resource, amount):
+        if amount <= 0:
+            return
+        c = self.civilization
+        if path1_on("PATH1_DIPLOMACY_ENABLED"):
+            bucket = self._settlement_store_bucket(self._settlement_for_agent(agent))
+            bucket[resource] = bucket.get(resource, 0) + amount
+        else:
+            c["stockpile"][resource] = c["stockpile"].get(resource, 0) + amount
+
+    def _pay_local_cost(self, agent, cost):
+        """Fund from agent inventory, settlement store, then village stockpile."""
+        c = self.civilization
+        sid = self._settlement_for_agent(agent)
+        store = (self._settlement_store_bucket(sid)
+                 if path1_on("PATH1_DIPLOMACY_ENABLED") else {})
+        plan = {}
+        missing = []
+        for res, amt in cost.items():
+            remaining = amt
+            from_agent = min(agent["resources"].get(res, 0), remaining)
+            remaining -= from_agent
+            from_store = min(int(store.get(res, 0)), remaining) if store else 0
+            remaining -= from_store
+            from_stock = remaining
+            if from_stock > int(c["stockpile"].get(res, 0)):
+                missing.append(res)
+            else:
+                plan[res] = (from_agent, from_store, from_stock)
+        if missing:
+            return None, missing
+        store_parts = []
+        stock_parts = []
+        for res, (from_agent, from_store, from_stock) in plan.items():
+            if from_agent:
+                agent["resources"][res] -= from_agent
+            if from_store:
+                store[res] = int(store.get(res, 0)) - from_store
+                store_parts.append(f"{from_store} {res}")
+            if from_stock:
+                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
+                stock_parts.append(f"{from_stock} {res}")
+        return (store_parts, stock_parts), None
+
+    def _format_settlement_stores_for_prompt(self, agent):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return None
+        self._ensure_settlement_stores()
+        stores = self.civilization.get("settlementStores") or {}
+        if not stores:
+            return None
+        parts = []
+        my_sid = self._settlement_for_agent(agent)
+        for sid, bucket in stores.items():
+            if not bucket:
+                continue
+            label = sid + (" (yours)" if sid == my_sid else "")
+            items = ", ".join(f"{qty} {res}" for res, qty in sorted(bucket.items()) if qty > 0)
+            if items:
+                parts.append(f"{label}: {items}")
+        return "; ".join(parts) if parts else "per-settlement stores empty"
+
+    def _enacted_treaty_tariff(self):
+        tariff = 0.0
+        for entry in (self.civilization.get("treaties") or []):
+            try:
+                tval = float(entry.get("tariff") or 0)
+            except (TypeError, ValueError):
+                tval = 0.0
+            tariff = max(tariff, tval)
+        for rule in (self.civilization.get("rules") or []):
+            if rule.get("kind") != "treaty":
+                continue
+            try:
+                tval = float(rule.get("tariff") or 0)
+            except (TypeError, ValueError):
+                tval = 0.0
+            tariff = max(tariff, tval)
+        return max(0.0, min(TREATY_TARIFF_MAX, tariff))
+
+    def _parse_treaty_tariff(self, raw):
+        try:
+            tariff = float(raw if raw is not None else 0)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= tariff <= TREATY_TARIFF_MAX:
+            return tariff
+        return None
+
+    def _caravan_trade_bundle(self, agent, dest_settlement_id=None):
+        bundle = {}
+        for res, qty in agent["resources"].items():
+            if qty <= 0 or res in CARAVAN_VEHICLE_RESOURCES:
+                continue
+            if res in EDIBLE_RESOURCES:
+                transferable = max(0, qty - EDIBLE_RESERVE)
+            else:
+                transferable = qty
+            if transferable > 0:
+                bundle[res] = transferable
+        return bundle
+
+    def _deliver_caravan(self, agent, dest_settlement_id, source_settlement_id=None):
+        c = self.civilization
+        bundle = self._caravan_trade_bundle(agent, dest_settlement_id)
+        if not bundle:
+            return False
+        source_sid = source_settlement_id or next(
+            (s["id"] for s in c["settlements"] if s["id"] != dest_settlement_id),
+            self._settlement_for_agent(agent),
+        )
+        dest_stores = self._settlement_store_bucket(dest_settlement_id)
+        source_stores = self._settlement_store_bucket(source_sid)
+        tariff = self._enacted_treaty_tariff()
+        from_district = agent.get("currentDistrict")
+        dest_settlement = next(
+            (s for s in c["settlements"] if s["id"] == dest_settlement_id), None)
+        dest_district = (
+            (dest_settlement or {}).get("districts") or [from_district])[0]
+        goods = {}
+        for res, qty in bundle.items():
+            agent["resources"][res] -= qty
+            tariff_qty = int(qty * tariff) if tariff > 0 else 0
+            dest_qty = qty - tariff_qty
+            if tariff_qty > 0:
+                if path1_on("PATH1_DIPLOMACY_ENABLED"):
+                    source_stores[res] = source_stores.get(res, 0) + tariff_qty
+                else:
+                    c["stockpile"][res] = c["stockpile"].get(res, 0) + tariff_qty
+            if dest_qty > 0:
+                dest_stores[res] = dest_stores.get(res, 0) + dest_qty
+            if from_district and dest_district:
+                self._emit_shipment(from_district, dest_district, res)
+            goods[res] = qty
+        c["caravanLog"].append({
+            "goods": goods,
+            "from": source_sid,
+            "to": dest_settlement_id,
+            "frame": self.frameTick,
+            "agent": agent["name"],
+        })
+        self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
+                            {"agent": agent["name"], "dest": dest_settlement_id, "goods": goods})
+        dest_name = (dest_settlement or {}).get("name") or dest_settlement_id
+        parts = ", ".join(f"{n} {r}" for r, n in goods.items())
+        self._push_activity(
+            f"{agent['name']} delivered {parts} to {dest_name}"
+            + (f" (tariff {int(tariff * 100)}%)" if tariff > 0 else ""))
+        return True
+
+    def _transit_district_for_settlement(self, settlement_id):
+        c = self.civilization
+        candidates = []
+        for s in c["structures"]:
+            if s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD:
+                continue
+            if s.get("type") not in ("dock", "shipyard"):
+                continue
+            did = s.get("districtId")
+            if did and c["districts"].get(did, {}).get("settlementId") == settlement_id:
+                candidates.append(did)
+        if candidates:
+            return candidates[0]
+        for did, d in c["districts"].items():
+            if d.get("settlementId") == settlement_id and d.get("kind") == "beach":
+                return did
+        for settlement in c["settlements"]:
+            if settlement["id"] == settlement_id and settlement.get("districts"):
+                return settlement["districts"][0]
+        return None
+
+    def _ocean_district_id(self):
+        ocean = self._wildlife_ocean_district()
+        if ocean:
+            for did, dist in self.civilization["districts"].items():
+                if dist is ocean:
+                    return did
+        return "ocean" if "ocean" in self.civilization["districts"] else None
+
+    def _caravan_route_legs(self, agent, dest_district_id):
+        c = self.civilization
+        my_sid = self._settlement_for_agent(agent)
+        dest_sid = (c["districts"].get(dest_district_id) or {}).get("settlementId", "home")
+        if (my_sid == dest_sid
+                or not path1_on("PATH1_DIPLOMACY_ENABLED")
+                or not TRANSIT_ENABLED
+                or not self._has_ocean_transit()):
+            return [dest_district_id]
+        source_dock = self._transit_district_for_settlement(my_sid)
+        ocean_did = self._ocean_district_id()
+        dest_dock = self._transit_district_for_settlement(dest_sid)
+        legs = []
+        if source_dock:
+            legs.append(source_dock)
+        if ocean_did:
+            legs.append(ocean_did)
+        if dest_dock and dest_dock != dest_district_id:
+            legs.append(dest_dock)
+        legs.append(dest_district_id)
+        deduped = []
+        for leg in legs:
+            if not deduped or deduped[-1] != leg:
+                deduped.append(leg)
+        return deduped
+
+    def _caravan_next_hop(self, agent, dest_district_id):
+        legs = self._caravan_route_legs(agent, dest_district_id)
+        my_did = agent.get("currentDistrict")
+        for leg in legs:
+            if leg == my_did:
+                continue
+            if not self._en_route_to(agent, leg):
+                return leg
+        return dest_district_id
+
+    def _set_caravan_target(self, agent, dest_district_id):
+        hop = self._caravan_next_hop(agent, dest_district_id)
+        self._set_agent_target_once(agent, hop)
+
+    def _caravan_eligible(self, agent):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return False
+        carry = self._carry_cap(agent)
+        has_vehicle = any(agent["resources"].get(v, 0) > 0 for v in CARAVAN_VEHICLE_RESOURCES)
+        if not has_vehicle or sum(agent["resources"].values()) < CARAVAN_CARRY_MIN:
+            return False
+        c = self.civilization
+        self._init_settlements()
+        return len(c["settlements"]) >= 2
+
+    def _resolve_caravan_dest(self, agent, decision):
+        c = self.civilization
+        self._init_settlements()
+        my_sid = self._settlement_for_agent(agent)
+        raw = decision.get("target_district") or decision.get("target")
+        if raw:
+            resolved = self._resolve_target_district(raw, agent)
+            if resolved:
+                return resolved
+        other = next((s for s in c["settlements"] if s["id"] != my_sid), None)
+        if other and other.get("districts"):
+            return other["districts"][0]
+        return None
+
+    def _assign_caravan_goal(self, agent, dest_district):
+        agent["goal"] = {
+            "kind": "caravan",
+            "target_district": dest_district,
+            "source_settlement": self._settlement_for_agent(agent),
+            "ttl": STALL_THRESHOLD * 4,
+        }
 
     def _maybe_found_settlement(self):
         if not path1_on("PATH1_DIPLOMACY_ENABLED"):
@@ -5747,33 +6034,27 @@ class SimEngine:
         return False
 
     def _maybe_caravan_goal(self, agent):
-        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
-            return
-        carry = self._carry_cap(agent)
-        has_vehicle = any(agent["resources"].get(v, 0) > 0 for v in ("cart", "wagon"))
-        if not has_vehicle or sum(agent["resources"].values()) < CARAVAN_CARRY_MIN:
+        if not self._caravan_eligible(agent):
             return
         c = self.civilization
-        self._init_settlements()
-        if len(c["settlements"]) < 2:
-            return
         my_sid = self._settlement_for_agent(agent)
         other = next((s for s in c["settlements"] if s["id"] != my_sid), None)
         if not other or not other["districts"]:
             return
         dest = other["districts"][0]
+        dest_sid = other["id"]
         if agent.get("currentDistrict") == dest:
-            if TRANSIT_ENABLED and self._has_ocean_transit():
-                if not self._consume_ocean_transit():
-                    return
-            c["caravanLog"].append({"agent": agent["name"], "settlement": other["id"],
-                                    "frame": self.frameTick})
-            self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
-                                {"agent": agent["name"], "dest": dest})
-            self._push_activity(f"{agent['name']} arrives at {other['name']} with trade goods")
+            goal = agent.get("goal") or {}
+            source_sid = goal.get("source_settlement") or next(
+                (s["id"] for s in c["settlements"] if s["id"] != dest_sid), my_sid)
+            if (source_sid != dest_sid and TRANSIT_ENABLED and self._has_ocean_transit()
+                    and not self._consume_ocean_transit(agent)):
+                return
+            if self._deliver_caravan(agent, dest_sid, source_settlement_id=source_sid):
+                agent["goal"] = None
             return
         if not agent.get("goal"):
-            agent["goal"] = {"kind": "caravan", "target_district": dest, "ttl": STALL_THRESHOLD * 4}
+            self._assign_caravan_goal(agent, dest)
 
     def _ocean_transit_unlocks(self):
         if not TRANSIT_ENABLED:
@@ -5790,17 +6071,31 @@ class SimEngine:
     def _has_ocean_transit(self):
         return bool(self._ocean_transit_unlocks())
 
-    def _consume_ocean_transit(self):
+    def _consume_ocean_transit(self, agent=None):
         unlock = self._ocean_transit_unlocks()[0] if self._ocean_transit_unlocks() else None
         if not unlock:
             return False
         costs = unlock.get("consumes") or {}
-        stock = self.civilization["stockpile"]
-        if any(stock.get(r, 0) < n for r, n in costs.items()):
-            self._push_activity("Ocean caravan waits for transit supplies")
-            return False
+        c = self.civilization
+        sid = self._settlement_for_agent(agent) if agent else "home"
+        store = (self._settlement_store_bucket(sid)
+                 if agent and path1_on("PATH1_DIPLOMACY_ENABLED") else {})
+        stock = c["stockpile"]
+        plan = {}
         for resource, amount in costs.items():
-            stock[resource] -= amount
+            remaining = amount
+            from_store = min(int(store.get(resource, 0)), remaining) if store else 0
+            remaining -= from_store
+            from_stock = remaining
+            if from_stock > int(stock.get(resource, 0)):
+                self._push_activity("Ocean caravan waits for transit supplies")
+                return False
+            plan[resource] = (from_store, from_stock)
+        for resource, (from_store, from_stock) in plan.items():
+            if from_store:
+                store[resource] = int(store.get(resource, 0)) - from_store
+            if from_stock:
+                stock[resource] = int(stock.get(resource, 0)) - from_stock
         self._push_activity("An ocean caravan launches, consuming " + ", ".join(f"{n} {r}" for r, n in costs.items()))
         return True
 
@@ -5880,17 +6175,23 @@ class SimEngine:
         if not isinstance(rule, dict) or not rule.get("id") or not rule.get("name"):
             agent["lastTreatyRejection"] = {"reason": "invalid treaty proposal", "frame": self.frameTick}
             return f"{agent['name']} drafted an invalid treaty"
+        tariff = self._parse_treaty_tariff(rule.get("tariff", 0))
+        if tariff is None:
+            agent["lastTreatyRejection"] = {"reason": "tariff must be 0–0.25", "frame": self.frameTick}
+            return f"{agent['name']} drafted an invalid treaty tariff"
         entry = {
             "id": rule["id"], "name": rule["name"], "kind": "treaty",
             "value": rule.get("value") or "trade",
             "description": rule.get("description", "Inter-settlement treaty"),
+            "tariff": tariff,
             "proposedBy": agent["name"], "enacted": False,
             "votes": {agent["name"]: "yes"},
         }
         self.civilization["pendingRules"].append(entry)
         self._tally_and_maybe_enact(entry)
         agent["lastTreatyRejection"] = None
-        return f'{agent["name"]} proposed treaty "{entry["name"]}"'
+        tariff_note = f" (tariff {int(tariff * 100)}%)" if tariff > 0 else ""
+        return f'{agent["name"]} proposed treaty "{entry["name"]}"{tariff_note}'
 
     def _vote_treaty(self, agent, decision):
         if not path1_on("PATH1_DIPLOMACY_ENABLED"):
@@ -5907,9 +6208,22 @@ class SimEngine:
         if pending.get("enacted"):
             self.civilization.setdefault("treaties", []).append({
                 "id": pending["id"], "name": pending["name"], "value": pending["value"],
+                "tariff": pending.get("tariff", 0),
                 "frame": self.frameTick,
             })
         return f'{agent["name"]} voted {vote} on treaty "{pending["name"]}"'
+
+    def _deliver_caravan_action(self, agent, decision):
+        if not self._caravan_eligible(agent):
+            return f"{agent['name']} cannot run a caravan yet"
+        dest = self._resolve_caravan_dest(agent, decision)
+        if not dest:
+            return f"{agent['name']} found no destination settlement"
+        dest_sid = self.civilization["districts"].get(dest, {}).get("settlementId")
+        if dest_sid == self._settlement_for_agent(agent):
+            return f"{agent['name']} is already at the destination settlement"
+        self._assign_caravan_goal(agent, dest)
+        return f"{agent['name']} sets out on a caravan toward {dest}"
 
     # --- Path 1: pressure loop ---
     def _is_night(self):
@@ -6481,7 +6795,7 @@ class SimEngine:
         return None
 
     def _grant_hunt_yield(self, agent, kind):
-        """Grant +1 meat/fish with carry-cap room first, overflow to stockpile."""
+        """Grant +1 meat/fish with carry-cap room first, overflow to settlement store."""
         resource = WILDLIFE_YIELD.get(kind)
         if not resource or not agent:
             return 0, 0, None
@@ -6490,13 +6804,12 @@ class SimEngine:
         held = agent["resources"].get(resource, 0)
         room = max(0, cap - held)
         agent_added = min(amount, room)
-        stockpile_added = amount - agent_added
+        overflow_added = amount - agent_added
         if agent_added:
             agent["resources"][resource] = held + agent_added
-        if stockpile_added:
-            c = self.civilization
-            c["stockpile"][resource] = c["stockpile"].get(resource, 0) + stockpile_added
-        return agent_added, stockpile_added, resource
+        if overflow_added:
+            self._credit_settlement_overflow(agent, resource, overflow_added)
+        return agent_added, overflow_added, resource
 
     def _apply_hunt_damage(self, agent, creature, damage=None):
         """Apply hunt damage under the lock. Returns a result dict for apply_decision."""
@@ -6522,17 +6835,17 @@ class SimEngine:
         creature["respawnAt"] = self.frameTick + WILDLIFE_RESPAWN_FRAMES
         creature["waypoints"] = []
         creature.pop("migrateDest", None)
-        agent_added, stockpile_added, resource = self._grant_hunt_yield(agent, kind)
+        agent_added, overflow_added, resource = self._grant_hunt_yield(agent, kind)
         note = f"{agent['name']} hunted a {kind}"
         if resource:
-            note += f" (+{agent_added + stockpile_added} {resource}"
-            if stockpile_added:
-                note += f"; {stockpile_added} overflow to stockpile"
+            note += f" (+{agent_added + overflow_added} {resource}"
+            if overflow_added:
+                note += f"; {overflow_added} overflow to settlement store"
             note += ")"
         self._push_activity(note)
         return {"ok": True, "killed": True, "creature": creature, "damage": damage,
                 "kind": kind, "resource": resource, "agentAdded": agent_added,
-                "stockpileAdded": stockpile_added}
+                "stockpileAdded": overflow_added}
 
     def god_wildlife_spawn(self, district_id, kind, respect_cap=True):
         """Spawn an alive creature at a habitat-legal position. Caller holds lock.
@@ -7015,15 +7328,18 @@ class SimEngine:
                                      "village_tier": village_tier})
                 return (f"{agent['name']} cannot craft {recipe_id} — it is tier {tier} "
                         f"tech and the village is tier {village_tier} ({reason})")
-        if not self._has_inputs(agent, recipe["inputs"]):
-            self._craft_input_reflex(agent, recipe_id, recipe)
-            missing = self._largest_missing_input(agent, recipe["inputs"])
-            return f"{agent['name']} lacks {missing} to craft {recipe_id}"
         if recipe.get("station") and agent["currentZone"] != recipe["station"]:
             self._set_agent_target_once(agent, recipe["station"])
             return f"{agent['name']} heads to the {recipe['station']} to craft {recipe_id}"
-        for r, n in recipe["inputs"].items():
-            agent["resources"][r] -= n
+        if self._has_inputs(agent, recipe["inputs"]):
+            for r, n in recipe["inputs"].items():
+                agent["resources"][r] -= n
+        else:
+            paid, missing = self._pay_local_cost(agent, recipe["inputs"])
+            if missing:
+                self._craft_input_reflex(agent, recipe_id, recipe)
+                missing_res = self._largest_missing_input(agent, recipe["inputs"])
+                return f"{agent['name']} lacks {missing_res} to craft {recipe_id}"
         output = 1
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop":
             output += self._craft_output_bonus(recipe, agent.get("currentDistrict"))
@@ -7380,6 +7696,10 @@ class SimEngine:
         if kind == "custom" and rule.get("effect") is not None \
                 and self._normalize_custom_rule_effect(rule.get("effect")) is None:
             return False
+        if kind == "treaty":
+            tariff = self._parse_treaty_tariff(rule.get("tariff", 0))
+            if tariff is None:
+                return False
         return True
 
     def _record_rule_kind_enacted(self, kind):
@@ -8083,6 +8403,36 @@ class SimEngine:
                 continue
             self._bury_agent_at(cemetery, corpse, buried_by=None)
 
+    def _village_repair_pressure(self):
+        """True when ruin ratio or working fraction crosses campaign thresholds."""
+        if not GOODS_ENABLED:
+            return False
+        structures = self.civilization["structures"]
+        total = len(structures)
+        if total == 0:
+            return False
+        ruined = sum(
+            1 for s in structures
+            if s.get("isRuin") or s.get("condition", 100) <= 0
+        )
+        working = sum(
+            1 for s in structures
+            if not s.get("isRuin")
+            and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD
+        )
+        return (
+            ruined / total >= REPAIR_CAMPAIGN_RUIN_RATIO
+            or working / total < REPAIR_CAMPAIGN_WORKING_FRAC
+        )
+
+    def _category_has_disrepaired_or_ruined(self, type_):
+        for s in self.civilization["structures"]:
+            if s.get("type") != type_:
+                continue
+            if s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD:
+                return True
+        return False
+
     def _repair_backstop_agent(self, structures):
         """Pick a living non-responder nearest the worst-condition target who
         can fund the repair (stockpile + held). Shared by housing/market
@@ -8132,42 +8482,78 @@ class SimEngine:
             (
                 "house",
                 lambda: GOODS_ENABLED,
-                lambda: self._working_structure_count("house") == 0,
+                lambda: (
+                    self._working_structure_count("house") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("house")
+                    )
+                ),
                 "Housing emergency -- {summary} (no working houses left; "
                 "population cap was locked)",
             ),
             (
                 "market",
                 lambda: GOODS_ENABLED and ECONOMY_ENABLED and has_type("market"),
-                lambda: not self._market_active(),
+                lambda: (
+                    not self._market_active()
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("market")
+                    )
+                ),
                 "Market emergency -- {summary} (no working market left; "
                 "priced trade was locked)",
             ),
             (
                 "workshop",
                 lambda: GOODS_ENABLED and has_type("workshop"),
-                lambda: self._working_structure_count("workshop") == 0,
+                lambda: (
+                    self._working_structure_count("workshop") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("workshop")
+                    )
+                ),
                 "Workshop emergency -- {summary} (no working workshop left; "
                 "crafting was locked)",
             ),
             (
                 "foundry",
                 lambda: GOODS_ENABLED and path1_on("TIER3_CONTENT_ENABLED") and has_type("foundry"),
-                lambda: self._working_structure_count("foundry") == 0,
+                lambda: (
+                    self._working_structure_count("foundry") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("foundry")
+                    )
+                ),
                 "Foundry emergency -- {summary} (no working foundry left; "
                 "tier-3 crafting was locked)",
             ),
             (
                 "granary",
                 lambda: GOODS_ENABLED and CRAFTING_ENABLED and has_type("granary"),
-                lambda: self._working_structure_count("granary") == 0,
+                lambda: (
+                    self._working_structure_count("granary") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("granary")
+                    )
+                ),
                 "Granary emergency -- {summary} (no working granary left; "
                 "food storage was locked)",
             ),
             (
                 "farm_plot",
                 lambda: GOODS_ENABLED and has_type("farm_plot"),
-                lambda: self._working_structure_count("farm_plot") == 0,
+                lambda: (
+                    self._working_structure_count("farm_plot") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("farm_plot")
+                    )
+                ),
                 "Farm emergency -- {summary} (no working farm plot left; "
                 "food production was locked)",
             ),
@@ -8202,6 +8588,139 @@ class SimEngine:
             if summary and "lacks" not in summary and "nothing" not in summary:
                 self._push_activity(message.format(summary=summary))
             return
+
+    def _repair_campaign_targets(self):
+        """Worst structures village-wide, preferring critical categories."""
+        damaged = [
+            s for s in self.civilization["structures"]
+            if s.get("isRuin") or s.get("condition", 100) < 100
+        ]
+        if not damaged:
+            return []
+        critical = [s for s in damaged if s.get("type") in REPAIR_CAMPAIGN_CRITICAL_TYPES]
+        pool = critical or damaged
+
+        def _sort_key(s):
+            is_critical = 0 if s.get("type") in REPAIR_CAMPAIGN_CRITICAL_TYPES else 1
+            return (is_critical, s.get("condition", 100))
+
+        return sorted(pool, key=_sort_key)
+
+    def _maybe_repair_campaign(self):
+        """Assign repair goals when village-wide structural pressure is high."""
+        if not GOODS_ENABLED or not self._village_repair_pressure():
+            return
+        em = self._sage_emergency() if SURVIVAL_ENABLED else None
+        responders = self._sage_responders(em) if em else set()
+        targets = self._repair_campaign_targets()
+        if not targets:
+            return
+        assigned = 0
+        used_agents = set()
+        for target in targets:
+            if assigned >= REPAIR_CAMPAIGN_MAX_ASSIGN:
+                break
+            agent = self._repair_backstop_agent([target])
+            if not agent or agent["name"] in used_agents:
+                continue
+            if agent["name"] in responders:
+                continue
+            if (agent.get("goal") or {}).get("kind") == "repair":
+                continue
+            agent["goal"] = {
+                "kind": "repair",
+                "target": target["id"],
+                "ttl": REPAIR_CAMPAIGN_GOAL_TTL,
+            }
+            used_agents.add(agent["name"])
+            assigned += 1
+
+    def _village_resources_total(self):
+        totals = dict(self.civilization.get("stockpile") or {})
+        for agent in self.agents:
+            if agent.get("deathFrame") is not None:
+                continue
+            for res, amt in (agent.get("resources") or {}).items():
+                totals[res] = totals.get(res, 0) + int(amt)
+        return totals
+
+    def _village_can_afford_rebuild(self, structure):
+        cost = self._repair_cost(structure)
+        totals = self._village_resources_total()
+        for res, amt in cost.items():
+            if totals.get(res, 0) < amt:
+                return False
+        return True
+
+    def _village_can_afford_any_rebuild(self):
+        ruins = [
+            s for s in self.civilization["structures"]
+            if s.get("isRuin") or s.get("condition", 100) <= 0
+        ]
+        return any(self._village_can_afford_rebuild(s) for s in ruins)
+
+    def _cull_priority_key(self, structure, ruined_list):
+        type_ = structure.get("type")
+        if type_ not in REPAIR_CAMPAIGN_CRITICAL_TYPES:
+            return (0, -(structure.get("ruinedSinceFrame") or 0))
+        if self._working_structure_count(type_) == 0:
+            ruins_of_type = [r for r in ruined_list if r.get("type") == type_]
+            if len(ruins_of_type) <= 1:
+                return (2, -(structure.get("ruinedSinceFrame") or 0))
+        return (1, -(structure.get("ruinedSinceFrame") or 0))
+
+    def _remove_structures_from_registry(self, structure_ids):
+        """Drop structures and clear homeStructureId / reorgTasks references."""
+        if not structure_ids:
+            return 0
+        ids = set(structure_ids)
+        c = self.civilization
+        before = len(c["structures"])
+        c["structures"] = [s for s in c["structures"] if s.get("id") not in ids]
+        removed = before - len(c["structures"])
+        for agent in self.agents:
+            if agent.get("homeStructureId") in ids:
+                agent["homeStructureId"] = None
+        reorg_tasks = c.get("reorgTasks")
+        if reorg_tasks is not None:
+            c["reorgTasks"] = [
+                t for t in reorg_tasks if t.get("structureId") not in ids
+            ]
+        return removed
+
+    def _maybe_cull_ruins(self):
+        """Remove aged, unaffordable ruins when ruin pressure is high."""
+        if not GOODS_ENABLED:
+            return
+        structures = self.civilization["structures"]
+        total = len(structures)
+        if total == 0:
+            return
+        ruined = [s for s in structures if s.get("isRuin")]
+        if not ruined:
+            return
+        if len(ruined) / total <= REPAIR_CAMPAIGN_RUIN_RATIO:
+            return
+        eligible = []
+        for s in ruined:
+            age_frame = s.get("ruinedSinceFrame", 0)
+            if self.frameTick - age_frame >= RUIN_CULL_AGE_FRAMES:
+                eligible.append(s)
+        if not eligible:
+            return
+        if self._village_can_afford_any_rebuild():
+            return
+        eligible.sort(key=lambda s: self._cull_priority_key(s, ruined))
+        cull_count = min(RUIN_CULL_MAX_PER_CALL, max(RUIN_CULL_MIN_PER_CALL, len(eligible)))
+        to_remove = eligible[:cull_count]
+        ids = [s["id"] for s in to_remove]
+        names = [s.get("name") or s.get("type") for s in to_remove]
+        removed = self._remove_structures_from_registry(ids)
+        if removed:
+            self._push_activity(
+                f"The village abandons {removed} ruined structure(s) beyond repair: "
+                f"{', '.join(names)}")
+            self._tick_structure_health_benchmark()
 
     # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
     def _succession_candidates(self):
@@ -9438,6 +9957,135 @@ class SimEngine:
             for a in self.agents
         )
 
+    def _edible_scarce(self, rid):
+        """Village held + stockpiled quantity at/below scarcity threshold."""
+        return self._village_holdings(rid) <= EDIBLE_SCARCITY_THRESHOLD
+
+    def _meat_scarce(self):
+        if self._edible_scarce("meat"):
+            return True
+        total = sum(self._village_holdings(rid) for rid in EDIBLE_RESOURCES)
+        return total <= EDIBLE_SCARCITY_THRESHOLD
+
+    def _gather_failing(self, rid):
+        """True when every district of rid's gather zone is ecology-depleted."""
+        zone = self._gather_zone_for_resource(rid)
+        if not zone:
+            return False
+        districts = self._districts_of_kind(zone)
+        if not districts:
+            return True
+        for did in districts:
+            ratio = self._district_ecology_ratio(did)
+            if ratio is not None and ratio >= STOCK_LOW_RATIO:
+                return False
+        return True
+
+    def _wildlife_present(self):
+        if not WILDLIFE_ENABLED:
+            return False
+        for cre in (self.civilization.get("wildlife") or []):
+            if not cre.get("alive"):
+                continue
+            kind = cre.get("kind")
+            if kind in WILDLIFE_DECORATIVE_KINDS or kind not in WILDLIFE_YIELD:
+                continue
+            return True
+        return False
+
+    def _agent_accessible_edible_total(self, agent):
+        """Personal edibles plus nearby surplus (SHARE_RADIUS backstop semantics)."""
+        total = sum(agent["resources"].get(rid, 0) for rid in EDIBLE_RESOURCES)
+        for donor in self.agents:
+            if donor is agent or donor["incapacitated"]:
+                continue
+            if self._distance_to(agent, donor) > SHARE_RADIUS:
+                continue
+            for rid in EDIBLE_RESOURCES:
+                total += max(0, donor["resources"].get(rid, 0) - EDIBLE_RESERVE)
+        return total
+
+    def _nearest_gather_edible_distance(self, agent):
+        best = None
+        for rid in EDIBLE_RESOURCES:
+            zone = self._gather_zone_for_resource(rid)
+            if not zone:
+                continue
+            for did in self._districts_of_kind(zone):
+                d = self._distance_to_district(agent, did)
+                if best is None or d < best:
+                    best = d
+        return best
+
+    def _nearest_prey_distance(self, agent):
+        prey = self._nearest_huntable_wildlife(agent)
+        if prey is None:
+            return None
+        return _dist(agent["x"], agent["y"], prey["x"], prey["y"])
+
+    def _confront_pair_key(self, id_a, id_b):
+        a, b = int(id_a), int(id_b)
+        lo, hi = (a, b) if a <= b else (b, a)
+        return f"{lo}:{hi}"
+
+    def _confront_on_cooldown(self, agent, target):
+        key = self._confront_pair_key(agent["id"], target["id"])
+        expires = (self.civilization.get("confrontCooldowns") or {}).get(key, 0)
+        return self.frameTick < expires
+
+    def _confront_pressure_context(self, agent):
+        if not path1_on("PRESSURE_LOOP_ENABLED"):
+            return False
+        if self._is_night() and not agent.get("homeStructureId"):
+            return True
+        note = agent.get("lastNightNote")
+        if note and self.frameTick - note.get("frame", 0) <= CONFRONT_PRESSURE_WINDOW_FRAMES:
+            return True
+        return False
+
+    def _confront_authorized(self, agent, target):
+        if agent["relationships"].get(target["name"]) == "rival":
+            return True
+        return self._confront_pressure_context(agent)
+
+    def _confront_eligible_targets(self, agent):
+        em = self._sage_emergency()
+        if em and agent["name"] in self._sage_responders(em):
+            return []
+        targets = []
+        for other in self.agents:
+            if other is agent or other["incapacitated"]:
+                continue
+            if other.get("deathFrame") is not None:
+                continue
+            if other["role"] == "elder":
+                continue
+            if not self._confront_authorized(agent, other):
+                continue
+            if self._confront_on_cooldown(agent, other):
+                continue
+            if self._distance_to(agent, other) > 200:
+                continue
+            targets.append(other)
+        return targets
+
+    def _most_abundant_edible_for_steal(self, agent):
+        best, best_count = None, EDIBLE_RESERVE
+        for rid in EDIBLE_RESOURCES:
+            count = agent["resources"].get(rid, 0)
+            if count > best_count:
+                best_count, best = count, rid
+        return best
+
+    def _flee_from_agent(self, agent, other):
+        dx = agent["x"] - other["x"]
+        dy = agent["y"] - other["y"]
+        dist = math.sqrt(dx * dx + dy * dy) or 1.0
+        agent["targetX"] = agent["x"] + (dx / dist) * CONFRONT_FLEE_DIST
+        agent["targetY"] = agent["y"] + (dy / dist) * CONFRONT_FLEE_DIST
+        agent["waypoints"] = []
+        agent["goal"] = None
+
     def _village_needed_role(self):
         """Return a gather role the village needs, or None.
 
@@ -9456,7 +10104,7 @@ class SimEngine:
                 if roles and not self._role_is_filled(roles):
                     return roles[0]
 
-        # 2) Survival need: starving agents and no living food/fish gatherer.
+        # 2) Survival need: stock-aware, wildlife-aware precedence (specs/08).
         if SURVIVAL_ENABLED:
             living = self._living_agents()
             starving = [
@@ -9464,20 +10112,27 @@ class SimEngine:
                 if not a["incapacitated"] and a["hunger"] <= STARVING_HUNGER
             ]
             if len(starving) >= ROLE_STARVE_NEED_THRESHOLD:
-                food_roles = []
+                # Hunter before farmer/fisher when gather zones are barren but prey
+                # exists (specs/08 survival precedence — old fixed-order missed this).
+                if (self._wildlife_present()
+                        and not self._role_is_filled("hunter")
+                        and (self._meat_scarce()
+                             or any(self._edible_scarce(r) for r in EDIBLE_RESOURCES))
+                        and (self._gather_failing("food") or self._gather_failing("fish"))):
+                    return "hunter"
+                if self._edible_scarce("food") and not self._role_is_filled("farmer"):
+                    return "farmer"
+                if self._edible_scarce("fish") and not self._role_is_filled("fisher"):
+                    return "fisher"
                 for rid in EDIBLE_RESOURCES:
-                    food_roles.extend(self.d["RESOURCE_GATHER_ROLES"].get(rid) or ())
-                # Prefer farmer (food) over fisher when both are missing.
-                for role in food_roles:
-                    if not self._role_is_filled(role):
-                        return role
+                    for role in (self.d["RESOURCE_GATHER_ROLES"].get(rid) or ()):
+                        if not self._role_is_filled(role):
+                            return role
 
         # 3) Ecology need: a tracked resource is depleted/low village-wide
-        # and its gather role is unfilled.
+        # and its gather role is unfilled (meat uses village totals — no gatherZone).
         if ECOLOGY_ENABLED:
             self._ensure_district_stocks()
-            # Aggregate stock ratio per resource across districts; pick the
-            # scarcest unfilled gather role.
             totals = {}
             for stocks in self.civilization["districtStocks"].values():
                 for rid, val in stocks.items():
@@ -9498,6 +10153,12 @@ class SimEngine:
                 if not roles or self._role_is_filled(roles):
                     continue
                 scarce.append((ratio, roles[0]))
+            meat_total = self._village_holdings("meat")
+            meat_ratio = meat_total / MEAT_SCARCITY_CAP
+            if meat_ratio < STOCK_LOW_RATIO:
+                roles = self.d["RESOURCE_GATHER_ROLES"].get("meat")
+                if roles and not self._role_is_filled(roles):
+                    scarce.append((meat_ratio, roles[0]))
             if scarce:
                 scarce.sort(key=lambda t: t[0])
                 return scarce[0][1]
@@ -9654,6 +10315,42 @@ class SimEngine:
                 self._set_agent_target(agent, district_id)
                 self._push_activity(
                     f"{agent['name']} is starving and heads to {district_id} for {rid}")
+
+    def _maybe_forced_hunt(self):
+        """Deterministic hunt goal when starving, prey is nearer than gather, and
+        edibles are below reserve. Runs after _maybe_feed_starving (specs/08)."""
+        if not SURVIVAL_ENABLED or not WILDLIFE_ENABLED:
+            return
+        em = self._sage_emergency()
+        responders = self._sage_responders(em) if em else set()
+        candidates = []
+        for agent in self.agents:
+            if agent["incapacitated"] or agent["hunger"] > STARVING_HUNGER:
+                continue
+            if agent["name"] in responders or self._first_edible(agent):
+                continue
+            if self._agent_accessible_edible_total(agent) >= EDIBLE_RESERVE:
+                continue
+            prey = self._nearest_huntable_wildlife(agent)
+            if prey is None:
+                continue
+            prey_dist = _dist(agent["x"], agent["y"], prey["x"], prey["y"])
+            gather_dist = self._nearest_gather_edible_distance(agent)
+            if gather_dist is not None and gather_dist <= prey_dist:
+                continue
+            goal = agent.get("goal")
+            if goal and goal.get("kind") in ("gather", "hunt"):
+                continue
+            candidates.append((0 if agent["role"] == "hunter" else 1, prey_dist, agent, prey))
+        candidates.sort(key=lambda t: (t[0], t[1]))
+        for _, _, agent, prey in candidates:
+            agent["goal"] = {
+                "kind": "hunt",
+                "target": prey.get("id"),
+                "ttl": FORCED_HUNT_GOAL_TTL,
+            }
+            self._push_activity(
+                f"{agent['name']} is starving and hunts nearby {prey.get('kind')}")
 
     def _maybe_start_idle_district_project(self):
         """With multiple buildable districts, nothing today encourages the
@@ -12141,6 +12838,64 @@ class SimEngine:
                         summary = (f"{agent['name']} strikes a {result.get('kind')} "
                                    f"({result.get('hp')}/{creature.get('maxHp', '?')} hp)")
 
+        elif action == "confront_agent":
+            if not SURVIVAL_ENABLED:
+                summary = f"{agent['name']} cannot confront — survival is disabled"
+            else:
+                em = self._sage_emergency()
+                if em and agent["name"] in self._sage_responders(em):
+                    summary = f"{agent['name']} cannot confront — Sage emergency duty"
+                else:
+                    target = self._find_agent(decision.get("target"))
+                    if not target or target.get("deathFrame") is not None:
+                        summary = f"{agent['name']} found no one to confront"
+                    elif target["incapacitated"]:
+                        summary = (f"{agent['name']} cannot confront {target['name']} — "
+                                   "they have collapsed")
+                    elif target["role"] == "elder":
+                        summary = f"{agent['name']} cannot confront the elder"
+                    elif not self._confront_authorized(agent, target):
+                        summary = (f"{agent['name']} has no cause to confront "
+                                   f"{target['name']}")
+                    elif self._confront_on_cooldown(agent, target):
+                        summary = (f"{agent['name']} must wait before confronting "
+                                   f"{target['name']} again")
+                    elif self._distance_to(agent, target) > CONFRONT_CONTACT_DIST:
+                        self._auto_move_toward_target(agent, target["name"])
+                        summary = f"{agent['name']} moves to confront {target['name']}"
+                    else:
+                        pre_health = target["health"]
+                        if pre_health <= CONFRONT_LETHAL_THRESHOLD:
+                            target["health"] = max(0, pre_health - CONFRONT_DAMAGE)
+                            if target["health"] <= 0:
+                                target["incapacitated"] = True
+                        else:
+                            target["health"] = max(
+                                CONFRONT_INCAP_HEALTH, pre_health - CONFRONT_DAMAGE)
+                        stolen = self._most_abundant_edible_for_steal(target)
+                        if stolen:
+                            target["resources"][stolen] -= 1
+                            cap = self._carry_cap(agent)
+                            held = agent["resources"].get(stolen, 0)
+                            if held < cap:
+                                agent["resources"][stolen] = held + 1
+                            else:
+                                c["stockpile"][stolen] = (
+                                    c["stockpile"].get(stolen, 0) + 1)
+                        self._flee_from_agent(agent, target)
+                        if agent["relationships"].get(target["name"]) != "rival":
+                            agent["relationships"][target["name"]] = "rival"
+                        pair_key = self._confront_pair_key(agent["id"], target["id"])
+                        c.setdefault("confrontCooldowns", {})[pair_key] = (
+                            self.frameTick + CONFRONT_COOLDOWN_FRAMES)
+                        note = f"{agent['name']} confronted {target['name']}"
+                        if stolen:
+                            note += f" and took {stolen}"
+                        self._push_activity(note)
+                        self._push_memory(agent, f"Confronted {target['name']}")
+                        self._push_memory(target, f"Confronted by {agent['name']}")
+                        summary = note
+
         elif action == "talk_to_nearby":
             recipient = self._resolve_talk_target(agent, decision)
             self._auto_move_toward_target(agent, recipient if recipient != "everyone" else decision.get("target"))
@@ -12613,6 +13368,9 @@ class SimEngine:
         elif action == "vote_treaty":
             summary = self._vote_treaty(agent, decision)
 
+        elif action == "deliver_caravan":
+            summary = self._deliver_caravan_action(agent, decision)
+
         elif action == "council_speak":
             summary = self._council_speak(agent, decision)
 
@@ -12678,6 +13436,14 @@ class SimEngine:
             return {"kind": "craft", "target": decision.get("target"), "ttl": 6}
         if a == "build_structure":
             return {"kind": "build", "target": None, "district": district, "ttl": 6}
+        if a == "deliver_caravan":
+            dest = decision.get("target_district") or decision.get("target")
+            return {
+                "kind": "caravan",
+                "target_district": dest,
+                "source_settlement": None,
+                "ttl": STALL_THRESHOLD * 4,
+            }
         return None
 
     def _step_goal(self, agent):
@@ -12722,11 +13488,54 @@ class SimEngine:
         if g["kind"] == "caravan":
             dest = g.get("target_district")
             if dest and agent.get("currentDistrict") != dest:
-                self._set_agent_target_once(agent, dest)
+                self._set_caravan_target(agent, dest)
                 return True
             self._maybe_caravan_goal(agent)
             agent["goal"] = None
             return False
+        if g["kind"] == "hunt":
+            prey_id = g.get("target")
+            creature = self._find_wildlife_by_id(prey_id)
+            if creature is None or not creature.get("alive"):
+                agent["goal"] = None
+                return False
+            if _dist(agent["x"], agent["y"], creature["x"], creature["y"]) > HUNT_RADIUS:
+                agent["goal"] = None
+                return False
+            self.apply_decision(agent, {
+                "action": "hunt_wildlife",
+                "target": str(prey_id),
+                "message": None,
+                "reasoning": "goal:hunt",
+            })
+            if not creature.get("alive"):
+                agent["goal"] = None
+            return True
+        if g["kind"] == "repair":
+            target_id = g.get("target")
+            structure = next(
+                (s for s in self.civilization["structures"] if s.get("id") == target_id),
+                None,
+            )
+            if structure is None:
+                agent["goal"] = None
+                return False
+            did = structure.get("districtId")
+            if did and agent.get("currentDistrict") != did:
+                self._set_agent_target_once(agent, did)
+                return True
+            summary = self.apply_decision(agent, {
+                "action": "repair_structure",
+                "target": str(target_id),
+                "reasoning": f"goal:repair {target_id}",
+            })
+            s = summary or ""
+            if any(t in s for t in ("lacks ", "found nothing", "nothing needs repair")):
+                agent["goal"] = None
+                return False
+            if "repaired" in s.lower() or "rebuilt" in s.lower():
+                agent["goal"] = None
+            return True
         district_id = g.get("district") or self._resolve_contribution_district(agent)
         if g["kind"] in ("gather", "deliver", "build") and not district_id:
             agent["goal"] = None
@@ -13274,7 +14083,7 @@ class SimEngine:
             if self._is_night():
                 note(3, "NOTE: It is night — seek shelter in a house or composable shelter.")
             if self._border_settlement_agent(agent):
-                neighbor_line = "Neighbor settlement nearby — trade or propose_treaty"
+                neighbor_line = "Neighbor settlement nearby — trade, deliver_caravan, or propose_treaty"
                 note(3, f"NOTE: {neighbor_line}.")
             for rej_key, label in (("lastBlockRejection", "block"), ("lastTerrainRejection", "terrain")):
                 rej = agent.get(rej_key)
@@ -13468,8 +14277,12 @@ class SimEngine:
                  or path1_on("TERRAIN_TILES_ENABLED"))
             and (action_name not in ("propose_treaty", "vote_treaty")
                  or path1_on("PATH1_DIPLOMACY_ENABLED"))
+            and (action_name != "deliver_caravan"
+                 or self._caravan_eligible(agent))
             and (action_name != "hunt_wildlife"
                  or (WILDLIFE_ENABLED and self._nearest_huntable_wildlife(agent) is not None))
+            and (action_name != "confront_agent"
+                 or (SURVIVAL_ENABLED and bool(self._confront_eligible_targets(agent))))
         ]
 
         # Sovereign God mode (Phase 3): computed once per think payload,
@@ -13643,6 +14456,7 @@ class SimEngine:
             "path1_tool_line": tool_line,
             "path1_industry_line": industry_line,
             "path1_neighbor_line": neighbor_line,
+            "settlement_stores_line": self._format_settlement_stores_for_prompt(agent),
             "high_stakes_reason": high_stakes_reason,
             "available_actions": available_actions,
         }
@@ -14121,7 +14935,11 @@ class SimEngine:
                 self._tick_lifecycle()
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_feed_starving()
+                self._maybe_forced_hunt()
                 self._maybe_repair_critical()
+                if GOODS_ENABLED:
+                    self._maybe_repair_campaign()
+                    self._maybe_cull_ruins()
                 self._maybe_abandon_stalled_projects()
                 self._maybe_relocate_stuck_project()
                 self._maybe_reorganize_structures()
@@ -14422,6 +15240,7 @@ class SimEngine:
                 civ.setdefault("emergencyRuleSeq", 0)
                 civ.setdefault("roleNeedSinceFrame", None)
                 civ.setdefault("lastRoleRebalanceLatency", None)
+                civ.setdefault("confrontCooldowns", {})
                 # Phase 2 role registry migration: older saves only know the
                 # roles.json seeds, while newer saves carry per-world approved
                 # roles. Merge missing seeds without overwriting live entries.
@@ -14588,6 +15407,10 @@ class SimEngine:
                     civ.setdefault("settlements", [])
                     civ.setdefault("treaties", [])
                     civ.setdefault("caravanLog", [])
+                    stores = civ.setdefault("settlementStores", {})
+                    for s in civ.get("settlements") or []:
+                        if isinstance(s, dict) and s.get("id"):
+                            stores.setdefault(s["id"], {})
                     civ.setdefault("path1Placements", 0)
                     civ.setdefault("path1TerrainMutations", 0)
                     for d in (civ.get("districts") or {}).values():
@@ -15143,6 +15966,86 @@ class SimEngine:
                     return float(value)
         return default
 
+    def _god_select_repair_structures(self, payload):
+        """Resolve repair_structures target set. Returns (structures, reason)."""
+        scope = payload.get("scope")
+        un_ruin = payload.get("unRuin", True)
+        c = self.civilization
+        if scope == "ids":
+            ids = set(payload.get("structureIds") or [])
+            structures = [s for s in c["structures"] if s.get("id") in ids]
+            if len(structures) != len(ids):
+                return None, "unknown structure id in structureIds"
+        elif scope == "all_critical":
+            structures = [
+                s for s in c["structures"]
+                if s.get("type") in REPAIR_CAMPAIGN_CRITICAL_TYPES
+            ]
+        elif isinstance(scope, dict) and "districtId" in scope:
+            did = scope["districtId"]
+            if did not in c.get("districts", {}):
+                return None, "unknown district"
+            structures = [s for s in c["structures"] if s.get("districtId") == did]
+        else:
+            return None, 'scope must be "ids", "all_critical", or {"districtId": "<id>"}'
+        if not un_ruin:
+            ruined = [s for s in structures if s.get("isRuin") or s.get("condition", 100) <= 0]
+            if ruined:
+                return None, "unRuin must be true to include ruined structures"
+        return structures, None
+
+    def _god_select_clear_ruins(self, payload):
+        """Resolve clear_ruins target ruins. Returns (ruins, reason)."""
+        c = self.civilization
+        structure_ids = payload.get("structureIds")
+        district_id = payload.get("districtId")
+        min_age = payload.get("minAgeFrames", RUIN_CULL_AGE_FRAMES)
+        if structure_ids is not None:
+            ruins = []
+            for sid in structure_ids:
+                s = next((x for x in c["structures"] if x.get("id") == sid), None)
+                if s is None:
+                    return None, f"unknown structure id {sid}"
+                if not s.get("isRuin"):
+                    return None, f"structure {sid} is not a ruin"
+                ruins.append(s)
+            return ruins, None
+        pool = [s for s in c["structures"] if s.get("isRuin")]
+        if district_id is not None:
+            if district_id not in c.get("districts", {}):
+                return None, "unknown district"
+            pool = [s for s in pool if s.get("districtId") == district_id]
+        if min_age is not None:
+            pool = [
+                s for s in pool
+                if self.frameTick - s.get("ruinedSinceFrame", 0) >= min_age
+            ]
+        return pool, None
+
+    def _god_project_structure_repair(self, structure, condition_target, un_ruin):
+        """Non-mutating preview of one repair_structures entry."""
+        old_cond = structure.get("condition", 100.0)
+        was_ruin = bool(structure.get("isRuin")) or old_cond <= 0
+        if was_ruin:
+            if not un_ruin:
+                return None
+            target = condition_target if condition_target is not None else REPAIR_CONDITION_RESTORE
+            new_cond = max(REPAIR_CONDITION_RESTORE, min(100.0, float(target)))
+        elif condition_target is not None:
+            delta = float(condition_target) - old_cond
+            delta = max(-GOD_REPAIR_STRUCTURES_CONDITION_MAX,
+                        min(GOD_REPAIR_STRUCTURES_CONDITION_MAX, delta))
+            new_cond = min(100.0, old_cond + delta) if delta >= 0 else max(0.0, old_cond + delta)
+        else:
+            new_cond = min(100.0, old_cond + REPAIR_CONDITION_RESTORE)
+        return {
+            "structureId": structure["id"],
+            "structureName": structure.get("name") or structure.get("type"),
+            "oldCondition": old_cond,
+            "newCondition": new_cond,
+            "unRuined": was_ruin and un_ruin,
+        }
+
     def _validate_god_envelope(self, envelope):
         """Validate + canonicalize a {kind, payload, expectedFrame} command
         envelope. NO mutation. Returns (normalized_command, reason);
@@ -15310,6 +16213,99 @@ class SimEngine:
             return {"kind": "structure_condition",
                     "payload": {"structureId": structure_id, "delta": float(delta)}}, None
 
+        if kind == "repair_structures":
+            scope = payload.get("scope")
+            if scope == "ids":
+                structure_ids = payload.get("structureIds")
+                if not isinstance(structure_ids, list) or not structure_ids:
+                    return None, "structureIds must be a non-empty list when scope is ids"
+                seen = set()
+                for sid in structure_ids:
+                    if isinstance(sid, bool) or not isinstance(sid, int):
+                        return None, "structureIds must contain integers"
+                    if sid in seen:
+                        return None, "structureIds must be unique"
+                    seen.add(sid)
+            elif scope == "all_critical":
+                pass
+            elif isinstance(scope, dict) and "districtId" in scope:
+                did = scope["districtId"]
+                if not isinstance(did, str) or not did.strip():
+                    return None, "districtId must be a non-empty string"
+                if did.strip() not in self.civilization.get("districts", {}):
+                    return None, "unknown district"
+            else:
+                return None, 'scope must be "ids", "all_critical", or {"districtId": "<id>"}'
+            un_ruin = payload.get("unRuin", True)
+            if not isinstance(un_ruin, bool):
+                return None, "unRuin must be a boolean"
+            condition_target = payload.get("conditionTarget")
+            if condition_target is not None:
+                if isinstance(condition_target, bool) or not isinstance(condition_target, (int, float)):
+                    return None, "conditionTarget must be a number"
+                if not math.isfinite(condition_target):
+                    return None, "conditionTarget must be finite"
+                if not (0 <= condition_target <= 100):
+                    return None, "conditionTarget must be between 0 and 100"
+            structures, sel_reason = self._god_select_repair_structures({
+                "scope": scope,
+                "structureIds": payload.get("structureIds"),
+                "unRuin": un_ruin,
+            })
+            if sel_reason:
+                return None, sel_reason
+            if not structures:
+                return None, "empty structure selection"
+            if len(structures) > GOD_REPAIR_STRUCTURES_BATCH_MAX:
+                return None, f"batch exceeds cap of {GOD_REPAIR_STRUCTURES_BATCH_MAX} structures"
+            norm_payload = {"scope": scope, "unRuin": un_ruin}
+            if scope == "ids":
+                norm_payload["structureIds"] = list(payload.get("structureIds") or [])
+            if condition_target is not None:
+                norm_payload["conditionTarget"] = float(condition_target)
+            return {"kind": "repair_structures", "payload": norm_payload}, None
+
+        if kind == "clear_ruins":
+            structure_ids = payload.get("structureIds")
+            district_id = payload.get("districtId")
+            min_age = payload.get("minAgeFrames", RUIN_CULL_AGE_FRAMES)
+            if structure_ids is None and district_id is None and "minAgeFrames" not in payload:
+                return None, "at least one selector is required (structureIds, districtId, or minAgeFrames)"
+            if structure_ids is not None:
+                if not isinstance(structure_ids, list) or not structure_ids:
+                    return None, "structureIds must be a non-empty list"
+            if district_id is not None:
+                if not isinstance(district_id, str) or not district_id.strip():
+                    return None, "districtId must be a non-empty string"
+                if district_id.strip() not in self.civilization.get("districts", {}):
+                    return None, "unknown district"
+            if min_age is not None:
+                if isinstance(min_age, bool) or not isinstance(min_age, int):
+                    return None, "minAgeFrames must be an integer"
+                if min_age < 0:
+                    return None, "minAgeFrames must be non-negative"
+            ruins, sel_reason = self._god_select_clear_ruins({
+                "structureIds": structure_ids,
+                "districtId": district_id.strip() if isinstance(district_id, str) else district_id,
+                "minAgeFrames": min_age,
+            })
+            if sel_reason:
+                return None, sel_reason
+            if not ruins:
+                return None, "empty ruin selection"
+            if len(ruins) > GOD_CLEAR_RUINS_BATCH_MAX:
+                return None, f"batch exceeds cap of {GOD_CLEAR_RUINS_BATCH_MAX} ruins"
+            norm_payload = {}
+            if structure_ids is not None:
+                norm_payload["structureIds"] = list(structure_ids)
+            if district_id is not None:
+                norm_payload["districtId"] = district_id.strip()
+            if "minAgeFrames" in payload:
+                norm_payload["minAgeFrames"] = min_age
+            elif structure_ids is None and district_id is None:
+                norm_payload["minAgeFrames"] = min_age
+            return {"kind": "clear_ruins", "payload": norm_payload}, None
+
         # --- Sovereign God mode Phase 6: weather override ---
         if kind == "weather_override":
             return self._validate_god_weather_override(payload)
@@ -15464,6 +16460,27 @@ class SimEngine:
                     "structureName": structure.get("name") or structure.get("type"),
                     "oldCondition": old_cond, "newCondition": new_cond,
                     "wouldBecomeRuin": bool(delta < 0 and new_cond <= 0)}
+        if kind == "repair_structures":
+            structures, sel_reason = self._god_select_repair_structures(payload)
+            if sel_reason or not structures:
+                return None
+            condition_target = payload.get("conditionTarget")
+            un_ruin = payload.get("unRuin", True)
+            outcomes = []
+            for s in structures:
+                projected = self._god_project_structure_repair(s, condition_target, un_ruin)
+                if projected:
+                    outcomes.append(projected)
+            return {"structures": outcomes, "count": len(outcomes)}
+        if kind == "clear_ruins":
+            ruins, sel_reason = self._god_select_clear_ruins(payload)
+            if sel_reason or not ruins:
+                return None
+            return {
+                "structureIds": [s["id"] for s in ruins],
+                "structureNames": [s.get("name") or s.get("type") for s in ruins],
+                "count": len(ruins),
+            }
         if kind == "story_event":
             modifiers = payload.get("modifiers") or {}
             outcome = {
@@ -16129,6 +17146,10 @@ class SimEngine:
             return self._god_apply_grant_resource(normalized["payload"]), None
         if kind == "structure_condition":
             return self._god_apply_structure_condition(normalized["payload"]), None
+        if kind == "repair_structures":
+            return self._god_apply_repair_structures(normalized["payload"]), None
+        if kind == "clear_ruins":
+            return self._god_apply_clear_ruins(normalized["payload"]), None
         if kind == "story_event":
             return self._god_apply_story_event(normalized["payload"]), None
         if kind == "weather_override":
@@ -16381,6 +17402,74 @@ class SimEngine:
         return {"interventionId": intervention_id, "kind": "structure_condition",
                 "structureId": structure_id, "oldCondition": old_cond, "newCondition": new_cond,
                 "becameRuin": became_ruin}
+
+    def _god_apply_repair_structures(self, payload):
+        """Batch condition restore / un-ruin for operator escape."""
+        structures, sel_reason = self._god_select_repair_structures(payload)
+        if sel_reason or not structures:
+            return None
+        condition_target = payload.get("conditionTarget")
+        un_ruin = payload.get("unRuin", True)
+        intervention_id = self._next_intervention_id()
+        outcomes = []
+        for structure in structures:
+            old_cond = structure.get("condition", 100.0)
+            was_ruin = bool(structure.get("isRuin")) or old_cond <= 0
+            name = structure.get("name") or structure.get("type")
+            if was_ruin:
+                target = condition_target if condition_target is not None else REPAIR_CONDITION_RESTORE
+                new_cond = max(REPAIR_CONDITION_RESTORE, min(100.0, float(target)))
+                structure["condition"] = new_cond
+                structure["isRuin"] = False
+                structure.pop("ruinedSinceFrame", None)
+            elif condition_target is not None:
+                delta = float(condition_target) - old_cond
+                delta = max(-GOD_REPAIR_STRUCTURES_CONDITION_MAX,
+                            min(GOD_REPAIR_STRUCTURES_CONDITION_MAX, delta))
+                new_cond = self._apply_structure_condition_delta(structure, delta)
+            else:
+                new_cond = self._apply_structure_condition_delta(
+                    structure, min(REPAIR_CONDITION_RESTORE, GOD_REPAIR_STRUCTURES_CONDITION_MAX))
+            outcomes.append({
+                "structureId": structure["id"],
+                "structureName": name,
+                "oldCondition": old_cond,
+                "newCondition": structure.get("condition", new_cond),
+                "unRuined": was_ruin and un_ruin,
+            })
+        count = len(outcomes)
+        text = f"A divine hand restores {count} structure(s) across the village"
+        self._push_activity(text)
+        self._push_communication("divine_repair_structures", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "repair_structures", "frameTick": self.frameTick,
+            "count": count, "structures": outcomes, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "repair_structures",
+                "count": count, "structures": outcomes}
+
+    def _god_apply_clear_ruins(self, payload):
+        """Delete selected or aged ruins from the registry."""
+        ruins, sel_reason = self._god_select_clear_ruins(payload)
+        if sel_reason or not ruins:
+            return None
+        intervention_id = self._next_intervention_id()
+        ids = [s["id"] for s in ruins]
+        names = [s.get("name") or s.get("type") for s in ruins]
+        removed = self._remove_structures_from_registry(ids)
+        if removed:
+            text = f"A divine hand clears {removed} ruin(s) from the village: {', '.join(names)}"
+            self._push_activity(text)
+            self._push_communication("divine_clear_ruins", "divine", "everyone", text, source="divine")
+            self._push_chronicle(text, kind="divine", source="divine")
+            self._tick_structure_health_benchmark()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "clear_ruins", "frameTick": self.frameTick,
+            "structureIds": ids, "removed": removed, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "clear_ruins",
+                "structureIds": ids, "removed": removed}
 
     # --- Huntable wildlife god kinds (irreversible; same public audit path) ---
     def _god_apply_wildlife_spawn(self, payload):
@@ -17068,6 +18157,11 @@ class SimEngine:
             if path1_on():
                 civ["settlements"] = list(c.get("settlements") or [])
                 civ["treaties"] = list(c.get("treaties") or [])
+                civ["settlementStores"] = {
+                    sid: dict(bucket or {})
+                    for sid, bucket in (c.get("settlementStores") or {}).items()
+                }
+                civ["caravanLog"] = list(c.get("caravanLog") or [])[-20:]
                 civ["isNight"] = self._is_night()
             if ENV_EFFECTS_ENABLED:
                 civ["litDistricts"] = list(c.get("litDistricts") or [])

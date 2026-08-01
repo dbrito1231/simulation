@@ -27,7 +27,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | `RULES_ENABLED` | 150 | `_maybe_advance_rules` |
 | `LIFECYCLE_ENABLED` | 150 | `_maybe_resolve_stalled_succession` |
 | `LIFECYCLE_ENABLED` | 300 | `_tick_lifecycle` |
-| (unconditional) | 150 | a fixed batch: `_maybe_feed_starving`, `_maybe_repair_critical`, `_maybe_abandon_stalled_projects`, `_maybe_relocate_stuck_project`, `_maybe_reorganize_structures`, `_maybe_force_contribution`, `_maybe_start_idle_district_project`, `_maybe_build_funded_project`, `_maybe_start_approved_custom`, `_maybe_retire_blueprint`, `_maybe_amnesty_rejected_blueprints`, `_maybe_retire_custom_resource`, `_maybe_invention_backstop`, `_maybe_found_district`, `_maybe_welcome_newcomer` |
+| (unconditional) | 150 | a fixed batch: `_maybe_feed_starving`, `_maybe_repair_critical`, `_maybe_repair_campaign`, `_maybe_cull_ruins`, `_maybe_abandon_stalled_projects`, `_maybe_relocate_stuck_project`, `_maybe_reorganize_structures`, `_maybe_force_contribution`, `_maybe_start_idle_district_project`, `_maybe_build_funded_project`, `_maybe_start_approved_custom`, `_maybe_retire_blueprint`, `_maybe_amnesty_rejected_blueprints`, `_maybe_retire_custom_resource`, `_maybe_invention_backstop`, `_maybe_found_district`, `_maybe_welcome_newcomer` |
 | within the 150-batch, `SAGE_REVIEW_ENABLED` | 150 | `_maybe_skip_sage_review`, `_maybe_amnesty_denied_sage_reviews` |
 | within the 150-batch, `TECH_TREE_ENABLED` | 150 | `_maybe_era_transition`, `_maybe_dissolve_council` |
 | `DAILY_COUNCIL_ENABLED` | day boundary (`frameTick % DAY_FRAMES == 0`) and deterministic phase gate | `_maybe_convene_daily_council`, `_maybe_advance_daily_council` |
@@ -40,7 +40,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | `STRUCTURE_EFFECTS_ENABLED` | 150 | `_tick_structure_effects` |
 | `ECOLOGY_ENABLED` | 600 | `_tick_ecology_regrow` |
 | `GOODS_ENABLED` | 900 | `_tick_goods` |
-| `GOODS_ENABLED` | 13500 (=`DAY_FRAMES`) | `_tick_shelter` |
+| `GOODS_ENABLED` | 18000 (=`DAY_FRAMES`) | `_tick_shelter` |
 | `MEMES_ENABLED` | 90 | `_spread_beliefs_by_proximity` |
 | `ALWAYS_ON_MODULES` | `MODULE_PULSE_INTERVAL_S * TICKS_PER_SEC` (45 s; dark default) | `_pulse_piano_modules`: a bounded, non-blocking, event-gated PIANO refresh pulse |
 | `BENCHMARKS_ENABLED` | 600, or frame 60 (`FIRST_BENCHMARK_FRAME`) | `_sample_benchmarks` |
@@ -63,25 +63,69 @@ future while holding the tick lock.
 
 ## Time model
 
-- `TICKS_PER_SEC = 30`; `DAY_FRAMES = 13500` (sim_engine.py:488); one day = 450 s.
-- `YEAR_FRAMES = 324_000`; `SEASON_FRAMES = YEAR_FRAMES // 4 = 81_000`
-  (sim_engine.py:523-524) — one season = 6 day/night cycles.
-- `NIGHT_FRACTION = 0.25` (sim_engine.py:1007): `_is_night()` is true for the last
+All calendar fields are **derived from `frameTick`** — nothing calendar-shaped is
+persisted separately. `_calendar()` (sim_engine.py) is a pure function of
+`frameTick`: returns `year`, `season`, `dayOfSeason`, `daysPerSeason`, `isNight`,
+`dayFraction`. The `/state` JSON shape is unchanged across the retune.
+
+**Invariants (must hold):**
+
+- `YEAR_FRAMES % DAY_FRAMES === 0` — whole days per in-world year.
+- `SEASON_FRAMES = YEAR_FRAMES // 4` — four equal seasons per year.
+- `RUIN_CULL_AGE_FRAMES = DAY_FRAMES` — ruin cull age stays ~one sim day.
+- `GOODS_TICK_FRAMES = 900` (~30 s) and `LIFECYCLE_TICK_FRAMES = 300` are
+  **unchanged** — micro cadences decouple from day length.
+
+**Calendar stretch (2026-07-31, atmosphere Phase 4b):** uniform **+33% real-time**
+lengthening. Ratios preserved: **24 days per year**, **6 days per season**,
+`daysPerSeason = SEASON_FRAMES // DAY_FRAMES = 6`.
+
+| Constant | Before (frames) | After (frames) | Real-time before | Real-time after |
+|---|---|---|---|---|
+| `TICKS_PER_SEC` | 30 | 30 | — | — |
+| **`DAY_FRAMES`** | **13,500** | **18,000** | **7.5 min** | **10.0 min** |
+| **`YEAR_FRAMES`** | **324,000** | **432,000** | **3.0 h** | **4.0 h** |
+| **`SEASON_FRAMES`** | **81,000** | **108,000** | **45 min** | **60 min** |
+| Days per year | 24 | 24 | — | — |
+| Days per season | 6 | 6 | — | — |
+
+**Canonical constants (sim_engine.py:1032, 1096–1097):**
+
+- `TICKS_PER_SEC = 30`; `DAY_FRAMES = 18000` — one day/night cycle = 600 s
+  (10.0 min real time at 30/s).
+- `YEAR_FRAMES = 432_000` — one in-world year = 24 × `DAY_FRAMES` = **4.0 h**
+  real time (exactly 24 day/night cycles).
+- `SEASON_FRAMES = YEAR_FRAMES // 4 = 108_000` — one season = 6 × `DAY_FRAMES`
+  = **60 min** real time (exactly 6 day/night cycles).
+
+**Derived impacts (auto from formulas):**
+
+| Dependent | Before | After |
+|---|---|---|
+| `AGE_YEARS_PER_TICK` | `300/324000 = 1/1080` | `300/432000 = 1/1440` |
+| Sim lifespan 0→90y (wall) | ~11.25 h | ~15.0 h |
+| Shelter tick (`_tick_shelter`) | every 7.5 min | every 10 min |
+| `RUIN_CULL_AGE_FRAMES` | 13,500 (~7.5 min) | 18,000 (~10 min) |
+| Ecology `SEASON_REGROW_MULT` | unchanged per-season mults | same mults, longer seasons |
+
+`AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES` (sim_engine.py:1223) —
+**exactly one in-world year per `YEAR_FRAMES`**, so agent aging, the season clock,
+and the GUI calendar stay locked to the same canonical year. With today's constants
+that is `1/1440` per lifecycle gate (~10 s at 30/s).
+
+- `NIGHT_FRACTION = 0.25` (sim_engine.py): `_is_night()` is true for the last
   quarter of each `DAY_FRAMES` cycle, but only when `PRESSURE_LOOP_ENABLED` — night
-  otherwise never triggers (sim_engine.py:4321-4325).
+  otherwise never triggers.
 - `SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}`
-  (sim_engine.py:526): ecology regrowth is doubled in spring and fully halted in
+  (sim_engine.py:1099): ecology regrowth is doubled in spring and fully halted in
   winter (`_tick_ecology_regrow`, applied only when `ECOLOGY_ENABLED`).
 - A scheduled Daily Council may convene once at the deterministic day boundary
-  when `DAILY_COUNCIL_ENABLED` is on. A leaderless lifecycle succession is the
-  bounded emergency exception and convenes on the next
+  (`frameTick % DAY_FRAMES == 0`) when `DAILY_COUNCIL_ENABLED` is on. A leaderless
+  lifecycle succession is the bounded emergency exception and convenes on the next
   `RULES_TICK_FRAMES` recovery pass. The persisted, tick-gated phase machine is
   specified in [09-systems-society.md](09-systems-society.md). It never adds a
   worker-pool slot: a council speaking/voting turn replaces the selected agent's
   ordinary think turn.
-- `_calendar()` (sim_engine.py:2765) is a pure function of `frameTick`: returns
-  `year`, `season`, `dayOfSeason`, `daysPerSeason`, `isNight`, `dayFraction` — all
-  derived, nothing persisted separately.
 
 ## Roster / cold start
 
@@ -517,13 +561,96 @@ magnitude capped at `GOD_STRUCTURE_DELTA_MAX = 100`. Both repair (`delta >=
 tick's per-structure body specifically so both callers share it), clamping to
 `0..100` and firing the exact `STRUCTURE_DISREPAIR_THRESHOLD`-crossing and
 ruin-transition narration (including the `homeOf`/`homeStructureId` homeless
-handling) a natural decay collapse would. Because validation already rejects
-ruined structures, repair through this miracle can never recreate a destroyed
-structure — it only ever restores condition on a structure that was never a
-ruin to begin with — and damage cannot delete registry state (a structure
-that reaches 0 becomes a ruin, exactly like natural decay; it is never
-removed from `civilization["structures"]`). See
-[05-world.md](05-world.md) for the shared decay/ruin contract this reuses.
+handling) a natural decay collapse would. **Single-structure scope:** this
+Phase 4 miracle still targets one non-ruined structure only — it cannot
+un-ruin a collapsed structure. Batch un-ruin and registry deletion are
+separate town-integrity commands (`repair_structures`, `clear_ruins`; see
+below). **Registry contract (amended):** passive decay, disasters, and this
+miracle's damage path still produce ruins rather than deleting registry
+entries — a structure that reaches 0 becomes a ruin, exactly like natural
+decay, and remains in `civilization["structures"]` until culled by
+`_maybe_cull_ruins()`, removed by God `clear_ruins`, or pruned offline. See
+[05-world.md](05-world.md) for the shared decay/ruin helper contract and
+[08-systems-economy.md](08-systems-economy.md) for repair campaigns, ruin
+cull, and disaster retune.
+
+## Sovereign God mode (Town integrity — mass structure repair and ruin clearance)
+
+Two additional irreversible, public apply kinds extend the Phase 4 miracle
+set for operator escape hatches when ruin pressure outruns autonomous repair.
+Both use the same `god_preview` / `god_apply` pipeline, write one
+`divine.jsonl` `"applied"` record each, set `godState.intervened = True`
+(monotonic), and are wired into the Divine Console **Miracles** tab alongside
+the Phase 4 trio ([11-viewer.md](11-viewer.md)). Neither is cancellable via
+`god_cancel` (same irreversible class as `structure_condition`). Field
+schemas and caps are advertised in `/control/god/capabilities`
+([04-http-api.md](04-http-api.md)).
+
+**`repair_structures`** — batch condition restore and optional un-ruin.
+Payload (conceptual):
+
+```json
+{
+  "scope": "ids" | "all_critical" | {"districtId": "<slug>"},
+  "structureIds": [int]?,
+  "conditionTarget": number?,
+  "unRuin": true?
+}
+```
+
+- `scope` selects the target set: explicit `structureIds` (required when
+  `scope == "ids"`), every working-critical type village-wide when
+  `scope == "all_critical"`, or all structures in `districtId` when scoped
+  to a district. `districtId` is a string slug matching
+  `civilization["districts"]` keys (e.g. `"village_core"`, `"forest"`).
+- `conditionTarget` is optional; when present it sets `condition` (clamped
+  `0..100`) via `_apply_structure_condition_delta`-equivalent semantics per
+  structure, magnitude capped at `GOD_REPAIR_STRUCTURES_CONDITION_MAX = 100`
+  per structure and `GOD_REPAIR_STRUCTURES_BATCH_MAX = 10` structures per
+  command.
+- When `unRuin` is true (default), ruined targets (`isRuin` or
+  `condition <= 0`) are restored to at least `REPAIR_CONDITION_RESTORE`
+  (`50`) and `isRuin` cleared — the explicit exception to the old Phase 4
+  text that "repair through this miracle can never recreate a destroyed
+  structure." The single-target `structure_condition` miracle remains
+  non-ruin-only; only `repair_structures` (and agent `repair_structure`)
+  may un-ruin.
+- Rejects unknown ids, empty selections, or batches exceeding the cap.
+  Preview reports the exact per-structure outcomes.
+
+**`clear_ruins`** — delete selected or aged ruins from the registry (mirrors
+engine cull cleanup). Payload (conceptual):
+
+```json
+{
+  "structureIds": [int]?,
+  "minAgeFrames": int?,
+  "districtId": "<slug>"?
+}
+```
+
+- At least one selector is required. `structureIds` removes explicit ruins;
+  `minAgeFrames` (default `RUIN_CULL_AGE_FRAMES = DAY_FRAMES`) restricts to
+  ruins at least that old; `districtId` limits to one district (string slug,
+  e.g. `"village_core"`).
+- Each removed ruin uses the same cleanup as `_maybe_cull_ruins()` and
+  [`scripts/prune_ruins.py`](../scripts/prune_ruins.py): drop from
+  `civilization["structures"]`, clear `homeStructureId`, filter
+  `reorgTasks`. Non-ruin ids are rejected.
+- Batch capped at `GOD_CLEAR_RUINS_BATCH_MAX = 10` per command. Writes
+  activity + chronicle attribution (`source="divine"`) like other miracles.
+
+**Amended invariants (summary).**
+
+| Path | May un-ruin? | May delete registry entry? |
+|---|---|---|
+| Passive decay / disaster damage | No (produces ruin) | No |
+| `structure_condition` miracle | No (non-ruin targets only) | No |
+| Agent `repair_structure` | Yes (funded half-cost rebuild) | No |
+| `repair_structures` (God) | Yes (batch, capped) | No |
+| `_maybe_cull_ruins()` (engine) | No | Yes (1–3 aged, unaffordable ruins) |
+| `clear_ruins` (God) | No | Yes (operator-selected/aged ruins) |
+| `scripts/prune_ruins.py` (offline) | No | Yes (all ruins) |
 
 ## Sovereign God mode (Phase 5 — storyteller events and timed lawgiver modifiers)
 

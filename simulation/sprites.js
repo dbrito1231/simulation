@@ -115,9 +115,12 @@ function snowHash(n) {
 // gap (bare edge), or a 1-cell overhang drooping below the edge line.
 // (x, y, w) describe the sprite's drawn top-left corner and pixel width;
 // `scale` is the sprite's per-cell pixel size.
-function drawSnowCap(ctx, x, y, w, scale) {
+function drawSnowCap(ctx, x, y, w, scale, opts) {
+  opts = opts || {};
+  const capExtra = opts.capExtra || 0;
   const step = Math.max(1, scale);
-  const steps = Math.max(1, Math.round(w / step));
+  const drawW = w + capExtra;
+  const steps = Math.max(1, Math.round(drawW / step));
   ctx.fillStyle = C.sn;
   for (let i = 0; i < steps; i++) {
     const n = snowHash(Math.floor(x / step) + i);
@@ -128,6 +131,31 @@ function drawSnowCap(ctx, x, y, w, scale) {
     if (n === 3) {
       // occasional overhang drooping a cell below the edge line
       ctx.fillRect(sx, y + clumpH * step, step, step);
+    }
+  }
+}
+
+// Winter ground frost speckle on grass/farm/village floor tiles (viewer v2).
+const WINTER_GROUND_SPECKLE_RATE = 0.15;
+
+function drawWinterGroundAccent(ctx, x, y, w, h, kind, seed) {
+  if (kind === "beach" || kind === "ocean" || kind === "quarry") return;
+  const cellSeed = (Math.imul(seed, 2654435761) >>> 0) % 1000;
+  if (cellSeed / 1000 > WINTER_GROUND_SPECKLE_RATE) return;
+  const px = x + (cellSeed % 11) + 2;
+  const py = y + (cellSeed % 5);
+  const scale = (cellSeed % 2) + 1;
+  ctx.fillStyle = C.sn || "#FFFFFF";
+  ctx.fillRect(px, py, scale, scale);
+  if (cellSeed % 7 === 0) ctx.fillRect(px + scale, py, scale, 1);
+}
+
+function drawWinterGroundAccentsForDistrict(ctx, district, season) {
+  if (season !== "winter" || district.kind === "ocean" || district.kind === "beach") return;
+  const b = district.bounds;
+  for (let ty = b.y1; ty < b.y2; ty += TILE) {
+    for (let tx = b.x1; tx < b.x2; tx += TILE) {
+      drawWinterGroundAccent(ctx, tx, ty, TILE, TILE, district.kind, tx * 31 + ty * 17);
     }
   }
 }
@@ -401,7 +429,13 @@ function buildTreeGrid(season, stage = "lush") {
 function drawTree(ctx, x, y, season = "summer", stage = "lush") {
   const key = season + "|" + stage;
   const grid = TREE_GRIDS[key] || (TREE_GRIDS[key] = buildTreeGrid(season, stage));
-  drawPixelGrid(ctx, x - 12, y - 12, grid, 3, false);
+  const originX = x - 12;
+  const originY = y - 12;
+  drawPixelGrid(ctx, originX, originY, grid, 3, false);
+  if (season === "winter" && (stage === "lush" || stage === "healthy")) {
+    const width = grid.reduce((max, row) => Math.max(max, row.length), 0) * 3;
+    drawSnowCap(ctx, originX, originY, width, 3, { capExtra: 2 });
+  }
 }
 
 // Barren-forest marker (Phase 2 living-ecosystem, CROP_GROWTH_ENABLED): a
@@ -1014,19 +1048,30 @@ function drawStructureSmoke(ctx, structure, frameTick) {
 // from frameTick each frame.
 function drawWeatherParticle(ctx, kind, x, y, index, opts) {
   opts = opts || {};
+  const alphaMult = opts.alphaMult != null ? opts.alphaMult : 1;
   ctx.save();
   if (kind === "snow") {
-    const drift = Math.sin((x + index) * 0.05) * 1.5;
-    ctx.fillStyle = "rgba(235, 245, 255, 0.75)";
+    const drift = Math.sin((x + index) * 0.07 + (opts.frameTick || 0) * 0.02) * 2;
+    const px = Math.round(x + drift);
+    const py = Math.round(y);
+    const alpha = (0.82 * alphaMult).toFixed(3);
+    ctx.fillStyle = `rgba(235, 245, 255, ${alpha})`;
+    ctx.fillRect(px - 1, py, 3, 1);
+    ctx.fillRect(px, py - 1, 1, 3);
     ctx.beginPath();
-    ctx.arc(Math.round(x + drift), Math.round(y), 1.6, 0, Math.PI * 2);
+    ctx.arc(px, py, 1, 0, Math.PI * 2);
     ctx.fill();
   } else {
-    const xOff = opts.xOff != null ? opts.xOff : -6;
-    const yOff = opts.yOff != null ? opts.yOff : 12;
     const sheet = opts.sheet === true;
-    ctx.strokeStyle = sheet ? "rgba(190, 210, 230, 0.72)" : "rgba(190, 210, 230, 0.55)";
-    ctx.lineWidth = sheet ? 2 : 1;
+    const angleDeg = ((opts.windHash != null ? opts.windHash : 0.5) * 50) - 25;
+    const len = 8 + (opts.lenHash != null ? opts.lenHash : 0.5) * 8;
+    const rad = angleDeg * Math.PI / 180;
+    const xOff = Math.sin(rad) * len;
+    const yOff = Math.cos(rad) * len;
+    const baseAlpha = sheet ? 0.86 : 0.68;
+    const alpha = Math.min(1, baseAlpha * alphaMult).toFixed(3);
+    ctx.strokeStyle = `rgba(190, 210, 230, ${alpha})`;
+    ctx.lineWidth = sheet ? 2.5 : 1;
     ctx.beginPath();
     ctx.moveTo(Math.round(x), Math.round(y));
     ctx.lineTo(Math.round(x + xOff), Math.round(y + yOff));
@@ -1856,7 +1901,7 @@ function drawDistrictTiles(ctx, district, season = "summer") {
   }
 }
 
-function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges, season = "summer", ecologyStages = null, stageTimings = null) {
+function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, roadNodes, roadEdges, season = "summer", ecologyStages = null, stageTimings = null, terrainVisualOpts = null) {
   const foamOffset = Math.floor(frameTick / 8) % 16;
   const activeDistricts = (districts && districts.length) ? districts : STARTER_DISTRICTS_JS;
   CURRENT_DISTRICTS_FOR_BLEND = activeDistricts;
@@ -1888,6 +1933,11 @@ function drawTiledWorld(ctx, worldW, worldH, frameTick, structures, districts, r
     }
     drawDistrictTerrain(ctx, d, season);
     drawDistrictTiles(ctx, d, season);
+    if (terrainVisualOpts && terrainVisualOpts.seasonalV2 && terrainVisualOpts.applyDistrictTint) {
+      const stage = (ecologyStages && ecologyStages[d.id]) || "healthy";
+      terrainVisualOpts.applyDistrictTint(ctx, season, d.kind, stage, d.bounds);
+      if (season === "winter") drawWinterGroundAccentsForDistrict(ctx, d, season);
+    }
   }
   if (stageTimings) stageTimings.districtPassesMs = performance.now() - stageT0;
 

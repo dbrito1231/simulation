@@ -756,7 +756,7 @@
      scroll in the remaining viewport instead of sitting under the bar.
      ~92px ≈ bar padding 10+10 + .gbtn ~54 + border. */
   body.divine-bar-visible {
-    --divine-bar-clearance: 92px;
+    --divine-bar-clearance: 100px;
   }
   body.divine-bar-visible #wrap {
     height: calc(100vh - var(--divine-bar-clearance));
@@ -775,9 +775,42 @@
   }
   .divine-tab-panel { font-size: 12px; color: #ccc; }
   .divine-fieldset {
-    border: 1px solid #2e2e3a; border-radius: 4px; padding: 8px; margin-bottom: 10px;
+    border: 1px solid #2e2e3a; border-radius: 4px; padding: 12px 10px 14px; margin-bottom: 14px;
   }
-  .divine-fieldset legend { font-size: 11px; color: #d9b96e; padding: 0 4px; }
+  .divine-fieldset legend { font-size: 12px; font-weight: 700; color: #d9b96e; padding: 0 4px; }
+  .divine-fieldset-irreversible { border-left: 3px solid #a24545; padding-left: 12px; }
+  .divine-section-title {
+    margin: 0 0 10px; font-size: 13px; font-weight: 700; color: #ffd27a; letter-spacing: 0.02em;
+  }
+  .divine-preview-strip {
+    display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 18px; border-bottom: 1px solid #282831;
+    background: linear-gradient(180deg, rgba(74,58,26,.35), rgba(30,24,12,.25));
+    position: sticky; top: 0; z-index: 2;
+  }
+  .divine-preview-strip.visible { display: flex; }
+  .divine-preview-strip .preview-label {
+    font: 600 12px system-ui, sans-serif; color: #ffd27a; flex: 1 1 auto;
+  }
+  .divine-preview-strip .preview-actions { display: flex; gap: 8px; }
+  .divine-preview-strip button {
+    padding: 5px 12px; font: 600 12px system-ui, sans-serif; border-radius: 4px; cursor: pointer;
+  }
+  .divine-preview-strip .preview-apply {
+    background: #4a3a1a; color: #ffd27a; border: 1px solid #b5883a;
+  }
+  .divine-preview-strip .preview-discard {
+    background: transparent; color: #9a9aa8; border: 1px solid #3a3a48;
+  }
+  .divine-preview-panel { margin-bottom: 12px; }
+  .divine-preview-panel summary {
+    cursor: pointer; font: 600 11px system-ui, sans-serif; color: #d9b96e; margin-bottom: 6px;
+  }
+  .divine-pin-row {
+    padding: 8px 10px; margin-bottom: 12px; border: 1px solid #3a3a48; border-radius: 6px;
+    background: rgba(30,58,42,.35); font-size: 11px; color: #ccc;
+  }
+  .divine-pin-row a { color: #ffd27a; cursor: pointer; text-decoration: underline; }
   .divine-row { margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .divine-row label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #9a9aa8; flex: 1 1 auto; }
   .divine-row input[type=text], .divine-row input[type=password], .divine-row input[type=number],
@@ -821,8 +854,8 @@
   /* Bottom action bar */
   .divine-bar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-    display: flex; align-items: stretch; gap: 6px;
-    padding: 10px 14px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 14px; min-height: 80px;
     background: linear-gradient(180deg, rgba(18,18,24,.55), rgba(10,10,14,.96));
     border-top: 1px solid #34343f;
     backdrop-filter: blur(8px);
@@ -837,6 +870,7 @@
     letter-spacing: .06em; text-transform: uppercase;
   }
   .bar-brand .b2 { font: 600 10px ui-monospace, monospace; color: #6f6f7c; margin-top: 2px; }
+  .bar-brand .b3 { font: 500 9px ui-monospace, monospace; color: #5a5a66; margin-top: 3px; }
   .bar-buttons { display: flex; gap: 6px; flex: 1 1 auto; flex-wrap: wrap; }
   .gbtn {
     display: flex; flex-direction: column; align-items: center; gap: 5px;
@@ -850,7 +884,10 @@
   .gbtn:hover:not(:disabled) {
     background: #23232e; color: #dcdce4; border-color: #b5883a; transform: translateY(-1px);
   }
-  .gbtn.active { background: #4a3a1a; color: #ffd27a; border-color: #b5883a; }
+  .gbtn.active {
+    background: #4a3a1a; color: #ffd27a; border-color: #b5883a;
+    box-shadow: inset 0 -2px 0 #ffd27a;
+  }
   .gbtn.locked-dependent:disabled { opacity: .4; cursor: not-allowed; }
   .gbtn.compile { border-style: dashed; }
   .gbtn .statuspip {
@@ -1061,6 +1098,7 @@
   <div class="bar-brand">
     <span class="b1">Divine</span>
     <span class="b2" id="divineBarBrandState">locked</span>
+    <span class="b3" id="divineBarInterventionCount"></span>
   </div>
   <div class="bar-buttons">
     <button type="button" class="gbtn unlock" data-feature="unlock" data-tab="unlock" data-state="locked"
@@ -1121,6 +1159,13 @@
       </div>
       <div class="spacer"></div>
       <button type="button" class="modal-close" id="divineModalClose" aria-label="Close">✕</button>
+    </div>
+    <div id="divinePreviewStrip" class="divine-preview-strip" aria-live="polite">
+      <span class="preview-label" id="divinePreviewStripLabel">Preview ready</span>
+      <div class="preview-actions">
+        <button type="button" class="preview-discard" id="divinePreviewDiscardBtn">Discard</button>
+        <button type="button" class="preview-apply" id="divinePreviewApplyBtn">Apply</button>
+      </div>
     </div>
     <div class="modal-body" id="divineModalBody"></div>
   </div>
@@ -1222,6 +1267,35 @@
               <button type="button" id="godStructureApplyBtn" disabled data-tip='{"t":"Apply","d":"IRREVERSIBLE once applied — an inverse is a new intervention, not a rollback."}'>Apply</button>
             </div>
             <div class="divine-result" id="godStructureResult"></div>
+          </fieldset>
+          <fieldset class="divine-fieldset" id="godMassRepairFieldset">
+            <legend data-tip='{"t":"Mass repair","d":"Batch restore or un-ruin up to 10 structures. Irreversible once applied."}'>Mass repair structures (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Scope","d":"ids = explicit list; all_critical = house/market/workshop/foundry/granary/farm_plot; district = one district."}'>Scope
+              <select id="godMassRepairScope"><option value="all_critical">All critical</option><option value="ids">Explicit ids</option><option value="district">District</option></select>
+            </label>
+            <label data-tip='{"t":"Structure ids","d":"Comma-separated ids when scope is Explicit ids."}'>Structure ids <input type="text" id="godMassRepairIds" placeholder="1,2,3" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"District","d":"Required when scope is District."}'>District <select id="godMassRepairDistrict"></select></label>
+              <label data-tip='{"t":"Condition target","d":"Optional target condition 0–100; default restores by REPAIR_CONDITION_RESTORE or un-ruins to 50."}'>Condition target <input type="number" id="godMassRepairTarget" min="0" max="100" step="1" placeholder="(optional)" /></label>
+              <label style="flex-direction:row; align-items:center; gap:6px;" data-tip='{"t":"Un-ruin","d":"When checked, ruined structures are restored (default on)."}'><input type="checkbox" id="godMassRepairUnRuin" checked style="width:auto;" /> Un-ruin ruins</label></div>
+            <div class="divine-actions">
+              <button type="button" id="godMassRepairPreviewBtn">Preview</button>
+              <button type="button" id="godMassRepairApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godMassRepairResult"></div>
+          </fieldset>
+          <fieldset class="divine-fieldset" id="godClearRuinsFieldset">
+            <legend data-tip='{"t":"Clear ruins","d":"Delete up to 10 ruins from the registry. Irreversible once applied."}'>Clear ruins (IRREVERSIBLE)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Mode","d":"Explicit ids, aged ruins village-wide, or aged ruins in one district."}'>Mode
+              <select id="godClearRuinsMode"><option value="aged">Aged ruins (≥1 sim day)</option><option value="ids">Explicit ids</option><option value="district">Aged in district</option></select>
+            </label>
+            <label data-tip='{"t":"Ruin ids","d":"Comma-separated ruin ids when mode is Explicit ids."}'>Ruin ids <input type="text" id="godClearRuinsIds" placeholder="1,2,3" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"District","d":"Required when mode is Aged in district."}'>District <select id="godClearRuinsDistrict"></select></label>
+              <label data-tip='{"t":"Min age","d":"Minimum ruin age in frames (default one sim day). Esc closes modal; Ctrl+Enter applies when preview is valid."}'>Min age (frames) <input type="number" id="godClearRuinsMinAge" placeholder="18000" /></label></div>
+            <div class="divine-actions">
+              <button type="button" id="godClearRuinsPreviewBtn">Preview</button>
+              <button type="button" id="godClearRuinsApplyBtn" disabled>Apply</button>
+            </div>
+            <div class="divine-result" id="godClearRuinsResult"></div>
           </fieldset>
         </div>
 
@@ -1401,40 +1475,76 @@ let lastSeasonRendered = null; // season the terrain cache was last tinted for; 
 // key the terrain cache was last built with -- same invalidation mechanism
 // as lastSeasonRendered above, just keyed on stage instead of season.
 let lastEcologyStageKeyRendered = null;
+let lastTerrainVisualKeyRendered = null;
 const worldLoadingEl = document.getElementById("worldLoading");
 
-// Seasonal color grading applied once to the terrain cache (and ocean foam
-// frames) at build time -- not per frame. Composite-mode passes over the
-// full canvas; summer/unknown is the untinted baseline.
-function applySeasonTint(canvas, season) {
-  if (!season || season === "summer") return;
-  const c = canvas.getContext("2d");
-  c.save();
-  if (season === "autumn") {
-    c.globalCompositeOperation = "multiply";
-    c.fillStyle = "rgba(200,140,40,0.18)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-    c.globalCompositeOperation = "overlay";
-    c.fillStyle = "rgba(200,140,40,0.10)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
+const STAGE_TINT_FACTOR = { lush: 1.0, healthy: 0.85, sparse: 0.65, barren: 0.45 };
+const BARREN_EXTRA_BROWN = "rgba(90,70,50,0.08)";
+
+function terrainVisualCacheKey(season, ecologyStageKey) {
+  return `${season || "summer"}|${ecologyStageKey || ""}`;
+}
+
+function districtTintAlpha(base, factor) {
+  return Math.min(1, Math.max(0, base * factor));
+}
+
+function applyDistrictTintRect(ctx, bounds, op, rgba, factor) {
+  if (!bounds || factor <= 0) return;
+  const m = rgba.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+  if (!m) return;
+  const alpha = districtTintAlpha(parseFloat(m[4] || "1"), factor);
+  if (alpha <= 0) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(bounds.x1, bounds.y1, bounds.x2 - bounds.x1, bounds.y2 - bounds.y1);
+  ctx.clip();
+  ctx.globalCompositeOperation = op;
+  ctx.fillStyle = `rgba(${m[1]},${m[2]},${m[3]},${alpha.toFixed(3)})`;
+  ctx.fillRect(bounds.x1, bounds.y1, bounds.x2 - bounds.x1, bounds.y2 - bounds.y1);
+  ctx.restore();
+}
+
+// Per terrain-kind seasonal grading during cache build.
+function applySeasonTintForKind(ctx, season, kind, stage, bounds) {
+  if (!season || season === "summer" || kind === "ocean") return;
+  const factor = STAGE_TINT_FACTOR[stage] || STAGE_TINT_FACTOR.healthy;
+  const k = kind || "village";
+  if (season === "spring") {
+    if (k === "forest") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(60,200,80,0.12)", factor);
+    else if (k === "farm") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(180,210,80,0.10)", factor);
+    else if (k === "beach") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(220,190,120,0.06)", factor);
+    else if (k === "quarry") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(120,150,100,0.08)", factor);
+    else applyDistrictTintRect(ctx, bounds, "overlay", "rgba(60,200,80,0.10)", factor);
+  } else if (season === "autumn") {
+    if (k === "forest") {
+      applyDistrictTintRect(ctx, bounds, "multiply", "rgba(200,140,40,0.22)", factor);
+      applyDistrictTintRect(ctx, bounds, "overlay", "rgba(120,80,30,0.08)", factor);
+    } else if (k === "farm") applyDistrictTintRect(ctx, bounds, "multiply", "rgba(200,150,40,0.20)", factor);
+    else if (k === "beach") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(200,140,80,0.10)", factor);
+    else if (k === "quarry") applyDistrictTintRect(ctx, bounds, "overlay", "rgba(160,90,50,0.12)", factor);
+    else applyDistrictTintRect(ctx, bounds, "multiply", "rgba(200,140,40,0.16)", factor);
   } else if (season === "winter") {
-    // Desaturate first -- greens must lose dominance or the cool passes
-    // just read as "bright pastel spring" instead of winter light.
-    c.globalCompositeOperation = "saturation";
-    c.fillStyle = "rgba(128,128,128,0.60)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-    c.globalCompositeOperation = "overlay";
-    c.fillStyle = "rgba(150,175,235,0.30)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-    c.globalCompositeOperation = "lighter";
-    c.fillStyle = "rgba(135,160,220,0.20)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-  } else if (season === "spring") {
-    c.globalCompositeOperation = "overlay";
-    c.fillStyle = "rgba(60,200,80,0.10)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
+    if (k === "beach") {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.25)", factor);
+    } else if (k === "forest") {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.55)", factor);
+      applyDistrictTintRect(ctx, bounds, "overlay", "rgba(150,175,235,0.25)", factor);
+    } else if (k === "farm") {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.40)", factor);
+      applyDistrictTintRect(ctx, bounds, "overlay", "rgba(110,85,60,0.15)", factor);
+    } else if (k === "quarry") {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.45)", factor);
+      applyDistrictTintRect(ctx, bounds, "lighter", "rgba(200,210,230,0.15)", factor);
+    } else {
+      applyDistrictTintRect(ctx, bounds, "saturation", "rgba(128,128,128,0.50)", factor);
+      applyDistrictTintRect(ctx, bounds, "overlay", "rgba(150,175,235,0.22)", factor);
+    }
   }
-  c.restore();
+  if (stage === "barren") applyDistrictTintRect(ctx, bounds, "overlay", BARREN_EXTRA_BROWN, 1);
+  if (season === "summer" && k === "farm") {
+    applyDistrictTintRect(ctx, bounds, "lighter", "rgba(255,230,150,0.08)", factor);
+  }
 }
 
 function hideWorldLoading() {
@@ -1751,14 +1861,15 @@ function buildTerrainCache() {
   const [ecologyStages, ecologyStageKey] = ecologyStagesForTerrain();
 
   const drawT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
+  const terrainVisualOpts = { seasonalV2: true, applyDistrictTint: applySeasonTintForKind };
   drawTiledWorld(tctx, WORLD_W, WORLD_H, 0, null, districts,
-                 districtsData.roadNodes, districtsData.roadEdges, season || "summer", ecologyStages, stageTimings);
+                 districtsData.roadNodes, districtsData.roadEdges, season || "summer", ecologyStages, stageTimings, terrainVisualOpts);
   const drawTiledWorldMs = VIEWER_LOAD_DEBUG ? performance.now() - drawT0 : 0;
 
   const tintT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
-  applySeasonTint(terrainCanvas, season);
   const seasonTintMs = VIEWER_LOAD_DEBUG ? performance.now() - tintT0 : 0;
   lastEcologyStageKeyRendered = ecologyStageKey;
+  lastTerrainVisualKeyRendered = terrainVisualCacheKey(season, ecologyStageKey);
 
   // The ocean's animated foam strip is scoped to the ocean district's own
   // bounds (not the full world height) -- with the much larger world, a
@@ -1776,7 +1887,6 @@ function buildTerrainCache() {
     const octx = oc.getContext("2d");
     octx.imageSmoothingEnabled = false;
     fillRectWithTile(octx, 0, 0, ow, oh, oceanTile(phase));
-    applySeasonTint(oc, season);
     oceanFrames.frames.push(oc);
   }
   const oceanFramesMs = VIEWER_LOAD_DEBUG ? performance.now() - oceanT0 : 0;
@@ -1807,21 +1917,31 @@ function buildTerrainCache() {
 const DOCK_RECT = { x: 150, y: 470, w: 144, h: 36 };
 
 // Night lighting: a cool translucent overlay whose alpha follows the day
-// phase (calendar.dayFraction; night is the last 25% of each day). Dusk
-// ramps in over 0.70-0.80, deep night holds to 0.95, dawn ramps out.
-const MAX_NIGHT_ALPHA = 0.45;
+// phase (calendar.dayFraction; night is the last 25% of each day). Wider
+// twilight bands and deeper peak alpha than the pre-atmosphere-pack baseline.
+const MAX_NIGHT_ALPHA = 0.58;
+const TWILIGHT_START = 0.62;
+const TWILIGHT_END_DUSK = 0.78;
+const TWILIGHT_START_DAWN = 0.92;
+const GOLDEN_HOUR_MAX = 0.22;
+const LIGHT_GLOW_RADIUS = 200;
+const LIGHT_GLOW_HALO_RADIUS = 280;
+const NIGHT_DESAT_ALPHA = 0.08;
+
 function nightAlpha(cal) {
   if (!cal) return 0;
   const f = cal.dayFraction;
   if (f == null) return cal.isNight ? MAX_NIGHT_ALPHA : 0;
-  if (f < 0.70) return 0;
-  if (f < 0.80) return MAX_NIGHT_ALPHA * (f - 0.70) / 0.10;
-  if (f < 0.95) return MAX_NIGHT_ALPHA;
-  return MAX_NIGHT_ALPHA * (1.00 - f) / 0.05;
+  if (f < TWILIGHT_START) return 0;
+  if (f < TWILIGHT_END_DUSK) {
+    const t = (f - TWILIGHT_START) / (TWILIGHT_END_DUSK - TWILIGHT_START);
+    return MAX_NIGHT_ALPHA * (t * t);
+  }
+  if (f < TWILIGHT_START_DAWN) return MAX_NIGHT_ALPHA;
+  const t = (1.0 - f) / (1.0 - TWILIGHT_START_DAWN);
+  return MAX_NIGHT_ALPHA * (1 - (1 - t) * (1 - t));
 }
 
-// ENV_EFFECTS_ENABLED's golden-hour extension shares the night overlay's
-// transition windows without changing calendar state or adding another flag.
 function goldenHourAlpha(cal) {
   if (!ENV_EFFECTS_ENABLED || !cal || cal.dayFraction == null) return 0;
   const f = cal.dayFraction;
@@ -1829,7 +1949,34 @@ function goldenHourAlpha(cal) {
     if (f < start || f >= end) return 0;
     return Math.sin(((f - start) / (end - start)) * Math.PI);
   };
-  return 0.13 * Math.max(band(0.70, 0.80), band(0.95, 1.00));
+  return GOLDEN_HOUR_MAX * Math.max(
+    band(TWILIGHT_START, TWILIGHT_END_DUSK),
+    band(TWILIGHT_START_DAWN, 1.00)
+  );
+}
+
+function drawGoldenHourOverlay(ctx, cal) {
+  const gha = goldenHourAlpha(cal);
+  if (gha <= 0) return;
+  ctx.fillStyle = `rgba(255, 177, 78, ${gha.toFixed(3)})`;
+  ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+  const f = cal.dayFraction;
+  const edgeBand = (start, end) => {
+    if (f < start || f >= end) return 0;
+    return Math.sin(((f - start) / (end - start)) * Math.PI);
+  };
+  const rimAlpha = GOLDEN_HOUR_MAX * 0.45 * Math.max(
+    edgeBand(TWILIGHT_START, TWILIGHT_START + 0.04),
+    edgeBand(TWILIGHT_END_DUSK - 0.04, TWILIGHT_END_DUSK),
+    edgeBand(TWILIGHT_START_DAWN, TWILIGHT_START_DAWN + 0.04),
+    edgeBand(0.98, 1.00)
+  );
+  if (rimAlpha <= 0) return;
+  const prevOp = ctx.globalCompositeOperation;
+  ctx.globalCompositeOperation = "lighter";
+  ctx.fillStyle = `rgba(255, 140, 160, ${rimAlpha.toFixed(3)})`;
+  ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+  ctx.globalCompositeOperation = prevOp;
 }
 
 // Weather sky tint (WEATHER_ENABLED, living-ecosystem Phase 4): darkens the
@@ -1858,11 +2005,13 @@ function weatherSkyAlpha(weather, nightA) {
 // VISIBLE viewport area (scroll/zoom-derived, same helper drawWildlife/
 // drawShipments use), not world area -- the world is much larger than any
 // one screen, especially fully zoomed out.
-const WEATHER_STATE_INTENSITY = { clear: 0, gathering: 0, storm: 1, clearing: 0.45 };
-const WEATHER_PARTICLE_DENSITY_DIVISOR = 14000; // visible px^2 per particle at intensity 1 (storm uses STORM divisor)
-const WEATHER_STORM_DENSITY_DIVISOR = 9500;
-const WEATHER_PARTICLE_CAP = 260;
-const WEATHER_SHEET_EVERY_N = 9; // every Nth rain particle draws a thicker "sheet" streak
+const WEATHER_STATE_INTENSITY = { clear: 0, gathering: 0.18, storm: 1, clearing: 0.45 };
+const WEATHER_PARTICLE_DENSITY_DIVISOR = 11000;
+const WEATHER_STORM_DENSITY_DIVISOR = 7200;
+const WEATHER_PARTICLE_CAP = 380;
+const WEATHER_SHEET_EVERY_N = 6;
+const WEATHER_SNOW_FALL_PERIOD = 650;
+const WEATHER_RAIN_FALL_PERIOD = 130;
 const LIGHTNING_BUCKET_FRAMES = 540; // 540 local frames ≈ ~9s at 60fps — rare full-canvas flash windows
 function weatherParticleHash(i) {
   let h = (2166136261 ^ i) >>> 0;
@@ -1872,9 +2021,21 @@ function weatherParticleHash(i) {
   h ^= h >>> 16;
   return (h >>> 0) / 4294967295;
 }
-function drawWeatherParticles(ctx, frameTick, weather, cal) {
-  if (!WEATHER_ENABLED || !weather) return;
-  const intensity = WEATHER_STATE_INTENSITY[weather.state] || 0;
+function weatherParticleConfig() {
+  return {
+    intensityMap: WEATHER_STATE_INTENSITY,
+    densityDivisor: WEATHER_PARTICLE_DENSITY_DIVISOR,
+    stormDivisor: WEATHER_STORM_DENSITY_DIVISOR,
+    cap: WEATHER_PARTICLE_CAP,
+    sheetEvery: WEATHER_SHEET_EVERY_N,
+    snowFallPeriod: WEATHER_SNOW_FALL_PERIOD,
+    rainFallPeriod: WEATHER_RAIN_FALL_PERIOD,
+  };
+}
+
+function drawWeatherParticleBatch(ctx, frameTick, weather, cal, layerOpts) {
+  const cfg = weatherParticleConfig();
+  const intensity = cfg.intensityMap[weather.state] || 0;
   if (intensity <= 0) return;
   const left = canvasWrapEl.scrollLeft / zoomLevel;
   const top = canvasWrapEl.scrollTop / zoomLevel;
@@ -1882,28 +2043,33 @@ function drawWeatherParticles(ctx, frameTick, weather, cal) {
   const h = canvasWrapEl.clientHeight / zoomLevel;
   if (w <= 0 || h <= 0) return;
   const isSnow = !!(cal && cal.season === "winter");
-  const densityDiv = intensity >= 1 ? WEATHER_STORM_DENSITY_DIVISOR : WEATHER_PARTICLE_DENSITY_DIVISOR;
-  const count = Math.min(WEATHER_PARTICLE_CAP, Math.floor((w * h / densityDiv) * intensity));
-  const fallPeriod = isSnow ? 500 : 130; // frames for one particle to cross the visible band
+  const densityDiv = intensity >= 1 ? cfg.stormDivisor : cfg.densityDivisor;
+  const countMult = layerOpts && layerOpts.countMult != null ? layerOpts.countMult : 1;
+  const alphaMult = layerOpts && layerOpts.alphaMult != null ? layerOpts.alphaMult : 1;
+  const fallMult = layerOpts && layerOpts.fallMult != null ? layerOpts.fallMult : 1;
+  const count = Math.min(cfg.cap, Math.floor((w * h / densityDiv) * intensity * countMult));
+  const fallPeriod = (isSnow ? cfg.snowFallPeriod : cfg.rainFallPeriod) * fallMult;
   for (let i = 0; i < count; i++) {
     const hx = weatherParticleHash(i * 2 + 1);
     const hy = weatherParticleHash(i * 2 + 2);
     const x = left + hx * w;
     const yFrac = ((frameTick + hy * fallPeriod) % fallPeriod) / fallPeriod;
     const y = top + yFrac * h;
-    const sheet = !isSnow && (i % WEATHER_SHEET_EVERY_N === 0);
-    drawWeatherParticle(ctx, isSnow ? "snow" : "rain", x, y, i, sheet ? { sheet: true } : null);
+    const sheet = !isSnow && (i % cfg.sheetEvery === 0);
+    drawWeatherParticle(ctx, isSnow ? "snow" : "rain", x, y, i, {
+      sheet,
+      alphaMult,
+      frameTick,
+      windHash: weatherParticleHash(i * 3 + 7),
+      lenHash: weatherParticleHash(i * 5 + 11),
+    });
   }
 }
 
-function districtWeatherSeed(id) {
-  let h = 2166136261;
-  const s = String(id);
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
+function drawWeatherParticles(ctx, frameTick, weather, cal) {
+  if (!WEATHER_ENABLED || !weather) return;
+  drawWeatherParticleBatch(ctx, frameTick, weather, cal, { countMult: 0.6, alphaMult: 0.5, fallMult: 0.85 });
+  drawWeatherParticleBatch(ctx, frameTick, weather, cal, { countMult: 0.4, alphaMult: 1.0, fallMult: 1.0 });
 }
 
 function drawDistrictStormVeil(ctx, weather) {
@@ -1918,48 +2084,6 @@ function drawDistrictStormVeil(ctx, weather) {
     if (!b) continue;
     ctx.fillStyle = `rgba(6, 16, 22, ${alpha.toFixed(3)})`;
     ctx.fillRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
-  }
-}
-
-function drawDistrictStormRain(ctx, frameTick, weather, cal) {
-  if (!WEATHER_ENABLED || !weather) return;
-  const state = weather.state;
-  if (state !== "storm" && state !== "clearing") return;
-  if (cal && cal.season === "winter") return; // snow uses the global layer only
-  const ids = weather.districts;
-  if (!ids || !ids.length) return;
-  const intensity = state === "storm" ? 1 : 0.45;
-  const left = canvasWrapEl.scrollLeft / zoomLevel;
-  const top = canvasWrapEl.scrollTop / zoomLevel;
-  const vw = canvasWrapEl.clientWidth / zoomLevel;
-  const vh = canvasWrapEl.clientHeight / zoomLevel;
-  const fallPeriod = 130;
-  for (const id of ids) {
-    const b = getDistrictBounds(id);
-    if (!b) continue;
-    const ix1 = Math.max(b.x1, left);
-    const iy1 = Math.max(b.y1, top);
-    const ix2 = Math.min(b.x2, left + vw);
-    const iy2 = Math.min(b.y2, top + vh);
-    const iw = ix2 - ix1;
-    const ih = iy2 - iy1;
-    if (iw <= 0 || ih <= 0) continue;
-    const seed = districtWeatherSeed(id);
-    const count = Math.min(140, Math.floor((iw * ih / 6500) * intensity));
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
-    ctx.clip();
-    for (let i = 0; i < count; i++) {
-      const hi = weatherParticleHash(seed + i * 2 + 1);
-      const hj = weatherParticleHash(seed + i * 2 + 2);
-      const x = ix1 + hi * iw;
-      const yFrac = ((frameTick + hj * fallPeriod) % fallPeriod) / fallPeriod;
-      const y = iy1 + yFrac * ih;
-      const sheet = i % WEATHER_SHEET_EVERY_N === 0;
-      drawWeatherParticle(ctx, "rain", x, y, seed + i, sheet ? { sheet: true } : null);
-    }
-    ctx.restore();
   }
 }
 
@@ -1983,10 +2107,7 @@ function drawLightningFlash(ctx, renderFrame, weather) {
 }
 
 // Light glow (ENV_EFFECTS_ENABLED): warm radial glow over lit structures while
-// the night overlay is active, pushing back the dark in lit districts. Purely
-// data-driven — a no-op when the server hasn't sent `light`/`litDistricts`
-// yet (older payload), so it's safe regardless of rollout order.
-const LIGHT_GLOW_RADIUS = 140;
+// the night overlay is active, pushing back the dark in lit districts.
 function drawLightGlows(cal) {
   if (!ENV_EFFECTS_ENABLED) return;
   const na = nightAlpha(cal);
@@ -1998,19 +2119,26 @@ function drawLightGlows(cal) {
   const strength = na / MAX_NIGHT_ALPHA;
   const prevOp = ctx.globalCompositeOperation;
   ctx.globalCompositeOperation = "lighter";
+  const drawGlow = (cx, cy, radius, centerAlpha, midAlpha) => {
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+    grad.addColorStop(0, `rgba(255, 200, 100, ${centerAlpha.toFixed(3)})`);
+    grad.addColorStop(0.45, `rgba(255, 190, 90, ${midAlpha.toFixed(3)})`);
+    grad.addColorStop(1, "rgba(255, 190, 90, 0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+  };
   for (const s of structures) {
     if (!s || s.light !== true) continue;
     if (!litDistricts.includes(s.districtId)) continue;
     const size = getStructureRenderSize(s);
     const cx = s.x + size.width / 2;
     const cy = s.y + size.height / 2;
-    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, LIGHT_GLOW_RADIUS);
-    grad.addColorStop(0, `rgba(255, 190, 90, ${(0.35 * strength).toFixed(3)})`);
-    grad.addColorStop(1, "rgba(255, 190, 90, 0)");
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, LIGHT_GLOW_RADIUS, 0, Math.PI * 2);
-    ctx.fill();
+    drawGlow(cx, cy, LIGHT_GLOW_RADIUS, 0.55 * strength, 0.22 * strength);
+    if (na >= 0.4 * MAX_NIGHT_ALPHA) {
+      drawGlow(cx, cy, LIGHT_GLOW_HALO_RADIUS, 0.12 * strength, 0.04 * strength);
+    }
   }
   ctx.globalCompositeOperation = prevOp;
 }
@@ -2395,10 +2523,12 @@ const ACTION_LABELS = {
   plant_terrain: "planting terrain",
   propose_treaty: "proposing a treaty",
   vote_treaty: "voting on a treaty",
+  deliver_caravan: "running a caravan",
   council_speak: "speaking at council",
   council_propose: "proposing at council",
   council_vote: "voting at council",
   hunt_wildlife: "hunting",
+  confront_agent: "confronting",
   rest: "resting"
 };
 function humanizeAction(agent) {
@@ -3175,9 +3305,12 @@ function calendarPhase(cal) {
   if (!cal) return null;
   const f = cal.dayFraction;
   if (f == null) return cal.isNight ? "night" : "day";
-  if (f < 0.70) return "day";
-  if (f < 0.80) return "dusk";
-  if (f < 0.95) return "night";
+  const duskStart = TWILIGHT_START;
+  const duskEnd = TWILIGHT_END_DUSK;
+  const nightEnd = TWILIGHT_START_DAWN;
+  if (f < duskStart) return "day";
+  if (f < duskEnd) return "dusk";
+  if (f < nightEnd) return "night";
   return "dawn";
 }
 
@@ -3915,6 +4048,16 @@ async function pollState() {
     }
     applyFlags(snapshot.config && snapshot.config.flags);
     setSeasonalAgentAccentsEnabled(SEASONAL_AGENTS_ENABLED);
+    if (terrainCanvas && !terrainBuildScheduled) {
+      const [, ecologyStageKey] = ecologyStagesForTerrain();
+      const seasonNow = snapshot.calendar && snapshot.calendar.season;
+      const visualKey = terrainVisualCacheKey(seasonNow, ecologyStageKey);
+      if (visualKey !== lastTerrainVisualKeyRendered) {
+        terrainCanvas = null;
+        terrainBuildScheduled = false;
+        scheduleTerrainCacheBuild();
+      }
+    }
     renderDailyCouncil((snapshot.civilization || {}).dailyCouncil);
     syncPauseButton();
     if (terrainCanvas) hideWorldLoading();
@@ -4062,6 +4205,13 @@ function tickBody() {
   }
 
   const na = nightAlpha(world.calendar);
+  if (na > 0.35) {
+    const prevOp = ctx.globalCompositeOperation;
+    ctx.globalCompositeOperation = "saturation";
+    ctx.fillStyle = `rgba(128, 128, 128, ${NIGHT_DESAT_ALPHA.toFixed(3)})`;
+    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+    ctx.globalCompositeOperation = prevOp;
+  }
   if (na > 0) {
     ctx.fillStyle = `rgba(10, 16, 48, ${na.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
@@ -4077,15 +4227,10 @@ function tickBody() {
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
   }
   drawLightningFlash(ctx, renderFrame, world.weather);
-  const gha = goldenHourAlpha(world.calendar);
-  if (gha > 0) {
-    ctx.fillStyle = `rgba(255, 177, 78, ${gha.toFixed(3)})`;
-    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
-  }
+  drawGoldenHourOverlay(ctx, world.calendar);
   drawLightGlows(world.calendar);
   drawDistrictStormVeil(ctx, world.weather);
   drawWeatherParticles(ctx, world.frameTick, world.weather, world.calendar);
-  drawDistrictStormRain(ctx, world.frameTick, world.weather, world.calendar);
 
   // C5 follow-cam: re-center every frame on the followed agent while active;
   // release the lock once they're deselected or no longer living.
@@ -4143,6 +4288,11 @@ const godConnectBtn = document.getElementById("godConnectBtn");
 const godAuthStatusEl = document.getElementById("godAuthStatus");
 const divineBarEl = document.getElementById("divineBar");
 const divineBarBrandStateEl = document.getElementById("divineBarBrandState");
+const divineBarInterventionCountEl = document.getElementById("divineBarInterventionCount");
+const divinePreviewStripEl = document.getElementById("divinePreviewStrip");
+const divinePreviewStripLabelEl = document.getElementById("divinePreviewStripLabel");
+const divinePreviewApplyBtnEl = document.getElementById("divinePreviewApplyBtn");
+const divinePreviewDiscardBtnEl = document.getElementById("divinePreviewDiscardBtn");
 const divineUnlockPipEl = document.getElementById("divineUnlockPip");
 const divineModalScrimEl = document.getElementById("divineModalScrim");
 const divineModalBodyEl = document.getElementById("divineModalBody");
@@ -4223,6 +4373,16 @@ function populateGodAgentSelects() {
       `<option value="${s.id}">${escapeHtml(s.name || s.type)} (#${s.id})</option>`
     ).join("") || `<option value="">(no structures)</option>`;
   }
+  const districtOptions = getDistricts().map((d) =>
+    `<option value="${escapeHtml(d.id)}">${escapeHtml(d.label || d.id)}</option>`
+  ).join("") || `<option value="">(no districts)</option>`;
+  ["godMassRepairDistrict", "godClearRuinsDistrict"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const prior = el.value;
+    el.innerHTML = districtOptions;
+    if (prior && Array.from(el.options).some((o) => o.value === prior)) el.value = prior;
+  });
 }
 
 // --- Auth / fetch plumbing --------------------------------------------
@@ -4259,6 +4419,74 @@ function godEffectivelyAuthorized() {
   return godAuthorized || !GOD_AUTH_REQUIRED_FLAG;
 }
 
+function godDefaultDayFrames() {
+  const cfg = world.config || {};
+  if (cfg.DAY_FRAMES != null) return Number(cfg.DAY_FRAMES) || 18000;
+  return 18000;
+}
+
+function godInterventionCount() {
+  const pub = (world.god && world.god.recentPublicInterventions) || [];
+  if (pub.length) return pub.length;
+  const gs = (getCiv().godState && getCiv().godState.recentInterventions) || [];
+  return gs.length;
+}
+
+let divinePreviewController = null;
+let divinePreviewOwnerForm = null;
+let godLastAppliedPin = null;
+
+function clearDivinePreviewStrip() {
+  divinePreviewController = null;
+  divinePreviewOwnerForm = null;
+  if (divinePreviewStripEl) divinePreviewStripEl.classList.remove("visible");
+}
+
+function showDivinePreviewStrip(label, data, applyFn, discardFn) {
+  if (!divinePreviewStripEl) return;
+  divinePreviewController = { label, data, applyFn, discardFn };
+  if (divinePreviewStripLabelEl) {
+    const kind = data.normalizedCommand && data.normalizedCommand.kind;
+    divinePreviewStripLabelEl.innerHTML =
+      godReversibilityBadge(data.reversibilityClass) +
+      `<span>${escapeHtml(label || kind || "command")} — preview ready</span>`;
+  }
+  divinePreviewStripEl.classList.add("visible");
+}
+
+function renderGodPinRow() {
+  if (!divineModalBodyEl || !godLastAppliedPin) return;
+  let pin = document.getElementById("divinePinRow");
+  if (!pin) {
+    pin = document.createElement("div");
+    pin.id = "divinePinRow";
+    pin.className = "divine-pin-row";
+    divineModalBodyEl.insertBefore(pin, divineModalBodyEl.firstChild);
+  }
+  const p = godLastAppliedPin;
+  pin.innerHTML = `Last applied: <strong>${escapeHtml(p.label)}</strong> (id ${escapeHtml(String(p.id))}) — ` +
+    `<a href="#" id="divinePinHistoryLink">View in History</a>`;
+  const link = document.getElementById("divinePinHistoryLink");
+  if (link) {
+    link.addEventListener("click", (e) => {
+      e.preventDefault();
+      openDivineModal("history");
+    });
+  }
+}
+
+if (divinePreviewApplyBtnEl) {
+  divinePreviewApplyBtnEl.addEventListener("click", () => {
+    if (divinePreviewController && divinePreviewController.applyFn) divinePreviewController.applyFn();
+  });
+}
+if (divinePreviewDiscardBtnEl) {
+  divinePreviewDiscardBtnEl.addEventListener("click", () => {
+    if (divinePreviewController && divinePreviewController.discardFn) divinePreviewController.discardFn();
+    clearDivinePreviewStrip();
+  });
+}
+
 function updateDivineBarAuthUi() {
   if (divineBarBrandStateEl) {
     if (!GOD_AUTH_REQUIRED_FLAG) {
@@ -4285,6 +4513,16 @@ function updateDivineBarAuthUi() {
     } else {
       divineUnlockPipEl.style.display = "";
       divineUnlockPipEl.textContent = godAuthorized ? "ready" : "locked";
+    }
+  }
+  if (divineBarInterventionCountEl) {
+    if (GOD_MODE_ENABLED_FLAG) {
+      const n = godInterventionCount();
+      divineBarInterventionCountEl.textContent = n ? `${n} intervention${n === 1 ? "" : "s"}` : "no interventions yet";
+      divineBarInterventionCountEl.style.display = "";
+    } else {
+      divineBarInterventionCountEl.textContent = "";
+      divineBarInterventionCountEl.style.display = "none";
     }
   }
   if (!divineBarEl) return;
@@ -4444,6 +4682,7 @@ function closeDivineModal() {
   if (divineModalScrimEl) divineModalScrimEl.classList.remove("open");
   godBarButtons.forEach((btn) => btn.classList.remove("active"));
   hideDivineTip();
+  clearDivinePreviewStrip();
 }
 
 function openDivineModal(name) {
@@ -4478,6 +4717,7 @@ function openDivineModal(name) {
   if (name === "sight" && godEffectivelyAuthorized()) refreshGodSight();
   if (name === "laws") renderGodLawsActive();
   if (name === "history") renderGodHistory();
+  renderGodPinRow();
 }
 
 // Thin alias: existing callers (connect→sight, lock→unlock, compile→story) open the modal.
@@ -4501,6 +4741,13 @@ if (divineModalScrimEl) {
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && divineModalScrimEl && divineModalScrimEl.classList.contains("open")) {
     closeDivineModal();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter"
+      && divineModalScrimEl && divineModalScrimEl.classList.contains("open")
+      && divinePreviewController) {
+    e.preventDefault();
+    divinePreviewController.applyFn();
   }
 });
 
@@ -4555,6 +4802,11 @@ document.addEventListener("focusout", (e) => {
 
 if (!GOD_AUTH_REQUIRED_FLAG) godAuthorized = true;
 updateDivineBarAuthUi();
+["godVitalsFieldset", "godGrantFieldset", "godStructureFieldset", "godMassRepairFieldset", "godClearRuinsFieldset"]
+  .forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add("divine-fieldset-irreversible");
+  });
 
 // --- Preview -> Apply generic wiring ------------------------------------
 // One reusable helper per mutating form (docs/plan: "no Apply before a
@@ -4571,9 +4823,36 @@ function wireDivineForm(formSelector, opts) {
   function invalidate() {
     previewState = null;
     applyBtn.disabled = true;
+    if (divinePreviewOwnerForm === formEl) clearDivinePreviewStrip();
   }
   formEl.addEventListener("input", invalidate);
   formEl.addEventListener("change", invalidate);
+
+  async function doApply() {
+    if (!previewState) return;
+    applyBtn.disabled = true;
+    const requestId = (window.crypto && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : ("req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+    const resp = await godApiFetch("/control/god/apply", {
+      method: "POST",
+      body: { previewId: previewState.previewId, requestId },
+    });
+    previewState = null;
+    clearDivinePreviewStrip();
+    if (!resp.data || !resp.data.ok) {
+      renderGodError(resultEl, (resp.data && resp.data.reason) || "apply failed");
+      return;
+    }
+    resultEl.innerHTML = renderGodAppliedHtml(resp.data);
+    godLastAppliedPin = {
+      label: opts.label || (resp.data.outcome && resp.data.outcome.kind) || "intervention",
+      id: resp.data.interventionId,
+    };
+    renderGodPinRow();
+    if (opts.onApplied) opts.onApplied(resp.data);
+    refreshGodSightIfOpen();
+  }
 
   previewBtn.addEventListener("click", async () => {
     invalidate();
@@ -4591,27 +4870,11 @@ function wireDivineForm(formSelector, opts) {
     previewState = resp.data;
     resultEl.innerHTML = renderGodPreviewHtml(resp.data, opts.label);
     applyBtn.disabled = false;
+    divinePreviewOwnerForm = formEl;
+    showDivinePreviewStrip(opts.label, resp.data, doApply, invalidate);
   });
 
-  applyBtn.addEventListener("click", async () => {
-    if (!previewState) return;
-    applyBtn.disabled = true;
-    const requestId = (window.crypto && crypto.randomUUID)
-      ? crypto.randomUUID()
-      : ("req-" + Date.now() + "-" + Math.random().toString(36).slice(2));
-    const resp = await godApiFetch("/control/god/apply", {
-      method: "POST",
-      body: { previewId: previewState.previewId, requestId },
-    });
-    previewState = null;
-    if (!resp.data || !resp.data.ok) {
-      renderGodError(resultEl, (resp.data && resp.data.reason) || "apply failed");
-      return;
-    }
-    resultEl.innerHTML = renderGodAppliedHtml(resp.data);
-    if (opts.onApplied) opts.onApplied(resp.data);
-    refreshGodSightIfOpen();
-  });
+  applyBtn.addEventListener("click", doApply);
 }
 
 function refreshGodSightIfOpen() {
@@ -4836,6 +5099,68 @@ wireDivineForm("#godStructureFieldset", {
     const delta = parseFloat(document.getElementById("godStructureDelta").value || "0");
     if (!delta) return { error: "delta must be non-zero" };
     return { envelope: { kind: "structure_condition", payload: { structureId: parseInt(structureId, 10), delta } } };
+  },
+});
+
+wireDivineForm("#godMassRepairFieldset", {
+  previewBtnId: "godMassRepairPreviewBtn", applyBtnId: "godMassRepairApplyBtn", resultElId: "godMassRepairResult",
+  label: "mass repair structures",
+  buildEnvelope: () => {
+    const scopeMode = document.getElementById("godMassRepairScope").value;
+    const payload = { unRuin: document.getElementById("godMassRepairUnRuin").checked };
+    const targetRaw = document.getElementById("godMassRepairTarget").value;
+    if (targetRaw) {
+      const conditionTarget = parseFloat(targetRaw);
+      if (!Number.isFinite(conditionTarget) || conditionTarget < 0 || conditionTarget > 100) {
+        return { error: "condition target must be 0–100" };
+      }
+      payload.conditionTarget = conditionTarget;
+    }
+    if (scopeMode === "ids") {
+      const raw = document.getElementById("godMassRepairIds").value.trim();
+      if (!raw) return { error: "enter comma-separated structure ids" };
+      const structureIds = raw.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
+      if (!structureIds.length) return { error: "invalid structure ids" };
+      payload.scope = "ids";
+      payload.structureIds = structureIds;
+    } else if (scopeMode === "district") {
+      const districtId = document.getElementById("godMassRepairDistrict").value;
+      if (!districtId) return { error: "select a district" };
+      payload.scope = { districtId };
+    } else {
+      payload.scope = "all_critical";
+    }
+    return { envelope: { kind: "repair_structures", payload } };
+  },
+});
+
+wireDivineForm("#godClearRuinsFieldset", {
+  previewBtnId: "godClearRuinsPreviewBtn", applyBtnId: "godClearRuinsApplyBtn", resultElId: "godClearRuinsResult",
+  label: "clear ruins",
+  buildEnvelope: () => {
+    const mode = document.getElementById("godClearRuinsMode").value;
+    const payload = {};
+    const minAgeRaw = document.getElementById("godClearRuinsMinAge").value;
+    if (minAgeRaw) {
+      const minAgeFrames = parseInt(minAgeRaw, 10);
+      if (!Number.isFinite(minAgeFrames) || minAgeFrames < 0) return { error: "min age must be a non-negative integer" };
+      payload.minAgeFrames = minAgeFrames;
+    }
+    if (mode === "ids") {
+      const raw = document.getElementById("godClearRuinsIds").value.trim();
+      if (!raw) return { error: "enter comma-separated ruin ids" };
+      const structureIds = raw.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
+      if (!structureIds.length) return { error: "invalid ruin ids" };
+      payload.structureIds = structureIds;
+    } else if (mode === "district") {
+      const districtId = document.getElementById("godClearRuinsDistrict").value;
+      if (!districtId) return { error: "select a district" };
+      payload.districtId = districtId;
+      if (!("minAgeFrames" in payload)) payload.minAgeFrames = godDefaultDayFrames();
+    } else {
+      if (!("minAgeFrames" in payload)) payload.minAgeFrames = godDefaultDayFrames();
+    }
+    return { envelope: { kind: "clear_ruins", payload } };
   },
 });
 
@@ -5293,6 +5618,7 @@ function renderDivineConsole() {
   if (key === godLastStateKey) return;
   godLastStateKey = key;
   renderGodPublicBanner();
+  updateDivineBarAuthUi();
   if (godActiveTab === "history") renderGodHistory();
   if (godActiveTab === "laws" && !(godLastSight && godLastSight.activeEvents)) renderGodLawsActive();
 }

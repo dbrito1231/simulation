@@ -110,6 +110,27 @@ one-time module-load constant. `_road_path_between(agent, dest_district_id)`
 True; semantics/rendering owned here, echo status in
 [01-architecture.md](01-architecture.md#flag-index-complete--30-module-level-flags-sim_enginepy)).
 
+## Inter-settlement movement (ocean corridor)
+
+When `PATH1_DIPLOMACY_ENABLED`, `TRANSIT_ENABLED`, and `_has_ocean_transit()`
+are all true, **caravan goals only** that travel between different
+`settlementId`s may route through a bounded ocean corridor instead of
+road-only paths:
+
+1. Leave the source settlement via its dock or shipyard district (working
+   structure with a `transit`/`ocean` unlock).
+2. Traverse ocean waypoint(s) on the road graph (no free-swim for ordinary
+   `move_to_district`, gather, or non-caravan goals).
+3. Enter the destination settlement at its dock/district.
+
+Transit cost is consumed once per crossing via `_consume_ocean_transit`
+([10-path1.md](10-path1.md#transit_enabled)). `_set_agent_target_once` /
+`_step_goal` for `kind: "caravan"` selects the corridor when the destination
+district's settlement differs from the actor's. Shipment visuals use
+`mode: "boat"` under the same boundary signal
+([08-systems-economy.md](08-systems-economy.md#caravan_visuals_enabled)).
+No persistent vehicle entities are spawned — movement remains agent-centric.
+
 ## Zone kinds
 
 `ZONE_NAMES = ["farm", "forest", "village", "market", "beach", "cave", "ocean",

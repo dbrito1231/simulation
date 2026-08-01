@@ -131,7 +131,13 @@ folder for its lifetime.
     Phase 4's `agent_vitals`/`grant_resource`/`structure_condition` write only
     the `applied` status (they are irreversible, one-shot, and `public: True`
     — there is no timed/pending state of theirs for `replaced`/`revoked`/
-    `restore-closed` to apply to). Huntable-wildlife god kinds
+    `restore-closed` to apply to). Town-integrity kinds `repair_structures` /
+    `clear_ruins` ([02-engine-core.md](02-engine-core.md#sovereign-god-mode-town-integrity--mass-structure-repair-and-ruin-clearance))
+    follow the same irreversible one-shot pattern: each successful apply writes
+    exactly one `divine.jsonl` `"applied"` record (`public: True`) with
+    `kind`, `normalized_command`, and `outcome` describing the batch restore
+    or ruin deletion (structure ids affected, condition deltas, registry
+    removals). Huntable-wildlife god kinds
     (`wildlife_spawn` / `wildlife_despawn` / `wildlife_set_hp` —
     [02-engine-core.md](02-engine-core.md#sovereign-god-mode-wildlife-kinds))
     follow the same irreversible one-shot pattern: each successful apply
@@ -221,6 +227,12 @@ documented in [11-viewer.md](11-viewer.md).
 regardless of auth mode — unexpected mutations remain attributable after the
 fact. The token and raw HTTP headers are never written to any log stream.
 
+**Divine Console chrome:** viewer-only UX polish (sticky preview strip,
+intervention count on the bar, pin row, keyboard shortcuts) — permanent default
+when God mode is on; no flag gate. No new routes, no `divine.jsonl` shape
+changes, no benchmark keys. Requires `GOD_MODE_ENABLED`; when God mode is off
+the bar is hidden.
+
 **Future option (not implemented):** a source-IP allowlist on God routes only
 (`GOD_ALLOWED_IPS`) could restrict mutation to named hosts while preserving
 LAN-wide viewing. See `docs/plan-god-always-unlocked.md` Phase 4-alt.
@@ -246,7 +258,8 @@ no raw requestId, ever.
 
 `recentInterventions` (and therefore this metric's `value`) is a single
 shared, bounded ring across every God-mode kind — Phase 4's three miracles
-increment the same counter proclamation/providence/private_omen/
+and town-integrity `repair_structures`/`clear_ruins` increment the same
+counter proclamation/providence/private_omen/
 revoke_guidance already do, not a separate one. Phase 4 also introduces one
 additional in-memory, non-persisted, non-benchmarked counter:
 `self._god_grant_session_total` (cumulative `grant_resource` units applied

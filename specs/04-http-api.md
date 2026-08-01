@@ -76,7 +76,7 @@ engine lock for a consistent read:
 | `calendar` | day/season/year — specs/02-engine-core.md |
 | `lmStatus` | last-known Ollama (LLM runtime) reachability |
 | `agents` | per-agent view (position, resources, health, beliefs, skills, lifecycle fields, etc.) — specs/06-agents.md |
-| `civilization` | structures, projects, resource/project registries, pending blueprints/recipes/rules, stockpile, and flag-gated sections (chronicle/library when `CULTURE_ENABLED`, era/tech-tier/council when `TECH_TREE_ENABLED`, market/prices when `ECONOMY_ENABLED`, settlements/treaties/`isNight` when Path 1 is on, `litDistricts` + per-structure `light` flag when `ENV_EFFECTS_ENABLED` — specs/08) — specs/05-world.md, specs/08-09-10 |
+| `civilization` | structures, projects, resource/project registries, pending blueprints/recipes/rules, stockpile, and flag-gated sections (chronicle/library when `CULTURE_ENABLED`, era/tech-tier/council when `TECH_TREE_ENABLED`, market/prices when `ECONOMY_ENABLED`, settlements/**settlementStores**/treaties/`caravanLog`/`isNight` when Path 1 diplomacy is on, `litDistricts` + per-structure `light` flag when `ENV_EFFECTS_ENABLED` — specs/08) — specs/05-world.md, specs/08-09-10 |
 | `benchmarks` | latest benchmark metrics — specs/12-ops.md |
 | `activity` | recent activity log entries |
 | `conversation` | last 30 conversation log entries |
@@ -110,6 +110,13 @@ When transit is enabled, `/state` includes `civilization.physicalProps`, a
 read-only list of `{resource, count}` hints for the thin viewer. It derives up
 to three boats from village stockpile quantity; the viewer places them at fixed
 moorings in the starter ocean, rather than beside ordinary structures.
+
+When `PATH1_DIPLOMACY_ENABLED` is on, `/state` also includes
+`civilization.settlementStores` — a map `{settlement_id: {resource_id: qty}}`
+mirroring the think-payload summary agents see when planning caravans and local
+spending ([08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
+Each settlement id matches `civilization.settlements[*].id`; missing keys
+migrate to `{}` on restore.
 
 ## Sovereign God mode
 
@@ -146,12 +153,16 @@ one uniform failure shape:
 
 Phase 2 shipped exactly one applyable command kind, `proclamation`; Phase 3
 added `providence`/`private_omen`/`revoke_guidance`; Phase 4 added
-`agent_vitals`/`grant_resource`/`structure_condition`; Phase 5 adds
+`agent_vitals`/`grant_resource`/`structure_condition`; town-integrity adds
+`repair_structures`/`clear_ruins`; Phase 5 adds
 `story_event` (timed modifiers + zero or more Phase 4 primitives + optional
 providence, composed atomically). `/control/god/capabilities` echoes the
 full current catalog — payload shape, bounds, and `reversibilityClass` per
 kind (`story_event`'s is `"cancellable"` with no primitives, `"consequential"`
-with any) — plus `modifierRanges` for the seven timed-lawgiver keys. See
+with any) — plus `modifierRanges` for the seven timed-lawgiver keys. Mass
+structure commands (`repair_structures`, `clear_ruins`) are documented in
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-town-integrity--mass-structure-repair-and-ruin-clearance).
+See
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel)
 for the command catalog and stored-text contract, and
 [12-ops.md](12-ops.md) for `divine.jsonl`.
