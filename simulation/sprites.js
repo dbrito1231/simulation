@@ -1048,47 +1048,30 @@ function drawStructureSmoke(ctx, structure, frameTick) {
 // from frameTick each frame.
 function drawWeatherParticle(ctx, kind, x, y, index, opts) {
   opts = opts || {};
-  const v2 = opts.v2 === true;
   const alphaMult = opts.alphaMult != null ? opts.alphaMult : 1;
   ctx.save();
   if (kind === "snow") {
-    const drift = v2
-      ? Math.sin((x + index) * 0.07 + (opts.frameTick || 0) * 0.02) * 2
-      : Math.sin((x + index) * 0.05) * 1.5;
+    const drift = Math.sin((x + index) * 0.07 + (opts.frameTick || 0) * 0.02) * 2;
     const px = Math.round(x + drift);
     const py = Math.round(y);
-    if (v2) {
-      const alpha = (0.82 * alphaMult).toFixed(3);
-      ctx.fillStyle = `rgba(235, 245, 255, ${alpha})`;
-      ctx.fillRect(px - 1, py, 3, 1);
-      ctx.fillRect(px, py - 1, 1, 3);
-      ctx.beginPath();
-      ctx.arc(px, py, 1, 0, Math.PI * 2);
-      ctx.fill();
-    } else {
-      ctx.fillStyle = "rgba(235, 245, 255, 0.75)";
-      ctx.beginPath();
-      ctx.arc(px, py, 1.6, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    const alpha = (0.82 * alphaMult).toFixed(3);
+    ctx.fillStyle = `rgba(235, 245, 255, ${alpha})`;
+    ctx.fillRect(px - 1, py, 3, 1);
+    ctx.fillRect(px, py - 1, 1, 3);
+    ctx.beginPath();
+    ctx.arc(px, py, 1, 0, Math.PI * 2);
+    ctx.fill();
   } else {
     const sheet = opts.sheet === true;
-    let xOff;
-    let yOff;
-    if (v2) {
-      const angleDeg = ((opts.windHash != null ? opts.windHash : 0.5) * 50) - 25;
-      const len = 8 + (opts.lenHash != null ? opts.lenHash : 0.5) * 8;
-      const rad = angleDeg * Math.PI / 180;
-      xOff = Math.sin(rad) * len;
-      yOff = Math.cos(rad) * len;
-    } else {
-      xOff = opts.xOff != null ? opts.xOff : -6;
-      yOff = opts.yOff != null ? opts.yOff : 12;
-    }
-    const baseAlpha = sheet ? (v2 ? 0.86 : 0.72) : (v2 ? 0.68 : 0.55);
+    const angleDeg = ((opts.windHash != null ? opts.windHash : 0.5) * 50) - 25;
+    const len = 8 + (opts.lenHash != null ? opts.lenHash : 0.5) * 8;
+    const rad = angleDeg * Math.PI / 180;
+    const xOff = Math.sin(rad) * len;
+    const yOff = Math.cos(rad) * len;
+    const baseAlpha = sheet ? 0.86 : 0.68;
     const alpha = Math.min(1, baseAlpha * alphaMult).toFixed(3);
     ctx.strokeStyle = `rgba(190, 210, 230, ${alpha})`;
-    ctx.lineWidth = sheet ? (v2 ? 2.5 : 2) : 1;
+    ctx.lineWidth = sheet ? 2.5 : 1;
     ctx.beginPath();
     ctx.moveTo(Math.round(x), Math.round(y));
     ctx.lineTo(Math.round(x + xOff), Math.round(y + yOff));

@@ -50,11 +50,7 @@ Commits since `fad699d` (storm presence pack on main):
 ### E — Atmosphere
 
 - **Calendar stretch (+33% real-time cadence):** 7.5 → 10 min days, 45 → 60 min seasons, 4 h in-world year (24 day/night cycles)
-- **New visual flags** (all default on, echoed in `/state` `config.flags`):
-  - `VISUAL_LIGHTING_V2_ENABLED`
-  - `VISUAL_SEASONAL_TERRAIN_ENABLED`
-  - `WEATHER_PARTICLES_V2_ENABLED`
-- Viewer: stronger day/night lighting, seasonal terrain palettes, weather particle v2, Divine Console chrome (permanent default)
+- Viewer: stronger day/night lighting, seasonal terrain palettes, weather particles, Divine Console chrome (all permanent defaults when their parent gates are on)
 - Plan docs: `docs/plan-visual-1-day-night-lighting.md`, `docs/plan-visual-2-seasonal-terrain-grading.md`, `docs/plan-visual-atmosphere-systems.md`
 
 ## How to verify

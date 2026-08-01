@@ -368,13 +368,6 @@ WEATHER_GOVERNANCE_ENABLED = True
 WEATHER_STORM_REGROW_MULT = 0.3     # suppression multiplier for storm-affected districts
 WEATHER_CLEARING_REGROW_MULT = 1.5  # post-storm "rain" boost for the same districts while clearing
 
-# Atmosphere pack (Phase 4b/4c): viewer-facing visual v2 gates. All default
-# on; off = pre-atmosphere-pack code path in index.html/sprites.js (no partial
-# hybrid). Not env-backed -- instant rollback during QA.
-VISUAL_LIGHTING_V2_ENABLED = True
-VISUAL_SEASONAL_TERRAIN_ENABLED = True
-WEATHER_PARTICLES_V2_ENABLED = True
-
 # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
 # GOD_MODE_ENABLED is an environment-backed, READ-ONCE-AT-IMPORT module flag,
 # not a runtime toggle: no HTTP route may change it, and there is no live
@@ -18231,9 +18224,6 @@ class SimEngine:
                         "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
                         "WEATHER_ENABLED": WEATHER_ENABLED,
                         "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
-                        "VISUAL_LIGHTING_V2_ENABLED": VISUAL_LIGHTING_V2_ENABLED,
-                        "VISUAL_SEASONAL_TERRAIN_ENABLED": VISUAL_SEASONAL_TERRAIN_ENABLED,
-                        "WEATHER_PARTICLES_V2_ENABLED": WEATHER_PARTICLES_V2_ENABLED,
                         # Sovereign God mode (Phase 2): ALWAYS echoed, flag-off
                         # or on, so the viewer/clients can detect the dark
                         # default without a private route. The "god" key

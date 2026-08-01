@@ -1482,8 +1482,7 @@ const STAGE_TINT_FACTOR = { lush: 1.0, healthy: 0.85, sparse: 0.65, barren: 0.45
 const BARREN_EXTRA_BROWN = "rgba(90,70,50,0.08)";
 
 function terrainVisualCacheKey(season, ecologyStageKey) {
-  const v = VISUAL_SEASONAL_TERRAIN_ENABLED ? "v2" : "v1";
-  return `${season || "summer"}|${ecologyStageKey || ""}|${v}`;
+  return `${season || "summer"}|${ecologyStageKey || ""}`;
 }
 
 function districtTintAlpha(base, factor) {
@@ -1506,7 +1505,7 @@ function applyDistrictTintRect(ctx, bounds, op, rgba, factor) {
   ctx.restore();
 }
 
-// Per terrain-kind seasonal grading (VISUAL_SEASONAL_TERRAIN_ENABLED v2).
+// Per terrain-kind seasonal grading during cache build.
 function applySeasonTintForKind(ctx, season, kind, stage, bounds) {
   if (!season || season === "summer" || kind === "ocean") return;
   const factor = STAGE_TINT_FACTOR[stage] || STAGE_TINT_FACTOR.healthy;
@@ -1546,40 +1545,6 @@ function applySeasonTintForKind(ctx, season, kind, stage, bounds) {
   if (season === "summer" && k === "farm") {
     applyDistrictTintRect(ctx, bounds, "lighter", "rgba(255,230,150,0.08)", factor);
   }
-}
-
-// Seasonal color grading applied once to the terrain cache (and ocean foam
-// frames) at build time -- not per frame. Composite-mode passes over the
-// full canvas; summer/unknown is the untinted baseline.
-function applySeasonTint(canvas, season) {
-  if (!season || season === "summer") return;
-  const c = canvas.getContext("2d");
-  c.save();
-  if (season === "autumn") {
-    c.globalCompositeOperation = "multiply";
-    c.fillStyle = "rgba(200,140,40,0.18)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-    c.globalCompositeOperation = "overlay";
-    c.fillStyle = "rgba(200,140,40,0.10)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-  } else if (season === "winter") {
-    // Desaturate first -- greens must lose dominance or the cool passes
-    // just read as "bright pastel spring" instead of winter light.
-    c.globalCompositeOperation = "saturation";
-    c.fillStyle = "rgba(128,128,128,0.60)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-    c.globalCompositeOperation = "overlay";
-    c.fillStyle = "rgba(150,175,235,0.30)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-    c.globalCompositeOperation = "lighter";
-    c.fillStyle = "rgba(135,160,220,0.20)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-  } else if (season === "spring") {
-    c.globalCompositeOperation = "overlay";
-    c.fillStyle = "rgba(60,200,80,0.10)";
-    c.fillRect(0, 0, canvas.width, canvas.height);
-  }
-  c.restore();
 }
 
 function hideWorldLoading() {
@@ -1707,9 +1672,6 @@ let CROP_GROWTH_ENABLED = true;
 let WILDLIFE_ENABLED = true;
 let CARAVAN_VISUALS_ENABLED = true;
 let WEATHER_ENABLED = true;
-let VISUAL_LIGHTING_V2_ENABLED = true;
-let VISUAL_SEASONAL_TERRAIN_ENABLED = true;
-let WEATHER_PARTICLES_V2_ENABLED = true;
 
 // --- Viewer-only display toggles (client-side, not server flags). Flipping
 // either to true fully restores that section with no other edits. ---
@@ -1899,15 +1861,12 @@ function buildTerrainCache() {
   const [ecologyStages, ecologyStageKey] = ecologyStagesForTerrain();
 
   const drawT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
-  const terrainVisualOpts = VISUAL_SEASONAL_TERRAIN_ENABLED
-    ? { seasonalV2: true, applyDistrictTint: applySeasonTintForKind }
-    : null;
+  const terrainVisualOpts = { seasonalV2: true, applyDistrictTint: applySeasonTintForKind };
   drawTiledWorld(tctx, WORLD_W, WORLD_H, 0, null, districts,
                  districtsData.roadNodes, districtsData.roadEdges, season || "summer", ecologyStages, stageTimings, terrainVisualOpts);
   const drawTiledWorldMs = VIEWER_LOAD_DEBUG ? performance.now() - drawT0 : 0;
 
   const tintT0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;
-  if (!VISUAL_SEASONAL_TERRAIN_ENABLED) applySeasonTint(terrainCanvas, season);
   const seasonTintMs = VIEWER_LOAD_DEBUG ? performance.now() - tintT0 : 0;
   lastEcologyStageKeyRendered = ecologyStageKey;
   lastTerrainVisualKeyRendered = terrainVisualCacheKey(season, ecologyStageKey);
@@ -1928,7 +1887,6 @@ function buildTerrainCache() {
     const octx = oc.getContext("2d");
     octx.imageSmoothingEnabled = false;
     fillRectWithTile(octx, 0, 0, ow, oh, oceanTile(phase));
-    if (!VISUAL_SEASONAL_TERRAIN_ENABLED) applySeasonTint(oc, season);
     oceanFrames.frames.push(oc);
   }
   const oceanFramesMs = VIEWER_LOAD_DEBUG ? performance.now() - oceanT0 : 0;
@@ -1959,77 +1917,42 @@ function buildTerrainCache() {
 const DOCK_RECT = { x: 150, y: 470, w: 144, h: 36 };
 
 // Night lighting: a cool translucent overlay whose alpha follows the day
-// phase (calendar.dayFraction; night is the last 25% of each day). Dusk
-// ramps in over 0.70-0.80, deep night holds to 0.95, dawn ramps out.
-// VISUAL_LIGHTING_V2_ENABLED widens twilight bands and deepens peak alpha.
-const MAX_NIGHT_ALPHA = 0.45;
-const MAX_NIGHT_ALPHA_V2 = 0.58;
-const TWILIGHT_START_V2 = 0.62;
-const TWILIGHT_END_DUSK_V2 = 0.78;
-const TWILIGHT_START_DAWN_V2 = 0.92;
-const GOLDEN_HOUR_MAX_V2 = 0.22;
-const LIGHT_GLOW_RADIUS_V2 = 200;
-const LIGHT_GLOW_HALO_RADIUS_V2 = 280;
-const NIGHT_DESAT_ALPHA_V2 = 0.08;
+// phase (calendar.dayFraction; night is the last 25% of each day). Wider
+// twilight bands and deeper peak alpha than the pre-atmosphere-pack baseline.
+const MAX_NIGHT_ALPHA = 0.58;
+const TWILIGHT_START = 0.62;
+const TWILIGHT_END_DUSK = 0.78;
+const TWILIGHT_START_DAWN = 0.92;
+const GOLDEN_HOUR_MAX = 0.22;
+const LIGHT_GLOW_RADIUS = 200;
+const LIGHT_GLOW_HALO_RADIUS = 280;
+const NIGHT_DESAT_ALPHA = 0.08;
 
-function maxNightAlphaForLighting() {
-  return VISUAL_LIGHTING_V2_ENABLED ? MAX_NIGHT_ALPHA_V2 : MAX_NIGHT_ALPHA;
-}
-
-function nightAlphaLegacy(cal) {
+function nightAlpha(cal) {
   if (!cal) return 0;
   const f = cal.dayFraction;
   if (f == null) return cal.isNight ? MAX_NIGHT_ALPHA : 0;
-  if (f < 0.70) return 0;
-  if (f < 0.80) return MAX_NIGHT_ALPHA * (f - 0.70) / 0.10;
-  if (f < 0.95) return MAX_NIGHT_ALPHA;
-  return MAX_NIGHT_ALPHA * (1.00 - f) / 0.05;
-}
-
-function nightAlphaV2(cal) {
-  if (!cal) return 0;
-  const f = cal.dayFraction;
-  if (f == null) return cal.isNight ? MAX_NIGHT_ALPHA_V2 : 0;
-  if (f < TWILIGHT_START_V2) return 0;
-  if (f < TWILIGHT_END_DUSK_V2) {
-    const t = (f - TWILIGHT_START_V2) / (TWILIGHT_END_DUSK_V2 - TWILIGHT_START_V2);
-    return MAX_NIGHT_ALPHA_V2 * (t * t);
+  if (f < TWILIGHT_START) return 0;
+  if (f < TWILIGHT_END_DUSK) {
+    const t = (f - TWILIGHT_START) / (TWILIGHT_END_DUSK - TWILIGHT_START);
+    return MAX_NIGHT_ALPHA * (t * t);
   }
-  if (f < TWILIGHT_START_DAWN_V2) return MAX_NIGHT_ALPHA_V2;
-  const t = (1.0 - f) / (1.0 - TWILIGHT_START_DAWN_V2);
-  return MAX_NIGHT_ALPHA_V2 * (1 - (1 - t) * (1 - t));
-}
-
-function nightAlpha(cal) {
-  return VISUAL_LIGHTING_V2_ENABLED ? nightAlphaV2(cal) : nightAlphaLegacy(cal);
-}
-
-function goldenHourAlphaLegacy(cal) {
-  if (!ENV_EFFECTS_ENABLED || !cal || cal.dayFraction == null) return 0;
-  const f = cal.dayFraction;
-  const band = (start, end) => {
-    if (f < start || f >= end) return 0;
-    return Math.sin(((f - start) / (end - start)) * Math.PI);
-  };
-  return 0.13 * Math.max(band(0.70, 0.80), band(0.95, 1.00));
-}
-
-function goldenHourAlphaV2(cal) {
-  if (!ENV_EFFECTS_ENABLED || !cal || cal.dayFraction == null) return 0;
-  const f = cal.dayFraction;
-  const band = (start, end) => {
-    if (f < start || f >= end) return 0;
-    return Math.sin(((f - start) / (end - start)) * Math.PI);
-  };
-  return GOLDEN_HOUR_MAX_V2 * Math.max(
-    band(TWILIGHT_START_V2, TWILIGHT_END_DUSK_V2),
-    band(TWILIGHT_START_DAWN_V2, 1.00)
-  );
+  if (f < TWILIGHT_START_DAWN) return MAX_NIGHT_ALPHA;
+  const t = (1.0 - f) / (1.0 - TWILIGHT_START_DAWN);
+  return MAX_NIGHT_ALPHA * (1 - (1 - t) * (1 - t));
 }
 
 function goldenHourAlpha(cal) {
   if (!ENV_EFFECTS_ENABLED || !cal || cal.dayFraction == null) return 0;
-  return VISUAL_LIGHTING_V2_ENABLED ? goldenHourAlphaV2(cal) : goldenHourAlphaLegacy(cal);
+  const f = cal.dayFraction;
+  const band = (start, end) => {
+    if (f < start || f >= end) return 0;
+    return Math.sin(((f - start) / (end - start)) * Math.PI);
+  };
+  return GOLDEN_HOUR_MAX * Math.max(
+    band(TWILIGHT_START, TWILIGHT_END_DUSK),
+    band(TWILIGHT_START_DAWN, 1.00)
+  );
 }
 
 function drawGoldenHourOverlay(ctx, cal) {
@@ -2037,16 +1960,15 @@ function drawGoldenHourOverlay(ctx, cal) {
   if (gha <= 0) return;
   ctx.fillStyle = `rgba(255, 177, 78, ${gha.toFixed(3)})`;
   ctx.fillRect(0, 0, WORLD_W, WORLD_H);
-  if (!VISUAL_LIGHTING_V2_ENABLED) return;
   const f = cal.dayFraction;
   const edgeBand = (start, end) => {
     if (f < start || f >= end) return 0;
     return Math.sin(((f - start) / (end - start)) * Math.PI);
   };
-  const rimAlpha = GOLDEN_HOUR_MAX_V2 * 0.45 * Math.max(
-    edgeBand(TWILIGHT_START_V2, TWILIGHT_START_V2 + 0.04),
-    edgeBand(TWILIGHT_END_DUSK_V2 - 0.04, TWILIGHT_END_DUSK_V2),
-    edgeBand(TWILIGHT_START_DAWN_V2, TWILIGHT_START_DAWN_V2 + 0.04),
+  const rimAlpha = GOLDEN_HOUR_MAX * 0.45 * Math.max(
+    edgeBand(TWILIGHT_START, TWILIGHT_START + 0.04),
+    edgeBand(TWILIGHT_END_DUSK - 0.04, TWILIGHT_END_DUSK),
+    edgeBand(TWILIGHT_START_DAWN, TWILIGHT_START_DAWN + 0.04),
     edgeBand(0.98, 1.00)
   );
   if (rimAlpha <= 0) return;
@@ -2083,16 +2005,13 @@ function weatherSkyAlpha(weather, nightA) {
 // VISIBLE viewport area (scroll/zoom-derived, same helper drawWildlife/
 // drawShipments use), not world area -- the world is much larger than any
 // one screen, especially fully zoomed out.
-const WEATHER_STATE_INTENSITY = { clear: 0, gathering: 0, storm: 1, clearing: 0.45 };
-const WEATHER_STATE_INTENSITY_V2 = { clear: 0, gathering: 0.18, storm: 1, clearing: 0.45 };
-const WEATHER_PARTICLE_DENSITY_DIVISOR = 14000; // visible px^2 per particle at intensity 1 (storm uses STORM divisor)
-const WEATHER_STORM_DENSITY_DIVISOR = 9500;
-const WEATHER_PARTICLE_CAP = 260;
-const WEATHER_PARTICLE_DENSITY_DIVISOR_V2 = 11000;
-const WEATHER_STORM_DENSITY_DIVISOR_V2 = 7200;
-const WEATHER_PARTICLE_CAP_V2 = 380;
-const WEATHER_SHEET_EVERY_N = 9; // every Nth rain particle draws a thicker "sheet" streak
-const WEATHER_SHEET_EVERY_N_V2 = 6;
+const WEATHER_STATE_INTENSITY = { clear: 0, gathering: 0.18, storm: 1, clearing: 0.45 };
+const WEATHER_PARTICLE_DENSITY_DIVISOR = 11000;
+const WEATHER_STORM_DENSITY_DIVISOR = 7200;
+const WEATHER_PARTICLE_CAP = 380;
+const WEATHER_SHEET_EVERY_N = 6;
+const WEATHER_SNOW_FALL_PERIOD = 650;
+const WEATHER_RAIN_FALL_PERIOD = 130;
 const LIGHTNING_BUCKET_FRAMES = 540; // 540 local frames ≈ ~9s at 60fps — rare full-canvas flash windows
 function weatherParticleHash(i) {
   let h = (2166136261 ^ i) >>> 0;
@@ -2103,25 +2022,14 @@ function weatherParticleHash(i) {
   return (h >>> 0) / 4294967295;
 }
 function weatherParticleConfig() {
-  if (WEATHER_PARTICLES_V2_ENABLED) {
-    return {
-      intensityMap: WEATHER_STATE_INTENSITY_V2,
-      densityDivisor: WEATHER_PARTICLE_DENSITY_DIVISOR_V2,
-      stormDivisor: WEATHER_STORM_DENSITY_DIVISOR_V2,
-      cap: WEATHER_PARTICLE_CAP_V2,
-      sheetEvery: WEATHER_SHEET_EVERY_N_V2,
-      snowFallPeriod: 650,
-      rainFallPeriod: 130,
-    };
-  }
   return {
     intensityMap: WEATHER_STATE_INTENSITY,
     densityDivisor: WEATHER_PARTICLE_DENSITY_DIVISOR,
     stormDivisor: WEATHER_STORM_DENSITY_DIVISOR,
     cap: WEATHER_PARTICLE_CAP,
     sheetEvery: WEATHER_SHEET_EVERY_N,
-    snowFallPeriod: 500,
-    rainFallPeriod: 130,
+    snowFallPeriod: WEATHER_SNOW_FALL_PERIOD,
+    rainFallPeriod: WEATHER_RAIN_FALL_PERIOD,
   };
 }
 
@@ -2141,7 +2049,6 @@ function drawWeatherParticleBatch(ctx, frameTick, weather, cal, layerOpts) {
   const fallMult = layerOpts && layerOpts.fallMult != null ? layerOpts.fallMult : 1;
   const count = Math.min(cfg.cap, Math.floor((w * h / densityDiv) * intensity * countMult));
   const fallPeriod = (isSnow ? cfg.snowFallPeriod : cfg.rainFallPeriod) * fallMult;
-  const v2 = WEATHER_PARTICLES_V2_ENABLED;
   for (let i = 0; i < count; i++) {
     const hx = weatherParticleHash(i * 2 + 1);
     const hy = weatherParticleHash(i * 2 + 2);
@@ -2151,7 +2058,6 @@ function drawWeatherParticleBatch(ctx, frameTick, weather, cal, layerOpts) {
     const sheet = !isSnow && (i % cfg.sheetEvery === 0);
     drawWeatherParticle(ctx, isSnow ? "snow" : "rain", x, y, i, {
       sheet,
-      v2,
       alphaMult,
       frameTick,
       windHash: weatherParticleHash(i * 3 + 7),
@@ -2162,22 +2068,8 @@ function drawWeatherParticleBatch(ctx, frameTick, weather, cal, layerOpts) {
 
 function drawWeatherParticles(ctx, frameTick, weather, cal) {
   if (!WEATHER_ENABLED || !weather) return;
-  if (WEATHER_PARTICLES_V2_ENABLED) {
-    drawWeatherParticleBatch(ctx, frameTick, weather, cal, { countMult: 0.6, alphaMult: 0.5, fallMult: 0.85 });
-    drawWeatherParticleBatch(ctx, frameTick, weather, cal, { countMult: 0.4, alphaMult: 1.0, fallMult: 1.0 });
-    return;
-  }
-  drawWeatherParticleBatch(ctx, frameTick, weather, cal, null);
-}
-
-function districtWeatherSeed(id) {
-  let h = 2166136261;
-  const s = String(id);
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
+  drawWeatherParticleBatch(ctx, frameTick, weather, cal, { countMult: 0.6, alphaMult: 0.5, fallMult: 0.85 });
+  drawWeatherParticleBatch(ctx, frameTick, weather, cal, { countMult: 0.4, alphaMult: 1.0, fallMult: 1.0 });
 }
 
 function drawDistrictStormVeil(ctx, weather) {
@@ -2192,49 +2084,6 @@ function drawDistrictStormVeil(ctx, weather) {
     if (!b) continue;
     ctx.fillStyle = `rgba(6, 16, 22, ${alpha.toFixed(3)})`;
     ctx.fillRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
-  }
-}
-
-function drawDistrictStormRain(ctx, frameTick, weather, cal) {
-  if (!WEATHER_ENABLED || !weather) return;
-  if (WEATHER_PARTICLES_V2_ENABLED) return; // v2 merges district rain into the global layer
-  const state = weather.state;
-  if (state !== "storm" && state !== "clearing") return;
-  if (cal && cal.season === "winter") return; // snow uses the global layer only
-  const ids = weather.districts;
-  if (!ids || !ids.length) return;
-  const intensity = state === "storm" ? 1 : 0.45;
-  const left = canvasWrapEl.scrollLeft / zoomLevel;
-  const top = canvasWrapEl.scrollTop / zoomLevel;
-  const vw = canvasWrapEl.clientWidth / zoomLevel;
-  const vh = canvasWrapEl.clientHeight / zoomLevel;
-  const fallPeriod = 130;
-  for (const id of ids) {
-    const b = getDistrictBounds(id);
-    if (!b) continue;
-    const ix1 = Math.max(b.x1, left);
-    const iy1 = Math.max(b.y1, top);
-    const ix2 = Math.min(b.x2, left + vw);
-    const iy2 = Math.min(b.y2, top + vh);
-    const iw = ix2 - ix1;
-    const ih = iy2 - iy1;
-    if (iw <= 0 || ih <= 0) continue;
-    const seed = districtWeatherSeed(id);
-    const count = Math.min(140, Math.floor((iw * ih / 6500) * intensity));
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
-    ctx.clip();
-    for (let i = 0; i < count; i++) {
-      const hi = weatherParticleHash(seed + i * 2 + 1);
-      const hj = weatherParticleHash(seed + i * 2 + 2);
-      const x = ix1 + hi * iw;
-      const yFrac = ((frameTick + hj * fallPeriod) % fallPeriod) / fallPeriod;
-      const y = iy1 + yFrac * ih;
-      const sheet = i % WEATHER_SHEET_EVERY_N === 0;
-      drawWeatherParticle(ctx, "rain", x, y, seed + i, sheet ? { sheet: true } : null);
-    }
-    ctx.restore();
   }
 }
 
@@ -2258,11 +2107,8 @@ function drawLightningFlash(ctx, renderFrame, weather) {
 }
 
 // Light glow (ENV_EFFECTS_ENABLED): warm radial glow over lit structures while
-// the night overlay is active, pushing back the dark in lit districts. Purely
-// data-driven — a no-op when the server hasn't sent `light`/`litDistricts`
-// yet (older payload), so it's safe regardless of rollout order.
-const LIGHT_GLOW_RADIUS = 140;
-function drawLightGlowsLegacy(cal) {
+// the night overlay is active, pushing back the dark in lit districts.
+function drawLightGlows(cal) {
   if (!ENV_EFFECTS_ENABLED) return;
   const na = nightAlpha(cal);
   if (na <= 0) return;
@@ -2271,34 +2117,6 @@ function drawLightGlowsLegacy(cal) {
   if (!litDistricts || !litDistricts.length) return;
   const structures = civ.structures || [];
   const strength = na / MAX_NIGHT_ALPHA;
-  const prevOp = ctx.globalCompositeOperation;
-  ctx.globalCompositeOperation = "lighter";
-  for (const s of structures) {
-    if (!s || s.light !== true) continue;
-    if (!litDistricts.includes(s.districtId)) continue;
-    const size = getStructureRenderSize(s);
-    const cx = s.x + size.width / 2;
-    const cy = s.y + size.height / 2;
-    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, LIGHT_GLOW_RADIUS);
-    grad.addColorStop(0, `rgba(255, 190, 90, ${(0.35 * strength).toFixed(3)})`);
-    grad.addColorStop(1, "rgba(255, 190, 90, 0)");
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, LIGHT_GLOW_RADIUS, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalCompositeOperation = prevOp;
-}
-
-function drawLightGlowsV2(cal) {
-  if (!ENV_EFFECTS_ENABLED) return;
-  const na = nightAlpha(cal);
-  if (na <= 0) return;
-  const civ = getCiv();
-  const litDistricts = civ.litDistricts;
-  if (!litDistricts || !litDistricts.length) return;
-  const structures = civ.structures || [];
-  const strength = na / MAX_NIGHT_ALPHA_V2;
   const prevOp = ctx.globalCompositeOperation;
   ctx.globalCompositeOperation = "lighter";
   const drawGlow = (cx, cy, radius, centerAlpha, midAlpha) => {
@@ -2317,17 +2135,12 @@ function drawLightGlowsV2(cal) {
     const size = getStructureRenderSize(s);
     const cx = s.x + size.width / 2;
     const cy = s.y + size.height / 2;
-    drawGlow(cx, cy, LIGHT_GLOW_RADIUS_V2, 0.55 * strength, 0.22 * strength);
-    if (na >= 0.4 * MAX_NIGHT_ALPHA_V2) {
-      drawGlow(cx, cy, LIGHT_GLOW_HALO_RADIUS_V2, 0.12 * strength, 0.04 * strength);
+    drawGlow(cx, cy, LIGHT_GLOW_RADIUS, 0.55 * strength, 0.22 * strength);
+    if (na >= 0.4 * MAX_NIGHT_ALPHA) {
+      drawGlow(cx, cy, LIGHT_GLOW_HALO_RADIUS, 0.12 * strength, 0.04 * strength);
     }
   }
   ctx.globalCompositeOperation = prevOp;
-}
-
-function drawLightGlows(cal) {
-  if (VISUAL_LIGHTING_V2_ENABLED) drawLightGlowsV2(cal);
-  else drawLightGlowsLegacy(cal);
 }
 
 function drawWorld(ctx, frameTick) {
@@ -3492,9 +3305,9 @@ function calendarPhase(cal) {
   if (!cal) return null;
   const f = cal.dayFraction;
   if (f == null) return cal.isNight ? "night" : "day";
-  const duskStart = VISUAL_LIGHTING_V2_ENABLED ? TWILIGHT_START_V2 : 0.70;
-  const duskEnd = VISUAL_LIGHTING_V2_ENABLED ? TWILIGHT_END_DUSK_V2 : 0.80;
-  const nightEnd = VISUAL_LIGHTING_V2_ENABLED ? TWILIGHT_START_DAWN_V2 : 0.95;
+  const duskStart = TWILIGHT_START;
+  const duskEnd = TWILIGHT_END_DUSK;
+  const nightEnd = TWILIGHT_START_DAWN;
   if (f < duskStart) return "day";
   if (f < duskEnd) return "dusk";
   if (f < nightEnd) return "night";
@@ -4094,9 +3907,6 @@ function applyFlags(flags) {
   if ("WILDLIFE_ENABLED" in flags) WILDLIFE_ENABLED = !!flags.WILDLIFE_ENABLED;
   if ("CARAVAN_VISUALS_ENABLED" in flags) CARAVAN_VISUALS_ENABLED = !!flags.CARAVAN_VISUALS_ENABLED;
   if ("WEATHER_ENABLED" in flags) WEATHER_ENABLED = !!flags.WEATHER_ENABLED;
-  if ("VISUAL_LIGHTING_V2_ENABLED" in flags) VISUAL_LIGHTING_V2_ENABLED = !!flags.VISUAL_LIGHTING_V2_ENABLED;
-  if ("VISUAL_SEASONAL_TERRAIN_ENABLED" in flags) VISUAL_SEASONAL_TERRAIN_ENABLED = !!flags.VISUAL_SEASONAL_TERRAIN_ENABLED;
-  if ("WEATHER_PARTICLES_V2_ENABLED" in flags) WEATHER_PARTICLES_V2_ENABLED = !!flags.WEATHER_PARTICLES_V2_ENABLED;
   if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
   if ("GOD_AUTH_REQUIRED" in flags) GOD_AUTH_REQUIRED_FLAG = !!flags.GOD_AUTH_REQUIRED;
 }
@@ -4395,10 +4205,10 @@ function tickBody() {
   }
 
   const na = nightAlpha(world.calendar);
-  if (VISUAL_LIGHTING_V2_ENABLED && na > 0.35) {
+  if (na > 0.35) {
     const prevOp = ctx.globalCompositeOperation;
     ctx.globalCompositeOperation = "saturation";
-    ctx.fillStyle = `rgba(128, 128, 128, ${NIGHT_DESAT_ALPHA_V2.toFixed(3)})`;
+    ctx.fillStyle = `rgba(128, 128, 128, ${NIGHT_DESAT_ALPHA.toFixed(3)})`;
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
     ctx.globalCompositeOperation = prevOp;
   }
@@ -4421,7 +4231,6 @@ function tickBody() {
   drawLightGlows(world.calendar);
   drawDistrictStormVeil(ctx, world.weather);
   drawWeatherParticles(ctx, world.frameTick, world.weather, world.calendar);
-  drawDistrictStormRain(ctx, world.frameTick, world.weather, world.calendar);
 
   // C5 follow-cam: re-center every frame on the followed agent while active;
   // release the lock once they're deselected or no longer living.

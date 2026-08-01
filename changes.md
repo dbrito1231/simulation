@@ -140,19 +140,12 @@
 - `SEASON_FRAMES`: `81_000` → **`108_000`** (~60 min = 6 day/night cycles per season)
 - Aging/lifecycle, shelter ticks, season regrowth, and weather storminess all derive from these identities
 
-### New visual flags (default on, echoed in `/state` `config.flags`)
-
-- `VISUAL_LIGHTING_V2_ENABLED`
-- `VISUAL_SEASONAL_TERRAIN_ENABLED`
-- `WEATHER_PARTICLES_V2_ENABLED`
-
 ### Viewer (`simulation/index.html`, `simulation/sprites.js`)
 
-- Stronger dusk/dawn twilight bands and deeper peak night alpha (lighting v2)
-- Per-terrain-kind seasonal palettes; winter snow accents (seasonal terrain v2)
-- Redesigned rain/snow/storm particle passes keyed by weather state (particles v2)
-- Divine Console chrome polish (`#divineBar`, preview/apply hierarchy) — permanent default when God mode is on
-- Flag-off fallbacks preserve pre-v2 rendering paths for the three visual flags above
+- Stronger dusk/dawn twilight bands and deeper peak night alpha (permanent)
+- Per-terrain-kind seasonal palettes; winter snow accents (permanent)
+- Redesigned rain/snow/storm particle passes keyed by weather state (permanent)
+- Divine Console chrome polish (`#divineBar`, preview/apply hierarchy) — permanent when God mode is on
 
 ### Plan docs (new)
 
