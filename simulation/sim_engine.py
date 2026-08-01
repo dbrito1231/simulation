@@ -374,7 +374,6 @@ WEATHER_CLEARING_REGROW_MULT = 1.5  # post-storm "rain" boost for the same distr
 VISUAL_LIGHTING_V2_ENABLED = True
 VISUAL_SEASONAL_TERRAIN_ENABLED = True
 WEATHER_PARTICLES_V2_ENABLED = True
-GOD_CONSOLE_CHROME_V2_ENABLED = True
 
 # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
 # GOD_MODE_ENABLED is an environment-backed, READ-ONCE-AT-IMPORT module flag,
@@ -18235,7 +18234,6 @@ class SimEngine:
                         "VISUAL_LIGHTING_V2_ENABLED": VISUAL_LIGHTING_V2_ENABLED,
                         "VISUAL_SEASONAL_TERRAIN_ENABLED": VISUAL_SEASONAL_TERRAIN_ENABLED,
                         "WEATHER_PARTICLES_V2_ENABLED": WEATHER_PARTICLES_V2_ENABLED,
-                        "GOD_CONSOLE_CHROME_V2_ENABLED": GOD_CONSOLE_CHROME_V2_ENABLED,
                         # Sovereign God mode (Phase 2): ALWAYS echoed, flag-off
                         # or on, so the viewer/clients can detect the dark
                         # default without a private route. The "god" key

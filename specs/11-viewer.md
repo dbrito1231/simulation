@@ -467,7 +467,7 @@ placement as `socialTies`/`districtEcology`/`shipments`.
 
 ## Atmosphere visual flags (Phase 4 — viewer v2)
 
-Four module-level flags in `sim_engine.py` (default **`True`**, echoed in
+Three module-level flags in `sim_engine.py` (default **`True`**, echoed in
 `/state` `config.flags`, read in `applyFlags()`). **Not env-backed** — unlike
 `GOD_MODE_ENABLED`, these are code constants for instant QA rollback. Each
 flag off selects the **pre-atmosphere-pack path** for that subsystem only; no
@@ -478,12 +478,15 @@ partial hybrid.
 | `VISUAL_LIGHTING_V2_ENABLED` | Legacy `nightAlphaLegacy` / `goldenHourAlphaLegacy` / `drawLightGlowsLegacy` (peak night alpha 0.45, dusk 0.70–0.80) |
 | `VISUAL_SEASONAL_TERRAIN_ENABLED` | Global `applySeasonTint` only at cache build (no per-kind district passes) |
 | `WEATHER_PARTICLES_V2_ENABLED` | Legacy particle constants, intensities, single layer, district-local storm rain |
-| `GOD_CONSOLE_CHROME_V2_ENABLED` | Pre-4c Divine Console bar/modal CSS and layout (no sticky preview strip, pin row, or v2 clearance) |
 
-All four off together (with calendar already at post-4b constants) restores
-pre-E viewer rendering for lighting/terrain/particles/God chrome; the longer
-day/season cadence from Phase 4b remains unless constants are reverted
-separately ([02-engine-core.md](02-engine-core.md)).
+All three off together (with calendar already at post-4b constants) restores
+pre-E viewer rendering for lighting/terrain/particles; the longer day/season
+cadence from Phase 4b remains unless constants are reverted separately
+([02-engine-core.md](02-engine-core.md)).
+
+**Divine Console chrome** is **not** flag-gated — the polished bar/modal layout
+(sticky preview strip, pin row, intervention count, 100px clearance) is the
+permanent default when `GOD_MODE_ENABLED` is on. See "Divine Console" below.
 
 ## Ambient wildlife (`WILDLIFE_ENABLED`)
 
@@ -648,19 +651,16 @@ or false — including an older snapshot from before this key existed, or a
 snapshot from a `GOD_MODE_ENABLED`-off server — the console makes zero
 `/control/god/*` requests except where noted below for open-mode bootstrap.
 
-**Chrome v2 (`GOD_CONSOLE_CHROME_V2_ENABLED`, default on).** When on,
-`applyFlags()` adds `body.divine-chrome-v2`, raising bar clearance to 100px
-(vs 92px legacy) and enabling the v2 CSS block (~index.html:761+): taller bar
-with gold underline on the active feature button; sticky **preview strip** at
-modal top (`#divinePreviewStrip`) showing command name + reversibility badge +
-Apply/Discard when a preview is cached; collapsible preview panel default-expanded;
-fieldset hierarchy with crimson left border on irreversible sections; **pin row**
-for the last applied intervention (link to History); bar brand secondary line
-`N interventions` from `recentPublicInterventions` length; **Ctrl/Cmd+Enter**
-applies when a preview is valid. All v2 UX is viewer-only — no new routes or
-engine mutations. **`GOD_CONSOLE_CHROME_V2_ENABLED` off:** pre-4c bar/modal CSS
-and layout; preview/apply still works through footer controls only. **`GOD_MODE_ENABLED`
-off:** bar hidden regardless of chrome v2 flag.
+**Divine Console chrome (permanent default).** When `GOD_MODE_ENABLED` is on,
+the bar uses 100px viewport clearance, a taller bar with gold underline on the
+active feature button, a sticky **preview strip** at modal top
+(`#divinePreviewStrip`) showing command name + reversibility badge +
+Apply/Discard when a preview is cached, collapsible preview panel
+default-expanded, fieldset hierarchy with crimson left border on irreversible
+sections, a **pin row** for the last applied intervention (link to History), bar
+brand secondary line `N interventions` from `recentPublicInterventions` length,
+and **Ctrl/Cmd+Enter** applies when a preview is valid. All UX is viewer-only
+— no new routes or engine mutations. **`GOD_MODE_ENABLED` off:** bar hidden.
 
 **Authorization gate (dual signal).** Whether the Unlock lifecycle runs is
 driven by a second mirror, `GOD_AUTH_REQUIRED_FLAG` (from

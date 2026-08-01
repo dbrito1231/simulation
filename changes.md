@@ -145,15 +145,14 @@
 - `VISUAL_LIGHTING_V2_ENABLED`
 - `VISUAL_SEASONAL_TERRAIN_ENABLED`
 - `WEATHER_PARTICLES_V2_ENABLED`
-- `GOD_CONSOLE_CHROME_V2_ENABLED`
 
 ### Viewer (`simulation/index.html`, `simulation/sprites.js`)
 
 - Stronger dusk/dawn twilight bands and deeper peak night alpha (lighting v2)
 - Per-terrain-kind seasonal palettes; winter snow accents (seasonal terrain v2)
 - Redesigned rain/snow/storm particle passes keyed by weather state (particles v2)
-- Divine Console chrome polish (`#divineBar`, preview/apply hierarchy; `divine-chrome-v2` body class)
-- Flag-off fallbacks preserve pre-v2 rendering paths
+- Divine Console chrome polish (`#divineBar`, preview/apply hierarchy) — permanent default when God mode is on
+- Flag-off fallbacks preserve pre-v2 rendering paths for the three visual flags above
 
 ### Plan docs (new)
 

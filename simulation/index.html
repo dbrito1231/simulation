@@ -756,9 +756,6 @@
      scroll in the remaining viewport instead of sitting under the bar.
      ~92px ≈ bar padding 10+10 + .gbtn ~54 + border. */
   body.divine-bar-visible {
-    --divine-bar-clearance: 92px;
-  }
-  body.divine-bar-visible.divine-chrome-v2 {
     --divine-bar-clearance: 100px;
   }
   body.divine-bar-visible #wrap {
@@ -778,9 +775,42 @@
   }
   .divine-tab-panel { font-size: 12px; color: #ccc; }
   .divine-fieldset {
-    border: 1px solid #2e2e3a; border-radius: 4px; padding: 8px; margin-bottom: 10px;
+    border: 1px solid #2e2e3a; border-radius: 4px; padding: 12px 10px 14px; margin-bottom: 14px;
   }
-  .divine-fieldset legend { font-size: 11px; color: #d9b96e; padding: 0 4px; }
+  .divine-fieldset legend { font-size: 12px; font-weight: 700; color: #d9b96e; padding: 0 4px; }
+  .divine-fieldset-irreversible { border-left: 3px solid #a24545; padding-left: 12px; }
+  .divine-section-title {
+    margin: 0 0 10px; font-size: 13px; font-weight: 700; color: #ffd27a; letter-spacing: 0.02em;
+  }
+  .divine-preview-strip {
+    display: none; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 10px 18px; border-bottom: 1px solid #282831;
+    background: linear-gradient(180deg, rgba(74,58,26,.35), rgba(30,24,12,.25));
+    position: sticky; top: 0; z-index: 2;
+  }
+  .divine-preview-strip.visible { display: flex; }
+  .divine-preview-strip .preview-label {
+    font: 600 12px system-ui, sans-serif; color: #ffd27a; flex: 1 1 auto;
+  }
+  .divine-preview-strip .preview-actions { display: flex; gap: 8px; }
+  .divine-preview-strip button {
+    padding: 5px 12px; font: 600 12px system-ui, sans-serif; border-radius: 4px; cursor: pointer;
+  }
+  .divine-preview-strip .preview-apply {
+    background: #4a3a1a; color: #ffd27a; border: 1px solid #b5883a;
+  }
+  .divine-preview-strip .preview-discard {
+    background: transparent; color: #9a9aa8; border: 1px solid #3a3a48;
+  }
+  .divine-preview-panel { margin-bottom: 12px; }
+  .divine-preview-panel summary {
+    cursor: pointer; font: 600 11px system-ui, sans-serif; color: #d9b96e; margin-bottom: 6px;
+  }
+  .divine-pin-row {
+    padding: 8px 10px; margin-bottom: 12px; border: 1px solid #3a3a48; border-radius: 6px;
+    background: rgba(30,58,42,.35); font-size: 11px; color: #ccc;
+  }
+  .divine-pin-row a { color: #ffd27a; cursor: pointer; text-decoration: underline; }
   .divine-row { margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .divine-row label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #9a9aa8; flex: 1 1 auto; }
   .divine-row input[type=text], .divine-row input[type=password], .divine-row input[type=number],
@@ -824,8 +854,8 @@
   /* Bottom action bar */
   .divine-bar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
-    display: flex; align-items: stretch; gap: 6px;
-    padding: 10px 14px;
+    display: flex; align-items: center; gap: 6px;
+    padding: 12px 14px; min-height: 80px;
     background: linear-gradient(180deg, rgba(18,18,24,.55), rgba(10,10,14,.96));
     border-top: 1px solid #34343f;
     backdrop-filter: blur(8px);
@@ -841,46 +871,6 @@
   }
   .bar-brand .b2 { font: 600 10px ui-monospace, monospace; color: #6f6f7c; margin-top: 2px; }
   .bar-brand .b3 { font: 500 9px ui-monospace, monospace; color: #5a5a66; margin-top: 3px; }
-  body.divine-chrome-v2 .divine-bar { padding: 12px 14px; min-height: 80px; align-items: center; }
-  body.divine-chrome-v2 .gbtn.active {
-    background: #4a3a1a; color: #ffd27a; border-color: #b5883a;
-    box-shadow: inset 0 -2px 0 #ffd27a;
-  }
-  body.divine-chrome-v2 .divine-fieldset { padding: 12px 10px 14px; margin-bottom: 14px; }
-  body.divine-chrome-v2 .divine-fieldset legend { font-size: 12px; font-weight: 700; }
-  body.divine-chrome-v2 .divine-fieldset-irreversible { border-left: 3px solid #a24545; padding-left: 12px; }
-  body.divine-chrome-v2 .divine-section-title {
-    margin: 0 0 10px; font-size: 13px; font-weight: 700; color: #ffd27a; letter-spacing: 0.02em;
-  }
-  body.divine-chrome-v2 .divine-preview-strip {
-    display: none; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 10px 18px; border-bottom: 1px solid #282831;
-    background: linear-gradient(180deg, rgba(74,58,26,.35), rgba(30,24,12,.25));
-    position: sticky; top: 0; z-index: 2;
-  }
-  body.divine-chrome-v2 .divine-preview-strip.visible { display: flex; }
-  body.divine-chrome-v2 .divine-preview-strip .preview-label {
-    font: 600 12px system-ui, sans-serif; color: #ffd27a; flex: 1 1 auto;
-  }
-  body.divine-chrome-v2 .divine-preview-strip .preview-actions { display: flex; gap: 8px; }
-  body.divine-chrome-v2 .divine-preview-strip button {
-    padding: 5px 12px; font: 600 12px system-ui, sans-serif; border-radius: 4px; cursor: pointer;
-  }
-  body.divine-chrome-v2 .divine-preview-strip .preview-apply {
-    background: #4a3a1a; color: #ffd27a; border: 1px solid #b5883a;
-  }
-  body.divine-chrome-v2 .divine-preview-strip .preview-discard {
-    background: transparent; color: #9a9aa8; border: 1px solid #3a3a48;
-  }
-  body.divine-chrome-v2 .divine-preview-panel { margin-bottom: 12px; }
-  body.divine-chrome-v2 .divine-preview-panel summary {
-    cursor: pointer; font: 600 11px system-ui, sans-serif; color: #d9b96e; margin-bottom: 6px;
-  }
-  body.divine-chrome-v2 .divine-pin-row {
-    padding: 8px 10px; margin-bottom: 12px; border: 1px solid #3a3a48; border-radius: 6px;
-    background: rgba(30,58,42,.35); font-size: 11px; color: #ccc;
-  }
-  body.divine-chrome-v2 .divine-pin-row a { color: #ffd27a; cursor: pointer; text-decoration: underline; }
   .bar-buttons { display: flex; gap: 6px; flex: 1 1 auto; flex-wrap: wrap; }
   .gbtn {
     display: flex; flex-direction: column; align-items: center; gap: 5px;
@@ -894,7 +884,10 @@
   .gbtn:hover:not(:disabled) {
     background: #23232e; color: #dcdce4; border-color: #b5883a; transform: translateY(-1px);
   }
-  .gbtn.active { background: #4a3a1a; color: #ffd27a; border-color: #b5883a; }
+  .gbtn.active {
+    background: #4a3a1a; color: #ffd27a; border-color: #b5883a;
+    box-shadow: inset 0 -2px 0 #ffd27a;
+  }
   .gbtn.locked-dependent:disabled { opacity: .4; cursor: not-allowed; }
   .gbtn.compile { border-style: dashed; }
   .gbtn .statuspip {
@@ -1717,7 +1710,6 @@ let WEATHER_ENABLED = true;
 let VISUAL_LIGHTING_V2_ENABLED = true;
 let VISUAL_SEASONAL_TERRAIN_ENABLED = true;
 let WEATHER_PARTICLES_V2_ENABLED = true;
-let GOD_CONSOLE_CHROME_V2_ENABLED = true;
 
 // --- Viewer-only display toggles (client-side, not server flags). Flipping
 // either to true fully restores that section with no other edits. ---
@@ -4105,10 +4097,8 @@ function applyFlags(flags) {
   if ("VISUAL_LIGHTING_V2_ENABLED" in flags) VISUAL_LIGHTING_V2_ENABLED = !!flags.VISUAL_LIGHTING_V2_ENABLED;
   if ("VISUAL_SEASONAL_TERRAIN_ENABLED" in flags) VISUAL_SEASONAL_TERRAIN_ENABLED = !!flags.VISUAL_SEASONAL_TERRAIN_ENABLED;
   if ("WEATHER_PARTICLES_V2_ENABLED" in flags) WEATHER_PARTICLES_V2_ENABLED = !!flags.WEATHER_PARTICLES_V2_ENABLED;
-  if ("GOD_CONSOLE_CHROME_V2_ENABLED" in flags) GOD_CONSOLE_CHROME_V2_ENABLED = !!flags.GOD_CONSOLE_CHROME_V2_ENABLED;
   if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
   if ("GOD_AUTH_REQUIRED" in flags) GOD_AUTH_REQUIRED_FLAG = !!flags.GOD_AUTH_REQUIRED;
-  document.body.classList.toggle("divine-chrome-v2", !!GOD_CONSOLE_CHROME_V2_ENABLED);
 }
 
 // Bounded viewer-only social pass. The engine has already filtered and
@@ -4644,7 +4634,7 @@ function clearDivinePreviewStrip() {
 }
 
 function showDivinePreviewStrip(label, data, applyFn, discardFn) {
-  if (!GOD_CONSOLE_CHROME_V2_ENABLED || !divinePreviewStripEl) return;
+  if (!divinePreviewStripEl) return;
   divinePreviewController = { label, data, applyFn, discardFn };
   if (divinePreviewStripLabelEl) {
     const kind = data.normalizedCommand && data.normalizedCommand.kind;
@@ -4656,7 +4646,7 @@ function showDivinePreviewStrip(label, data, applyFn, discardFn) {
 }
 
 function renderGodPinRow() {
-  if (!GOD_CONSOLE_CHROME_V2_ENABLED || !divineModalBodyEl || !godLastAppliedPin) return;
+  if (!divineModalBodyEl || !godLastAppliedPin) return;
   let pin = document.getElementById("divinePinRow");
   if (!pin) {
     pin = document.createElement("div");
@@ -4717,7 +4707,7 @@ function updateDivineBarAuthUi() {
     }
   }
   if (divineBarInterventionCountEl) {
-    if (GOD_CONSOLE_CHROME_V2_ENABLED && GOD_MODE_ENABLED_FLAG) {
+    if (GOD_MODE_ENABLED_FLAG) {
       const n = godInterventionCount();
       divineBarInterventionCountEl.textContent = n ? `${n} intervention${n === 1 ? "" : "s"}` : "no interventions yet";
       divineBarInterventionCountEl.style.display = "";
@@ -4944,7 +4934,7 @@ document.addEventListener("keydown", (e) => {
     closeDivineModal();
     return;
   }
-  if (GOD_CONSOLE_CHROME_V2_ENABLED && (e.ctrlKey || e.metaKey) && e.key === "Enter"
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter"
       && divineModalScrimEl && divineModalScrimEl.classList.contains("open")
       && divinePreviewController) {
     e.preventDefault();
@@ -5003,14 +4993,11 @@ document.addEventListener("focusout", (e) => {
 
 if (!GOD_AUTH_REQUIRED_FLAG) godAuthorized = true;
 updateDivineBarAuthUi();
-document.body.classList.toggle("divine-chrome-v2", !!GOD_CONSOLE_CHROME_V2_ENABLED);
-if (GOD_CONSOLE_CHROME_V2_ENABLED) {
-  ["godVitalsFieldset", "godGrantFieldset", "godStructureFieldset", "godMassRepairFieldset", "godClearRuinsFieldset"]
-    .forEach((id) => {
-      const el = document.getElementById(id);
-      if (el) el.classList.add("divine-fieldset-irreversible");
-    });
-}
+["godVitalsFieldset", "godGrantFieldset", "godStructureFieldset", "godMassRepairFieldset", "godClearRuinsFieldset"]
+  .forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add("divine-fieldset-irreversible");
+  });
 
 // --- Preview -> Apply generic wiring ------------------------------------
 // One reusable helper per mutating form (docs/plan: "no Apply before a
@@ -5027,7 +5014,7 @@ function wireDivineForm(formSelector, opts) {
   function invalidate() {
     previewState = null;
     applyBtn.disabled = true;
-    if (GOD_CONSOLE_CHROME_V2_ENABLED && divinePreviewOwnerForm === formEl) clearDivinePreviewStrip();
+    if (divinePreviewOwnerForm === formEl) clearDivinePreviewStrip();
   }
   formEl.addEventListener("input", invalidate);
   formEl.addEventListener("change", invalidate);
@@ -5049,13 +5036,11 @@ function wireDivineForm(formSelector, opts) {
       return;
     }
     resultEl.innerHTML = renderGodAppliedHtml(resp.data);
-    if (GOD_CONSOLE_CHROME_V2_ENABLED) {
-      godLastAppliedPin = {
-        label: opts.label || (resp.data.outcome && resp.data.outcome.kind) || "intervention",
-        id: resp.data.interventionId,
-      };
-      renderGodPinRow();
-    }
+    godLastAppliedPin = {
+      label: opts.label || (resp.data.outcome && resp.data.outcome.kind) || "intervention",
+      id: resp.data.interventionId,
+    };
+    renderGodPinRow();
     if (opts.onApplied) opts.onApplied(resp.data);
     refreshGodSightIfOpen();
   }
@@ -5076,10 +5061,8 @@ function wireDivineForm(formSelector, opts) {
     previewState = resp.data;
     resultEl.innerHTML = renderGodPreviewHtml(resp.data, opts.label);
     applyBtn.disabled = false;
-    if (GOD_CONSOLE_CHROME_V2_ENABLED) {
-      divinePreviewOwnerForm = formEl;
-      showDivinePreviewStrip(opts.label, resp.data, doApply, invalidate);
-    }
+    divinePreviewOwnerForm = formEl;
+    showDivinePreviewStrip(opts.label, resp.data, doApply, invalidate);
   });
 
   applyBtn.addEventListener("click", doApply);

@@ -54,8 +54,7 @@ Commits since `fad699d` (storm presence pack on main):
   - `VISUAL_LIGHTING_V2_ENABLED`
   - `VISUAL_SEASONAL_TERRAIN_ENABLED`
   - `WEATHER_PARTICLES_V2_ENABLED`
-  - `GOD_CONSOLE_CHROME_V2_ENABLED`
-- Viewer: stronger day/night lighting, seasonal terrain palettes, weather particle v2, Divine Console chrome polish
+- Viewer: stronger day/night lighting, seasonal terrain palettes, weather particle v2, Divine Console chrome (permanent default)
 - Plan docs: `docs/plan-visual-1-day-night-lighting.md`, `docs/plan-visual-2-seasonal-terrain-grading.md`, `docs/plan-visual-atmosphere-systems.md`
 
 ## How to verify
