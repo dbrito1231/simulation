@@ -4302,9 +4302,18 @@ def control_resume():
     return jsonify({"ok": True, "paused": False})
 
 
+_RESET_PASSWORD_RAW = os.environ.get("SIM_RESET_PASSWORD", "").strip()
+RESET_PASSWORD = _RESET_PASSWORD_RAW if _RESET_PASSWORD_RAW else "reset"
+
+
 @app.route("/control/reset", methods=["POST"])
 def control_reset():
     body = request.get_json(force=True, silent=True) or {}
+    supplied = body.get("password", "")
+    if not isinstance(supplied, str):
+        supplied = ""
+    if not hmac.compare_digest(supplied, RESET_PASSWORD):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     agents = body.get("agents")
     try:
         agents = int(agents) if agents else None

@@ -65,7 +65,9 @@ world state beyond a cached palette/season key.
 - Controls (Pause/Resume/Reset) POST to `/control/pause|resume|reset` via
   `postControl()` (`viewer.js`) with optimistic local flips
   reconciled by the next poll; keyboard shortcut `R` also resets
-  (`viewer.js`).
+  (`viewer.js`). Reset additionally prompts for the `SIM_RESET_PASSWORD`
+  value (default `reset` when unset) after the confirm dialog; cancel/empty
+  aborts, and HTTP 401 shows an alert — see [04-http-api.md](04-http-api.md).
 
 ## Canvas / world rendering
 
@@ -759,7 +761,13 @@ conflict the same way — see this phase's report for the underlying gap.
   a duration field, `private_omen` with an agent selector and duration, and
   `whisper_campaign` with shared theme + per-agent whisper rows up to 12),
   each following the Preview → Apply contract above.
-- **Matrix** — phased Matrix interventions. Phase 2 ships **Brain / Temperature
+- **Matrix** — brain, memory, distortion, possession, dialogue, identity, zone,
+  and checkpoint interventions (see phase list below). Each tool fieldset shows
+  an always-visible `.divine-help` blurb under its legend plus `data-tip`
+  tooltips on labels, controls, and Preview/Apply buttons (same delegated
+  `#tooltip` handler as Voice). The panel opens with a short intro paragraph;
+  tools are grouped under section headings (Brain, Memory, Distortion,
+  Possession, Dialogue & Bargain, Identity, Zones, Reload). Phase 2 ships **Brain / Temperature
   Dial** (`agent_sampling`: agent + model + temperature slider + optional
   `top_p`/`top_k`/`min_p` + duration; `revoke_agent_sampling` to clear).
   Phase 3 adds **Memory Surgery** (`memory_insert`, `memory_delete`,

@@ -2655,12 +2655,13 @@ function syncPauseButton() {
 
 async function postControl(path, body) {
   try {
-    await fetch(path, {
+    return await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: body ? JSON.stringify(body) : undefined
     });
   } catch (err) { /* ignore; next poll reflects real state */ }
+  return null;
 }
 
 pauseBtn.addEventListener("click", async () => {
@@ -2673,10 +2674,18 @@ pauseBtn.addEventListener("click", async () => {
 });
 
 const resetBtn = document.getElementById("resetBtn");
+resetBtn.title = "Requires password (SIM_RESET_PASSWORD)";
 function doReset() {
-  if (window.confirm("Reset the simulation? This restarts the village.")) {
-    postControl("/control/reset").then(pollState);
-  }
+  if (!window.confirm("Reset the simulation? This restarts the village.")) return;
+  const password = window.prompt("Type the reset password to wipe the world:");
+  if (password === null || password === "") return;
+  postControl("/control/reset", { password }).then(async (res) => {
+    if (res && res.status === 401) {
+      window.alert("Reset refused — wrong password (SIM_RESET_PASSWORD).");
+      return;
+    }
+    pollState();
+  });
 }
 resetBtn.addEventListener("click", doReset);
 
@@ -2894,7 +2903,7 @@ const DIVINE_FEATURES = {
   unlock:  { title: "Unlock the Divine Console", sub: "Authenticate with the God token to enable every other tool.", gated: false },
   sight:   { title: "Sight — private inspection", sub: "See what agents never expose publicly: vitals, ties, omens, active effects.", gated: true },
   voice:   { title: "Voice — proclamations & omens", sub: "Speak to the village, or whisper a private omen to one agent.", gated: true },
-  matrix:  { title: "Matrix — brain & world interventions", sub: "Temperature dial, memory surgery, reality distortion, possession, and more (phased rollout).", gated: true },
+  matrix:  { title: "Matrix — brain & world interventions", sub: "Override agent brains, memories, perception, possession, identity, zones, and checkpoints — mostly private; Preview validates, Apply commits.", gated: true },
   miracles:{ title: "Miracles — direct intervention", sub: "Heal, grant resources, or repair/damage a structure. Irreversible once applied.", gated: true },
   story:   { title: "Story — timed narrative events", sub: "Compose a titled event from validated effect primitives.", gated: true },
   laws:    { title: "Laws — temporary world modifiers", sub: "Bend gather yield, hunger, spoilage and more for a bounded time.", gated: true },

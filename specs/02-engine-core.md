@@ -233,7 +233,9 @@ over the roster, so a flat `for o in self.agents` scan is O(n) per call
 - `reset(roster_size=None)` (sim_engine.py:9891) rebuilds the world
   (`_reset_world`), clears the in-process memory store, then deletes and
   immediately rewrites `state.db` via `clear_state()` + `save_state()` so a
-  reset persists cleanly.
+  reset persists cleanly. The HTTP route `POST /control/reset` (server.py)
+  calls this only after a successful `SIM_RESET_PASSWORD` check — see
+  [04-http-api.md](04-http-api.md).
 
 ## Sage emergency
 

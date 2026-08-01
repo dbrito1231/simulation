@@ -230,6 +230,14 @@ documented in [11-viewer.md](11-viewer.md).
 regardless of auth mode — unexpected mutations remain attributable after the
 fact. The token and raw HTTP headers are never written to any log stream.
 
+**World reset password:** `POST /control/reset` requires a JSON `password`
+field checked against `SIM_RESET_PASSWORD` (server.py, read once at import;
+defaults to `"reset"` when unset or blank) via `hmac.compare_digest`. This is
+independent of God mode token auth — operators can wipe the village from the
+viewer Reset button or any HTTP client without `X-God-Token`, but must supply
+the reset password. See [04-http-api.md](04-http-api.md) and
+[11-viewer.md](11-viewer.md).
+
 **Divine Console chrome:** viewer-only UX polish (sticky preview strip,
 intervention count on the bar, pin row, keyboard shortcuts) — permanent default
 when God mode is on; no flag gate. No new routes, no `divine.jsonl` shape

@@ -44,7 +44,7 @@ configured; see "Sovereign God mode" below.
 | `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected) | — | `{districts: [...], roadNodes: {...}, roadEdges: [...]}` |
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
 | `/control/resume` | POST | Resume the tick loop | — | `{ok: true, paused: false}` |
-| `/control/reset` | POST | Reset the world, optionally with a new roster size | `{agents?: int}` (optional; omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` |
+| `/control/reset` | POST | Reset the world, optionally with a new roster size (requires password) | `{password: string, agents?: int}` — `password` must match `SIM_RESET_PASSWORD` (server.py, read once at import; default `"reset"` when unset/blank); `agents` optional (omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` on success; `{ok: false, error: "unauthorized"}` with HTTP 401 on wrong/missing password (no reset) |
 | `/control/god/capabilities` | GET | Enabled command/effect names, bounds, duration caps, token status (requires God auth when `GOD_AUTH_REQUIRED`) | — | `{ok, godModeEnabled, tokenConfigured, kinds: {...}, previewTtlSeconds, activeEventsCap, compiler: {enabled, minIntervalSec, sessionCap, promptMaxChars}}` |
 | `/control/god/sight` | GET | Authenticated private inspection, bounded and filterable (requires God auth when `GOD_AUTH_REQUIRED`) | — | `engine.god_sight()` |
 | `/control/god/preview` | POST | Validate and normalize a god command without mutation (requires God auth when `GOD_AUTH_REQUIRED`) | `{kind, payload, expectedFrame?}` | `engine.god_preview(envelope)` |
@@ -98,6 +98,13 @@ Startup order: `engine.start()` (spins up the 30/s tick daemon thread) runs
 accepts connections. Roster size at cold start comes from the `SIM_AGENTS`
 env var (default 8, server.py:3256-3262) — distinct from the `/control/reset`
 body field, which only takes effect on an explicit reset.
+
+**Reset password:** `POST /control/reset` requires a JSON `password` field
+compared with `hmac.compare_digest` against `RESET_PASSWORD` (server.py, read
+once at import from `SIM_RESET_PASSWORD`, defaulting to `"reset"` when unset
+or blank). Wrong or missing password returns `401 {"ok": false, "error":
+"unauthorized"}` and does **not** call `engine.reset()`. This gate is separate
+from Sovereign God mode token auth (`SIM_GOD_TOKEN` / `X-God-Token`).
 
 Graceful shutdown: `atexit.register(_flush_on_exit)` plus `SIGINT`/`SIGTERM`
 handlers (server.py:3421-3441) both call a `threading.Event`-guarded

@@ -3870,6 +3870,39 @@ def run_http_tests():
         if old_lm_complete is not None:
             server.engine.d["lm_complete"] = old_lm_complete
 
+    # /control/reset password gate (never calls the real engine.reset()).
+    assert_true(server.RESET_PASSWORD == "reset",
+                "expected default RESET_PASSWORD when SIM_RESET_PASSWORD unset")
+    tick_before = server.engine.frameTick
+    reset_calls = []
+    orig_reset = server.engine.reset
+
+    def _track_reset(roster_size=None):
+        reset_calls.append(roster_size)
+        return None
+
+    server.engine.reset = _track_reset
+    try:
+        resp = client.post("/control/reset", json={"password": "wrong-password"})
+        assert_true(resp.status_code == 401, resp.status_code)
+        assert_true(resp.get_json() == {"ok": False, "error": "unauthorized"}, resp.get_json())
+        assert_true(not reset_calls, "wrong password must not call engine.reset()")
+        assert_true(server.engine.frameTick == tick_before, "world unchanged on wrong password")
+
+        resp = client.post("/control/reset", json={})
+        assert_true(resp.status_code == 401 and not reset_calls,
+                    (resp.status_code, reset_calls))
+
+        resp = client.post("/control/reset",
+                           json={"password": server.RESET_PASSWORD, "agents": 10})
+        assert_true(resp.status_code == 200, resp.status_code)
+        body = resp.get_json()
+        assert_true(body.get("ok") is True, body)
+        assert_true(reset_calls == [10], reset_calls)
+    finally:
+        server.engine.reset = orig_reset
+    print("  OK POST /control/reset password gate (wrong/missing -> 401, correct -> reset)")
+
 
 def _architect_zone_envelope(zone_kind, district_id, cells, **extra):
     payload = {"zoneKind": zone_kind, "districtId": district_id, "cells": cells,

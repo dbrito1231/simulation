@@ -145,7 +145,7 @@
       <span class="lbl">Voice</span>
     </button>
     <button type="button" class="gbtn matrix locked-dependent" data-feature="matrix" data-tab="matrix" disabled
-      data-tip='{"t":"Matrix — brain &amp; world interventions","d":"Temperature dial, memory surgery, reality distortion, possession, and more (phased rollout)."}'>
+      data-tip='{"t":"Matrix — brain &amp; world interventions","d":"Override agent brains, memories, perception, possession, identity, zones, and world checkpoints — mostly private to the operator."}'>
       <svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 4v16"/></svg>
       <span class="lbl">Matrix</span>
     </button>
@@ -279,340 +279,390 @@
         </div>
 
         <div class="divine-tab-panel" id="divineTab-matrix" style="display:none">
+          <p class="divine-help divine-help-intro">Matrix tools manipulate agent <strong>brains and environment</strong> via Preview → Apply. Most effects are private (not in public <code>/state</code>). <strong>Preview</strong> validates without changing the world; <strong>Apply</strong> commits the last successful preview. Hover any labeled control for more detail. Durations are simulation frames (~30 per second).</p>
+          <div class="divine-matrix-section">
+            <h3 class="divine-section-title">Brain</h3>
           <fieldset class="divine-fieldset" id="godSamplingFieldset">
             <legend data-tip='{"t":"Temperature dial","d":"Override one agent&#39;s decision LLM model and sampling parameters. Private — never visible to villagers."}'>Brain / Temperature dial (cancellable)</legend>
+            <p class="divine-help">Change how creative or random one agent&#39;s decision model is — model, temperature, and optional sampling caps. Private; villagers never see it. Only one living agent may use sim-fast at a time.</p>
             <div class="divine-row"><label data-tip='{"t":"Agent","d":"Living agent whose decision brain will be overridden."}'>Agent <select id="godSamplingAgentSelect"></select></label>
-              <label data-tip='{"t":"Model","d":"sim-smart (default) or sim-fast. At most one living agent may use sim-fast for decisions at once."}'>Model
-                <select id="godSamplingModel"><option value="sim-smart">sim-smart</option><option value="sim-fast">sim-fast</option></select>
+              <label data-tip='{"t":"Model","d":"sim-smart (default, careful) or sim-fast (faster). At most one living agent may use sim-fast for decisions at once."}'>Model
+                <select id="godSamplingModel"><option value="sim-smart">sim-smart (default, careful)</option><option value="sim-fast">sim-fast (faster, one agent max)</option></select>
               </label></div>
-            <div class="divine-row"><label data-tip='{"t":"Temperature","d":"0.0–1.5 decision sampling temperature."}'>Temperature <input type="range" id="godSamplingTemp" min="0" max="1.5" step="0.05" value="0.4" />
+            <div class="divine-row"><label data-tip='{"t":"Temperature","d":"0.0 = deterministic; 1.5 = very creative. Higher values increase randomness in the LLM&#39;s action choice."}'>Temperature <input type="range" id="godSamplingTemp" min="0" max="1.5" step="0.05" value="0.4" />
               <output id="godSamplingTempOut">0.4</output></label>
-              <label data-tip='{"t":"Duration","d":"Optional frames until auto-expiry; leave blank for until revoke."}'>Duration (frames, optional) <input type="number" id="godSamplingDuration" placeholder="(until revoke)" /></label></div>
-            <div class="divine-row"><label data-tip='{"t":"top_p","d":"Optional nucleus sampling cap 0–1."}'>top_p <input type="number" id="godSamplingTopP" min="0" max="1" step="0.05" placeholder="(default)" /></label>
-              <label data-tip='{"t":"top_k","d":"Optional top-k 0–200."}'>top_k <input type="number" id="godSamplingTopK" min="0" max="200" step="1" placeholder="(default)" /></label>
-              <label data-tip='{"t":"min_p","d":"Optional min-p 0–1."}'>min_p <input type="number" id="godSamplingMinP" min="0" max="1" step="0.05" placeholder="(default)" /></label></div>
+              <label data-tip='{"t":"Duration","d":"Optional frames until auto-expiry; leave blank to keep until you revoke."}'>Duration (frames, optional) <input type="number" id="godSamplingDuration" placeholder="(until revoke)" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"top_p","d":"Optional nucleus sampling cap 0–1. Limits the cumulative probability mass of tokens considered."}'>top_p <input type="number" id="godSamplingTopP" min="0" max="1" step="0.05" placeholder="(default)" /></label>
+              <label data-tip='{"t":"top_k","d":"Optional top-k 0–200. Only the K most likely tokens are considered each step."}'>top_k <input type="number" id="godSamplingTopK" min="0" max="200" step="1" placeholder="(default)" /></label>
+              <label data-tip='{"t":"min_p","d":"Optional min-p 0–1. Drops tokens below this relative probability threshold."}'>min_p <input type="number" id="godSamplingMinP" min="0" max="1" step="0.05" placeholder="(default)" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godSamplingPreviewBtn" data-tip='{"t":"Preview","d":"Validate without mutating the world."}'>Preview</button>
-              <button type="button" id="godSamplingApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview."}'>Apply</button>
+              <button type="button" id="godSamplingPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godSamplingApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godSamplingResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godSamplingRevokeFieldset">
             <legend data-tip='{"t":"Revoke sampling","d":"Clear an active temperature-dial override for one agent."}'>Revoke sampling override</legend>
-            <div class="divine-row"><label>Agent <select id="godSamplingRevokeAgentSelect"></select></label></div>
+            <p class="divine-help">Remove an active temperature-dial override and restore the agent&#39;s default decision model.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose sampling override should be cleared."}'>Agent <select id="godSamplingRevokeAgentSelect"></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godSamplingRevokePreviewBtn">Preview</button>
-              <button type="button" id="godSamplingRevokeApplyBtn" disabled>Apply</button>
+              <button type="button" id="godSamplingRevokePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godSamplingRevokeApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godSamplingRevokeResult"></div>
           </fieldset>
+          </div>
+          <div class="divine-matrix-section">
+            <h3 class="divine-section-title">Memory</h3>
           <fieldset class="divine-fieldset divine-fieldset-irreversible" id="godMemoryInsertFieldset">
             <legend data-tip='{"t":"Memory insert","d":"Plant a false memory in one agent. Private — never in public /state or village chronicle."}'>Memory insert (IRREVERSIBLE)</legend>
-            <div class="divine-row"><label>Agent <select id="godMemoryInsertAgentSelect"></select></label>
-              <label>Salience (0–1) <input type="number" id="godMemoryInsertSalience" min="0" max="1" step="0.05" value="0.7" /></label></div>
-            <div class="divine-row"><label>Kind (optional) <input type="text" id="godMemoryInsertKind" placeholder="divine_false_memory" /></label></div>
-            <div class="divine-row"><label>Text <textarea id="godMemoryInsertText"></textarea></label></div>
+            <p class="divine-help">Plant a memory only that agent will recall in future think prompts. Cannot be removed except by targeted memory delete. Private — never appears in public logs.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Target agent who will store and recall this memory."}'>Agent <select id="godMemoryInsertAgentSelect"></select></label>
+              <label data-tip='{"t":"Salience","d":"0–1 importance weight. Higher salience surfaces the memory more often in retrieval."}'>Salience (0–1) <input type="number" id="godMemoryInsertSalience" min="0" max="1" step="0.05" value="0.7" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Kind","d":"Optional memory category tag for filtering. Defaults to divine_false_memory if blank."}'>Kind (optional) <input type="text" id="godMemoryInsertKind" placeholder="divine_false_memory" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Text","d":"The memory content the agent will believe they experienced."}'>Text <textarea id="godMemoryInsertText"></textarea></label></div>
             <div class="divine-actions">
-              <button type="button" id="godMemoryInsertPreviewBtn">Preview</button>
-              <button type="button" id="godMemoryInsertApplyBtn" disabled>Apply</button>
+              <button type="button" id="godMemoryInsertPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godMemoryInsertApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godMemoryInsertResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset divine-fieldset-irreversible" id="godMemoryDeleteFieldset">
             <legend data-tip='{"t":"Memory delete","d":"Delete matching vector-store rows for one agent. At least one filter required."}'>Memory delete (IRREVERSIBLE)</legend>
-            <div class="divine-row"><label>Agent <select id="godMemoryDeleteAgentSelect"></select></label>
-              <label>Keyword <input type="text" id="godMemoryDeleteKeyword" placeholder="(optional substring)" /></label></div>
-            <div class="divine-row"><label>Frame from <input type="number" id="godMemoryDeleteFrameFrom" placeholder="(optional)" /></label>
-              <label>Frame to <input type="number" id="godMemoryDeleteFrameTo" placeholder="(optional)" /></label>
-              <label>Kinds <input type="text" id="godMemoryDeleteKinds" placeholder="comma-separated (optional)" /></label></div>
+            <p class="divine-help">Erase memories matching your filters from one agent&#39;s vector store. You must provide at least one filter (keyword, frame range, or kinds).</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose memories will be searched and deleted."}'>Agent <select id="godMemoryDeleteAgentSelect"></select></label>
+              <label data-tip='{"t":"Keyword","d":"Optional substring match against memory text."}'>Keyword <input type="text" id="godMemoryDeleteKeyword" placeholder="(optional substring)" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Frame from","d":"Optional start frame (inclusive) for memories created at or after this tick."}'>Frame from <input type="number" id="godMemoryDeleteFrameFrom" placeholder="(optional)" /></label>
+              <label data-tip='{"t":"Frame to","d":"Optional end frame (inclusive) for memories created at or before this tick."}'>Frame to <input type="number" id="godMemoryDeleteFrameTo" placeholder="(optional)" /></label>
+              <label data-tip='{"t":"Kinds","d":"Comma-separated memory kind tags. Only memories with matching kinds are deleted."}'>Kinds <input type="text" id="godMemoryDeleteKinds" placeholder="comma-separated (optional)" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godMemoryDeletePreviewBtn">Preview</button>
-              <button type="button" id="godMemoryDeleteApplyBtn" disabled>Apply</button>
+              <button type="button" id="godMemoryDeletePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godMemoryDeleteApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godMemoryDeleteResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset divine-fieldset-irreversible" id="godBeliefPlantFieldset">
             <legend data-tip='{"t":"Belief plant","d":"Add a belief to one agent. Optional memeTexts override. Private — never in public logs."}'>Belief plant (IRREVERSIBLE)</legend>
-            <div class="divine-row"><label>Agent <select id="godBeliefPlantAgentSelect"></select></label>
-              <label>Belief id <input type="text" id="godBeliefPlantId" placeholder="e.g. harvest_spirit (optional)" /></label></div>
-            <div class="divine-row"><label>Text <textarea id="godBeliefPlantText" placeholder="Custom tenet (optional if belief id set)"></textarea></label>
-              <label style="flex-direction:row; align-items:center; gap:6px;"><input type="checkbox" id="godBeliefPlantMemeTexts" style="width:auto;" /> Plant in memeTexts</label></div>
-            <div class="divine-row"><label>Salience <input type="number" id="godBeliefPlantSalience" min="0" max="1" step="0.05" value="0.7" /></label></div>
+            <p class="divine-help">Give the agent a belief or tenet they will treat as their own. Use a known belief id or custom text. Private — never in public logs.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent who will adopt the belief."}'>Agent <select id="godBeliefPlantAgentSelect"></select></label>
+              <label data-tip='{"t":"Belief id","d":"Optional registry id (e.g. harvest_spirit). If set, supplies default tenet text unless you override."}'>Belief id <input type="text" id="godBeliefPlantId" placeholder="e.g. harvest_spirit (optional)" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Text","d":"Custom tenet wording. Required if no belief id is set."}'>Text <textarea id="godBeliefPlantText" placeholder="Custom tenet (optional if belief id set)"></textarea></label>
+              <label style="flex-direction:row; align-items:center; gap:6px;" data-tip='{"t":"Plant in memeTexts","d":"Also inject the tenet into the agent&#39;s memeTexts list for social spread mechanics."}'><input type="checkbox" id="godBeliefPlantMemeTexts" style="width:auto;" /> Plant in memeTexts</label></div>
+            <div class="divine-row"><label data-tip='{"t":"Salience","d":"0–1 strength of the belief in think prompts."}'>Salience <input type="number" id="godBeliefPlantSalience" min="0" max="1" step="0.05" value="0.7" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godBeliefPlantPreviewBtn">Preview</button>
-              <button type="button" id="godBeliefPlantApplyBtn" disabled>Apply</button>
+              <button type="button" id="godBeliefPlantPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godBeliefPlantApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godBeliefPlantResult"></div>
           </fieldset>
+          </div>
+          <div class="divine-matrix-section">
+            <h3 class="divine-section-title">Distortion</h3>
           <fieldset class="divine-fieldset" id="godDistortionFieldset">
             <legend data-tip='{"t":"Reality distortion","d":"Alter what one agent sees in their think snapshot — dream, blue pill, red pill, or forged whispers. Private; never in /state."}'>Reality distortion / context mask (cancellable)</legend>
-            <div class="divine-row"><label>Agent <select id="godDistortionAgentSelect"></select></label>
-              <label>Duration (frames) <input type="number" id="godDistortionDuration" /></label></div>
+            <p class="divine-help">Alter what one agent sees in their think snapshot before the LLM decides. Modes hide divine lines, reveal simulation truth, fabricate world state, or forge nearby chat. Private — never in public <code>/state</code>.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose perception will be masked."}'>Agent <select id="godDistortionAgentSelect"></select></label>
+              <label data-tip='{"t":"Duration","d":"Frames until the distortion expires (~30 frames per second)."}'>Duration (frames) <input type="number" id="godDistortionDuration" /></label></div>
             <div class="divine-row divine-distortion-modes">
-              <label><input type="radio" name="godDistortionMode" value="blue_pill" checked /> Blue pill (hide divine)</label>
-              <label><input type="radio" name="godDistortionMode" value="red_pill" /> Red pill (simulation truth)</label>
-              <label><input type="radio" name="godDistortionMode" value="dream" /> Dream (fabricated snapshot)</label>
-              <label><input type="radio" name="godDistortionMode" value="whisper_chain" /> Whisper chain (forge chat)</label>
+              <label data-tip='{"t":"Blue pill","d":"Hide divine and providence lines from this agent&#39;s think snapshot. They see a sanitized world."}'><input type="radio" name="godDistortionMode" value="blue_pill" checked /> Blue pill (hide divine)</label>
+              <label data-tip='{"t":"Red pill","d":"Tell this agent they are simulated. Does not expose other agents&#39; private omens or divine effects."}'><input type="radio" name="godDistortionMode" value="red_pill" /> Red pill (simulation truth)</label>
+              <label data-tip='{"t":"Dream","d":"Replace selected snapshot fields with your JSON — fabricated resources, conversations, etc."}'><input type="radio" name="godDistortionMode" value="dream" /> Dream (fabricated snapshot)</label>
+              <label data-tip='{"t":"Whisper chain","d":"Forge nearby chat lines in the prompt only. Other agents never see the forged dialogue."}'><input type="radio" name="godDistortionMode" value="whisper_chain" /> Whisper chain (forge chat)</label>
             </div>
             <div class="divine-row" id="godDistortionDreamRow" style="display:none;">
-              <label>Dream snapshot JSON <textarea id="godDistortionDreamJson" placeholder='{"resources":{"wood":99},"recent_conversations":"none"}'></textarea></label>
+              <label data-tip='{"t":"Dream snapshot JSON","d":"JSON object merged into the agent&#39;s think snapshot. Example keys: resources, recent_conversations."}'>Dream snapshot JSON <textarea id="godDistortionDreamJson" placeholder='{"resources":{"wood":99},"recent_conversations":"none"}'></textarea></label>
             </div>
             <div class="divine-row" id="godDistortionWhisperRow" style="display:none;">
-              <label>Forged conversations JSON <textarea id="godDistortionWhisperJson" placeholder='[{"from":"Alice","to":"Bob","message":"Meet me at the well."}]'></textarea></label>
+              <label data-tip='{"t":"Forged conversations JSON","d":"Array of {from, to, message} objects injected as recent chat in the prompt only."}'>Forged conversations JSON <textarea id="godDistortionWhisperJson" placeholder='[{"from":"Alice","to":"Bob","message":"Meet me at the well."}]'></textarea></label>
             </div>
             <div class="divine-actions">
-              <button type="button" id="godDistortionPreviewBtn">Preview</button>
-              <button type="button" id="godDistortionApplyBtn" disabled>Apply</button>
+              <button type="button" id="godDistortionPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godDistortionApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godDistortionResult"></div>
           </fieldset>
+          </div>
+          <div class="divine-matrix-section">
+            <h3 class="divine-section-title">Possession</h3>
           <fieldset class="divine-fieldset" id="godCompulsionFieldset">
             <legend data-tip='{"t":"Decision compulsion","d":"Force one agent&#39;s next decision(s) to a pinned action. Private; cancel via god_cancel."}'>Decision compulsion (cancellable)</legend>
-            <div class="divine-row"><label>Agent <select id="godCompulsionAgentSelect"></select></label>
-              <label>Action <select id="godCompulsionAction"><option value="rest">rest</option></select></label></div>
-            <div class="divine-row"><label>Duration (frames) <input type="number" id="godCompulsionDuration" placeholder="(optional)" /></label>
-              <label>Remaining turns <input type="number" id="godCompulsionTurns" min="1" placeholder="(optional)" /></label></div>
+            <p class="divine-help">Force a pinned action after the LLM runs — the model still thinks, but its output is overridden. Private; revoke via decision gate cancel.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose decisions will be compelled."}'>Agent <select id="godCompulsionAgentSelect"></select></label>
+              <label data-tip='{"t":"Action","d":"Pinned action applied after each LLM decision while active."}'>Action <select id="godCompulsionAction"><option value="rest">rest</option></select></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Duration","d":"Optional frames until compulsion expires."}'>Duration (frames) <input type="number" id="godCompulsionDuration" placeholder="(optional)" /></label>
+              <label data-tip='{"t":"Remaining turns","d":"Optional count of think cycles to compel before auto-clear."}'>Remaining turns <input type="number" id="godCompulsionTurns" min="1" placeholder="(optional)" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godCompulsionPreviewBtn">Preview</button>
-              <button type="button" id="godCompulsionApplyBtn" disabled>Apply</button>
+              <button type="button" id="godCompulsionPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godCompulsionApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godCompulsionResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godVetoArmFieldset">
             <legend data-tip='{"t":"Thought veto arm","d":"Hold the agent&#39;s next LLM decision for operator approve/reject/rewrite."}'>Thought veto — arm (cancellable)</legend>
-            <div class="divine-row"><label>Agent <select id="godVetoArmAgentSelect"></select></label>
-              <label>Duration (frames) <input type="number" id="godVetoArmDuration" /></label></div>
+            <p class="divine-help">Hold the agent&#39;s next LLM decision for your review. The agent pauses until you resolve with approve, reject, or rewrite.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose next decision will be held."}'>Agent <select id="godVetoArmAgentSelect"></select></label>
+              <label data-tip='{"t":"Duration","d":"Frames the veto arm stays active if you do not resolve (~30/sec)."}'>Duration (frames) <input type="number" id="godVetoArmDuration" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godVetoArmPreviewBtn">Preview</button>
-              <button type="button" id="godVetoArmApplyBtn" disabled>Apply</button>
+              <button type="button" id="godVetoArmPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godVetoArmApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godVetoArmResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godVetoResolveFieldset">
             <legend data-tip='{"t":"Veto resolve","d":"Approve, reject, or rewrite a held veto decision."}'>Thought veto — resolve (IRREVERSIBLE)</legend>
-            <div class="divine-row"><label>Agent <select id="godVetoResolveAgentSelect"></select></label>
-              <label>Resolution
-                <select id="godVetoResolveMode"><option value="approve">approve</option><option value="reject">reject</option><option value="rewrite">rewrite</option></select>
+            <p class="divine-help">Resolve a held veto decision: approve what the LLM chose, reject it (fallback action), or rewrite to a different action.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent with a pending held decision."}'>Agent <select id="godVetoResolveAgentSelect"></select></label>
+              <label data-tip='{"t":"Resolution","d":"Approve uses the held LLM decision; reject applies fallback; rewrite substitutes your chosen action."}'>Resolution
+                <select id="godVetoResolveMode"><option value="approve">Approve (use held decision)</option><option value="reject">Reject (fallback action)</option><option value="rewrite">Rewrite (substitute action)</option></select>
               </label></div>
-            <div class="divine-row" id="godVetoRewriteRow" style="display:none;"><label>Rewritten action <select id="godVetoRewriteAction"><option value="rest">rest</option></select></label></div>
+            <div class="divine-row" id="godVetoRewriteRow" style="display:none;"><label data-tip='{"t":"Rewritten action","d":"Action substituted when resolution is Rewrite."}'>Rewritten action <select id="godVetoRewriteAction"><option value="rest">rest</option></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godVetoResolvePreviewBtn">Preview</button>
-              <button type="button" id="godVetoResolveApplyBtn" disabled>Apply</button>
+              <button type="button" id="godVetoResolvePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godVetoResolveApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godVetoResolveResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godPossessionFieldset">
             <legend data-tip='{"t":"Agent possession","d":"Skip the LLM and apply a pinned action each think. Private; cancel via god_cancel."}'>Agent possession (cancellable)</legend>
-            <div class="divine-row"><label>Agent <select id="godPossessionAgentSelect"></select></label>
-              <label>Action <select id="godPossessionAction"><option value="rest">rest</option></select></label>
-              <label>Duration (frames) <input type="number" id="godPossessionDuration" /></label></div>
+            <p class="divine-help">Skip the LLM entirely and puppet one action each think cycle. Stronger than compulsion — no model call runs. Private; revoke via decision gate cancel.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent to possess."}'>Agent <select id="godPossessionAgentSelect"></select></label>
+              <label data-tip='{"t":"Action","d":"Action applied every think while possession is active."}'>Action <select id="godPossessionAction"><option value="rest">rest</option></select></label>
+              <label data-tip='{"t":"Duration","d":"Frames until possession expires (~30/sec)."}'>Duration (frames) <input type="number" id="godPossessionDuration" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godPossessionPreviewBtn">Preview</button>
-              <button type="button" id="godPossessionApplyBtn" disabled>Apply</button>
+              <button type="button" id="godPossessionPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godPossessionApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godPossessionResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godGateRevokeFieldset">
             <legend data-tip='{"t":"Revoke gate","d":"Clear compulsion, veto, or possession for one agent."}'>Revoke decision gate</legend>
-            <div class="divine-row"><label>Agent <select id="godGateRevokeAgentSelect"></select></label></div>
+            <p class="divine-help">Clear any active compulsion, veto hold, or possession for one agent and restore normal LLM decisions.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose decision gate should be cleared."}'>Agent <select id="godGateRevokeAgentSelect"></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godGateRevokePreviewBtn">Preview</button>
-              <button type="button" id="godGateRevokeApplyBtn" disabled>Apply</button>
+              <button type="button" id="godGateRevokePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godGateRevokeApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godGateRevokeResult"></div>
           </fieldset>
+          </div>
+          <div class="divine-matrix-section">
+            <h3 class="divine-section-title">Dialogue &amp; Bargain</h3>
           <fieldset class="divine-fieldset" id="godBurningBushFieldset">
             <legend data-tip='{"t":"Burning Bush","d":"Private Divine-audience dialogue with one agent. Thread text never appears in /state."}'>Burning Bush (private)</legend>
-            <div class="divine-row"><label>Agent <select id="godBurningBushAgentSelect"></select></label></div>
-            <div class="divine-row"><label>Message <textarea id="godBurningBushText"></textarea></label></div>
+            <p class="divine-help">Send a private God↔agent dialogue line. Only that agent sees the thread in their think context; it never appears in public <code>/state</code>.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent who receives your divine message."}'>Agent <select id="godBurningBushAgentSelect"></select></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Message","d":"Your line in the private Burning Bush thread."}'>Message <textarea id="godBurningBushText"></textarea></label></div>
             <div class="divine-actions">
-              <button type="button" id="godBurningBushPreviewBtn">Preview</button>
-              <button type="button" id="godBurningBushApplyBtn" disabled>Apply</button>
+              <button type="button" id="godBurningBushPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godBurningBushApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godBurningBushResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godBurningBushCloseFieldset">
             <legend data-tip='{"t":"Close Burning Bush","d":"End the private dialogue session for one agent."}'>Close Burning Bush</legend>
-            <div class="divine-row"><label>Agent <select id="godBurningBushCloseAgentSelect"></select></label></div>
+            <p class="divine-help">End the private Burning Bush session for one agent. Future thinks will no longer include the thread.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose Burning Bush session should close."}'>Agent <select id="godBurningBushCloseAgentSelect"></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godBurningBushClosePreviewBtn">Preview</button>
-              <button type="button" id="godBurningBushCloseApplyBtn" disabled>Apply</button>
+              <button type="button" id="godBurningBushClosePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godBurningBushCloseApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godBurningBushCloseResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godBargainFieldset">
             <legend data-tip='{"t":"Merovingian Bargain","d":"Timed bargain with allowlisted success/failure predicates and optional reward/punish primitives."}'>Merovingian Bargain</legend>
-            <div class="divine-row"><label>Agent <select id="godBargainAgentSelect"></select></label>
-              <label>Duration (frames) <input type="number" id="godBargainDuration" /></label></div>
-            <div class="divine-row"><label>Terms <textarea id="godBargainTerms"></textarea></label></div>
-            <div class="divine-row"><label>Success predicate
+            <p class="divine-help">Offer a timed deal: if the agent meets a success condition, grant a reward; on failure or expiry, apply a punishment. Auto-settles each tick; manual settle overrides.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent bound by the bargain."}'>Agent <select id="godBargainAgentSelect"></select></label>
+              <label data-tip='{"t":"Duration","d":"Frames until the bargain expires if not settled (~30/sec)."}'>Duration (frames) <input type="number" id="godBargainDuration" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Terms","d":"Plain-language deal text shown to the agent in their think prompt."}'>Terms <textarea id="godBargainTerms"></textarea></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Success predicate","d":"Condition that counts as the agent fulfilling the bargain. Arg 1/2 depend on the predicate type."}'>Success predicate
               <select id="godBargainSuccessKind">
-                <option value="agent_has_resource">agent_has_resource</option>
-                <option value="structure_built">structure_built</option>
-                <option value="frame_reached">frame_reached</option>
-                <option value="agent_health_below">agent_health_below</option>
+                <option value="agent_has_resource">Agent has resource</option>
+                <option value="structure_built">Structure exists</option>
+                <option value="frame_reached">Frame reached</option>
+                <option value="agent_health_below">Health below threshold</option>
               </select>
             </label>
-            <label>Arg 1 <input type="text" id="godBargainSuccessArg1" placeholder="resourceId / structureType / frame / threshold" /></label>
-            <label>Arg 2 <input type="number" id="godBargainSuccessArg2" placeholder="amount (resource only)" min="1" step="1" /></label></div>
-            <div class="divine-row"><label>Reward primitive
-              <select id="godBargainRewardKind"><option value="">(none)</option><option value="grant_resource">grant_resource</option><option value="agent_vitals">agent_vitals</option></select>
+            <label data-tip='{"t":"Arg 1","d":"Resource id, structure type, target frame number, or health threshold — depends on predicate."}'>Arg 1 <input type="text" id="godBargainSuccessArg1" placeholder="resourceId / structureType / frame / threshold" /></label>
+            <label data-tip='{"t":"Arg 2","d":"Resource amount only (when predicate is Agent has resource)."}'>Arg 2 <input type="number" id="godBargainSuccessArg2" placeholder="amount (resource only)" min="1" step="1" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Reward primitive","d":"Effect applied on bargain success. Grant resource or adjust vitals."}'>Reward primitive
+              <select id="godBargainRewardKind"><option value="">(none)</option><option value="grant_resource">Grant resource</option><option value="agent_vitals">Adjust vitals</option></select>
             </label>
-            <label>Resource <input type="text" id="godBargainRewardResource" placeholder="wood" /></label>
-            <label>Amount <input type="number" id="godBargainRewardAmount" value="5" min="1" step="1" /></label></div>
-            <div class="divine-row"><label>Punish primitive
-              <select id="godBargainPunishKind"><option value="">(none)</option><option value="agent_vitals">agent_vitals</option></select>
+            <label data-tip='{"t":"Resource","d":"Resource id for grant_resource reward (e.g. wood)."}'>Resource <input type="text" id="godBargainRewardResource" placeholder="wood" /></label>
+            <label data-tip='{"t":"Amount","d":"Quantity granted on success."}'>Amount <input type="number" id="godBargainRewardAmount" value="5" min="1" step="1" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Punish primitive","d":"Effect applied on bargain failure or expiry."}'>Punish primitive
+              <select id="godBargainPunishKind"><option value="">(none)</option><option value="agent_vitals">Adjust vitals</option></select>
             </label>
-            <label>Health delta <input type="number" id="godBargainPunishHealth" value="-10" step="1" /></label></div>
+            <label data-tip='{"t":"Health delta","d":"Signed health change on failure (e.g. -10)."}'>Health delta <input type="number" id="godBargainPunishHealth" value="-10" step="1" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godBargainPreviewBtn">Preview</button>
-              <button type="button" id="godBargainApplyBtn" disabled>Apply</button>
+              <button type="button" id="godBargainPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godBargainApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godBargainResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset divine-fieldset-irreversible" id="godBargainSettleFieldset">
             <legend data-tip='{"t":"Bargain settle","d":"Force success or failure on an open bargain (tick auto-settle is primary)."}'>Bargain settle (manual)</legend>
-            <div class="divine-row"><label>Agent <select id="godBargainSettleAgentSelect"></select></label>
-              <label>Outcome <select id="godBargainSettleOutcome"><option value="success">success</option><option value="failure">failure</option></select></label></div>
+            <p class="divine-help">Force an open bargain to succeed or fail immediately. Tick auto-settle is the normal path; use this to override.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent with an active bargain."}'>Agent <select id="godBargainSettleAgentSelect"></select></label>
+              <label data-tip='{"t":"Outcome","d":"Success applies the reward primitive; failure applies punishment."}'>Outcome <select id="godBargainSettleOutcome"><option value="success">Success (grant reward)</option><option value="failure">Failure (apply punish)</option></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godBargainSettlePreviewBtn">Preview</button>
-              <button type="button" id="godBargainSettleApplyBtn" disabled>Apply</button>
+              <button type="button" id="godBargainSettlePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godBargainSettleApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godBargainSettleResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godAnointFieldset">
             <legend data-tip='{"t":"Anoint","d":"Mark one agent with a private destiny, public stigmata signs for neighbors, and timed oracle hints. Never in /state."}'>Anoint (private destiny)</legend>
-            <div class="divine-row"><label>Agent <select id="godAnointAgentSelect"></select></label>
-              <label>Duration (frames) <input type="number" id="godAnointDuration" /></label></div>
-            <div class="divine-row"><label>Destiny <textarea id="godAnointDestiny" placeholder="Private fate only the target sees in their think prompt"></textarea></label></div>
-            <div class="divine-row"><label>Stigmata tags <input type="text" id="godAnointStigmata" placeholder="comma-separated public signs, e.g. golden aura, weeping eyes" /></label></div>
-            <div class="divine-row"><label>Oracle hints <textarea id="godAnointOracle" placeholder="one per line: revealFrame|hint text (absolute frame tick)"></textarea></label></div>
+            <p class="divine-help">Mark an agent with a private destiny (think prompt only), public stigmata neighbors can see, and timed oracle hints revealed at set frames. Never in public <code>/state</code>.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent to anoint."}'>Agent <select id="godAnointAgentSelect"></select></label>
+              <label data-tip='{"t":"Duration","d":"Frames until anointment expires (~30/sec)."}'>Duration (frames) <input type="number" id="godAnointDuration" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Destiny","d":"Private fate text only the target sees in their think prompt."}'>Destiny <textarea id="godAnointDestiny" placeholder="Private fate only the target sees in their think prompt"></textarea></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Stigmata tags","d":"Comma-separated public signs visible to nearby agents (e.g. golden aura)."}'>Stigmata tags <input type="text" id="godAnointStigmata" placeholder="comma-separated public signs, e.g. golden aura, weeping eyes" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Oracle hints","d":"One per line: revealFrame|hint text. Hint injects at the absolute frame tick."}'>Oracle hints <textarea id="godAnointOracle" placeholder="one per line: revealFrame|hint text (absolute frame tick)"></textarea></label></div>
             <div class="divine-actions">
-              <button type="button" id="godAnointPreviewBtn">Preview</button>
-              <button type="button" id="godAnointApplyBtn" disabled>Apply</button>
+              <button type="button" id="godAnointPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godAnointApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godAnointResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godAnointRevokeFieldset">
             <legend data-tip='{"t":"Revoke anoint","d":"Clear an active anointment for one agent."}'>Revoke anoint</legend>
-            <div class="divine-row"><label>Agent <select id="godAnointRevokeAgentSelect"></select></label></div>
+            <p class="divine-help">Clear an active anointment — destiny, stigmata, and pending oracle hints — for one agent.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose anointment should be cleared."}'>Agent <select id="godAnointRevokeAgentSelect"></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godAnointRevokePreviewBtn">Preview</button>
-              <button type="button" id="godAnointRevokeApplyBtn" disabled>Apply</button>
+              <button type="button" id="godAnointRevokePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godAnointRevokeApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godAnointRevokeResult"></div>
           </fieldset>
+          </div>
+          <div class="divine-matrix-section">
+            <h3 class="divine-section-title">Identity</h3>
           <fieldset class="divine-fieldset" id="godIdentityEditFieldset">
             <legend data-tip='{"t":"Identity edit","d":"Mutate persona, personality, and/or role. Timed edits restore on expiry/cancel."}'>Identity edit</legend>
-            <div class="divine-row"><label>Agent <select id="godIdentityEditAgentSelect"></select></label>
-              <label>Duration (frames) <input type="number" id="godIdentityEditDuration" placeholder="(optional permanent)" /></label></div>
-            <div class="divine-row"><label>Persona <textarea id="godIdentityEditPersona" placeholder="optional — act-in-character line"></textarea></label></div>
-            <div class="divine-row"><label>Personality <textarea id="godIdentityEditPersonality" placeholder="optional — think-prompt personality"></textarea></label></div>
-            <div class="divine-row"><label>Role <input type="text" id="godIdentityEditRole" placeholder="optional — must exist in roles.json" /></label></div>
+            <p class="divine-help">Change persona, personality, and/or role for one agent. Timed edits restore on expiry; use Cancel identity forge to restore early.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose identity will be edited."}'>Agent <select id="godIdentityEditAgentSelect"></select></label>
+              <label data-tip='{"t":"Duration","d":"Optional frames until revert; blank means permanent until cancelled."}'>Duration (frames) <input type="number" id="godIdentityEditDuration" placeholder="(optional permanent)" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Persona","d":"Optional act-in-character line shown in dialogue."}'>Persona <textarea id="godIdentityEditPersona" placeholder="optional — act-in-character line"></textarea></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Personality","d":"Optional think-prompt personality description."}'>Personality <textarea id="godIdentityEditPersonality" placeholder="optional — think-prompt personality"></textarea></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Role","d":"Optional role id — must exist in roles.json."}'>Role <input type="text" id="godIdentityEditRole" placeholder="optional — must exist in roles.json" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godIdentityEditPreviewBtn">Preview</button>
-              <button type="button" id="godIdentityEditApplyBtn" disabled>Apply</button>
+              <button type="button" id="godIdentityEditPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godIdentityEditApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godIdentityEditResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godIdentityCopyFieldset">
             <legend data-tip='{"t":"Identity copy","d":"Gradually blend target persona/personality toward a source agent each think."}'>Identity copy overwrite</legend>
-            <div class="divine-row"><label>Target <select id="godIdentityCopyTargetSelect"></select></label>
-              <label>Source <select id="godIdentityCopySourceSelect"></select></label></div>
-            <div class="divine-row"><label>Rate per think <input type="number" id="godIdentityCopyRate" value="0.25" min="0" max="1" step="0.05" /></label>
-              <label style="flex-direction:row; align-items:center; gap:6px;"><input type="checkbox" id="godIdentityCopySyncMemories" style="width:auto;" /> Sync memories (up to 3)</label>
-              <label>Duration (frames) <input type="number" id="godIdentityCopyDuration" placeholder="(optional)" /></label></div>
+            <p class="divine-help">Gradually blend the target&#39;s persona and personality toward a source agent each think. Optionally sync up to three memories from the source.</p>
+            <div class="divine-row"><label data-tip='{"t":"Target","d":"Agent being overwritten."}'>Target <select id="godIdentityCopyTargetSelect"></select></label>
+              <label data-tip='{"t":"Source","d":"Agent to copy traits from."}'>Source <select id="godIdentityCopySourceSelect"></select></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Rate per think","d":"0–1 blend fraction applied each think cycle."}'>Rate per think <input type="number" id="godIdentityCopyRate" value="0.25" min="0" max="1" step="0.05" /></label>
+              <label style="flex-direction:row; align-items:center; gap:6px;" data-tip='{"t":"Sync memories","d":"Copy up to three recent memories from source to target during the forge."}'><input type="checkbox" id="godIdentityCopySyncMemories" style="width:auto;" /> Sync memories (up to 3)</label>
+              <label data-tip='{"t":"Duration","d":"Optional frames until forge ends."}'>Duration (frames) <input type="number" id="godIdentityCopyDuration" placeholder="(optional)" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godIdentityCopyPreviewBtn">Preview</button>
-              <button type="button" id="godIdentityCopyApplyBtn" disabled>Apply</button>
+              <button type="button" id="godIdentityCopyPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godIdentityCopyApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godIdentityCopyResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godIdentityCancelFieldset">
             <legend data-tip='{"t":"Cancel identity forge","d":"Restore the snapshot taken when the active edit/copy was applied."}'>Cancel identity forge (IRREVERSIBLE restore)</legend>
-            <div class="divine-row"><label>Agent <select id="godIdentityCancelAgentSelect"></select></label></div>
+            <p class="divine-help">Restore the identity snapshot taken when the active edit or copy was applied. Ends the forge immediately.</p>
+            <div class="divine-row"><label data-tip='{"t":"Agent","d":"Agent whose identity forge should be cancelled."}'>Agent <select id="godIdentityCancelAgentSelect"></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godIdentityCancelPreviewBtn">Preview</button>
-              <button type="button" id="godIdentityCancelApplyBtn" disabled>Apply</button>
+              <button type="button" id="godIdentityCancelPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godIdentityCancelApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godIdentityCancelResult"></div>
           </fieldset>
+          </div>
+          <div class="divine-matrix-section">
+            <h3 class="divine-section-title">Zones</h3>
           <fieldset class="divine-fieldset" id="godArchitectZoneFieldset">
             <legend data-tip='{"t":"Architect zone","d":"Paint terrain, keyed door barrier, or limbo hold over grid cells. Forms only — no canvas paint."}'>Architect zone</legend>
-            <div class="divine-row"><label>Kind
+            <p class="divine-help">Define a grid zone: paint terrain, place a keyed door barrier, or park agents in limbo. Enter cells as coordinates or bounds JSON — no canvas painting in the UI.</p>
+            <div class="divine-row"><label data-tip='{"t":"Kind","d":"Paint changes terrain; Door blocks passage without a key; Limbo parks agents off-world until released."}'>Kind
               <select id="godArchitectZoneKind">
-                <option value="paint">paint</option>
-                <option value="door">door</option>
-                <option value="limbo">limbo</option>
+                <option value="paint">Paint terrain</option>
+                <option value="door">Keyed door barrier</option>
+                <option value="limbo">Limbo hold (park agents)</option>
               </select>
             </label>
-              <label>District <select id="godArchitectDistrict"></select></label>
-              <label>Duration (frames) <input type="number" id="godArchitectDuration" placeholder="default" /></label></div>
-            <div class="divine-row"><label>Cells (gx,gy per line)
+              <label data-tip='{"t":"District","d":"World district containing the zone cells."}'>District <select id="godArchitectDistrict"></select></label>
+              <label data-tip='{"t":"Duration","d":"Optional frames until zone expires."}'>Duration (frames) <input type="number" id="godArchitectDuration" placeholder="default" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Cells","d":"One gx,gy per line, or a bounds JSON object with gx1, gy1, gx2, gy2."}'>Cells (gx,gy per line)
               <textarea id="godArchitectCells" placeholder="0,0&#10;1,0&#10;or bounds JSON: {&quot;gx1&quot;:0,&quot;gy1&quot;:0,&quot;gx2&quot;:2,&quot;gy2&quot;:1}"></textarea>
             </label></div>
-            <div class="divine-row"><label>Paint terrain
+            <div class="divine-row"><label data-tip='{"t":"Paint terrain","d":"Terrain type applied when Kind is Paint terrain."}'>Paint terrain
               <select id="godArchitectPaintTerrain">
-                <option value="soil">soil</option><option value="rock">rock</option>
-                <option value="grove">grove</option><option value="water">water</option>
-                <option value="sand">sand</option>
+                <option value="soil">Soil</option><option value="rock">Rock</option>
+                <option value="grove">Grove</option><option value="water">Water</option>
+                <option value="sand">Sand</option>
               </select>
             </label>
-              <label>Key id <input type="text" id="godArchitectKeyId" placeholder="door key tag" /></label>
-              <label style="flex-direction:row; align-items:center; gap:6px;"><input type="checkbox" id="godArchitectReversible" checked style="width:auto;" /> Reversible paint</label></div>
-            <div class="divine-row"><label>Grant key to agents <select id="godArchitectGrantKeyAgents" multiple size="4"></select></label>
-              <label>Limbo hold agents <select id="godArchitectHoldAgents" multiple size="4"></select></label></div>
+              <label data-tip='{"t":"Key id","d":"Tag agents must carry to pass a door zone."}'>Key id <input type="text" id="godArchitectKeyId" placeholder="door key tag" /></label>
+              <label style="flex-direction:row; align-items:center; gap:6px;" data-tip='{"t":"Reversible paint","d":"When checked, cancel zone can restore original terrain."}'><input type="checkbox" id="godArchitectReversible" checked style="width:auto;" /> Reversible paint</label></div>
+            <div class="divine-row"><label data-tip='{"t":"Grant key to agents","d":"Agents who receive the door key tag (multi-select)."}'>Grant key to agents <select id="godArchitectGrantKeyAgents" multiple size="4"></select></label>
+              <label data-tip='{"t":"Limbo hold agents","d":"Agents parked in limbo when the zone is applied (multi-select)."}'>Limbo hold agents <select id="godArchitectHoldAgents" multiple size="4"></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godArchitectZonePreviewBtn">Preview</button>
-              <button type="button" id="godArchitectZoneApplyBtn" disabled>Apply</button>
+              <button type="button" id="godArchitectZonePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godArchitectZoneApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godArchitectZoneResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godArchitectCancelFieldset">
             <legend data-tip='{"t":"Cancel architect zone","d":"Reverts reversible paint and releases limbo holds for the zone."}'>Cancel architect zone</legend>
-            <div class="divine-row"><label>Zone id <input type="text" id="godArchitectCancelZoneId" placeholder="intervention id from apply" /></label></div>
+            <p class="divine-help">Cancel an architect zone by intervention id. Reverts reversible paint and releases limbo holds tied to that zone.</p>
+            <div class="divine-row"><label data-tip='{"t":"Zone id","d":"Intervention id returned when the zone was applied."}'>Zone id <input type="text" id="godArchitectCancelZoneId" placeholder="intervention id from apply" /></label></div>
             <div class="divine-actions">
-              <button type="button" id="godArchitectCancelPreviewBtn">Preview</button>
-              <button type="button" id="godArchitectCancelApplyBtn" disabled>Apply</button>
+              <button type="button" id="godArchitectCancelPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godArchitectCancelApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godArchitectCancelResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godArchitectReleaseFieldset">
             <legend data-tip='{"t":"Release limbo hold","d":"Restore agents parked at the Trainman limbo station for an active limbo zone."}'>Release limbo hold</legend>
-            <div class="divine-row"><label>Zone id <input type="text" id="godArchitectReleaseZoneId" placeholder="limbo zone intervention id" /></label></div>
-            <div class="divine-row"><label>Agents (optional) <select id="godArchitectReleaseAgents" multiple size="4"></select></label></div>
+            <p class="divine-help">Release agents parked in limbo for an active limbo zone. Leave agents blank to release everyone held by that zone.</p>
+            <div class="divine-row"><label data-tip='{"t":"Zone id","d":"Limbo zone intervention id."}'>Zone id <input type="text" id="godArchitectReleaseZoneId" placeholder="limbo zone intervention id" /></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Agents","d":"Optional subset to release; omit selection to release all held agents."}'>Agents (optional) <select id="godArchitectReleaseAgents" multiple size="4"></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godArchitectReleasePreviewBtn">Preview</button>
-              <button type="button" id="godArchitectReleaseApplyBtn" disabled>Apply</button>
+              <button type="button" id="godArchitectReleasePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godArchitectReleaseApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godArchitectReleaseResult"></div>
           </fieldset>
+          </div>
+          <div class="divine-matrix-section">
+            <h3 class="divine-section-title">Reload</h3>
           <fieldset class="divine-fieldset divine-fieldset-irreversible" id="godCheckpointCreateFieldset">
             <legend data-tip='{"t":"Create checkpoint","d":"Pause-safe snapshot of state.db and memory_store.json on disk (cap 5)."}'>Create checkpoint</legend>
-            <div class="divine-row"><label>Label <input type="text" id="godCheckpointLabel" placeholder="before the storm" /></label></div>
-            <div class="divine-row"><label style="flex-direction:row; align-items:center; gap:6px;"><input type="checkbox" id="godCheckpointReplaceOldest" style="width:auto;" /> Replace oldest when at cap (5)</label></div>
+            <p class="divine-help">Save a labeled on-disk snapshot of the world and memory store (max 5). Safe while paused; oldest can be replaced when at cap.</p>
+            <div class="divine-row"><label data-tip='{"t":"Label","d":"Human-readable name shown in Sight and the restore picker."}'>Label <input type="text" id="godCheckpointLabel" placeholder="before the storm" /></label></div>
+            <div class="divine-row"><label style="flex-direction:row; align-items:center; gap:6px;" data-tip='{"t":"Replace oldest","d":"When five checkpoints exist, delete the oldest to make room."}'><input type="checkbox" id="godCheckpointReplaceOldest" style="width:auto;" /> Replace oldest when at cap (5)</label></div>
             <div class="divine-actions">
-              <button type="button" id="godCheckpointCreatePreviewBtn">Preview</button>
-              <button type="button" id="godCheckpointCreateApplyBtn" disabled>Apply</button>
+              <button type="button" id="godCheckpointCreatePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godCheckpointCreateApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godCheckpointCreateResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset divine-fieldset-irreversible" id="godCheckpointRestoreFieldset">
             <legend data-tip='{"t":"Restore checkpoint","d":"Irreversible world replace — live state.db and memory are overwritten from the checkpoint."}'>Restore checkpoint (IRREVERSIBLE)</legend>
+            <p class="divine-help">Replace the entire live world with a checkpoint snapshot. Irreversible except by restoring a different checkpoint.</p>
             <div class="divine-note">Restoring replaces the entire live world with the checkpoint snapshot. This cannot be undone except by restoring a different checkpoint.</div>
-            <div class="divine-row"><label>Checkpoint <select id="godCheckpointRestoreSelect"><option value="">— refresh Sight or create first —</option></select></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Checkpoint","d":"Snapshot to restore. Refresh Sight or create a checkpoint first to populate this list."}'>Checkpoint <select id="godCheckpointRestoreSelect"><option value="">— refresh Sight or create first —</option></select></label></div>
             <div class="divine-actions">
-              <button type="button" id="godCheckpointRestorePreviewBtn">Preview</button>
-              <button type="button" id="godCheckpointRestoreApplyBtn" disabled>Apply</button>
+              <button type="button" id="godCheckpointRestorePreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
+              <button type="button" id="godCheckpointRestoreApplyBtn" disabled data-tip='{"t":"Apply","d":"Commit the last successful preview. Sends only previewId + requestId."}'>Apply</button>
             </div>
             <div class="divine-result" id="godCheckpointRestoreResult"></div>
           </fieldset>
           <fieldset class="divine-fieldset" id="godDejaVuFieldset" disabled>
             <legend data-tip='{"t":"Déjà Vu replay","d":"Stub — tick-accurate replay is not implemented; requires GOD_DEJA_VU_REPLAY flag."}'>Déjà Vu replay (stub)</legend>
+            <p class="divine-help">Future feature: replay world ticks from a recording. Not implemented — requires the GOD_DEJA_VU_REPLAY flag.</p>
             <div class="divine-note">Not available — tick replay is a future flag-gated feature (GOD_DEJA_VU_REPLAY).</div>
           </fieldset>
+          </div>
         </div>
-
         <div class="divine-tab-panel" id="divineTab-miracles" style="display:none">
           <fieldset class="divine-fieldset" id="godVitalsFieldset">
             <legend data-tip='{"t":"Agent vitals","d":"Add health and/or hunger to one living agent, clamped 0–100. A negative delta cannot drive an agent to death in v1."}'>Agent vitals (IRREVERSIBLE)</legend>
