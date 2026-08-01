@@ -1,6 +1,6 @@
 # Divine Console Improvements — Implementation Plan
 
-**Status:** Implemented — Phase 12 verify/PR.  
+**Status:** Implemented — draft PR [#9](https://github.com/dbrito1231/simulation/pull/9) into `feature/god-mode`.  
 **Branch:** `feature/divine-console-improvements` (from **latest** `origin/feature/god-mode`; Matrix already merged via PR #8).  
 **PR target:** `feature/god-mode` (not `main`).  
 **Scope lock:** 1A (new branch) + 2A (full stack: all UX + Déjà Vu, village pulse, crowd compulsion, dream broadcast, compiler promotion).
@@ -219,7 +219,7 @@ flowchart TB
 - [x] `node --check simulation/viewer.js`
 - [ ] Manual: titled `simserver` on port 5001; single `simulation/server.py` process; Divine bar walkthrough; tail `divine.jsonl`
 - [x] Update `docs/HANDOFF.md`
-- [ ] Open PR into `feature/god-mode` (orchestrator)
+- [x] Open draft PR [#9](https://github.com/dbrito1231/simulation/pull/9) into `feature/god-mode`
 
 ## Implementation discipline
 

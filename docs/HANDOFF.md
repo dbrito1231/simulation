@@ -4,7 +4,7 @@
 
 **Plan:** [`docs/plan-divine-console-improvements.md`](plan-divine-console-improvements.md)
 
-**Phase status:** Phases **0–11 shipped** · **Phase 12** verify/PR in progress.
+**Phase status:** Phases **0–12 shipped** (automated verify + draft PR). Manual simserver walkthrough still recommended before merge.
 
 **Base:** `feature/god-mode` tip `89aac707` (Matrix merged via PR #8).
 
@@ -61,5 +61,5 @@ Manual (orchestrator before merge): titled `simserver` on port **5001**, single 
 
 ## Next
 
-1. Re-fetch `origin/feature/god-mode` and rebase if it advanced.
-2. Open PR from `feature/divine-console-improvements` → **`feature/god-mode`**.
+1. Manual Divine bar walkthrough on port 5001 (single `simulation/server.py`).
+2. Review/merge draft PR [#9](https://github.com/dbrito1231/simulation/pull/9) into **`feature/god-mode`**.
