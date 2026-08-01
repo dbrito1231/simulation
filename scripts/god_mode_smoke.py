@@ -115,6 +115,26 @@ def _whisper_campaign_envelope(theme, whispers, duration=None):
     return {"kind": "whisper_campaign", "payload": payload}
 
 
+def _crowd_compulsion_envelope(targets, theme=None, duration=None, remaining_turns=None):
+    payload = {"targets": targets}
+    if theme is not None:
+        payload["theme"] = theme
+    if duration is not None:
+        payload["durationFrames"] = duration
+    if remaining_turns is not None:
+        payload["remainingTurns"] = remaining_turns
+    return {"kind": "crowd_compulsion", "payload": payload}
+
+
+def _dream_broadcast_envelope(target_ids, dream_snapshot, duration=None):
+    payload = {
+        "targetIds": target_ids,
+        "dreamSnapshot": dream_snapshot,
+        "durationFrames": duration if duration is not None else se.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+    }
+    return {"kind": "dream_broadcast", "payload": payload}
+
+
 def _agent_sampling_envelope(target_id, temperature, model="sim-smart", **extra):
     payload = {"targetId": target_id, "temperature": temperature, "model": model}
     payload.update(extra)
@@ -2139,6 +2159,59 @@ def test_proclamation_sets_providence_and_cancels_special_turns():
         se.GOD_MODE_ENABLED = old
 
 
+def test_presentation_soft_thunder_validates_and_applies():
+    """Optional presentation is cosmetic-only: stored on records, not cognition."""
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        bad = engine.god_preview({
+            "kind": "proclamation",
+            "payload": {"text": "Hear me.", "presentation": "lightning"},
+        })
+        assert_true(not bad.get("ok"), bad)
+        assert_true("presentation" in (bad.get("reason") or ""), bad)
+
+        text = "The sky shall answer."
+        preview = engine.god_preview({
+            "kind": "proclamation",
+            "payload": {"text": text, "presentation": "thunder"},
+        })
+        assert_true(preview.get("ok"), preview)
+        norm = preview.get("normalizedCommand") or {}
+        assert_true(norm.get("payload", {}).get("presentation") == "thunder", norm)
+
+        applied = engine.god_apply(preview["previewId"], "req-pres-thunder-1")
+        assert_true(applied.get("ok"), applied)
+
+        god = engine.civilization["godState"]
+        prov = god.get("providence") or {}
+        assert_true(prov.get("presentation") == "thunder", prov)
+
+        recent = god.get("recentInterventions") or []
+        proc = next((r for r in reversed(recent) if r.get("kind") == "proclamation"), None)
+        assert_true(proc and proc.get("presentation") == "thunder", proc)
+
+        chronicle = engine.civilization.get("chronicle") or []
+        assert_true(any(
+            e.get("text") == text and e.get("presentation") == "thunder"
+            for e in chronicle
+        ), chronicle[-3:])
+
+        soft_preview = engine.god_preview(_providence_envelope("A gentle word."))
+        assert_true(soft_preview.get("ok"), soft_preview)
+        soft_norm = soft_preview.get("normalizedCommand") or {}
+        assert_true("presentation" not in (soft_norm.get("payload") or {}), soft_norm)
+
+        soft_applied = engine.god_apply(soft_preview["previewId"], "req-pres-soft-1")
+        assert_true(soft_applied.get("ok"), soft_applied)
+        assert_true(god.get("providence", {}).get("presentation") is None, god.get("providence"))
+
+        print("  OK presentation thunder validates, stores on banner/chronicle records; soft omits field")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
 def test_sight_recent_divine_responses_and_snapshot_privacy():
     """Sight exposes adherence log; /state god allowlist stays private."""
     old = se.GOD_MODE_ENABLED
@@ -2993,6 +3066,25 @@ def test_spoilage_divine_multiplier_bounds():
         spoiled = (cap2 + overflow) - c2["stockpile"]["food"]
         assert_true(0 <= spoiled <= overflow, f"spoiled {spoiled} exceeded eligible overflow {overflow}")
         print("  OK spoilage_multiplier: 0.0 spoils nothing; a 3.0 maximum never exceeds eligible overflow")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_story_event_modifier_conflict_warnings_non_fatal():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        preview = engine.god_preview(_story_event_envelope(
+            modifiers={"gather_yield_multiplier": 2.0, "hunger_drain_multiplier": 2.0}))
+        assert_true(preview["ok"], preview)
+        warnings = preview.get("warnings") or []
+        assert_true(len(warnings) >= 1, preview)
+        assert_true(any("hunger drain" in w.lower() for w in warnings), warnings)
+        single = engine.god_preview(_story_event_envelope(
+            modifiers={"gather_yield_multiplier": 2.0}))
+        assert_true(single["ok"] and not single.get("warnings"), single)
+        print("  OK conflicting modifier pair: preview ok:true with warnings[]; single modifier omits warnings")
     finally:
         se.GOD_MODE_ENABLED = old
 
@@ -4391,6 +4483,100 @@ def test_checkpoint_sight_privacy():
         se.GOD_MODE_ENABLED = old
 
 
+def _deja_vu_replay_envelope(target_id, **extra):
+    payload = {"targetId": target_id}
+    payload.update(extra)
+    return {"kind": "deja_vu_replay", "payload": payload}
+
+
+def test_god_state_v3_default_shape():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        god = engine.civilization["godState"]
+        assert_true(god.get("version") == 3, god.get("version"))
+        assert_true(isinstance(god.get("decisionDigests"), list), god)
+        assert_true(isinstance(god.get("dejaVuReplays"), dict), god)
+        assert_true(isinstance(god.get("crowdCompulsions"), dict), god)
+        assert_true(isinstance(god.get("dreamBroadcasts"), dict), god)
+        normalized = engine._normalize_god_state({"version": 2, "decisionDigests": [
+            {"frameTick": 10, "agentId": 1, "action": "rest", "reasoningHash": "abc"},
+            {"bad": True},
+        ]})
+        assert_true(normalized["version"] == 2, normalized)
+        assert_true(len(normalized["decisionDigests"]) == 1, normalized["decisionDigests"])
+        assert_true(normalized["decisionDigests"][0]["action"] == "rest", normalized)
+        print("  OK godState v3 default + normalize backfills digests")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_decision_digest_capture_on_gated_apply():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine_with_cognition()
+        agent = engine.agents[0]
+        with engine.lock:
+            engine._apply_gated_decision(agent, {
+                "action": "rest", "reasoning": "smoke digest path",
+            })
+        digests = engine.civilization["godState"].get("decisionDigests") or []
+        assert_true(len(digests) >= 1, digests)
+        last = digests[-1]
+        assert_true(last.get("agentId") == agent["id"], last)
+        assert_true(last.get("action") == "rest", last)
+        assert_true(isinstance(last.get("reasoningHash"), str), last)
+        snap = engine.snapshot()
+        assert_true("decisionDigests" not in (snap.get("god") or {}), snap.get("god"))
+        print("  OK decision digest captured on gated apply; not in /state")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_deja_vu_replay_apply_and_cancel():
+    old = se.GOD_MODE_ENABLED
+    old_replay = se.GOD_DEJA_VU_REPLAY
+    se.GOD_MODE_ENABLED = True
+    se.GOD_DEJA_VU_REPLAY = True
+    try:
+        engine = make_engine_with_cognition()
+        agent = engine.agents[0]
+        with engine.lock:
+            for action in ("rest", "talk_to_nearby"):
+                engine._apply_gated_decision(agent, {
+                    "action": action, "reasoning": f"seed {action}",
+                })
+        preview = engine.god_preview(_deja_vu_replay_envelope(agent["id"], maxSteps=2))
+        assert_true(preview.get("ok"), preview)
+        assert_true(preview.get("reversibilityClass") == "cancellable", preview)
+        norm = preview.get("normalizedCommand") or {}
+        steps = (norm.get("payload") or {}).get("replaySteps") or []
+        assert_true(len(steps) == 2, steps)
+        applied = engine.god_apply(preview["previewId"], "req-deja-vu-1")
+        assert_true(applied.get("ok"), applied)
+        replays = engine.civilization["godState"].get("dejaVuReplays") or {}
+        assert_true(len(replays) == 1, replays)
+        replay_id = next(iter(replays.keys()))
+        with engine.lock:
+            engine._apply_gated_decision(agent, {
+                "action": "collect_resource", "reasoning": "ignored under replay",
+            })
+        assert_true(agent.get("lastAction") == steps[0]["action"], agent)
+        parent = (engine.civilization["godState"].get("dejaVuReplays") or {}).get(replay_id)
+        assert_true(isinstance(parent, dict) and parent.get("currentIndex") == 1, parent)
+        cancelled = engine.god_cancel(replay_id)
+        assert_true(cancelled.get("cancelled") is True, cancelled)
+        assert_true(cancelled.get("targetKind") == "deja_vu_replay", cancelled)
+        assert_true(replay_id not in (engine.civilization["godState"].get("dejaVuReplays") or {}),
+                    "parent removed after cancel")
+        print("  OK deja_vu_replay preview/apply sequences compulsion; cancel clears parent")
+    finally:
+        se.GOD_DEJA_VU_REPLAY = old_replay
+        se.GOD_MODE_ENABLED = old
+
+
 def test_deja_vu_replay_rejects_when_flag_off():
     old = se.GOD_MODE_ENABLED
     old_replay = se.GOD_DEJA_VU_REPLAY
@@ -4407,12 +4593,231 @@ def test_deja_vu_replay_rejects_when_flag_off():
         se.GOD_MODE_ENABLED = old
 
 
+def test_crowd_compulsion_batch_apply_and_privacy():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine_with_cognition()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 2, "need at least two living agents")
+        a0, a1 = agents[0], agents[1]
+        theme = "Secret crowd theme"
+        preview = engine.god_preview(_crowd_compulsion_envelope(
+            [
+                {"targetId": a0["id"], "pinnedDecision": {"action": "rest", "reasoning": "crowd A"}},
+                {"targetId": a1["id"], "pinnedDecision": {"action": "rest", "reasoning": "crowd B"}},
+            ],
+            theme=theme,
+            remaining_turns=2,
+        ))
+        assert_true(preview.get("ok"), preview)
+        assert_true(preview.get("reversibilityClass") == "cancellable", preview)
+        applied = engine.god_apply(preview["previewId"], "req-crowd-1")
+        assert_true(applied.get("ok"), applied)
+        parent_id = applied["outcome"]["interventionId"]
+        god = engine.civilization["godState"]
+        assert_true(parent_id in god["crowdCompulsions"], god)
+        assert_true(god["crowdCompulsions"][parent_id]["theme"] == theme, god)
+
+        snap = engine.snapshot()
+        dumped = json.dumps(snap)
+        assert_true(theme not in dumped, "crowd theme leaked into /state")
+        assert_true("crowdCompulsions" not in dumped, "crowdCompulsions map leaked into /state")
+        assert_true(all(r.get("kind") != "crowd_compulsion"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "crowd_compulsion leaked into recentPublicInterventions")
+
+        with engine.lock:
+            engine._apply_gated_decision(a0, {
+                "action": "collect_resource", "reasoning": "ignored under crowd",
+            })
+            engine._apply_gated_decision(a1, {
+                "action": "collect_resource", "reasoning": "ignored under crowd",
+            })
+        assert_true(a0.get("lastAction") == "rest", a0)
+        assert_true(a1.get("lastAction") == "rest", a1)
+
+        sight = engine.god_sight()
+        assert_true(any(c.get("id") == parent_id for c in (sight.get("crowdCompulsions") or [])),
+                    sight.get("crowdCompulsions"))
+        print("  OK crowd_compulsion batch apply; theme/map absent from /state; gates compel per target")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_crowd_compulsion_cancel_clears_linked_gates():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 2, "need at least two living agents")
+        a0, a1 = agents[0], agents[1]
+        preview = engine.god_preview(_crowd_compulsion_envelope(
+            [
+                {"targetId": a0["id"], "pinnedDecision": {"action": "rest", "reasoning": "cancel A"}},
+                {"targetId": a1["id"], "pinnedDecision": {"action": "rest", "reasoning": "cancel B"}},
+            ],
+            duration=5000,
+        ))
+        applied = engine.god_apply(preview["previewId"], "req-crowd-cancel")
+        parent_id = applied["outcome"]["interventionId"]
+        gates = engine.civilization["godState"].get("decisionGates") or {}
+        assert_true(str(a0["id"]) in gates and str(a1["id"]) in gates, gates)
+
+        cancelled = engine.god_cancel(parent_id)
+        assert_true(cancelled.get("cancelled") is True, cancelled)
+        assert_true(cancelled.get("targetKind") == "crowd_compulsion", cancelled)
+        assert_true(parent_id not in (engine.civilization["godState"].get("crowdCompulsions") or {}),
+                    "parent removed after cancel")
+        gates_after = engine.civilization["godState"].get("decisionGates") or {}
+        assert_true(str(a0["id"]) not in gates_after and str(a1["id"]) not in gates_after, gates_after)
+        print("  OK god_cancel on crowd_compulsion id revokes all linked gates and removes parent")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_dream_broadcast_batch_apply_and_privacy():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 2, "need at least two living agents")
+        a0, a1 = agents[0], agents[1]
+        secret = "SMOKE_DREAM_BROADCAST_SECRET_XYZZY"
+        snapshot = {"resources": {"wood": 777}, "recent_conversations": secret}
+        preview = engine.god_preview(_dream_broadcast_envelope(
+            [a0["id"], a1["id"]], snapshot, duration=5000))
+        assert_true(preview.get("ok"), preview)
+        applied = engine.god_apply(preview["previewId"], "req-dream-bcast-1")
+        assert_true(applied.get("ok"), applied)
+        parent_id = applied["outcome"]["interventionId"]
+        god = engine.civilization["godState"]
+        assert_true(parent_id in god["dreamBroadcasts"], god)
+
+        snap = engine.snapshot()
+        dumped = json.dumps(snap)
+        assert_true(secret not in dumped, "dream text leaked into /state")
+        assert_true("dreamBroadcasts" not in dumped, "dreamBroadcasts map leaked into /state")
+        assert_true(all(r.get("kind") != "dream_broadcast"
+                        for r in snap["god"]["recentPublicInterventions"]),
+                    "dream_broadcast leaked into recentPublicInterventions")
+
+        with engine.lock:
+            dreamed0 = engine._build_think_payload(a0)
+            dreamed1 = engine._build_think_payload(a1)
+        assert_true(dreamed0["resources"].get("wood") == 777, dreamed0)
+        assert_true(dreamed1["resources"].get("wood") == 777, dreamed1)
+
+        sight = engine.god_sight()
+        sight_dump = json.dumps(sight)
+        assert_true(secret not in sight_dump, "dream text must not appear in sight")
+        assert_true(any(b.get("id") == parent_id for b in (sight.get("dreamBroadcasts") or [])),
+                    sight.get("dreamBroadcasts"))
+        print("  OK dream_broadcast batch apply; dream text/maps absent from /state and sight")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_dream_broadcast_cancel_clears_linked_masks():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agents = [a for a in engine.agents if a.get("deathFrame") is None]
+        assert_true(len(agents) >= 2, "need at least two living agents")
+        a0, a1 = agents[0], agents[1]
+        preview = engine.god_preview(_dream_broadcast_envelope(
+            [a0["id"], a1["id"]],
+            {"resources": {"wood": 1}},
+            duration=5000,
+        ))
+        applied = engine.god_apply(preview["previewId"], "req-dream-bcast-cancel")
+        parent_id = applied["outcome"]["interventionId"]
+        masks = engine.civilization["godState"].get("contextMasks") or {}
+        assert_true(str(a0["id"]) in masks and str(a1["id"]) in masks, masks)
+
+        cancelled = engine.god_cancel(parent_id)
+        assert_true(cancelled.get("cancelled") is True, cancelled)
+        assert_true(cancelled.get("targetKind") == "dream_broadcast", cancelled)
+        assert_true(parent_id not in (engine.civilization["godState"].get("dreamBroadcasts") or {}),
+                    "parent removed after cancel")
+        masks_after = engine.civilization["godState"].get("contextMasks") or {}
+        assert_true(str(a0["id"]) not in masks_after and str(a1["id"]) not in masks_after, masks_after)
+        print("  OK god_cancel on dream_broadcast id revokes all linked masks and removes parent")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
 def run_matrix_phase10_smoke():
     print("Divine Matrix Phase 10 smoke -- Reload / Déjà Vu checkpoints")
     test_checkpoint_create_restore_roundtrip()
     test_checkpoint_cap_reject_and_replace_oldest()
     test_checkpoint_sight_privacy()
     test_deja_vu_replay_rejects_when_flag_off()
+
+
+def run_divine_console_phase8_smoke():
+    print("Divine Console Phase 8 smoke -- GOD_STATE_VERSION 3 + Déjà Vu")
+    test_god_state_v3_default_shape()
+    test_decision_digest_capture_on_gated_apply()
+    test_deja_vu_replay_apply_and_cancel()
+    test_deja_vu_replay_rejects_when_flag_off()
+
+
+def run_divine_console_phase9_smoke():
+    print("Divine Console Phase 9 smoke -- crowd compulsion + dream broadcast")
+    test_crowd_compulsion_batch_apply_and_privacy()
+    test_crowd_compulsion_cancel_clears_linked_gates()
+    test_dream_broadcast_batch_apply_and_privacy()
+    test_dream_broadcast_cancel_clears_linked_masks()
+
+
+def test_sight_village_pulse_ephemeral():
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    old_db_path = se.DB_PATH
+    tmpdir = tempfile.mkdtemp()
+    tmp_db = str(Path(tmpdir) / "state_pulse.db")
+    try:
+        engine = make_engine()
+        sight = engine.god_sight()
+        assert_true(sight.get("ok"), sight)
+        pulse = sight.get("pulse")
+        assert_true(isinstance(pulse, dict), pulse)
+        for key in (
+            "crisisAgents", "stockpileTotals", "openProjectsCount",
+            "sageStatus", "weather", "activeEventTitles", "providence",
+        ):
+            assert_true(key in pulse, f"missing pulse.{key}: {pulse}")
+        assert_true(isinstance(pulse["crisisAgents"], list), pulse)
+        assert_true(isinstance(pulse["stockpileTotals"], dict), pulse)
+        assert_true(isinstance(pulse["openProjectsCount"], int), pulse)
+        assert_true(isinstance(pulse["sageStatus"], dict), pulse)
+        assert_true(isinstance(pulse["weather"], dict), pulse)
+        assert_true(isinstance(pulse["activeEventTitles"], list), pulse)
+        assert_true(isinstance(pulse["providence"], dict), pulse)
+        assert_true("pulse" not in json.dumps(engine.civilization["godState"]),
+                    "pulse must not persist in godState")
+
+        se.DB_PATH = tmp_db
+        assert_true(engine.save_state(), "save_state failed")
+        restored = make_engine()
+        assert_true(restored.restore_state(), "restore_state failed")
+        assert_true("pulse" not in restored.civilization["godState"],
+                    "pulse in godState after restore")
+        sight2 = restored.god_sight()
+        assert_true(isinstance(sight2.get("pulse"), dict), sight2)
+        print("  OK god_sight pulse ephemeral with expected keys; not in godState")
+    finally:
+        se.DB_PATH = old_db_path
+        se.GOD_MODE_ENABLED = old
+
+
+def run_divine_console_phase10_smoke():
+    print("Divine Console Phase 10 smoke -- village pulse (Sight aggregate)")
+    test_sight_village_pulse_ephemeral()
 
 
 def main():
@@ -4471,6 +4876,9 @@ def main():
     test_architect_zone_paint_cancel_reverts()
     test_architect_zone_privacy_and_sight_summary()
     run_matrix_phase10_smoke()
+    run_divine_console_phase8_smoke()
+    run_divine_console_phase9_smoke()
+    run_divine_console_phase10_smoke()
     test_bargain_success_grants_resource()
     test_bargain_expiry_settles_failure()
     test_directive_and_providence_stay_separate()
@@ -4481,6 +4889,7 @@ def main():
     test_voice_follow_clears_goal_continue_keeps()
     test_voice_omen_cancels_special_turns_not_defer()
     test_proclamation_sets_providence_and_cancels_special_turns()
+    test_presentation_soft_thunder_validates_and_applies()
     test_sight_recent_divine_responses_and_snapshot_privacy()
     test_restore_does_not_refire_omen_memory()
 
@@ -4502,6 +4911,7 @@ def main():
     print("Sovereign God mode Phase 5 smoke -- storyteller events and timed lawgiver modifiers")
     test_divine_modifier_default_and_flag_gate()
     test_modifier_range_validation_every_key()
+    test_story_event_modifier_conflict_warnings_non_fatal()
     test_gather_zero_path_before_carry_cap_clamp()
     test_fish_modifier_replaces_general_modifier()
     test_collapsed_agent_recovers_under_zero_health_regen()

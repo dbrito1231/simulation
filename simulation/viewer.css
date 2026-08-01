@@ -774,8 +774,28 @@
     margin: 0 0 8px; font-size: 11px; line-height: 1.45; color: #8a8a98;
   }
   .divine-help-intro { margin-bottom: 14px; }
+  .divine-matrix-nav {
+    position: sticky; top: 0; z-index: 1;
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 8px 0 10px; margin-bottom: 10px;
+    background: linear-gradient(180deg, #1b1b25 70%, rgba(27,27,37,.92));
+    border-bottom: 1px solid #252530;
+  }
+  .divine-matrix-chip {
+    padding: 4px 10px; font: 600 11px system-ui, sans-serif;
+    background: #23232e; color: #9a9aa8;
+    border: 1px solid #34343f; border-radius: 999px;
+    cursor: pointer; transition: background .12s, color .12s, border-color .12s;
+  }
+  .divine-matrix-chip:hover {
+    background: #2a2a36; color: #dcdce4; border-color: #b5883a;
+  }
+  .divine-matrix-chip:focus-visible {
+    outline: 2px solid #b5883a; outline-offset: 2px;
+  }
   .divine-matrix-section {
     margin: 18px 0 4px; padding-top: 10px; border-top: 1px solid #252530;
+    scroll-margin-top: 44px;
   }
   .divine-matrix-section:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
   .divine-matrix-section .divine-section-title { margin-bottom: 8px; }
@@ -808,6 +828,31 @@
     background: rgba(30,58,42,.35); font-size: 11px; color: #ccc;
   }
   .divine-pin-row a { color: #ffd27a; cursor: pointer; text-decoration: underline; }
+  .divine-pin-row .divine-pin-revoke {
+    margin-left: 8px; padding: 2px 8px; font: 11px sans-serif; cursor: pointer;
+    background: #3a2a1e; color: #ffd27a; border: 1px solid #8a6a3a; border-radius: 3px;
+  }
+  .divine-pin-row .divine-pin-revoke:hover:not(:disabled) { background: #4a3520; }
+  .divine-pin-row .divine-pin-revoke:disabled { opacity: 0.45; cursor: not-allowed; }
+  .divine-history-toolbar {
+    margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid #2a2a34;
+  }
+  .divine-history-filters { align-items: flex-end; }
+  .divine-history-toggle {
+    flex-direction: row !important; align-items: center; gap: 6px; white-space: nowrap;
+  }
+  .divine-history-toggle input { width: auto !important; }
+  .divine-history-actions { margin-top: 0; flex-wrap: nowrap; }
+  .divine-history-item .divine-history-actions-row {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px;
+  }
+  .divine-history-rerun {
+    padding: 2px 8px; font: 11px sans-serif; cursor: pointer;
+    background: #1e2a3a; color: #8ed2ed; border: 1px solid #3a5a6a; border-radius: 3px;
+  }
+  .divine-history-rerun:hover:not(:disabled) { background: #243848; }
+  .divine-history-rerun:disabled { opacity: 0.45; cursor: not-allowed; color: #888; }
+  .divine-history-rerun-note { font-size: 10px; color: #7a7a88; }
   .divine-row { margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .divine-row label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #9a9aa8; flex: 1 1 auto; }
   .divine-row input[type=text], .divine-row input[type=password], .divine-row input[type=number],
@@ -872,6 +917,41 @@
     display: inline-block; font-size: 9px; padding: 0 4px; border-radius: 2px;
     color: #9a9aa8; border: 1px solid #3a3a48; margin-left: 4px;
   }
+  .divine-voice-presets-bar {
+    margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #252530;
+    flex-wrap: wrap; align-items: flex-end; gap: 8px;
+  }
+  .divine-voice-presets-bar select { min-width: 160px; }
+  .divine-voice-presentation-row {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+  }
+  .divine-voice-presentation-row label {
+    flex-direction: row; align-items: center; gap: 4px; font-size: 11px;
+  }
+  .divine-voice-adherence-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px;
+  }
+  @media (max-width: 720px) {
+    .divine-voice-adherence-grid { grid-template-columns: 1fr; }
+  }
+  .divine-subsection-title {
+    font-size: 11px; font-weight: 600; color: #b8b8c8; margin: 0 0 6px;
+  }
+  .divine-voice-timeline { max-height: 240px; overflow-y: auto; }
+  .divine-voice-timeline-entry {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+    padding: 5px 0; border-bottom: 1px solid #22222c; font-size: 11px; line-height: 1.4;
+  }
+  .divine-voice-timeline-agent { font-weight: 600; color: #e0e0ea; min-width: 4em; }
+  .divine-voice-timeline-snippet { flex: 1 1 120px; color: #c8c8d4; word-break: break-word; }
+  .divine-voice-timeline-meta { color: #7a7a88; font-size: 10px; white-space: nowrap; }
+  .divine-voice-reply-inbox { max-height: 240px; overflow-y: auto; }
+  .divine-voice-reply-item {
+    padding: 6px 0; border-bottom: 1px solid #22222c; font-size: 11px; line-height: 1.45;
+  }
+  .divine-voice-reply-from { font-weight: 600; color: #e0e0ea; margin-bottom: 2px; }
+  .divine-voice-reply-body { color: #c8c8d4; word-break: break-word; }
+  .divine-voice-reply-meta { color: #7a7a88; font-size: 10px; margin-top: 2px; }
   .divine-primitive-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 4px; padding: 4px; border: 1px dashed #333; border-radius: 3px; }
   .divine-primitive-row select, .divine-primitive-row input { font-size: 11px; padding: 2px 4px; }
   /* Bottom action bar */
@@ -894,8 +974,99 @@
   }
   .bar-brand .b2 { font: 600 10px ui-monospace, monospace; color: #6f6f7c; margin-top: 2px; }
   .bar-brand .b3 { font: 500 9px ui-monospace, monospace; color: #5a5a66; margin-top: 3px; }
+  .divine-bar-favorites {
+    display: none; flex-wrap: wrap; gap: 4px; margin-top: 6px; max-width: 220px;
+  }
+  .divine-bar-favorites:not(:empty) { display: flex; }
+  .divine-bar-effects {
+    display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
+    flex: 0 1 auto; max-width: min(420px, 38vw); min-height: 24px;
+  }
+  .divine-bar-effects:not(:empty) { padding: 0 8px; border-left: 1px solid #282831; margin-left: 2px; }
+  .divine-effect-chip {
+    padding: 2px 8px; font: 600 10px ui-monospace, monospace;
+    background: #23232e; color: #b8b8c6; border: 1px solid #3a3a48; border-radius: 999px;
+    cursor: pointer; white-space: nowrap;
+  }
+  .divine-effect-chip:hover { border-color: #b5883a; color: #ffd27a; }
+  .divine-effect-chip.active { border-color: #6a9a6a; color: #a5d6a7; }
+  .divine-effect-chip.inactive { opacity: .72; }
+  .god-sight-diff-strip {
+    margin: 0 0 10px; padding: 8px 10px; border-radius: 6px;
+    background: rgba(255, 210, 122, 0.08); border: 1px solid rgba(255, 210, 122, 0.35);
+    font-size: 11px; line-height: 1.45; color: #e8dcc4;
+  }
+  .god-sight-diff-title {
+    font: 700 10px ui-monospace, monospace; text-transform: uppercase;
+    letter-spacing: 0.04em; color: #ffd27a; margin-bottom: 4px;
+  }
+  .god-sight-diff-focus .god-sight-diff-entry { display: block; font-weight: 600; }
+  .god-sight-diff-others .god-sight-diff-entry { display: block; opacity: 0.88; }
+  .god-sight-diff-more { display: block; font-style: italic; opacity: 0.65; margin-top: 2px; }
+  .god-sight-diff-none, .god-sight-diff-first { opacity: 0.75; font-style: italic; }
+  .god-sight-pulse-card {
+    margin: 8px 0 10px;
+    padding: 8px 10px;
+    border: 1px solid #4a4035;
+    border-radius: 4px;
+    background: rgba(20, 18, 14, 0.55);
+    font-size: 12px;
+    line-height: 1.45;
+  }
+  .god-sight-pulse-title { font-weight: 600; margin-bottom: 4px; color: #d4b878; }
+  .god-sight-pulse-row { margin: 2px 0; }
+  .god-sight-pulse-crisis { color: #e8a090; }
+  .god-sight-intervene-row {
+    display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px;
+  }
+  .god-sight-intervene-btn {
+    padding: 3px 10px; font: 600 10px system-ui, sans-serif;
+    background: #2a2a36; color: #ffd27a; border: 1px solid #5a4a2a; border-radius: 4px;
+    cursor: pointer;
+  }
+  .god-sight-intervene-btn:hover { background: #3a3228; border-color: #b5883a; }
+  .divine-bar.divine-bar-pulse {
+    animation: divine-bar-pulse 0.9s ease-out 1;
+  }
+  @keyframes divine-bar-pulse {
+    0%, 100% { box-shadow: inset 0 0 0 0 transparent; border-top-color: #34343f; }
+    45% { box-shadow: inset 0 0 28px rgba(255, 210, 122, 0.38); border-top-color: #ffd27a; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .divine-bar.divine-bar-pulse { animation: none; border-top-color: #ffd27a; }
+  }
+  .divine-fav-chip {
+    padding: 2px 8px; font: 600 10px system-ui, sans-serif;
+    background: #23232e; color: #c9c9d4; border: 1px solid #3a3a48; border-radius: 999px;
+    cursor: pointer; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .divine-fav-chip:hover { border-color: #b5883a; color: #ffd27a; }
+  .divine-head-filter input {
+    width: 140px; padding: 4px 8px; font: 11px system-ui, sans-serif;
+    background: #1b1b26; color: #ddd; border: 1px solid #3a3a48; border-radius: 4px;
+  }
+  .divine-pin-btn {
+    padding: 4px 10px; margin-right: 6px; font: 600 11px system-ui, sans-serif;
+    background: #23232e; color: #d9b96e; border: 1px solid #3a3a48; border-radius: 4px; cursor: pointer;
+  }
+  .divine-pin-btn:hover { border-color: #b5883a; color: #ffd27a; }
+  .divine-matrix-nav .divine-matrix-pin { margin-left: auto; }
+  .divine-irreversible-confirm input {
+    min-width: 160px; padding: 4px 8px; font: 11px system-ui, sans-serif;
+    background: #1b1b26; color: #ddd; border: 1px solid #a24545; border-radius: 4px;
+  }
+  .divine-preview-strip .divine-irreversible-confirm:not([hidden]) { display: flex; align-items: center; }
+  .divine-actions button.divine-apply-holding,
+  .divine-preview-strip .preview-apply.divine-apply-holding {
+    background: #6b2020; border-color: #a24545; color: #ffcdd2;
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+  }
   .bar-buttons { display: flex; gap: 6px; flex: 1 1 auto; flex-wrap: wrap; }
   .gbtn {
+    position: relative;
     display: flex; flex-direction: column; align-items: center; gap: 5px;
     min-width: 74px; padding: 8px 10px 6px;
     background: #1b1b25; color: #9a9aa8;
@@ -912,10 +1083,15 @@
     box-shadow: inset 0 -2px 0 #ffd27a;
   }
   .gbtn.locked-dependent:disabled { opacity: .4; cursor: not-allowed; }
-  .gbtn.compile { border-style: dashed; }
   .gbtn .statuspip {
     font: 700 8px ui-monospace, monospace; letter-spacing: .04em;
     text-transform: uppercase; color: #ef9a9a;
+  }
+  .gbtn .gbtn-countpip {
+    position: absolute; top: 4px; right: 4px;
+    min-width: 14px; height: 14px; padding: 0 4px;
+    font: 700 9px ui-monospace, monospace; line-height: 14px; text-align: center;
+    background: #4a3a1a; color: #ffd27a; border: 1px solid #b5883a; border-radius: 999px;
   }
   .gbtn.unlock[data-state="unlocked"] .statuspip { color: #a5d6a7; }
   /* Modal shell */
@@ -931,6 +1107,7 @@
     box-shadow: 0 24px 70px rgba(0,0,0,.6), 0 0 0 1px rgba(255,210,122,.06);
     animation: divine-modal-pop .16s ease-out;
   }
+  .modal.wide { width: min(960px, 96vw); }
   @keyframes divine-modal-pop {
     from { transform: translateY(10px) scale(.985); opacity: 0; }
     to { transform: none; opacity: 1; }
@@ -980,6 +1157,17 @@
     background: rgba(74, 30, 58, 0.92); color: #f0d0ff;
     border: 1px solid #a24594; border-radius: 4px;
     z-index: 11; display: none; pointer-events: none;
+  }
+  #godPublicBanner.divine-banner-soft {
+    background: rgba(74, 30, 58, 0.92); color: #f0d0ff; border-color: #a24594;
+  }
+  #godPublicBanner.divine-banner-thunder {
+    background: rgba(48, 18, 72, 0.96); color: #ffe8a0;
+    border-color: #d4a020; box-shadow: 0 0 18px rgba(212, 160, 32, 0.45);
+    font-size: 14px; letter-spacing: 0.02em;
+  }
+  .chronicle-presentation-thunder {
+    color: #ffd27a; text-shadow: 0 0 6px rgba(255, 200, 80, 0.25);
   }
   @media (max-width: 900px) {
     #wrap { flex-direction: column; height: auto; padding: 0; }

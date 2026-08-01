@@ -181,6 +181,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `GOD_COMPILER_ENABLED` | False (env-backed, `SIM_GOD_COMPILER`) | no (advertised only via `/control/god/capabilities`'s `compiler.enabled`, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_DEJA_VU_REPLAY` | False (env-backed, `SIM_GOD_DEJA_VU_REPLAY`) | yes | [02](02-engine-core.md), [04](04-http-api.md), [12](12-ops.md) |
 
-`civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`2` after Divine
-Matrix scaffolding); persisted private maps from that shape never appear in
-`/state` `god` (see [02-engine-core.md](02-engine-core.md)).
+`civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
+Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder
+maps); persisted private maps from that shape never appear in `/state` `god`
+(see [02-engine-core.md](02-engine-core.md)).

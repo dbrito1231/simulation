@@ -386,7 +386,10 @@ expiry discipline as omens). Mask modes:
   `from -> to: message` slices from `forgedConversations`.
 
 `contextMasks` is private — absent from `/state` god allowlist. Sight exposes
-per-agent status only: `{active, mode, expiresFrame}`.
+per-agent status only: `{active, mode, expiresFrame}`. Batch **`dream_broadcast`**
+parents fan out one shared `dreamSnapshot` per target; child masks carry
+`dreamBroadcastId` for cancel-all semantics (runtime apply path is identical to
+single-target `context_mask` mode `dream`).
 
 ### Divine Matrix Phase 5: decision gate (Possession pipeline)
 
@@ -407,6 +410,9 @@ Pinned decisions are validated at god preview/apply via `normalize_decision`
 `decisionGates` is private. Sight exposes per-agent gate status:
 `{active, mode, armed?, status?, expiresFrame?, hasPending?, pinnedAction?}`
 plus `divineHold` on the agent row — never full pinned JSON in `/state`.
+Batch **`crowd_compulsion`** parents fan out per-target compulsion gates with
+shared duration/turns; child gates carry `crowdCompulsionId` for cancel-all
+semantics (runtime apply path is identical to single-target `decision_compulsion`).
 
 ### Divine Matrix Phase 6: Burning Bush + Merovingian Bargain
 

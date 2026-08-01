@@ -4856,10 +4856,79 @@ def control_god_capabilities():
                 "notes": "irreversible world replace — copies checkpoint state.db + memory_store.json, then restore_state().",
             },
             "deja_vu_replay": {
-                "applyable": False,
-                "payload": {},
-                "reversibilityClass": "irreversible",
-                "notes": "stub — rejected unless GOD_DEJA_VU_REPLAY flag is on; not implemented even when on.",
+                "applyable": _sim_engine.GOD_DEJA_VU_REPLAY,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "maxSteps": {
+                        "type": "integer", "optional": True,
+                        "min": 1, "max": _sim_engine.GOD_DEJA_VU_MAX_STEPS,
+                        "default": _sim_engine.GOD_DEJA_VU_MAX_STEPS,
+                    },
+                },
+                "reversibilityClass": "cancellable",
+                "sessionCap": _sim_engine.GOD_DEJA_VU_SESSION_CAP,
+                "notes": (
+                    f"sequences up to {_sim_engine.GOD_DEJA_VU_MAX_STEPS} compulsion "
+                    "steps from decisionDigests for one agent; cancel parent clears "
+                    "remaining gates."
+                ),
+            },
+            "crowd_compulsion": {
+                "applyable": True,
+                "payload": {
+                    "theme": {
+                        "type": "string", "optional": True,
+                        "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                        "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES,
+                    },
+                    "durationFrames": {
+                        "type": "integer", "optional": True,
+                        "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                        "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                    },
+                    "remainingTurns": {"type": "integer", "optional": True, "min": 1},
+                    "targets": {
+                        "type": "array",
+                        "maxItems": _sim_engine.GOD_CROWD_COMPULSION_MAX_TARGETS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "targetId": {"type": "integer"},
+                                "pinnedDecision": {
+                                    "type": "object",
+                                    "notes": "must include action; validated via normalize_decision",
+                                },
+                            },
+                        },
+                    },
+                },
+                "reversibilityClass": "cancellable",
+                "notes": (
+                    "at least one of durationFrames or remainingTurns required; "
+                    "cancel parent id clears all linked gates."
+                ),
+            },
+            "dream_broadcast": {
+                "applyable": True,
+                "payload": {
+                    "durationFrames": {
+                        "type": "integer",
+                        "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                        "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                        "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES,
+                    },
+                    "dreamSnapshot": {
+                        "type": "object",
+                        "notes": "required; keys validated per GOD_CONTEXT_MASK_DREAM_KEYS",
+                    },
+                    "targetIds": {
+                        "type": "array",
+                        "maxItems": _sim_engine.GOD_DREAM_BROADCAST_MAX_TARGETS,
+                        "items": {"type": "integer"},
+                    },
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "shared dream snapshot per target; cancel parent clears all linked masks.",
             },
             "revoke_guidance": {
                 "applyable": True,

@@ -188,9 +188,16 @@ Matrix Phase 9 adds `architect_zone`, `architect_zone_cancel`, and
 `architect_release_hold` (Path1 terrain paint, keyed door movement gate, limbo
 hold at `GOD_LIMBO_STATION`; `architectZones` omitted from `/state`; Sight
 summaries only; paint audit `public: true`, door/limbo `public: false`); Divine
-Matrix Phase 10 adds `checkpoint_create`, `checkpoint_restore`, and
-`deja_vu_replay` (stub; `GOD_DEJA_VU_REPLAY` gate); checkpoint metadata in
-Sight only, not `/state`; restore is irreversible world replace; Phase 4 added
+Matrix Phase 10 adds `checkpoint_create` and `checkpoint_restore`; checkpoint
+metadata in Sight only, not `/state`; restore is irreversible world replace.
+Divine Console Phase 8 adds applyable `deja_vu_replay` when
+`GOD_DEJA_VU_REPLAY` is on (`{targetId, maxSteps?}`; cancellable parent
+sequencing compulsion gates from `decisionDigests`); digest summaries in Sight
+only, not `/state`. Divine Console Phase 9 adds `crowd_compulsion` (batch
+decision gates from shared duration/turns + per-target pinned decisions;
+parent `crowdCompulsions`; private) and `dream_broadcast` (batch dream
+`context_mask` from one shared snapshot; parent `dreamBroadcasts`; private).
+Phase 4 added
 `agent_vitals`/`grant_resource`/`structure_condition`; town-integrity adds
 `repair_structures`/`clear_ruins`; Phase 5 adds
 `story_event` (timed modifiers + zero or more Phase 4 primitives + optional
@@ -209,6 +216,10 @@ for the command catalog and stored-text contract, and
 preview/apply step (unlike every other mutating God route). It searches, in
 order, the active `providence` slot, every `privateOmens` record, every
 `whisperCampaigns` entry (by campaign id — revokes all linked omens), every
+`crowdCompulsions` entry (by parent id — closes all linked decision gates),
+every `dreamBroadcasts` entry (by parent id — closes all linked dream masks),
+every `dejaVuReplays` entry (by replay parent id — clears remaining sequenced
+compulsion gates), every
 `agentSampling` override (by intervention `id` or via `revoke_agent_sampling`),
 every `contextMasks` entry (by mask intervention `id`), every
 `decisionGates` entry (by gate intervention `id`), every
@@ -235,12 +246,45 @@ is the first and only client of all five routes. It reads
 `god_preview()`'s response (documented in
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel))
 to drive its preview→apply flow, and reads `god_sight()`'s `agents`/
-`activeEvents`/`recentInterventions`/`recentDivineResponses` for its Sight
-and Voice Adherence panels. `/control/god/capabilities` documents that
+`activeEvents`/`recentInterventions`/`recentDivineResponses`/`pulse` for its Sight
+and Voice Adherence panels.
+
+**Village pulse (Divine Console improvements, Phase 10).** Successful
+`GET /control/god/sight` responses include an additive top-level `pulse`
+object — **ephemeral**, derived live from world state at request time, never
+stored in `godState` or persisted by save/restore. Shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `crisisAgents` | `{id, name, reason}[]` | Living agents in survival crisis (incapacitated, low/critical health, starving/very hungry); capped ~8, worst first |
+| `stockpileTotals` | `object` | Positive resource totals from `civilization.stockpile` |
+| `openProjectsCount` | `int` | Count of active `districtProjects` entries |
+| `sageStatus` | `object` | Elder summary: `present`, `status` (`living`/`critical`/`incapacitated`/`absent`), optional `name`/`role`/`health`/`hunger` |
+| `weather` | `object` | Same projection as `/state` weather (`state`, `since`, `districts`) |
+| `activeEventTitles` | `string[]` | Public-safe titles from active `activeEvents` (`title` for story events, else `kind`) |
+| `providence` | `{active: bool, expiresFrame?}` | Timed providence window only — no guidance text |
+
+No LLM calls; no `GOD_STATE_VERSION` bump. `/control/god/capabilities` documents that
 `proclamation` applies as timed providence (optional `durationFrames`, same
-slot/revoke/expiry as `providence`). No new response shape was needed for the
-viewer beyond `recentDivineResponses` — every other field it reads was
-already documented by Phases 2–6.
+slot/revoke/expiry as `providence`). Both `proclamation` and `providence`
+payloads accept an optional cosmetic `presentation` enum (`"soft"` \| `"thunder"`;
+default omit/`"soft"`) — validated at preview, audited in `divine.jsonl` via
+the normalized command, stored on intervention/providence records and public
+chronicle entries for viewer banner/chronicle styling only (cognition text
+unchanged). No new preview/apply response fields — the viewer reads
+`presentation` from `/state` `god.recentPublicInterventions`, `god.providence`,
+and `world.chronicle` entries.
+
+**Preview warnings (Divine Console improvements, Phase 7).** A successful
+`POST /control/god/preview` response (`ok: true`) may include an additive
+`warnings: string[]` field. Each entry is a short, secret-free human message
+about non-fatal concerns in the normalized command — today, semantically
+opposing timed-modifier keys on `story_event` (including Laws submissions,
+which are `story_event` with modifiers only). Warnings never change
+`ok`, never block Apply, and are omitted (or `[]`) when there is nothing to
+report. Fatal validation still returns `ok: false` with `reason` only.
+See [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
+for the conflict table evaluated at preview time.
 
 ### Optional Phase 8: `/control/god/compile`
 
