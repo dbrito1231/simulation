@@ -1649,6 +1649,8 @@ WILDLIFE_GUARD_RADIUS = 120
 SETTLEMENT_STRUCT_THRESHOLD = 5
 SETTLEMENT_POP_THRESHOLD = 6
 CARAVAN_CARRY_MIN = 3
+CARAVAN_VEHICLE_RESOURCES = frozenset({"cart", "wagon"})
+TREATY_TARIFF_MAX = 0.25
 PATH1_GRID_COLS = 8
 PATH1_GRID_ROWS = 8
 
@@ -2293,6 +2295,7 @@ class SimEngine:
             "settlements": [],
             "treaties": [],
             "caravanLog": [],
+            "settlementStores": {},
             "path1Placements": 0,
             "path1TerrainMutations": 0,
             # Agent-driven structure reorganization (footprint-overlap fixup):
@@ -4807,36 +4810,19 @@ class SimEngine:
             return f"{agent['name']} found nothing that needs repair"
         cost = self._repair_cost(s)
         name = s.get("name") or s.get("type")
-        # Fund each resource from the agent's inventory first, then the village
-        # stockpile (2026-07-07 audit: repairs drew from personal inventory
-        # only, so 320 repair attempts failed while the stockpile held 29k
-        # planks -- the gather->contribute loop could never fund the escape
-        # hatch). Refuse only when both together fall short.
-        c = self.civilization
-        plan = {}
-        missing = []
-        for res, amt in cost.items():
-            held = agent["resources"].get(res, 0)
-            from_agent = min(held, amt)
-            from_stock = amt - from_agent
-            if from_stock > int(c["stockpile"].get(res, 0)):
-                missing.append(res)
-            else:
-                plan[res] = (from_agent, from_stock)
+        paid, missing = self._pay_local_cost(agent, cost)
         if missing:
             cost_str = ", ".join(f"{amt} {res}" for res, amt in cost.items())
             agent["lastRepairRejection"] = {
-                "reason": (f"repairing the {name} needs {cost_str} -- you and the "
-                           f"village stockpile together lack {', '.join(missing)}"),
+                "reason": (f"repairing the {name} needs {cost_str} -- you, your settlement store, "
+                           f"and the village stockpile together lack {', '.join(missing)}"),
                 "frame": self.frameTick}
             return f"{agent['name']} lacks {', '.join(missing)} to repair the {name}"
-        stock_parts = []
-        for res, (from_agent, from_stock) in plan.items():
-            if from_agent:
-                agent["resources"][res] -= from_agent
-            if from_stock:
-                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
-                stock_parts.append(f"{from_stock} {res}")
+        store_parts, stock_parts = paid
+        if store_parts:
+            self._push_activity(
+                f"The {self._settlement_for_agent(agent)} settlement store supplied "
+                f"{', '.join(store_parts)} for {agent['name']}'s repair of the {name}")
         if stock_parts:
             self._push_activity(
                 f"The village stockpile supplied {', '.join(stock_parts)} for "
@@ -5073,32 +5059,20 @@ class SimEngine:
         return total
 
     def _pay_upgrade_cost(self, agent, cost, name):
-        c = self.civilization
-        plan = {}
-        missing = []
-        for res, amt in cost.items():
-            held = agent["resources"].get(res, 0)
-            from_agent = min(held, amt)
-            from_stock = amt - from_agent
-            if from_stock > int(c["stockpile"].get(res, 0)):
-                missing.append(res)
-            else:
-                plan[res] = (from_agent, from_stock)
+        paid, missing = self._pay_local_cost(agent, cost)
         if missing:
             cost_str = ", ".join(f"{amt} {res}" for res, amt in cost.items())
             agent["lastUpgradeRejection"] = {
-                "reason": (f"upgrading {name} needs {cost_str} -- you and the stockpile "
-                           f"together lack {', '.join(missing)}"),
+                "reason": (f"upgrading {name} needs {cost_str} -- you, your settlement store, "
+                           f"and the stockpile together lack {', '.join(missing)}"),
                 "frame": self.frameTick,
             }
             return False
-        stock_parts = []
-        for res, (from_agent, from_stock) in plan.items():
-            if from_agent:
-                agent["resources"][res] -= from_agent
-            if from_stock:
-                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
-                stock_parts.append(f"{from_stock} {res}")
+        store_parts, stock_parts = paid
+        if store_parts:
+            self._push_activity(
+                f"The {self._settlement_for_agent(agent)} settlement store supplied "
+                f"{', '.join(store_parts)} for {agent['name']}'s upgrade of the {name}")
         if stock_parts:
             self._push_activity(
                 f"The village stockpile supplied {', '.join(stock_parts)} for "
@@ -5391,8 +5365,20 @@ class SimEngine:
             reason = "a divine hand stills the harvest"
             agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
             return f"{agent['name']} found nothing — {reason}"
-        amount = max(1, min(amount, self._carry_cap(agent) - agent["resources"].get(resource, 0)))
-        agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
+        intended = amount
+        room = max(0, self._carry_cap(agent) - agent["resources"].get(resource, 0))
+        agent_add = min(intended, room)
+        overflow = intended - agent_add
+        if agent_add <= 0 and overflow <= 0 and intended > 0:
+            overflow = intended
+        elif agent_add <= 0 and room > 0:
+            agent_add = min(intended, max(1, room))
+            overflow = intended - agent_add
+        amount = agent_add + overflow
+        if agent_add:
+            agent["resources"][resource] = agent["resources"].get(resource, 0) + agent_add
+        if overflow:
+            self._credit_settlement_overflow(agent, resource, overflow)
         c["collectSuccesses"] += 1
         self._path1_tool_benchmark(resource, True)
         if ECOLOGY_ENABLED:
@@ -5408,7 +5394,10 @@ class SimEngine:
         bonus_note = ""
         if amount > 1:
             bonus_note = " (structure effects boosted the harvest)"
-        return f"{agent['name']} collected {resource}" + (f" x{amount}{bonus_note}" if amount > 1 else "")
+        summary = f"{agent['name']} collected {resource}" + (f" x{amount}{bonus_note}" if amount > 1 else "")
+        if overflow:
+            summary += f" ({overflow} overflow to settlement store)"
+        return summary
 
     # --- Path 1: tool tiers ---
     def _gather_tool_tier(self, agent):
@@ -5730,6 +5719,271 @@ class SimEngine:
             c["districts"][did].setdefault("settlementId", "home")
         c.setdefault("treaties", [])
         c.setdefault("caravanLog", [])
+        stores = c.setdefault("settlementStores", {})
+        for sid in (s["id"] for s in c["settlements"]):
+            stores.setdefault(sid, {})
+
+    def _ensure_settlement_stores(self):
+        self._init_settlements()
+        stores = self.civilization.setdefault("settlementStores", {})
+        for sid in (s["id"] for s in self.civilization["settlements"]):
+            stores.setdefault(sid, {})
+
+    def _settlement_store_bucket(self, settlement_id):
+        self._ensure_settlement_stores()
+        return self.civilization["settlementStores"].setdefault(settlement_id, {})
+
+    def _credit_settlement_overflow(self, agent, resource, amount):
+        if amount <= 0:
+            return
+        c = self.civilization
+        if path1_on("PATH1_DIPLOMACY_ENABLED"):
+            bucket = self._settlement_store_bucket(self._settlement_for_agent(agent))
+            bucket[resource] = bucket.get(resource, 0) + amount
+        else:
+            c["stockpile"][resource] = c["stockpile"].get(resource, 0) + amount
+
+    def _pay_local_cost(self, agent, cost):
+        """Fund from agent inventory, settlement store, then village stockpile."""
+        c = self.civilization
+        sid = self._settlement_for_agent(agent)
+        store = (self._settlement_store_bucket(sid)
+                 if path1_on("PATH1_DIPLOMACY_ENABLED") else {})
+        plan = {}
+        missing = []
+        for res, amt in cost.items():
+            remaining = amt
+            from_agent = min(agent["resources"].get(res, 0), remaining)
+            remaining -= from_agent
+            from_store = min(int(store.get(res, 0)), remaining) if store else 0
+            remaining -= from_store
+            from_stock = remaining
+            if from_stock > int(c["stockpile"].get(res, 0)):
+                missing.append(res)
+            else:
+                plan[res] = (from_agent, from_store, from_stock)
+        if missing:
+            return None, missing
+        store_parts = []
+        stock_parts = []
+        for res, (from_agent, from_store, from_stock) in plan.items():
+            if from_agent:
+                agent["resources"][res] -= from_agent
+            if from_store:
+                store[res] = int(store.get(res, 0)) - from_store
+                store_parts.append(f"{from_store} {res}")
+            if from_stock:
+                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
+                stock_parts.append(f"{from_stock} {res}")
+        return (store_parts, stock_parts), None
+
+    def _format_settlement_stores_for_prompt(self, agent):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return None
+        self._ensure_settlement_stores()
+        stores = self.civilization.get("settlementStores") or {}
+        if not stores:
+            return None
+        parts = []
+        my_sid = self._settlement_for_agent(agent)
+        for sid, bucket in stores.items():
+            if not bucket:
+                continue
+            label = sid + (" (yours)" if sid == my_sid else "")
+            items = ", ".join(f"{qty} {res}" for res, qty in sorted(bucket.items()) if qty > 0)
+            if items:
+                parts.append(f"{label}: {items}")
+        return "; ".join(parts) if parts else "per-settlement stores empty"
+
+    def _enacted_treaty_tariff(self):
+        tariff = 0.0
+        for entry in (self.civilization.get("treaties") or []):
+            try:
+                tval = float(entry.get("tariff") or 0)
+            except (TypeError, ValueError):
+                tval = 0.0
+            tariff = max(tariff, tval)
+        for rule in (self.civilization.get("rules") or []):
+            if rule.get("kind") != "treaty":
+                continue
+            try:
+                tval = float(rule.get("tariff") or 0)
+            except (TypeError, ValueError):
+                tval = 0.0
+            tariff = max(tariff, tval)
+        return max(0.0, min(TREATY_TARIFF_MAX, tariff))
+
+    def _parse_treaty_tariff(self, raw):
+        try:
+            tariff = float(raw if raw is not None else 0)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= tariff <= TREATY_TARIFF_MAX:
+            return tariff
+        return None
+
+    def _caravan_trade_bundle(self, agent, dest_settlement_id=None):
+        bundle = {}
+        for res, qty in agent["resources"].items():
+            if qty <= 0 or res in CARAVAN_VEHICLE_RESOURCES:
+                continue
+            if res in EDIBLE_RESOURCES:
+                transferable = max(0, qty - EDIBLE_RESERVE)
+            else:
+                transferable = qty
+            if transferable > 0:
+                bundle[res] = transferable
+        return bundle
+
+    def _deliver_caravan(self, agent, dest_settlement_id, source_settlement_id=None):
+        c = self.civilization
+        bundle = self._caravan_trade_bundle(agent, dest_settlement_id)
+        if not bundle:
+            return False
+        source_sid = source_settlement_id or next(
+            (s["id"] for s in c["settlements"] if s["id"] != dest_settlement_id),
+            self._settlement_for_agent(agent),
+        )
+        dest_stores = self._settlement_store_bucket(dest_settlement_id)
+        source_stores = self._settlement_store_bucket(source_sid)
+        tariff = self._enacted_treaty_tariff()
+        from_district = agent.get("currentDistrict")
+        dest_settlement = next(
+            (s for s in c["settlements"] if s["id"] == dest_settlement_id), None)
+        dest_district = (
+            (dest_settlement or {}).get("districts") or [from_district])[0]
+        goods = {}
+        for res, qty in bundle.items():
+            agent["resources"][res] -= qty
+            tariff_qty = int(qty * tariff) if tariff > 0 else 0
+            dest_qty = qty - tariff_qty
+            if tariff_qty > 0:
+                if path1_on("PATH1_DIPLOMACY_ENABLED"):
+                    source_stores[res] = source_stores.get(res, 0) + tariff_qty
+                else:
+                    c["stockpile"][res] = c["stockpile"].get(res, 0) + tariff_qty
+            if dest_qty > 0:
+                dest_stores[res] = dest_stores.get(res, 0) + dest_qty
+            if from_district and dest_district:
+                self._emit_shipment(from_district, dest_district, res)
+            goods[res] = qty
+        c["caravanLog"].append({
+            "goods": goods,
+            "from": source_sid,
+            "to": dest_settlement_id,
+            "frame": self.frameTick,
+            "agent": agent["name"],
+        })
+        self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
+                            {"agent": agent["name"], "dest": dest_settlement_id, "goods": goods})
+        dest_name = (dest_settlement or {}).get("name") or dest_settlement_id
+        parts = ", ".join(f"{n} {r}" for r, n in goods.items())
+        self._push_activity(
+            f"{agent['name']} delivered {parts} to {dest_name}"
+            + (f" (tariff {int(tariff * 100)}%)" if tariff > 0 else ""))
+        return True
+
+    def _transit_district_for_settlement(self, settlement_id):
+        c = self.civilization
+        candidates = []
+        for s in c["structures"]:
+            if s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD:
+                continue
+            if s.get("type") not in ("dock", "shipyard"):
+                continue
+            did = s.get("districtId")
+            if did and c["districts"].get(did, {}).get("settlementId") == settlement_id:
+                candidates.append(did)
+        if candidates:
+            return candidates[0]
+        for did, d in c["districts"].items():
+            if d.get("settlementId") == settlement_id and d.get("kind") == "beach":
+                return did
+        for settlement in c["settlements"]:
+            if settlement["id"] == settlement_id and settlement.get("districts"):
+                return settlement["districts"][0]
+        return None
+
+    def _ocean_district_id(self):
+        ocean = self._wildlife_ocean_district()
+        if ocean:
+            for did, dist in self.civilization["districts"].items():
+                if dist is ocean:
+                    return did
+        return "ocean" if "ocean" in self.civilization["districts"] else None
+
+    def _caravan_route_legs(self, agent, dest_district_id):
+        c = self.civilization
+        my_sid = self._settlement_for_agent(agent)
+        dest_sid = (c["districts"].get(dest_district_id) or {}).get("settlementId", "home")
+        if (my_sid == dest_sid
+                or not path1_on("PATH1_DIPLOMACY_ENABLED")
+                or not TRANSIT_ENABLED
+                or not self._has_ocean_transit()):
+            return [dest_district_id]
+        source_dock = self._transit_district_for_settlement(my_sid)
+        ocean_did = self._ocean_district_id()
+        dest_dock = self._transit_district_for_settlement(dest_sid)
+        legs = []
+        if source_dock:
+            legs.append(source_dock)
+        if ocean_did:
+            legs.append(ocean_did)
+        if dest_dock and dest_dock != dest_district_id:
+            legs.append(dest_dock)
+        legs.append(dest_district_id)
+        deduped = []
+        for leg in legs:
+            if not deduped or deduped[-1] != leg:
+                deduped.append(leg)
+        return deduped
+
+    def _caravan_next_hop(self, agent, dest_district_id):
+        legs = self._caravan_route_legs(agent, dest_district_id)
+        my_did = agent.get("currentDistrict")
+        for leg in legs:
+            if leg == my_did:
+                continue
+            if not self._en_route_to(agent, leg):
+                return leg
+        return dest_district_id
+
+    def _set_caravan_target(self, agent, dest_district_id):
+        hop = self._caravan_next_hop(agent, dest_district_id)
+        self._set_agent_target_once(agent, hop)
+
+    def _caravan_eligible(self, agent):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return False
+        carry = self._carry_cap(agent)
+        has_vehicle = any(agent["resources"].get(v, 0) > 0 for v in CARAVAN_VEHICLE_RESOURCES)
+        if not has_vehicle or sum(agent["resources"].values()) < CARAVAN_CARRY_MIN:
+            return False
+        c = self.civilization
+        self._init_settlements()
+        return len(c["settlements"]) >= 2
+
+    def _resolve_caravan_dest(self, agent, decision):
+        c = self.civilization
+        self._init_settlements()
+        my_sid = self._settlement_for_agent(agent)
+        raw = decision.get("target_district") or decision.get("target")
+        if raw:
+            resolved = self._resolve_target_district(raw, agent)
+            if resolved:
+                return resolved
+        other = next((s for s in c["settlements"] if s["id"] != my_sid), None)
+        if other and other.get("districts"):
+            return other["districts"][0]
+        return None
+
+    def _assign_caravan_goal(self, agent, dest_district):
+        agent["goal"] = {
+            "kind": "caravan",
+            "target_district": dest_district,
+            "source_settlement": self._settlement_for_agent(agent),
+            "ttl": STALL_THRESHOLD * 4,
+        }
 
     def _maybe_found_settlement(self):
         if not path1_on("PATH1_DIPLOMACY_ENABLED"):
@@ -5779,33 +6033,27 @@ class SimEngine:
         return False
 
     def _maybe_caravan_goal(self, agent):
-        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
-            return
-        carry = self._carry_cap(agent)
-        has_vehicle = any(agent["resources"].get(v, 0) > 0 for v in ("cart", "wagon"))
-        if not has_vehicle or sum(agent["resources"].values()) < CARAVAN_CARRY_MIN:
+        if not self._caravan_eligible(agent):
             return
         c = self.civilization
-        self._init_settlements()
-        if len(c["settlements"]) < 2:
-            return
         my_sid = self._settlement_for_agent(agent)
         other = next((s for s in c["settlements"] if s["id"] != my_sid), None)
         if not other or not other["districts"]:
             return
         dest = other["districts"][0]
+        dest_sid = other["id"]
         if agent.get("currentDistrict") == dest:
-            if TRANSIT_ENABLED and self._has_ocean_transit():
-                if not self._consume_ocean_transit():
-                    return
-            c["caravanLog"].append({"agent": agent["name"], "settlement": other["id"],
-                                    "frame": self.frameTick})
-            self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
-                                {"agent": agent["name"], "dest": dest})
-            self._push_activity(f"{agent['name']} arrives at {other['name']} with trade goods")
+            goal = agent.get("goal") or {}
+            source_sid = goal.get("source_settlement") or next(
+                (s["id"] for s in c["settlements"] if s["id"] != dest_sid), my_sid)
+            if (source_sid != dest_sid and TRANSIT_ENABLED and self._has_ocean_transit()
+                    and not self._consume_ocean_transit(agent)):
+                return
+            if self._deliver_caravan(agent, dest_sid, source_settlement_id=source_sid):
+                agent["goal"] = None
             return
         if not agent.get("goal"):
-            agent["goal"] = {"kind": "caravan", "target_district": dest, "ttl": STALL_THRESHOLD * 4}
+            self._assign_caravan_goal(agent, dest)
 
     def _ocean_transit_unlocks(self):
         if not TRANSIT_ENABLED:
@@ -5822,17 +6070,31 @@ class SimEngine:
     def _has_ocean_transit(self):
         return bool(self._ocean_transit_unlocks())
 
-    def _consume_ocean_transit(self):
+    def _consume_ocean_transit(self, agent=None):
         unlock = self._ocean_transit_unlocks()[0] if self._ocean_transit_unlocks() else None
         if not unlock:
             return False
         costs = unlock.get("consumes") or {}
-        stock = self.civilization["stockpile"]
-        if any(stock.get(r, 0) < n for r, n in costs.items()):
-            self._push_activity("Ocean caravan waits for transit supplies")
-            return False
+        c = self.civilization
+        sid = self._settlement_for_agent(agent) if agent else "home"
+        store = (self._settlement_store_bucket(sid)
+                 if agent and path1_on("PATH1_DIPLOMACY_ENABLED") else {})
+        stock = c["stockpile"]
+        plan = {}
         for resource, amount in costs.items():
-            stock[resource] -= amount
+            remaining = amount
+            from_store = min(int(store.get(resource, 0)), remaining) if store else 0
+            remaining -= from_store
+            from_stock = remaining
+            if from_stock > int(stock.get(resource, 0)):
+                self._push_activity("Ocean caravan waits for transit supplies")
+                return False
+            plan[resource] = (from_store, from_stock)
+        for resource, (from_store, from_stock) in plan.items():
+            if from_store:
+                store[resource] = int(store.get(resource, 0)) - from_store
+            if from_stock:
+                stock[resource] = int(stock.get(resource, 0)) - from_stock
         self._push_activity("An ocean caravan launches, consuming " + ", ".join(f"{n} {r}" for r, n in costs.items()))
         return True
 
@@ -5912,17 +6174,23 @@ class SimEngine:
         if not isinstance(rule, dict) or not rule.get("id") or not rule.get("name"):
             agent["lastTreatyRejection"] = {"reason": "invalid treaty proposal", "frame": self.frameTick}
             return f"{agent['name']} drafted an invalid treaty"
+        tariff = self._parse_treaty_tariff(rule.get("tariff", 0))
+        if tariff is None:
+            agent["lastTreatyRejection"] = {"reason": "tariff must be 0–0.25", "frame": self.frameTick}
+            return f"{agent['name']} drafted an invalid treaty tariff"
         entry = {
             "id": rule["id"], "name": rule["name"], "kind": "treaty",
             "value": rule.get("value") or "trade",
             "description": rule.get("description", "Inter-settlement treaty"),
+            "tariff": tariff,
             "proposedBy": agent["name"], "enacted": False,
             "votes": {agent["name"]: "yes"},
         }
         self.civilization["pendingRules"].append(entry)
         self._tally_and_maybe_enact(entry)
         agent["lastTreatyRejection"] = None
-        return f'{agent["name"]} proposed treaty "{entry["name"]}"'
+        tariff_note = f" (tariff {int(tariff * 100)}%)" if tariff > 0 else ""
+        return f'{agent["name"]} proposed treaty "{entry["name"]}"{tariff_note}'
 
     def _vote_treaty(self, agent, decision):
         if not path1_on("PATH1_DIPLOMACY_ENABLED"):
@@ -5939,9 +6207,22 @@ class SimEngine:
         if pending.get("enacted"):
             self.civilization.setdefault("treaties", []).append({
                 "id": pending["id"], "name": pending["name"], "value": pending["value"],
+                "tariff": pending.get("tariff", 0),
                 "frame": self.frameTick,
             })
         return f'{agent["name"]} voted {vote} on treaty "{pending["name"]}"'
+
+    def _deliver_caravan_action(self, agent, decision):
+        if not self._caravan_eligible(agent):
+            return f"{agent['name']} cannot run a caravan yet"
+        dest = self._resolve_caravan_dest(agent, decision)
+        if not dest:
+            return f"{agent['name']} found no destination settlement"
+        dest_sid = self.civilization["districts"].get(dest, {}).get("settlementId")
+        if dest_sid == self._settlement_for_agent(agent):
+            return f"{agent['name']} is already at the destination settlement"
+        self._assign_caravan_goal(agent, dest)
+        return f"{agent['name']} sets out on a caravan toward {dest}"
 
     # --- Path 1: pressure loop ---
     def _is_night(self):
@@ -6513,7 +6794,7 @@ class SimEngine:
         return None
 
     def _grant_hunt_yield(self, agent, kind):
-        """Grant +1 meat/fish with carry-cap room first, overflow to stockpile."""
+        """Grant +1 meat/fish with carry-cap room first, overflow to settlement store."""
         resource = WILDLIFE_YIELD.get(kind)
         if not resource or not agent:
             return 0, 0, None
@@ -6522,13 +6803,12 @@ class SimEngine:
         held = agent["resources"].get(resource, 0)
         room = max(0, cap - held)
         agent_added = min(amount, room)
-        stockpile_added = amount - agent_added
+        overflow_added = amount - agent_added
         if agent_added:
             agent["resources"][resource] = held + agent_added
-        if stockpile_added:
-            c = self.civilization
-            c["stockpile"][resource] = c["stockpile"].get(resource, 0) + stockpile_added
-        return agent_added, stockpile_added, resource
+        if overflow_added:
+            self._credit_settlement_overflow(agent, resource, overflow_added)
+        return agent_added, overflow_added, resource
 
     def _apply_hunt_damage(self, agent, creature, damage=None):
         """Apply hunt damage under the lock. Returns a result dict for apply_decision."""
@@ -6554,17 +6834,17 @@ class SimEngine:
         creature["respawnAt"] = self.frameTick + WILDLIFE_RESPAWN_FRAMES
         creature["waypoints"] = []
         creature.pop("migrateDest", None)
-        agent_added, stockpile_added, resource = self._grant_hunt_yield(agent, kind)
+        agent_added, overflow_added, resource = self._grant_hunt_yield(agent, kind)
         note = f"{agent['name']} hunted a {kind}"
         if resource:
-            note += f" (+{agent_added + stockpile_added} {resource}"
-            if stockpile_added:
-                note += f"; {stockpile_added} overflow to stockpile"
+            note += f" (+{agent_added + overflow_added} {resource}"
+            if overflow_added:
+                note += f"; {overflow_added} overflow to settlement store"
             note += ")"
         self._push_activity(note)
         return {"ok": True, "killed": True, "creature": creature, "damage": damage,
                 "kind": kind, "resource": resource, "agentAdded": agent_added,
-                "stockpileAdded": stockpile_added}
+                "stockpileAdded": overflow_added}
 
     def god_wildlife_spawn(self, district_id, kind, respect_cap=True):
         """Spawn an alive creature at a habitat-legal position. Caller holds lock.
@@ -7047,15 +7327,18 @@ class SimEngine:
                                      "village_tier": village_tier})
                 return (f"{agent['name']} cannot craft {recipe_id} — it is tier {tier} "
                         f"tech and the village is tier {village_tier} ({reason})")
-        if not self._has_inputs(agent, recipe["inputs"]):
-            self._craft_input_reflex(agent, recipe_id, recipe)
-            missing = self._largest_missing_input(agent, recipe["inputs"])
-            return f"{agent['name']} lacks {missing} to craft {recipe_id}"
         if recipe.get("station") and agent["currentZone"] != recipe["station"]:
             self._set_agent_target_once(agent, recipe["station"])
             return f"{agent['name']} heads to the {recipe['station']} to craft {recipe_id}"
-        for r, n in recipe["inputs"].items():
-            agent["resources"][r] -= n
+        if self._has_inputs(agent, recipe["inputs"]):
+            for r, n in recipe["inputs"].items():
+                agent["resources"][r] -= n
+        else:
+            paid, missing = self._pay_local_cost(agent, recipe["inputs"])
+            if missing:
+                self._craft_input_reflex(agent, recipe_id, recipe)
+                missing_res = self._largest_missing_input(agent, recipe["inputs"])
+                return f"{agent['name']} lacks {missing_res} to craft {recipe_id}"
         output = 1
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop":
             output += self._craft_output_bonus(recipe, agent.get("currentDistrict"))
@@ -7412,6 +7695,10 @@ class SimEngine:
         if kind == "custom" and rule.get("effect") is not None \
                 and self._normalize_custom_rule_effect(rule.get("effect")) is None:
             return False
+        if kind == "treaty":
+            tariff = self._parse_treaty_tariff(rule.get("tariff", 0))
+            if tariff is None:
+                return False
         return True
 
     def _record_rule_kind_enacted(self, kind):
@@ -13080,6 +13367,9 @@ class SimEngine:
         elif action == "vote_treaty":
             summary = self._vote_treaty(agent, decision)
 
+        elif action == "deliver_caravan":
+            summary = self._deliver_caravan_action(agent, decision)
+
         elif action == "council_speak":
             summary = self._council_speak(agent, decision)
 
@@ -13145,6 +13435,14 @@ class SimEngine:
             return {"kind": "craft", "target": decision.get("target"), "ttl": 6}
         if a == "build_structure":
             return {"kind": "build", "target": None, "district": district, "ttl": 6}
+        if a == "deliver_caravan":
+            dest = decision.get("target_district") or decision.get("target")
+            return {
+                "kind": "caravan",
+                "target_district": dest,
+                "source_settlement": None,
+                "ttl": STALL_THRESHOLD * 4,
+            }
         return None
 
     def _step_goal(self, agent):
@@ -13189,7 +13487,7 @@ class SimEngine:
         if g["kind"] == "caravan":
             dest = g.get("target_district")
             if dest and agent.get("currentDistrict") != dest:
-                self._set_agent_target_once(agent, dest)
+                self._set_caravan_target(agent, dest)
                 return True
             self._maybe_caravan_goal(agent)
             agent["goal"] = None
@@ -13784,7 +14082,7 @@ class SimEngine:
             if self._is_night():
                 note(3, "NOTE: It is night — seek shelter in a house or composable shelter.")
             if self._border_settlement_agent(agent):
-                neighbor_line = "Neighbor settlement nearby — trade or propose_treaty"
+                neighbor_line = "Neighbor settlement nearby — trade, deliver_caravan, or propose_treaty"
                 note(3, f"NOTE: {neighbor_line}.")
             for rej_key, label in (("lastBlockRejection", "block"), ("lastTerrainRejection", "terrain")):
                 rej = agent.get(rej_key)
@@ -13978,6 +14276,8 @@ class SimEngine:
                  or path1_on("TERRAIN_TILES_ENABLED"))
             and (action_name not in ("propose_treaty", "vote_treaty")
                  or path1_on("PATH1_DIPLOMACY_ENABLED"))
+            and (action_name != "deliver_caravan"
+                 or self._caravan_eligible(agent))
             and (action_name != "hunt_wildlife"
                  or (WILDLIFE_ENABLED and self._nearest_huntable_wildlife(agent) is not None))
             and (action_name != "confront_agent"
@@ -14155,6 +14455,7 @@ class SimEngine:
             "path1_tool_line": tool_line,
             "path1_industry_line": industry_line,
             "path1_neighbor_line": neighbor_line,
+            "settlement_stores_line": self._format_settlement_stores_for_prompt(agent),
             "high_stakes_reason": high_stakes_reason,
             "available_actions": available_actions,
         }
@@ -15105,6 +15406,10 @@ class SimEngine:
                     civ.setdefault("settlements", [])
                     civ.setdefault("treaties", [])
                     civ.setdefault("caravanLog", [])
+                    stores = civ.setdefault("settlementStores", {})
+                    for s in civ.get("settlements") or []:
+                        if isinstance(s, dict) and s.get("id"):
+                            stores.setdefault(s["id"], {})
                     civ.setdefault("path1Placements", 0)
                     civ.setdefault("path1TerrainMutations", 0)
                     for d in (civ.get("districts") or {}).values():
@@ -17851,6 +18156,11 @@ class SimEngine:
             if path1_on():
                 civ["settlements"] = list(c.get("settlements") or [])
                 civ["treaties"] = list(c.get("treaties") or [])
+                civ["settlementStores"] = {
+                    sid: dict(bucket or {})
+                    for sid, bucket in (c.get("settlementStores") or {}).items()
+                }
+                civ["caravanLog"] = list(c.get("caravanLog") or [])[-20:]
                 civ["isNight"] = self._is_night()
             if ENV_EFFECTS_ENABLED:
                 civ["litDistricts"] = list(c.get("litDistricts") or [])

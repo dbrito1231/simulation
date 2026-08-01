@@ -1037,6 +1037,7 @@ DECISION_ACTIONS = [
     # Path 1: composable tiles, terrain mutation, diplomacy treaties.
     "place_block", "remove_block", "dig_terrain", "plant_terrain",
     "propose_treaty", "vote_treaty",
+    "deliver_caravan",
     # Huntable wildlife (WILDLIFE_ENABLED): engine offers only when prey is in range.
     "hunt_wildlife",
     "confront_agent",
@@ -1108,6 +1109,7 @@ DECISION_SCHEMA = {
                 "kind": {"type": "string"},
                 "value": {"type": ["number", "string", "null"]},
                 "description": {"type": ["string", "null"]},
+                "tariff": {"type": ["number", "null"], "minimum": 0, "maximum": 0.25},
                 "supersedes": {"type": ["string", "null"]},
                 "effect": {
                     "type": ["object", "null"],
@@ -3483,6 +3485,8 @@ def build_user_prompt(data, slim=False):
         path1_parts.append(data["path1_industry_line"])
     if data.get("path1_neighbor_line"):
         path1_parts.append(data["path1_neighbor_line"])
+    if data.get("settlement_stores_line"):
+        path1_parts.append(f"Settlement stores: {data['settlement_stores_line']}")
     path1_lines = ("\n".join(path1_parts) + "\n") if path1_parts else ""
 
     return USER_PROMPT_TEMPLATE.format(
