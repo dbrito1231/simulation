@@ -4160,7 +4160,11 @@ function godBuildBargainPredicate(kind, arg1, arg2) {
   if (kind === "agent_has_resource") {
     if (!arg1) return { error: "resource id required for agent_has_resource" };
     const pred = { kind, resourceId: arg1.trim() };
-    if (arg2) pred.amount = parseInt(arg2, 10);
+    if (arg2) {
+      const amount = parseInt(arg2, 10);
+      if (!Number.isInteger(amount)) return { error: "amount must be a valid integer" };
+      pred.amount = amount;
+    }
     return { predicate: pred };
   }
   if (kind === "structure_built") {
@@ -4169,11 +4173,15 @@ function godBuildBargainPredicate(kind, arg1, arg2) {
   }
   if (kind === "frame_reached") {
     if (!arg1) return { error: "frame required for frame_reached" };
-    return { predicate: { kind, frame: parseInt(arg1, 10) } };
+    const frame = parseInt(arg1, 10);
+    if (!Number.isFinite(frame) || frame < 0) return { error: "frame must be a non-negative integer" };
+    return { predicate: { kind, frame } };
   }
   if (kind === "agent_health_below") {
     if (!arg1) return { error: "threshold required for agent_health_below" };
-    return { predicate: { kind, threshold: parseFloat(arg1) } };
+    const threshold = parseFloat(arg1);
+    if (!Number.isFinite(threshold)) return { error: "threshold must be a number" };
+    return { predicate: { kind, threshold } };
   }
   return { error: "unknown predicate kind" };
 }
