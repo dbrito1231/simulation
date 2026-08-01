@@ -138,13 +138,13 @@ Helper predicates (Phase 2b):
 
 **Selection order** (first match wins):
 
-1. **`farmer`** — `_edible_scarce("food")` and farmer role unfilled.
-2. **`fisher`** — `_edible_scarce("fish")` and fisher role unfilled.
-3. **`hunter`** — `_wildlife_present()` **and** hunter unfilled **and**
+1. **`hunter`** — `_wildlife_present()` **and** hunter unfilled **and**
    (`_meat_scarce()` or `_edible_scarce` on any edible) **and**
    (`_gather_failing("food")` or `_gather_failing("fish")`) — promotes hunter
    **ahead of** unfilled farmer/fisher when farms/fish zones are barren but prey
    exists (the regression the old fixed-order loop missed).
+2. **`farmer`** — `_edible_scarce("food")` and farmer role unfilled.
+3. **`fisher`** — `_edible_scarce("fish")` and fisher role unfilled.
 4. **First-unfilled fallback** — walk `EDIBLE_RESOURCES` gather roles in registry
    order (`food`, `fish`, `meat`) and return the first unfilled role (preserves
    legacy behavior when none of the stock/wildlife signals fire).

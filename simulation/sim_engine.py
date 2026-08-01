@@ -9824,16 +9824,18 @@ class SimEngine:
                 if not a["incapacitated"] and a["hunger"] <= STARVING_HUNGER
             ]
             if len(starving) >= ROLE_STARVE_NEED_THRESHOLD:
-                if self._edible_scarce("food") and not self._role_is_filled("farmer"):
-                    return "farmer"
-                if self._edible_scarce("fish") and not self._role_is_filled("fisher"):
-                    return "fisher"
+                # Hunter before farmer/fisher when gather zones are barren but prey
+                # exists (specs/08 survival precedence — old fixed-order missed this).
                 if (self._wildlife_present()
                         and not self._role_is_filled("hunter")
                         and (self._meat_scarce()
                              or any(self._edible_scarce(r) for r in EDIBLE_RESOURCES))
                         and (self._gather_failing("food") or self._gather_failing("fish"))):
                     return "hunter"
+                if self._edible_scarce("food") and not self._role_is_filled("farmer"):
+                    return "farmer"
+                if self._edible_scarce("fish") and not self._role_is_filled("fisher"):
+                    return "fisher"
                 for rid in EDIBLE_RESOURCES:
                     for role in (self.d["RESOURCE_GATHER_ROLES"].get(rid) or ()):
                         if not self._role_is_filled(role):
