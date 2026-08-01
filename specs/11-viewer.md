@@ -127,16 +127,30 @@ mechanism the season tint already uses.
   [05-world.md](05-world.md)) — the viewer just reads whatever `stage` string
   it's given, so a ratio hovering on a boundary can't thrash the terrain
   cache multiple times per second.
-- **Seasonal color grading** (`applySeasonTint`, index.html:704-733) is baked
-  into the terrain cache once at build time: autumn = warm multiply+overlay,
-  winter = desaturate then cool overlay+lighter passes, spring = faint green
-  overlay, summer = untinted baseline (no-op).
-- **Day/night overlay** (`nightAlpha`, index.html): ramps a
-  `MAX_NIGHT_ALPHA = 0.45` navy overlay in over `dayFraction` 0.70–0.80,
-  holds through 0.95, ramps out to 1.00 — applied as a full-canvas `fillRect`
-  after agents/structures each frame. When `ENV_EFFECTS_ENABLED` is on, a
-  low-alpha golden band is composited during the same dusk (0.70–0.80) and
-  dawn (0.95–1.00) ramps; it adds no state or separate feature flag.
+- **Seasonal color grading** (`applySeasonTint`, index.html): baked into the
+  terrain cache once at build time. **`VISUAL_SEASONAL_TERRAIN_ENABLED` off
+  (legacy v1):** one global pass over the full `terrainCanvas` — autumn =
+  warm multiply+overlay, winter = desaturate then cool overlay+lighter passes,
+  spring = faint green overlay, summer = untinted baseline (no-op).
+  **`VISUAL_SEASONAL_TERRAIN_ENABLED` on (v2):** per-district, per-terrain-kind
+  grading during cache build via `applySeasonTintForKind` — forest/farm/beach/
+  quarry/village each get distinct spring/autumn/winter passes clipped to that
+  district's bounds; ecology `stage` scales tint strength through
+  `STAGE_TINT_FACTOR`; barren districts get an extra brown overlay; farm
+  summer gets a subtle lighter pass. The terrain cache key includes a `v2`
+  marker (`terrainVisualCacheKey`) so v1/v2 never share a stale bake. Flag off
+  restores the global-only path exactly.
+- **Day/night overlay** (`nightAlpha`, index.html): ramps a navy overlay from
+  `calendar.dayFraction` (night is the last 25% of each day). **`VISUAL_LIGHTING_V2_ENABLED`
+  off (legacy):** dusk 0.70–0.80, deep night to 0.95, dawn out to 1.00;
+  `MAX_NIGHT_ALPHA = 0.45`; golden hour (`ENV_EFFECTS_ENABLED`) peaks at 0.13
+  over the same legacy bands. **`VISUAL_LIGHTING_V2_ENABLED` on (v2):** wider
+  twilight (`TWILIGHT_START_V2 = 0.62` … `TWILIGHT_END_DUSK_V2 = 0.78`, dawn
+  from `TWILIGHT_START_DAWN_V2 = 0.92`); quadratic ease-in/out; peak
+  `MAX_NIGHT_ALPHA_V2 = 0.58`; optional night desaturation pass when
+  `na > 0.35`; golden hour peaks at `GOLDEN_HOUR_MAX_V2 = 0.22` over the v2
+  bands plus a warm rim pass at band edges. Applied as full-canvas `fillRect`
+  after agents/structures each frame.
 - **World clock HUD** (`WORLD_CLOCK_HUD_ENABLED`): a fixed, non-interactive
   badge over the map projects the existing `calendar.season` and
   `calendar.dayFraction`/`isNight` as one of dawn, day, dusk, or night. It is
@@ -145,10 +159,12 @@ mechanism the season tint already uses.
 - **Light glow** (`ENV_EFFECTS_ENABLED`): while the night overlay is active,
   each structure flagged `light: true` in the `/state` structures payload
   whose district is in `civilization.litDistricts` gets a warm radial
-  gradient (center ~`rgba(255,190,90,…)` fading to transparent, radius
-  ~140 world px) composited over the night overlay so lit districts visibly
-  push back the dark. No glow by day or for unfueled lights (they simply
-  lack the flag/district entry that night).
+  gradient composited over the night overlay. **`VISUAL_LIGHTING_V2_ENABLED`
+  off:** single glow, radius ~140 world px, center ~`rgba(255,190,90,…)`.
+  **`VISUAL_LIGHTING_V2_ENABLED` on:** larger core glow (`LIGHT_GLOW_RADIUS_V2
+  = 200`) scaled by `na / MAX_NIGHT_ALPHA_V2`, plus an outer halo
+  (`LIGHT_GLOW_HALO_RADIUS_V2 = 280`) when deep night. No glow by day or for
+  unfueled lights (they simply lack the flag/district entry that night).
 - **Weather sky tint + particles** (`WEATHER_ENABLED`, living-ecosystem
   Phase 4): see the dedicated section below.
 - **Structure wear** (`STRUCTURE_WEAR_ENABLED`): the server snapshot's
@@ -379,7 +395,8 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   alpha actually drawn is `min(rawWeatherAlpha, 0.68 - nightAlpha)`, so
   night + storm can never exceed a combined 0.68 before sequential
   `fillRect` alpha compounding (`1 - (1-night)*(1-weather)`). Worst case
-  (winter storm, deep night `nightAlpha = MAX_NIGHT_ALPHA = 0.45`, no golden
+  (winter storm, deep night `nightAlpha` up to `MAX_NIGHT_ALPHA_V2 = 0.58` when
+  lighting v2 is on, or `0.45` legacy, no golden hour since deep night falls
   hour since deep night falls outside the golden-hour dawn/dusk bands, no
   light glow since the district is unlit): `weatherAlpha` clamps from a raw
   0.41 down to 0.23, combined visible darkening remains well short of
@@ -394,25 +411,29 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   reads as "the storm is here" while damage targeting stays localized per
   [08-systems-economy.md](08-systems-economy.md).
 - **Particles** (`drawWeatherParticles`, index.html; `drawWeatherParticle`,
-  sprites.js): drawn every frame (not baked into `terrainCanvas` — motion
-  can't live in a static cache, same reasoning as `drawWildlife`). Active
-  only during `storm` (full intensity) and `clearing` (45% intensity,
-  tapering off); `clear`/`gathering` draw nothing (`WEATHER_STATE_INTENSITY`).
-  Snow (`drawWeatherParticle(ctx, "snow", …)`, small drifting dot) replaces
-  rain when `calendar.season === "winter"`. Rain streaks slant with wind
-  (default offset `x-6` → `y+12`). Every `WEATHER_SHEET_EVERY_N` (9) rain
-  particle draws a thicker "sheet" streak (`lineWidth: 2`, higher alpha).
-  Storm uses a denser divisor (`WEATHER_STORM_DENSITY_DIVISOR = 9500` vs
-  `WEATHER_PARTICLE_DENSITY_DIVISOR = 14000` for clearing). Positions are
-  deterministic from `frameTick` and a per-particle-index hash
-  (`weatherParticleHash`, FNV-1a-style) — no retained state, same discipline
-  as `drawStructureSmoke`/`drawActivityDust`.
+  sprites.js): drawn every frame (not baked into `terrainCanvas`). Active during
+  `storm` (full intensity) and `clearing` (45% intensity); legacy v1 also draws
+  nothing for `clear`/`gathering`. **`WEATHER_PARTICLES_V2_ENABLED` off (legacy):**
+  `WEATHER_STATE_INTENSITY = {clear: 0, gathering: 0, storm: 1, clearing: 0.45}`;
+  global cap `260`; divisors `14000`/`9500`; sheet every 9th rain streak;
+  single layer; district-local rain (`drawDistrictStormRain`, up to 140
+  particles per affected district) runs in parallel during storm/clearing.
+  **`WEATHER_PARTICLES_V2_ENABLED` on (v2):** `gathering` intensity **`0.18`**
+  (light drizzle); cap **`380`**; divisors **`11000`/`7200`**; sheet every **6th**
+  streak; **two depth layers** (background 60% count ×0.5 alpha, foreground
+  40%); wind-varied rain angles/lengths from per-particle hash; snow uses a
+  flake cluster with slower fall and horizontal wobble (`sprites.js` `v2`
+  branch); **`drawDistrictStormRain` is a no-op** — district rain merges into
+  the global layer with bounds clip. Snow replaces rain when
+  `calendar.season === "winter"`. Positions deterministic from `frameTick` and
+  `weatherParticleHash` — no retained state.
 - **Cap by visible area, not world area:** global particle count is
-  `min(WEATHER_PARTICLE_CAP(260), floor(visibleW * visibleH / densityDiv *
-  intensity))`, where `visibleW`/`visibleH` come from the same
+  `min(cap, floor(visibleW * visibleH / densityDiv * intensity))` (v2 cap
+  `380`, legacy `260`), where `visibleW`/`visibleH` come from the same
   `canvasWrapEl.scrollLeft/scrollTop / zoomLevel` viewport math
-  `drawWildlife`/`drawShipments` already use. District-local rain adds up
-  to 140 particles per affected district (divisor 6500), clipped to bounds.
+  `drawWildlife`/`drawShipments` already use. Legacy district-local rain adds
+  up to 140 particles per affected district (divisor 6500), clipped to bounds;
+  v2 omits this pass (merged global layer).
 - **Lightning** (`drawLightningFlash`, index.html): during `storm` only,
   deterministic rare full-canvas white/blue flashes (~8–18 display frames,
   ~130–300ms at 60fps), keyed off local `renderFrame` (rAF), not
@@ -434,13 +455,35 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   `drawStructureHitFlash`, index.html): client-only diff of structure
   `condition`/`isRuin` between polls; flashes when condition drops by at
   least `STRUCTURE_HIT_FLASH_MIN_DROP` (5 — enough to ignore passive decay
-  ~0.05 per goods tick, still catches disasters at 40–70) or when
+  ~0.025 per goods tick, still catches disasters at 40–70) or when
   `isRuin` newly becomes true. That id flashes white/cyan outline + bright
   overlay for ~800ms wall clock. Gated on `STRUCTURE_WEAR_ENABLED`.
 - **Gate:** `WEATHER_ENABLED = false` — `weatherSkyAlpha` returns 0 (no sky
   change), lightning/veil/district rain/global particles all no-op, and the
   World Clock HUD omits the weather chip, regardless of `world.weather`'s
-  presence/content.
+  presence/content. `WEATHER_PARTICLES_V2_ENABLED` and
+  `VISUAL_LIGHTING_V2_ENABLED` are independent sub-gates on their respective
+  v2 code paths (see below).
+
+## Atmosphere visual flags (Phase 4 — viewer v2)
+
+Four module-level flags in `sim_engine.py` (default **`True`**, echoed in
+`/state` `config.flags`, read in `applyFlags()`). **Not env-backed** — unlike
+`GOD_MODE_ENABLED`, these are code constants for instant QA rollback. Each
+flag off selects the **pre-atmosphere-pack path** for that subsystem only; no
+partial hybrid.
+
+| Flag | Off behavior |
+|---|---|
+| `VISUAL_LIGHTING_V2_ENABLED` | Legacy `nightAlphaLegacy` / `goldenHourAlphaLegacy` / `drawLightGlowsLegacy` (peak night alpha 0.45, dusk 0.70–0.80) |
+| `VISUAL_SEASONAL_TERRAIN_ENABLED` | Global `applySeasonTint` only at cache build (no per-kind district passes) |
+| `WEATHER_PARTICLES_V2_ENABLED` | Legacy particle constants, intensities, single layer, district-local storm rain |
+| `GOD_CONSOLE_CHROME_V2_ENABLED` | Pre-4c Divine Console bar/modal CSS and layout (no sticky preview strip, pin row, or v2 clearance) |
+
+All four off together (with calendar already at post-4b constants) restores
+pre-E viewer rendering for lighting/terrain/particles/God chrome; the longer
+day/season cadence from Phase 4b remains unless constants are reverted
+separately ([02-engine-core.md](02-engine-core.md)).
 
 ## Ambient wildlife (`WILDLIFE_ENABLED`)
 
@@ -605,6 +648,20 @@ or false — including an older snapshot from before this key existed, or a
 snapshot from a `GOD_MODE_ENABLED`-off server — the console makes zero
 `/control/god/*` requests except where noted below for open-mode bootstrap.
 
+**Chrome v2 (`GOD_CONSOLE_CHROME_V2_ENABLED`, default on).** When on,
+`applyFlags()` adds `body.divine-chrome-v2`, raising bar clearance to 100px
+(vs 92px legacy) and enabling the v2 CSS block (~index.html:761+): taller bar
+with gold underline on the active feature button; sticky **preview strip** at
+modal top (`#divinePreviewStrip`) showing command name + reversibility badge +
+Apply/Discard when a preview is cached; collapsible preview panel default-expanded;
+fieldset hierarchy with crimson left border on irreversible sections; **pin row**
+for the last applied intervention (link to History); bar brand secondary line
+`N interventions` from `recentPublicInterventions` length; **Ctrl/Cmd+Enter**
+applies when a preview is valid. All v2 UX is viewer-only — no new routes or
+engine mutations. **`GOD_CONSOLE_CHROME_V2_ENABLED` off:** pre-4c bar/modal CSS
+and layout; preview/apply still works through footer controls only. **`GOD_MODE_ENABLED`
+off:** bar hidden regardless of chrome v2 flag.
+
 **Authorization gate (dual signal).** Whether the Unlock lifecycle runs is
 driven by a second mirror, `GOD_AUTH_REQUIRED_FLAG` (from
 `state.config.flags.GOD_AUTH_REQUIRED`, also set in `applyFlags()` and synced
@@ -678,7 +735,7 @@ from the response's typed keys (`renderGodPreviewOutcomeHtml()`/
 
 **Preview → Apply.** `wireDivineForm(formSelector, opts)` is the one reusable
 wiring helper behind every mutating subform (proclamation, providence,
-private omen, the three miracles, story event, law): an `input`/`change`
+private omen, miracle subforms, story event, law): an `input`/`change`
 listener on the whole `<fieldset>` invalidates any cached preview and
 disables Apply; Preview posts the built envelope to
 `/control/god/preview` and, on success, caches the response and renders
@@ -731,9 +788,9 @@ conflict the same way — see this phase's report for the underlying gap.
 - **Voice** — three independent subforms (`proclamation`, `providence` with
   a duration field, `private_omen` with an agent selector and duration),
   each following the Preview → Apply contract above.
-- **Miracles** — `agent_vitals` (agent + health delta + hunger delta),
-  `grant_resource` (resource + amount + stockpile-or-agent target),
-  `structure_condition` (structure + signed delta); all three are labeled
+- **Miracles** — Phase 4 trio (`agent_vitals`, `grant_resource`,
+  `structure_condition`) plus town-integrity kinds (`repair_structures`,
+  `clear_ruins` — [02-engine-core.md](02-engine-core.md)); all labeled
   `IRREVERSIBLE` in their preview badge, matching `_god_reversibility_class`.
 - **Story** — title, narration, visibility (public, or private with an
   agent target), duration, a shared 7-key modifier editor
@@ -805,13 +862,15 @@ any other public surface) for a private omen or private story event.
 
 ## Active viewer work
 
-Three open design docs describe further, not-yet-fully-landed viewer polish
-(verified status lines as of this writing):
+Atmosphere pack (Phase 4) shipped lighting v2, seasonal terrain v2, weather
+particles v2, God console chrome v2, and the calendar retune — see
+[docs/plan-visual-atmosphere-systems.md](../docs/plan-visual-atmosphere-systems.md).
+Earlier plan docs remain as design records:
 
 - [docs/plan-visual-1-day-night-lighting.md](../docs/plan-visual-1-day-night-lighting.md)
-  — **PLANNED (not implemented)**, viewer-only + one small engine addition.
+  — **DONE** (superseded by `VISUAL_LIGHTING_V2_ENABLED` in atmosphere pack).
 - [docs/plan-visual-2-seasonal-terrain-grading.md](../docs/plan-visual-2-seasonal-terrain-grading.md)
-  — **PLANNED (not implemented)**, viewer-only, composes with Plan 1.
+  — **DONE** (superseded by `VISUAL_SEASONAL_TERRAIN_ENABLED` in atmosphere pack).
 - [docs/plan-visual-3-seasonal-sprite-variants.md](../docs/plan-visual-3-seasonal-sprite-variants.md)
   — **DONE** (plumbing + art passes both shipped and verified; kept for the
   design record). The `setSpriteSeason`/`TREE_GRIDS`/winter-snow-cap

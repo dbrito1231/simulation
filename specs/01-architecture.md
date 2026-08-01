@@ -118,7 +118,7 @@ default False). Every prior env-var precedent (`SIM_HOST`, `SIM_PORT`,
 previously read no environment state at all. The companion `SIM_GOD_TOKEN`
 env var stays in server.py only, since the token check itself lives there.
 
-## Flag index (complete — 52 module-level flags, sim_engine.py)
+## Flag index (complete — 56 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -175,6 +175,10 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `CARAVAN_VISUALS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WEATHER_ENABLED` | True | yes | [05](05-world.md) |
 | `WEATHER_GOVERNANCE_ENABLED` | True | yes | [05](05-world.md) |
+| `VISUAL_LIGHTING_V2_ENABLED` | True | yes | [11](11-viewer.md) |
+| `VISUAL_SEASONAL_TERRAIN_ENABLED` | True | yes | [11](11-viewer.md) |
+| `WEATHER_PARTICLES_V2_ENABLED` | True | yes | [11](11-viewer.md) |
+| `GOD_CONSOLE_CHROME_V2_ENABLED` | True | yes | [11](11-viewer.md), [12](12-ops.md) |
 | `GOD_MODE_ENABLED` | True (env-backed, `SIM_GOD_MODE`; disable via `0`/`false`/`no`/`off`) | yes | [02](02-engine-core.md), [04](04-http-api.md) |
 | `GOD_AUTH_REQUIRED` | False (env-backed, `SIM_GOD_AUTH`; enable via `1`/`true`/`yes`/`on`) | yes | [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_COMPILER_ENABLED` | False (env-backed, `SIM_GOD_COMPILER`) | no (advertised only via `/control/god/capabilities`'s `compiler.enabled`, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |

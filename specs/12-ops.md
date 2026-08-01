@@ -227,6 +227,13 @@ documented in [11-viewer.md](11-viewer.md).
 regardless of auth mode — unexpected mutations remain attributable after the
 fact. The token and raw HTTP headers are never written to any log stream.
 
+**Divine Console chrome v2 (`GOD_CONSOLE_CHROME_V2_ENABLED`, default on):**
+viewer-only UX polish (sticky preview strip, intervention count on the bar,
+pin row, keyboard shortcuts) — no new routes, no `divine.jsonl` shape changes,
+no benchmark keys. Off = pre-4c bar/modal layout documented in
+[11-viewer.md](11-viewer.md). Requires `GOD_MODE_ENABLED`; when God mode is
+off the bar is hidden regardless of this flag.
+
 **Future option (not implemented):** a source-IP allowlist on God routes only
 (`GOD_ALLOWED_IPS`) could restrict mutation to named hosts while preserving
 LAN-wide viewing. See `docs/plan-god-always-unlocked.md` Phase 4-alt.
