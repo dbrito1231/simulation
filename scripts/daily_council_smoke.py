@@ -603,7 +603,8 @@ def exercise_digest_prompt_and_sync(checks):
     server_source = (ROOT / "simulation" / "server.py").read_text(encoding="utf-8")
     prompts_source = (ROOT / "simulation" / "prompts.py").read_text(encoding="utf-8")
     engine_source = (ROOT / "simulation" / "sim_engine.py").read_text(encoding="utf-8")
-    viewer_source = (ROOT / "simulation" / "index.html").read_text(encoding="utf-8")
+    viewer_js_source = (ROOT / "simulation" / "viewer.js").read_text(encoding="utf-8")
+    viewer_css_source = (ROOT / "simulation" / "viewer.css").read_text(encoding="utf-8")
     tree = ast.parse(server_source)
     action_names = None
     for node in tree.body:
@@ -622,13 +623,13 @@ def exercise_digest_prompt_and_sync(checks):
     checks.check(all(action in engine_source for action in actions)
                  and "available_actions = [" in engine_source,
                  "action_sync_available_actions")
-    checks.check(all(f"{action}:" in viewer_source for action in actions),
+    checks.check(all(f"{action}:" in viewer_js_source for action in actions),
                  "action_sync_action_labels")
     checks.check(
         "#councilAssemblyCanvas { width:min(100%, 760px, calc(100vh - 116px));"
-        in viewer_source
-        and "aspect-ratio:1" in viewer_source
-        and "@media (max-width: 900px)" in viewer_source,
+        in viewer_css_source
+        and "aspect-ratio:1" in viewer_css_source
+        and "@media (max-width: 900px)" in viewer_css_source,
         "viewer_canvas_responsive_contract",
     )
     checks.check('"action": {"type": "string", "enum": DECISION_ACTIONS}' in server_source,

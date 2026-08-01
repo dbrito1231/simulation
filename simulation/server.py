@@ -2663,6 +2663,16 @@ def sprites():
     return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "sprites.js")
 
 
+@app.route("/viewer.css")
+def viewer_css():
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "viewer.css")
+
+
+@app.route("/viewer.js")
+def viewer_js():
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "viewer.js")
+
+
 @app.route("/wildlife_refsheet.html")
 def wildlife_refsheet():
     return send_from_directory(

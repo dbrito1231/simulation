@@ -159,6 +159,6 @@ Sage-emergency interaction, safeguards against runaway proposal spam):
 
 Any change to this catalog must be mirrored across `DECISION_ACTIONS`,
 `DECISION_SCHEMA`, `SYSTEM_PROMPT` (server.py), `apply_decision` +
-`available_actions` (sim_engine.py), and `ACTION_LABELS` (index.html, display
+`available_actions` (sim_engine.py), and `ACTION_LABELS` (viewer.js, display
 only) — see [01-architecture.md](01-architecture.md#action-sync-invariant) for the
 full table of locations.

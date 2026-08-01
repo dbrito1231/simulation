@@ -7,6 +7,9 @@ world. No simulation logic lives here.
 rendering pipeline (terrain cache, day/night, zoom/minimap), sidebar panel
 inventory, `ACTION_LABELS` (display-only), and `sprites.js`'s pure drawing
 rules (structure sprite resolution order, seasonal variants).
+**Files:** `simulation/index.html` (markup shell), `simulation/viewer.css`
+(styles), `simulation/viewer.js` (polling, render loop, sidebar, Divine
+Console), `simulation/sprites.js` (stateless Canvas helpers).
 **See also:** [01-architecture.md](01-architecture.md) for the
 server-authoritative topology this file implements the "thin viewer" half of;
 [04-http-api.md](04-http-api.md) for `/state`/`/districts.js` payload shapes;
@@ -15,10 +18,12 @@ labels.
 
 ## Thin-viewer contract
 
-`simulation/index.html` states its own contract in a banner comment
-(index.html:673-680): it is a **PURE RENDERER** — it polls `GET /state`
+`simulation/viewer.js` states its own contract in a banner comment at the top
+of the file: it is a **PURE RENDERER** — it polls `GET /state`
 (~10 Hz), keeps the latest snapshot in a module-level `world` variable, and
-draws agents/structures/sidebar from it. Closing the browser tab does **not**
+draws agents/structures/sidebar from it. `simulation/index.html` is markup
+only (panels, canvas, modals, script tags); `simulation/viewer.css` holds
+layout and panel chrome. Closing the browser tab does **not**
 stop the simulation; all engine logic (decisions, movement, survival, rules,
 memes, memory, build pipeline) runs server-side only. `simulation/sprites.js`
 is a second, purely-functional file: stateless Canvas drawing helpers that
@@ -27,15 +32,15 @@ world state beyond a cached palette/season key.
 
 ## Polling and render loop
 
-- `STATE_POLL_MS = 100` (index.html:2142) drives `pollState()`: fetches
+- `STATE_POLL_MS = 100` (`viewer.js`, `pollState()`) drives polling: fetches
   `GET /state`, replaces `world` wholesale, and on fetch failure patches
-  `world.lmStatus = "disconnected"` while keeping the last-known snapshot
-  (index.html:2182-2190). **Offline behavior**: the last good frame stays on
-  screen and the sidebar status dot goes gray (`#9E9E9E`, index.html:1660)
+  `world.lmStatus = "disconnected"` while keeping the last-known snapshot.
+  **Offline behavior**: the last good frame stays on
+  screen and the sidebar status dot goes gray (`#9E9E9E`, `renderSidebar()`)
   with the hint "Showing last frame; retrying /state…"
-  (index.html:1663-1664) — distinct from `lmStatus: "offline"` (Ollama
+  — distinct from `lmStatus: "offline"` (Ollama
   unreachable, Flask up) and `"compute_error"` (GPU memory error), each with
-  its own dot color/label (index.html:1654-1665).
+  its own dot color/label in `renderSidebar()`.
 - `DISTRICTS_POLL_MS = 3000` drives `pollDistricts()` (`GET /districts.js`)
   on a slower cadence since districts/roads change only when a district is
   founded server-side. The first terrain-cache build starts immediately at page
@@ -44,7 +49,7 @@ world state beyond a cached palette/season key.
   district-id list later differs, `pollDistricts()` nulls `terrainCanvas` and
   rebuilds.
 - The render loop is **decoupled from polling** via `requestAnimationFrame`:
-  `tick()` (index.html:2899-2914) redraws every animation frame from
+  `tick()` (`viewer.js`) redraws every animation frame from
   whatever `world` currently holds, keeping ~60fps even though network polls
   land at ~10 Hz.
 - **Render-error resilience**: `tick()` is a thin wrapper that calls the
@@ -58,15 +63,15 @@ world state beyond a cached palette/season key.
   independent `setInterval` kept fetching fresh `/state` data in the
   background that was never rendered.
 - Controls (Pause/Resume/Reset) POST to `/control/pause|resume|reset` via
-  `postControl()` (index.html:2202-2224) with optimistic local flips
+  `postControl()` (`viewer.js`) with optimistic local flips
   reconciled by the next poll; keyboard shortcut `R` also resets
-  (index.html:2229-2232).
+  (`viewer.js`).
 
 ## Canvas / world rendering
 
-- `WORLD_W = 5200`, `WORLD_H = 5400` (index.html:689-690) must match
+- `WORLD_W = 5200`, `WORLD_H = 5400` (`viewer.js`) must match
   `sim_engine.py`'s `WORLD_W`/`WORLD_H` (sim_engine.py:69-70) exactly — the
-  comment at index.html:686-688 says so explicitly.
+  comment in `viewer.js` says so explicitly.
 - **Offscreen terrain cache**: static terrain (zones, crops, trees, dock,
   ocean) is rendered once into an offscreen `terrainCanvas` and blitted each
   frame instead of re-tiling per frame (`buildTerrainCache`/
@@ -82,7 +87,7 @@ world state beyond a cached palette/season key.
   `districtsKey` from `/districts.js` differs), or (`CROP_GROWTH_ENABLED`,
   living-ecosystem Phase 2) a district's `districtEcology` stage change — see
   below. Optional load-perf timings: set `VIEWER_LOAD_DEBUG = true` in
-  index.html to log build stage splits and performance marks.
+  `viewer.js` to log build stage splits and performance marks.
 
 **Crop/tree growth stages (`CROP_GROWTH_ENABLED`, living-ecosystem Phase 2):**
 terrain — including crops and trees — is baked into the static
@@ -90,7 +95,7 @@ terrain — including crops and trees — is baked into the static
 a small number of discrete stages that key into the same cache-invalidation
 mechanism the season tint already uses.
 
-- `ecologyStagesForTerrain()` (index.html) reduces the top-level
+- `ecologyStagesForTerrain()` (`viewer.js`) reduces the top-level
   `world.districtEcology` list (a sibling of `civilization`, see
   [05-world.md](05-world.md)) to a `{districtId: stage}` map plus a
   stable string key. `buildTerrainCache()` passes the map through
@@ -127,7 +132,7 @@ mechanism the season tint already uses.
   [05-world.md](05-world.md)) — the viewer just reads whatever `stage` string
   it's given, so a ratio hovering on a boundary can't thrash the terrain
   cache multiple times per second.
-- **Seasonal color grading** (`applySeasonTintForKind`, index.html): baked into
+- **Seasonal color grading** (`applySeasonTintForKind`, `viewer.js`): baked into
   the terrain cache at build time via per-district, per-terrain-kind passes —
   forest/farm/beach/quarry/village each get distinct spring/autumn/winter
   grading clipped to that district's bounds; ecology `stage` scales tint
@@ -135,7 +140,7 @@ mechanism the season tint already uses.
   overlay; farm summer gets a subtle lighter pass. Winter ground speckle and
   tree snow caps are drawn in `sprites.js`. The terrain cache key is
   `season|ecologyStageKey` (`terrainVisualCacheKey`).
-- **Day/night overlay** (`nightAlpha`, index.html): ramps a navy overlay from
+- **Day/night overlay** (`nightAlpha`, `viewer.js`): ramps a navy overlay from
   `calendar.dayFraction` (night is the last 25% of each day). Wider twilight
   (`TWILIGHT_START = 0.62` … `TWILIGHT_END_DUSK = 0.78`, dawn from
   `TWILIGHT_START_DAWN = 0.92`); quadratic ease-in/out; peak
@@ -176,15 +181,15 @@ mechanism the season tint already uses.
   nearby in world space. Ally lines are warm and rival lines cool; alpha fades
   with distance. The pass does no all-world pair scan and is a clean no-op when
   the flag is off or an older snapshot lacks `socialTies`.
-- **Zoom**: `zoomLevel` (index.html:780) scales `canvas.style.width/height`
-  over the fixed-resolution backing store (`applyZoom`, index.html:784-786);
-  +/- buttons multiply by 1.25/0.8 (index.html:819-820), scroll-wheel zoom
-  is wired (index.html:833), and "Fit" computes the zoom that fits the whole
+- **Zoom**: `zoomLevel` (`viewer.js`) scales `canvas.style.width/height`
+  over the fixed-resolution backing store (`applyZoom`, `viewer.js`);
+  +/- buttons multiply by 1.25/0.8, scroll-wheel zoom
+  is wired, and "Fit" computes the zoom that fits the whole
   world.
-- **Minimap**: `#minimap` (220×160, index.html:585), `renderMinimap()`
-  (index.html:2070+) draws a scaled-down world plus a viewport rectangle
-  from scroll position/`zoomLevel` (index.html:2092-2100); clicking it
-  recenters the main view (index.html:2114-2115).
+- **Minimap**: `#minimap` (220×160, `viewer.css`), `renderMinimap()`
+  (`viewer.js`) draws a scaled-down world plus a viewport rectangle
+  from scroll position/`zoomLevel`; clicking it
+  recenters the main view.
 - **Two side panels**, both filled by `renderSidebar()`:
   - **Left panel** (`#convPanel`), titled "Agents & Activity": the **Agents**
     section (`#agentsPanel` — rollup header, living-agent list with
@@ -193,11 +198,11 @@ mechanism the season tint already uses.
     section (`#conversationLog`) and a **Settlements** section
     (`#settlementsSection`) also live here but are **hidden by default** behind
     the client-side viewer toggles `SHOW_CONVERSATIONS` / `SHOW_SETTLEMENTS`
-    (index.html ~1028, both `false`). These are viewer-only display flags, not
+    (`viewer.js`, both `false`). These are viewer-only display flags, not
     server `config.flags`; flip either to `true` to restore its section. The
     underlying `world.conversation` and `civ.settlements` data still arrives in
     `/state` regardless. `#agentsPanel` is a flex child of `#convPanel` with its
-    own `overflow-y: auto` (index.html ~608), so a long agent roster scrolls
+    own `overflow-y: auto` (`viewer.css`), so a long agent roster scrolls
     within the section instead of being clipped by the panel's own
     `overflow: hidden`.
   - **Right panel** (`#sidebar`): the "AI Simulation World" title, LM/server
@@ -206,8 +211,8 @@ mechanism the season tint already uses.
     `flex-shrink: 0`, natural height), **Civilization** (`#civPanel`
     era/level/structures/active builds/resources), and **Activity**
     (`#activityLog`, the world-event feed, `#actList`). Civilization and
-    Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (index.html
-    ~142-153), so they split the space remaining after Time equally and each
+    Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (`viewer.css`),
+    so they split the space remaining after Time equally and each
     scrolls independently. The Civilization panel's **Village resources**
     row (`#civResources` headline + `#civResourceList` chips) shows
     `civ.stockpile` **plus** every agent inventory, keyed through
@@ -215,7 +220,7 @@ mechanism the season tint already uses.
     render), with chip colours from `resourceRegistry`. The headline count
     (`totalVillageResources()`) is the sum of `villageResourceBreakdown()` so
     the number and chips cannot disagree. Sidebar change detection includes
-    `villageResourceBreakdown()` inside `sidebarKey` (index.html ~2582); the
+    `villageResourceBreakdown()` inside `sidebarKey` (`viewer.js`); the
     raw `civ.stockpile` dict is intentionally **not** in the key — it is a
     ~40-key map that changes nearly every tick and would force a sidebar
     re-render on every poll; the breakdown is the stockpile's proxy in this
@@ -223,9 +228,9 @@ mechanism the season tint already uses.
     projection of top-level `world.chronicle`, distinct from the raw Activity
     feed. It preserves its scroll position across snapshot updates and is
     hidden cleanly when `CHRONICLE_ENABLED` is off.
-- **`ACTION_LABELS`** (index.html:1357-1390) maps each `DECISION_ACTIONS`
+- **`ACTION_LABELS`** (`viewer.js`) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
-  `humanizeAction(agent)` (index.html:1391-1398) special-cases
+  `humanizeAction(agent)` (`viewer.js`) special-cases
   dead/incapacitated/thinking agents and falls back to
   `a.replace(/_/g, " ")` for any action missing from the map. Display-only —
   not the source of truth for what actions exist (see
@@ -258,7 +263,8 @@ client already parses the full `chronicle` array every poll for the Chronicle
 panel (see above), so no additional data is needed to detect a new founding.
 
 No terrain-cache tint/highlight for newly founded districts was added (the
-plan's stretch item): the static `terrainCanvas` cache (index.html ~921/1233)
+plan's stretch item): the static `terrainCanvas` cache (`viewer.js`,
+  `buildTerrainCache` / `scheduleTerrainCacheBuild`)
 is invalidated only on season change and districts-list change, and adding a
 time-limited "under construction" visual state would require either a new
 per-frame cache-bust condition or extra state tracked outside that cache —
@@ -292,7 +298,7 @@ The existing Council sidebar/history continues to render bounded `councilLog`
 records. `ACTION_LABELS` adds display gerunds for `council_speak`,
 `council_propose`, and `council_vote`.
 
-The history transcript modal (`openCouncilTranscript`, index.html) reads
+The history transcript modal (`openCouncilTranscript`, `viewer.js`) reads
 `record.transcript` from a past `councilLog` entry, which may have been
 written by either council system — the legacy invention council
 (`proposer`/`elder`/`blueprint_name`/... fields, `type` in `convene`,
@@ -345,7 +351,7 @@ heading are chosen per the same classification.
   top edge (sprites.js:794-797). Seasonal agent accents also read the
   module-level `spriteSeason` mirror rather than an explicit `season` param.
   `setSpriteSeason(season)` (sprites.js:7) is called once per `/state` poll
-  from `pollState()` (index.html:2170) so rendering tracks
+  from `pollState()` (`viewer.js`) so rendering tracks
   `calendar.season`. `SEASONAL_AGENTS_ENABLED` uses the same mirror and a
   viewer-set boolean to draw small post-body seasonal accessory pixels on
   living agents (winter wool cap/scarf, spring leaf pin, summer straw brim,
@@ -370,7 +376,7 @@ Reads the top-level `world.weather` projection (`{state, since, districts}`,
 see [05-world.md](05-world.md)) — a sibling of `civilization`, same
 placement as `socialTies`/`districtEcology`/`shipments`.
 
-- **Sky tint** (`weatherSkyAlpha(weather, nightAlpha)`, index.html):
+- **Sky tint** (`weatherSkyAlpha(weather, nightAlpha)`, `viewer.js`):
   composited in the **same full-canvas overlay stage** as the existing
   night overlay — drawn immediately after it, before the golden-hour band —
   so the two stack coherently instead of fighting. `WEATHER_SKY_ALPHA =
@@ -397,7 +403,7 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   district's `bounds` rect from `/districts.js` (`getDistrictBounds(id)`).
   The global tint reads as atmosphere; the veil reads as "the storm is here"
   while damage targeting stays localized per [08-systems-economy.md](08-systems-economy.md).
-- **Particles** (`drawWeatherParticles`, index.html; `drawWeatherParticle`,
+- **Particles** (`drawWeatherParticles`, `viewer.js`; `drawWeatherParticle`,
   sprites.js): drawn every frame (not baked into `terrainCanvas`). Active during
   `storm` (full intensity), `clearing` (45% intensity), and `gathering`
   (light drizzle at intensity `0.18`). Cap **`380`**; divisors
@@ -412,25 +418,25 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   `min(380, floor(visibleW * visibleH / densityDiv * intensity))`, where
   `visibleW`/`visibleH` come from the same `canvasWrapEl.scrollLeft/scrollTop
   / zoomLevel` viewport math `drawWildlife`/`drawShipments` already use.
-- **Lightning** (`drawLightningFlash`, index.html): during `storm` only,
+- **Lightning** (`drawLightningFlash`, `viewer.js`): during `storm` only,
   deterministic rare full-canvas white/blue flashes (~8–18 display frames,
   ~130–300ms at 60fps), keyed off local `renderFrame` (rAF), not
   `frameTick`, in `LIGHTNING_BUCKET_FRAMES` (540) windows — no new
   `/state` fields. Drawn immediately after the sky tint, before golden hour;
   alpha ~0.10–0.20 so readability is preserved. ~12% of buckets may flash
   (~every ~75s at 60fps), not every second.
-- **Weather chip on World Clock HUD** (`renderWorldClockHud`, index.html,
+- **Weather chip on World Clock HUD** (`renderWorldClockHud`, `viewer.js`,
   `WORLD_CLOCK_HUD_ENABLED`): when `WEATHER_ENABLED` and `world.weather` are
   present, appends the title-case state label after season+phase, e.g.
   `spring day · Storm`.
-- **Disaster banner** (`#disasterBanner`, index.html): mirrors the founding
+- **Disaster banner** (`#disasterBanner`, `viewer.js`): mirrors the founding
   banner pattern — edge-detects new `world.chronicle` entries with
   `kind === "disaster"` via a first-snapshot-seen `Set` on `frame` (no replay
   on page load). Shows storm-colored slate/teal banner for 5.5s with entry
   text. Gated on `CHRONICLE_ENABLED`; edge-detection mirrors founding (runs
   whenever enabled — empty chronicle clears the seen Set).
 - **Structure hit flash** (`trackStructureConditionDeltas`,
-  `drawStructureHitFlash`, index.html): client-only diff of structure
+  `drawStructureHitFlash`, `viewer.js`): client-only diff of structure
   `condition`/`isRuin` between polls; flashes when condition drops by at
   least `STRUCTURE_HIT_FLASH_MIN_DROP` (5 — enough to ignore passive decay
   ~0.025 per goods tick, still catches disasters at 40–70) or when
@@ -521,7 +527,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | small | ≈26 px max side | 1.0 | 1 | `mouse`, `squirrel`, `fish`, `crab`, `bee` |
 
   Cosmetic motion also includes the caller-side `bob` sine offset in
-  `index.html` `drawWildlife`; `frameTick` drives frame swap only and does
+  `drawWildlife` (`viewer.js`); `frameTick` drives frame swap only and does
   not invent a second position.
 - **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
   (and `districtId`). The viewer does not seed positions client-side and

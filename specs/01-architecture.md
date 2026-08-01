@@ -18,8 +18,9 @@ for the action catalog.
 - `simulation/server.py` is the Flask app plus the cognition layer: it builds
   prompts, calls Ollama, validates the response, and hands a decision back to the
   engine.
-- `simulation/index.html` + `simulation/sprites.js` poll `GET /state` (~10 Hz) and
-  render; closing the browser tab does not stop the simulation.
+- `simulation/index.html` (shell) + `simulation/viewer.js` + `simulation/sprites.js`
+  poll `GET /state` (~10 Hz) and render; closing the browser tab does not stop
+  the simulation.
 
 The engine mutates state only under `self.lock`; the full world is persisted to
 `simulation/state.db` (see [02-engine-core.md](02-engine-core.md)).
@@ -68,7 +69,7 @@ locations, or the engine and the LLM-facing schema will silently diverge:
 | `SYSTEM_PROMPT` | server.py:885 | Prose description of each action for the model |
 | `apply_decision` | sim_engine.py:7885 | Server-side effect when an action is chosen |
 | `available_actions` (payload) | sim_engine.py:9143 | Flag-filtered action list actually offered to an agent this think |
-| `ACTION_LABELS` | index.html:1357 | Human-readable label shown in the viewer (display only, no logic) |
+| `ACTION_LABELS` | viewer.js | Human-readable label shown in the viewer (display only, no logic) |
 
 Full action-by-action detail (params, gates, effects) lives in
 [07-actions.md](07-actions.md) — this file only states the invariant.

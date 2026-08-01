@@ -278,7 +278,7 @@ def test_prompt_and_restore_roundtrip():
     finally:
         se.DB_PATH = old_db
 
-    viewer = (Path(__file__).resolve().parents[1] / "simulation" / "index.html").read_text(
+    viewer = (Path(__file__).resolve().parents[1] / "simulation" / "viewer.js").read_text(
         encoding="utf-8",
     )
     assert_true('ballot.kind === "succession"' in viewer

@@ -340,6 +340,8 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 
 | Path | File | Notes |
 |---|---|---|
+| `/viewer.css` | `simulation/viewer.css` | Required — viewer layout and panel chrome |
+| `/viewer.js` | `simulation/viewer.js` | Required — polling, render loop, sidebar, Divine Console |
 | `/sprites.js` | `simulation/sprites.js` | Required — Canvas renderer |
 | `/wildlife.png` | `simulation/wildlife.png` | Wildlife spritesheet (variable-size atlas from user PNGs). When absent (404), `sprites.js` keeps `_wildlifeSheetReady = false` and draws canvas helpers / procedural `WILDLIFE_SPRITES` grids — first paint is never blocked. |
 | `/wildlife_refsheet.html` | `simulation/wildlife_refsheet.html` | Dev/debug only — labeled 4×4 grid calling live `drawWildlifeCreature`; not part of the sim viewer loop. |

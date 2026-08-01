@@ -295,7 +295,7 @@ def test_confront_agent_action_sync():
     action = "confront_agent"
     server_source = (ROOT / "simulation" / "server.py").read_text(encoding="utf-8")
     engine_source = (ROOT / "simulation" / "sim_engine.py").read_text(encoding="utf-8")
-    viewer_source = (ROOT / "simulation" / "index.html").read_text(encoding="utf-8")
+    viewer_source = (ROOT / "simulation" / "viewer.js").read_text(encoding="utf-8")
     prompts_source = (ROOT / "simulation" / "prompts.py").read_text(encoding="utf-8")
 
     tree = ast.parse(server_source)

@@ -54,7 +54,7 @@ server-side wildlife entity system from nothing, since none exists today.
    action-sync invariant (CLAUDE.md, [specs/01-architecture.md](../specs/01-architecture.md#action-sync-invariant)):
    - `DECISION_ACTIONS` / `DECISION_SCHEMA` / `SYSTEM_PROMPT` in `server.py`
    - `apply_decision()` + payload `available_actions` in `sim_engine.py`
-   - `ACTION_LABELS` in `index.html` (display only)
+   - `ACTION_LABELS` in `viewer.js` (display only)
 
 3. **New resource path.** A "meat"/"game" good that feeds the existing
    food/goods economy (survival, `contribute`, trade), threaded through

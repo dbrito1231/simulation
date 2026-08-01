@@ -44,7 +44,9 @@ deep mechanics.
 |---|---|
 | `simulation/sim_engine.py` | The engine: all world state, tick loop, `apply_decision`, persistence |
 | `simulation/server.py` | Flask app + cognition: routes, prompt building, LLM calls, decision validation |
-| `simulation/index.html` | Thin browser viewer — polls `/state`, renders, holds no sim state |
+| `simulation/index.html` | Thin browser viewer shell — markup only |
+| `simulation/viewer.css` | Viewer stylesheet (layout, panels, Divine Console chrome) |
+| `simulation/viewer.js` | Viewer client — polls `/state`, render loop, sidebar, holds no sim state |
 | `simulation/sprites.js` | Pure stateless Canvas drawing helpers |
 | `simulation/roles.json` | Single source of truth for role definitions |
 | `simulation/logs/<timestamp>/` | Per-run JSONL logs (gitignored) |
@@ -77,7 +79,7 @@ the Ollama dependency): [CLAUDE.md](../CLAUDE.md#commands).
 | [08-systems-economy.md](08-systems-economy.md) | Survival, crafting, goals, structure effects, goods, economy |
 | [09-systems-society.md](09-systems-society.md) | Tech tree, Daily Council/governance and voting, memes, culture, benchmarks |
 | [10-path1.md](10-path1.md) | Path 1 bundle: industry, tools, terrain, diplomacy, pressure loop |
-| [11-viewer.md](11-viewer.md) | Thin-viewer contract, sprites.js rendering |
+| [11-viewer.md](11-viewer.md) | Thin-viewer contract, viewer.js/viewer.css, sprites.js rendering |
 | [12-ops.md](12-ops.md) | SessionLogger, log ingestion, scripts/ tools |
 
 ## Spec-driven development contract
