@@ -217,6 +217,19 @@ Rule kinds: `RULE_KINDS = {"resource_tax", "custom", "priority"}`
 mechanics). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
 enacted at `MAX_ACTIVE_RULES = 8`.
 
+**Treaty proposals (`kind: "treaty"`).** Reuse the shared propose/vote
+scaffold via `propose_treaty`/`vote_treaty` ([07-actions.md](07-actions.md)).
+The `rule` object requires `id` and `name`; optional fields include `value`
+(trade pact label, default `"trade"`), `description`, and **`tariff`** — a
+fraction `0`–`0.25` (default `0`) applied on caravan delivery: the tariff
+share credits the source settlement store (or village `stockpile` when
+unset); the remainder credits the destination store
+([10-path1.md](10-path1.md#treaty-tariffs)). `_validate_rule` rejects
+out-of-range `tariff` values; `_propose_treaty` copies `tariff` onto the
+pending entry and enacted `civilization["treaties"]` record. Council
+`council_propose` with `kind: "rule"` may include the same `tariff` field when
+opening a treaty ballot.
+
 **Effectful custom rules.** A `kind: "custom"` proposal may include one safe
 `effect` object; arbitrary code, expressions, and free-form selectors are
 never evaluated. Its grammar is:

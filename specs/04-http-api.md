@@ -76,7 +76,7 @@ engine lock for a consistent read:
 | `calendar` | day/season/year — specs/02-engine-core.md |
 | `lmStatus` | last-known Ollama (LLM runtime) reachability |
 | `agents` | per-agent view (position, resources, health, beliefs, skills, lifecycle fields, etc.) — specs/06-agents.md |
-| `civilization` | structures, projects, resource/project registries, pending blueprints/recipes/rules, stockpile, and flag-gated sections (chronicle/library when `CULTURE_ENABLED`, era/tech-tier/council when `TECH_TREE_ENABLED`, market/prices when `ECONOMY_ENABLED`, settlements/treaties/`isNight` when Path 1 is on, `litDistricts` + per-structure `light` flag when `ENV_EFFECTS_ENABLED` — specs/08) — specs/05-world.md, specs/08-09-10 |
+| `civilization` | structures, projects, resource/project registries, pending blueprints/recipes/rules, stockpile, and flag-gated sections (chronicle/library when `CULTURE_ENABLED`, era/tech-tier/council when `TECH_TREE_ENABLED`, market/prices when `ECONOMY_ENABLED`, settlements/**settlementStores**/treaties/`caravanLog`/`isNight` when Path 1 diplomacy is on, `litDistricts` + per-structure `light` flag when `ENV_EFFECTS_ENABLED` — specs/08) — specs/05-world.md, specs/08-09-10 |
 | `benchmarks` | latest benchmark metrics — specs/12-ops.md |
 | `activity` | recent activity log entries |
 | `conversation` | last 30 conversation log entries |
@@ -110,6 +110,13 @@ When transit is enabled, `/state` includes `civilization.physicalProps`, a
 read-only list of `{resource, count}` hints for the thin viewer. It derives up
 to three boats from village stockpile quantity; the viewer places them at fixed
 moorings in the starter ocean, rather than beside ordinary structures.
+
+When `PATH1_DIPLOMACY_ENABLED` is on, `/state` also includes
+`civilization.settlementStores` — a map `{settlement_id: {resource_id: qty}}`
+mirroring the think-payload summary agents see when planning caravans and local
+spending ([08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
+Each settlement id matches `civilization.settlements[*].id`; missing keys
+migrate to `{}` on restore.
 
 ## Sovereign God mode
 

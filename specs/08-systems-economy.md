@@ -257,7 +257,9 @@ Goal kinds (`g["kind"]`): `craft_gather` (walk to gather missing craft
 inputs), `plant_terrain` (apply `plant_terrain` once), `seek_shelter`
 (walk to a district with shelter, `PRESSURE_LOOP_ENABLED`), `dig_relocate`
 (walk to a diggable district, then `_dig_terrain` until carry-capped),
-`caravan` (walk to the other settlement, `PATH1_DIPLOMACY_ENABLED`),
+`caravan` (walk to the other settlement and deliver goods on arrival,
+`PATH1_DIPLOMACY_ENABLED` — see
+[Settlement stores and inter-settlement trade](#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)),
 **`hunt`** (synthesize `hunt_wildlife` against `target` wildlife id —
 [Starvation reflex and forced hunt precedence](#starvation-reflex-and-forced-hunt-precedence)),
 plus generic `gather`/`deliver`/`build` goals resolved against a target district.
@@ -626,6 +628,48 @@ coin yet — the mechanism is ready the moment one does.
 
 Related actions: `trade_resource` — [07-actions.md](07-actions.md).
 
+## Settlement stores and inter-settlement trade (PATH1_DIPLOMACY_ENABLED)
+
+Gated by `path1_on("PATH1_DIPLOMACY_ENABLED")`. Adds authoritative
+per-settlement stockpiles alongside the village-wide `stockpile`.
+
+**Shape:** `civilization["settlementStores"][settlement_id][resource_id] =
+qty`. Cold start initializes an empty dict per settlement id in
+`_init_settlements()`; `restore_state()` migrates missing keys to `{}` per
+known settlement so old saves gain the field without inventing goods.
+
+**Credit/debit precedence:**
+- **Gather overflow** — when an agent's carry is full, surplus from
+  `_collect_resource`, hunt yields, and similar grants route to the agent's
+  current settlement store (`_settlement_for_agent`) before the village
+  `stockpile`.
+- **Local spend** — repair (`_repair_structure`), craft input pulls, and
+  other local settlement-scoped funding draw from the agent's settlement
+  store first, then the village `stockpile` (mirrors district-stock-first
+  upkeep in `STRUCTURE_EFFECTS_ENABLED`).
+- **Caravan delivery** — credits destination `settlementStores`; debits
+  the traveler's held bundle (vehicles and personal `EDIBLE_RESERVE` exempt).
+
+**Delivery pipeline** (`_caravan_trade_bundle`, `_deliver_caravan`,
+sim_engine.py — wired from `_maybe_caravan_goal` on arrival and from the
+`deliver_caravan` action):
+1. `_caravan_trade_bundle(agent, dest_settlement_id)` — selects transferable
+   held resources (positive qty, not cart/wagon, respecting edible reserve).
+2. `_deliver_caravan(agent, dest_settlement_id)` — debits the bundle from
+   the traveler; for each resource, applies the enacted treaty `tariff`
+   fraction (see [10-path1.md](10-path1.md#treaty-tariffs)): tariff share →
+   source settlement store (or village `stockpile` when unset); remainder →
+   destination settlement store; calls `_emit_shipment(from_district,
+   to_district, resource)` after each transfer; appends
+   `caravanLog` `{goods, from, to, frame}` and logs activity.
+
+**Prompt/viewer:** think payload includes a per-settlement store summary;
+`/state` exposes `civilization.settlementStores` when diplomacy is on
+([04-http-api.md](04-http-api.md)).
+
+Related actions: `deliver_caravan`, `propose_treaty`, `vote_treaty` —
+[07-actions.md](07-actions.md).
+
 ## CARAVAN_VISUALS_ENABLED
 
 `CARAVAN_VISUALS_ENABLED` defaults to True. Living-ecosystem Phase 3
@@ -635,7 +679,8 @@ graph when goods move between districts.
 
 **Hard constraint — shipments never gate the economy.** `_emit_shipment`
 is called strictly *after* the authoritative transfer has already mutated
-agent inventories / district-project `contributed` / the village stockpile
+agent inventories / district-project `contributed` / settlement stores /
+the village stockpile
 — trade, contributions, and market settlement remain exactly as
 instantaneous as they were before this flag existed. A shipment is an
 animation receipt of a transfer that already happened, never a precondition
@@ -654,6 +699,8 @@ call):
   agent currently stands in (`_resolve_contribution_district`'s
   most-stalled-district fallback), i.e. a genuine stockpile transfer
   between districts.
+- `_deliver_caravan` — each resource moved between settlement stores on
+  caravan arrival ([Settlement stores](#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
 
 **Shape**: `{id, fromDistrict, toDistrict, resource, path, startFrame,
 endFrame, mode}`. `path` is the list of `{x, y}` road-graph waypoints

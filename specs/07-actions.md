@@ -3,7 +3,7 @@
 **The action catalog** — the sole source for every decision action an agent can be
 offered. No other spec lists actions.
 
-**Canonical for:** all 44 `DECISION_ACTIONS`: params, flag gate/preconditions,
+**Canonical for:** all 45 `DECISION_ACTIONS`: params, flag gate/preconditions,
 effect, validation. The build pipeline and blueprint two-stage flow as the core
 game loop.
 **See also:** [01-architecture.md](01-architecture.md#action-sync-invariant) for the
@@ -16,7 +16,7 @@ for districts/terrain/structures referenced by params; [08](08-systems-economy.m
 [09](09-systems-society.md)/[10](10-path1.md) for the flag semantics gating many
 of these actions.
 
-Fact source: `DECISION_ACTIONS` (server.py, 44 entries after the Daily Council
+Fact source: `DECISION_ACTIONS` (server.py, 45 entries after the Daily Council
 actions below, listed
 here in declaration order). Params legend: `target` (agent name / district id /
 structure id / wildlife creature id / grid `"gx,gy"` depending on action),
@@ -66,8 +66,9 @@ structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 | `remove_block` | `target` (`"gx,gy"`, optional — defaults to agent's cell) | `COMPOSABLE_BUILD_ENABLED` | Refunds the block's cost, clears the tile |
 | `dig_terrain` | — (acts on agent's current cell) | `TERRAIN_TILES_ENABLED`; tool-free by design (bootstrap stone source) | Converts `grove`→`soil` (or similar) at the agent's grid cell, yields a resource |
 | `plant_terrain` | — (acts on agent's current cell) | `TERRAIN_TILES_ENABLED`; needs 1 wood; cell must be `soil` or `rock` | Converts the cell toward a planted/vegetated kind, consumes 1 wood |
-| `propose_treaty` | `rule` (id/name/value/description) | `PATH1_DIPLOMACY_ENABLED`; rule must have `id`+`name` | Adds a `kind: "treaty"` entry to `pendingRules` with proposer auto-yes, tallies immediately |
-| `vote_treaty` | `target` (treaty id), `vote` | `PATH1_DIPLOMACY_ENABLED`; treaty must be pending | Records vote; on enactment appends to `civilization["treaties"]` ([10](10-path1.md)) |
+| `propose_treaty` | `rule` (id/name/value/description/`tariff`?) | `PATH1_DIPLOMACY_ENABLED`; rule must have `id`+`name`; optional `tariff` fraction `0`–`0.25` (default `0`) | Adds a `kind: "treaty"` entry to `pendingRules` with proposer auto-yes, tallies immediately; `tariff` persists on enactment ([10-path1.md](10-path1.md#treaty-tariffs)) |
+| `vote_treaty` | `target` (treaty id), `vote` | `PATH1_DIPLOMACY_ENABLED`; treaty must be pending | Records vote; on enactment appends to `civilization["treaties"]` ([10-path1.md](10-path1.md)) |
+| `deliver_caravan` | `target_district` (optional — defaults to the other settlement's first district) | `PATH1_DIPLOMACY_ENABLED`; ≥2 settlements; actor holds cart/wagon and ≥ `CARAVAN_CARRY_MIN` total resources | Assigns or refreshes a `caravan` goal toward the destination district; authoritative goods transfer runs on arrival via `_deliver_caravan` ([08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)). **Action-sync:** must appear in `DECISION_ACTIONS`, `DECISION_SCHEMA`, `SYSTEM_PROMPT`, `apply_decision`, `available_actions`, and `ACTION_LABELS` together in Phase 3b. |
 | `council_speak` | `message` (required), `feeling` (short free text), `topic` (agenda reference) | `DAILY_COUNCIL_ENABLED`; a Daily Council is active and actor is seated | Appends the actor's opinion and feeling to the live transcript, stages their speech bubble, and advances the deterministic speaking order; no world state changes beyond the meeting record/bubble |
 | `council_propose` | `kind` (`rule`/`blueprint`/`idea`), then existing `rule` or `blueprint` payload, or `title` + `detail` for an idea | active Daily Council; actor seated; rule/blueprint must pass the existing validators | Opens the council ballot and transitions to voting. Rule and blueprint proposals retain all existing validation; an idea is advisory-only and has no direct mechanical effect |
 | `council_vote` | ordinary ballot: `vote` (`yes`/`no`/`abstain`); succession ballot: `candidate` (current candidate name) or `vote: "abstain"` | active Daily Council; actor seated; ballot open | Ordinary ballots retain majority/elder-tie behavior and validated enactment paths. Succession records one candidate choice per voter in the normal transcript/tally; after all eligible votes or TTL, highest votes wins and an exact tie uses lowest stable agent id. The leaderless village declares the result and office changes only through `_enact_succession_winner()` |
@@ -81,6 +82,9 @@ requires `CEMETERY_ENABLED`; `repeal_rule` requires `RULES_ENABLED`;
 `place_block`/`remove_block` require `COMPOSABLE_BUILD_ENABLED`;
 `dig_terrain`/`plant_terrain` require `TERRAIN_TILES_ENABLED`;
 `propose_treaty`/`vote_treaty` require `PATH1_DIPLOMACY_ENABLED`;
+`deliver_caravan` requires `PATH1_DIPLOMACY_ENABLED` and further filters
+per-agent when fewer than two settlements exist or the actor lacks a
+vehicle/minimum cargo;
 `hunt_wildlife` requires `WILDLIFE_ENABLED`; `confront_agent` requires
 `SURVIVAL_ENABLED` and further filters per-agent by social/pressure gates
 (see action table); the three role
