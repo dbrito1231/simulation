@@ -591,7 +591,7 @@ Payload (conceptual):
 
 ```json
 {
-  "scope": "ids" | "all_critical" | {"districtId": string},
+  "scope": "ids" | "all_critical" | {"districtId": "<slug>"},
   "structureIds": [int]?,
   "conditionTarget": number?,
   "unRuin": true?
@@ -601,7 +601,8 @@ Payload (conceptual):
 - `scope` selects the target set: explicit `structureIds` (required when
   `scope == "ids"`), every working-critical type village-wide when
   `scope == "all_critical"`, or all structures in `districtId` when scoped
-  to a district.
+  to a district. `districtId` is a string slug matching
+  `civilization["districts"]` keys (e.g. `"village_core"`, `"forest"`).
 - `conditionTarget` is optional; when present it sets `condition` (clamped
   `0..100`) via `_apply_structure_condition_delta`-equivalent semantics per
   structure, magnitude capped at `GOD_REPAIR_STRUCTURES_CONDITION_MAX = 100`
@@ -624,13 +625,14 @@ engine cull cleanup). Payload (conceptual):
 {
   "structureIds": [int]?,
   "minAgeFrames": int?,
-  "districtId": string?
+  "districtId": "<slug>"?
 }
 ```
 
 - At least one selector is required. `structureIds` removes explicit ruins;
   `minAgeFrames` (default `RUIN_CULL_AGE_FRAMES = DAY_FRAMES`) restricts to
-  ruins at least that old; `districtId` limits to one district.
+  ruins at least that old; `districtId` limits to one district (string slug,
+  e.g. `"village_core"`).
 - Each removed ruin uses the same cleanup as `_maybe_cull_ruins()` and
   [`scripts/prune_ruins.py`](../scripts/prune_ruins.py): drop from
   `civilization["structures"]`, clear `homeStructureId`, filter

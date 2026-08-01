@@ -445,8 +445,10 @@ placement as `socialTies`/`districtEcology`/`shipments`.
 The Phase 4 atmosphere pack (lighting, seasonal terrain grading, weather
 particles, Divine Console chrome) is **always on** in the viewer — not gated by
 module-level flags. Only `WEATHER_ENABLED`, `ENV_EFFECTS_ENABLED`, and
-`GOD_MODE_ENABLED` still toggle their respective subsystems. Implementation
-plans: `docs/plan-visual-1-day-night-lighting.md`,
+`GOD_MODE_ENABLED` still toggle their respective subsystems.
+`docs/plan-visual-*.md` files are historical design records (superseded banners
+note the removed flag gates); this section and the viewer implementation are the
+runtime contract. Implementation plans: `docs/plan-visual-1-day-night-lighting.md`,
 `docs/plan-visual-2-seasonal-terrain-grading.md`,
 `docs/plan-visual-atmosphere-systems.md`.
 
