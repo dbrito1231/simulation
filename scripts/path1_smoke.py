@@ -17,6 +17,9 @@ sys.path.insert(0, str(ROOT / "simulation"))
 
 import sim_engine as se  # noqa: E402
 
+# Sample tick inside the night fraction (night starts at 75% of DAY_FRAMES).
+_NIGHT_SAMPLE_TICK = int(se.DAY_FRAMES * 0.85)
+
 
 def _load_roles():
     import json
@@ -366,7 +369,7 @@ def test_env_effects():
     agent["homeStructureId"] = None
     agent["incapacitated"] = False
     agent["health"] = 50
-    engine.frameTick = 12000  # inside the night fraction of day 0
+    engine.frameTick = _NIGHT_SAMPLE_TICK  # inside the night fraction of day 0
 
     engine._tick_night_pressure()
     assert_true(c["stockpile"]["charcoal"] == 4,
@@ -381,7 +384,7 @@ def test_env_effects():
     # Drain the fuel and force a new day so upkeep is re-charged: the hearth
     # can't pay, so it goes unfueled and the agent takes exposure damage.
     c["stockpile"]["charcoal"] = 0
-    engine.frameTick = se.DAY_FRAMES + 12000  # day 1, still the night fraction
+    engine.frameTick = se.DAY_FRAMES + _NIGHT_SAMPLE_TICK  # day 1, still the night fraction
     engine._tick_night_pressure()
     assert_true(did not in (c.get("litDistricts") or []),
                 f"expected {did} unlit once fuel is drained, got {c.get('litDistricts')}")
@@ -395,7 +398,7 @@ def test_env_effects():
     try:
         agent["health"] = 50
         c["stockpile"]["charcoal"] = 5
-        engine.frameTick = se.DAY_FRAMES * 2 + 12000  # day 2, night fraction
+        engine.frameTick = se.DAY_FRAMES * 2 + _NIGHT_SAMPLE_TICK  # day 2, night fraction
         engine._tick_night_pressure()
         assert_true(c.get("litDistricts") == [],
                     f"litDistricts should be empty with the flag off, got {c.get('litDistricts')}")

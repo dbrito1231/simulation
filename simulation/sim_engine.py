@@ -368,6 +368,14 @@ WEATHER_GOVERNANCE_ENABLED = True
 WEATHER_STORM_REGROW_MULT = 0.3     # suppression multiplier for storm-affected districts
 WEATHER_CLEARING_REGROW_MULT = 1.5  # post-storm "rain" boost for the same districts while clearing
 
+# Atmosphere pack (Phase 4b/4c): viewer-facing visual v2 gates. All default
+# on; off = pre-atmosphere-pack code path in index.html/sprites.js (no partial
+# hybrid). Not env-backed -- instant rollback during QA.
+VISUAL_LIGHTING_V2_ENABLED = True
+VISUAL_SEASONAL_TERRAIN_ENABLED = True
+WEATHER_PARTICLES_V2_ENABLED = True
+GOD_CONSOLE_CHROME_V2_ENABLED = True
+
 # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
 # GOD_MODE_ENABLED is an environment-backed, READ-ONCE-AT-IMPORT module flag,
 # not a runtime toggle: no HTTP route may change it, and there is no live
@@ -1016,12 +1024,12 @@ SPOILAGE_RATIO = 0.25
 # Cart (the first vehicle): holding one raises the carry cap query-time, the
 # same pattern as _gather_yield_bonus. COLLECT_CAP itself stays unchanged.
 CART_CARRY_BONUS = 20
-# Shelter: one night per DAY_FRAMES (~7.5 min real time). Each *working* house
+# Shelter: one night per DAY_FRAMES (~10.0 min real time). Each *working* house
 # shelters HOUSE_SHELTER_OCCUPANTS; unsheltered agents lose a little hunger --
 # a nudge, never a punishment: ~1/7 of one meal (FOOD_RESTORE 45), floored at
 # SHELTER_HUNGER_FLOOR (20), i.e. a night outside can never push anyone into
 # the starvation-reflex band (STARVING_HUNGER 10).
-DAY_FRAMES = 13500
+DAY_FRAMES = 18000
 HOUSE_SHELTER_OCCUPANTS = 2
 SHELTER_HUNGER_PENALTY = 6
 SHELTER_HUNGER_FLOOR = 20
@@ -1075,17 +1083,18 @@ def structure_condition_tier(structure):
 DISASTER_PROB = 0.002
 DISASTER_DAMAGE = (30, 55)
 # Seasons: a four-season clock derived purely from frameTick (no extra state to
-# persist). YEAR_FRAMES is the single canonical in-world year -- 3 real hours
+# persist). YEAR_FRAMES is the single canonical in-world year -- 4 real hours
 # = exactly 24 day/night cycles (DAY_FRAMES) -- and seasons and aging both
 # derive from it, so the GUI calendar, the season clock, and agent ages stay
-# in sync. One season = YEAR_FRAMES/4 (~45 min = exactly 6 day/night cycles;
+# in sync. One season = YEAR_FRAMES/4 (~60 min = exactly 6 day/night cycles;
 # an overnight soak sees several winters). The season multiplies district
 # stock regrowth: spring booms, winter stops regrowth entirely. Escapes:
 # stores/granary capacity built before winter (spoilage permitting), and the
-# season simply turning. Note: winter lengthened 30->45 min in the 2026-07-14
-# year unification -- watch food runway across winter on the next soak.
-YEAR_FRAMES = 324_000
-SEASON_FRAMES = YEAR_FRAMES // 4  # 81_000: one season = 45 min = exactly 6 day/night cycles
+# season simply turning. Note: calendar stretch 2026-07-31 (+33% real-time
+# cadence: 7.5->10 min days, 45->60 min seasons) -- watch food runway across
+# winter on the next soak.
+YEAR_FRAMES = 432_000
+SEASON_FRAMES = YEAR_FRAMES // 4  # 108_000: one season = 60 min = exactly 6 day/night cycles
 SEASONS = ["spring", "summer", "autumn", "winter"]
 SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}
 
@@ -1206,12 +1215,12 @@ LIFECYCLE_ENABLED = True
 # cohorts overnight; 0.005 (~1y/33min) still felt too fast -- retuned to
 # 0.001 (~1y/2.8h, 0→90 in ~10.4 days) so multi-day 24/7 soaks see gradual
 # turnover, not near-extinction every night. 2026-07-14: derived from
-# YEAR_FRAMES instead of a hand-tuned constant (~1y/3.0h, 0→90 in ~11.25
+# YEAR_FRAMES instead of a hand-tuned constant (~1y/4.0h, 0→90 in ~15.0
 # days) so aging stays locked to the same canonical year as the season clock
 # and GUI calendar. Smoke-testing forces this by temporarily shrinking the
 # gate/increment, never by waiting.
 LIFECYCLE_TICK_FRAMES = 300
-AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES  # = 1/1080: exactly 1 year per YEAR_FRAMES (3.0 h)
+AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES  # = 1/1440: exactly 1 year per YEAR_FRAMES (4.0 h)
 ADULT_AGE = 18                      # below this, an agent cannot be a birth parent or election candidate
 ELDER_AGE = 55                      # life-stage label switches to "elder" (age word only, not the elder ROLE)
 MAX_LIFE_EXPECTANCY = 90            # death chance saturates approaching this age
@@ -18223,6 +18232,10 @@ class SimEngine:
                         "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
                         "WEATHER_ENABLED": WEATHER_ENABLED,
                         "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
+                        "VISUAL_LIGHTING_V2_ENABLED": VISUAL_LIGHTING_V2_ENABLED,
+                        "VISUAL_SEASONAL_TERRAIN_ENABLED": VISUAL_SEASONAL_TERRAIN_ENABLED,
+                        "WEATHER_PARTICLES_V2_ENABLED": WEATHER_PARTICLES_V2_ENABLED,
+                        "GOD_CONSOLE_CHROME_V2_ENABLED": GOD_CONSOLE_CHROME_V2_ENABLED,
                         # Sovereign God mode (Phase 2): ALWAYS echoed, flag-off
                         # or on, so the viewer/clients can detect the dark
                         # default without a private route. The "god" key
