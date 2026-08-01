@@ -830,9 +830,9 @@ particles v2, God console chrome v2, and the calendar retune — see
 Earlier plan docs remain as design records:
 
 - [docs/plan-visual-1-day-night-lighting.md](../docs/plan-visual-1-day-night-lighting.md)
-  — **DONE** (superseded by `VISUAL_LIGHTING_V2_ENABLED` in atmosphere pack).
+  — **DONE** (atmosphere pack lighting; permanent default in viewer).
 - [docs/plan-visual-2-seasonal-terrain-grading.md](../docs/plan-visual-2-seasonal-terrain-grading.md)
-  — **DONE** (superseded by `VISUAL_SEASONAL_TERRAIN_ENABLED` in atmosphere pack).
+  — **DONE** (atmosphere pack seasonal terrain; permanent default in viewer).
 - [docs/plan-visual-3-seasonal-sprite-variants.md](../docs/plan-visual-3-seasonal-sprite-variants.md)
   — **DONE** (plumbing + art passes both shipped and verified; kept for the
   design record). The `setSpriteSeason`/`TREE_GRIDS`/winter-snow-cap
