@@ -686,8 +686,8 @@ disk paths); `checkpoints` metadata is **not** in `/state` `god` allowlist.
 `godState["decisionDigests"]` is a bounded ring (cap
 `GOD_DECISION_DIGEST_CAP = 200`) of `{frameTick, agentId, action,
 reasoningHash?}` — appended on the gated LLM apply path when a natural decision
-is applied (not divine compulsion/possession/replay steps; no full think
-payload). `reasoningHash` is optional SHA-256 of reasoning text truncated to 16
+is applied (not divine compulsion/possession/`decision_veto_resolve`/replay
+steps; no full think payload). `reasoningHash` is optional SHA-256 of reasoning text truncated to 16
 hex chars. Parent map `godState["dejaVuReplays"]` stores cancellable replay
 sessions `{id, targetId, steps[], currentIndex, status, createdFrame}`.
 Apply payload `{targetId, maxSteps?}` (default `maxSteps =

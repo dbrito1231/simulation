@@ -21790,8 +21790,6 @@ class SimEngine:
         kind = gate_kind or gate.get("mode") or "possession"
         action = decision.get("action") or "rest"
         self.apply_decision(agent, decision)
-        if gate_kind == "veto_resolve":
-            self._append_decision_digest(agent["id"], decision)
         label = f"Divine {kind}: {agent['name']} — {action}"
         self._push_communication(f"divine_{kind}", "divine", agent["name"], label, source="divine")
         if action not in ("rest", "talk_to_nearby"):

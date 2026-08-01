@@ -1522,6 +1522,8 @@ def test_veto_hold_and_resolve():
         assert_true(applied.get("ok"), applied)
         assert_true(not agent.get("divineHold"), agent)
         assert_true(engine._god_active_decision_gate_record(agent["id"]) is None, agent)
+        digests = engine.civilization["godState"].get("decisionDigests") or []
+        assert_true(len(digests) == 0, "veto_resolve must not append decisionDigests")
         print("  OK veto arms, holds candidate, resolve clears hold and applies")
     finally:
         se.GOD_MODE_ENABLED = old
