@@ -1,182 +1,106 @@
-# Handoff — Sovereign God Mode planning
+# Handoff — Four Breakthroughs (A / C / B / E)
 
-**Updated:** 2026-07-28
+**Updated:** 2026-07-31
 
-**Branch:** `main`
+**Branch:** `feature/four-breakthroughs-ace`
 
-**HEAD:** `7077d40 Merge branch 'feature/living-ecosystem'`
-**Status:** Planning and review only. No God-mode implementation has begun.
+**HEAD:** `3576656 docs(sdd): atmosphere calendar, visual flags, viewer v2`
+
+**Status:** Four breakthroughs **A**, **C**, **B**, and **E** are implemented on this branch (based on the God-mode feature stack). Plan-level exclusions **D** (God Compiler Phase 8) and **F** (`ALWAYS_ON_MODULES` / PIANO re-soak) remain out of scope.
 
 ## Start here
 
-Read [CLAUDE.md](../CLAUDE.md) first. It is the canonical agent guide. The
-repository is server-authoritative, canonical specs must stay synchronized with
-implemented behavior, and implementation must follow the repository's
-orchestrator/Sonnet-5 model policy.
+Read [CLAUDE.md](../CLAUDE.md) first — server-authoritative architecture, action-sync invariants, and the orchestrator/Sonnet-5 model policy.
 
-The active planning artifact is:
+Active delivery plan:
 
-- [plan-sovereign-god-mode-v2.md](plan-sovereign-god-mode-v2.md) — **current**
-- [plan-sovereign-god-mode.md](plan-sovereign-god-mode.md) — superseded; retained
-  for review history only
+- [.cursor/plans/two_sim_breakthroughs_634bb2dd.plan.md](../.cursor/plans/two_sim_breakthroughs_634bb2dd.plan.md) — phased A → C → B → E breakdown, verification gates, and exclusions
 
-v2 was produced after verifying v1's claims line-by-line against the working
-tree. It corrects four contract defects (gather arithmetic ordering, weather
-expiry ownership, divine-vs-emergent rule composition, and the survival modifier
-catalog), splits the SPEC 00 identity amendment into its own commit, moves the
-idempotency store in-memory, defers weather override to its own phase, and
-rewrites the model-routing section for the Claude Code harness. See v2's "Why v2
-exists" section.
+## What landed (this branch)
 
-Do not implement it until the user explicitly approves implementation and the
-decisions in v2's "Decisions required before implementation" section (14 items;
-five changed or new since v1).
+Commits since `fad699d` (storm presence pack on main):
 
-## Conversation outcome
+| Phase | Breakthrough | Summary |
+|---|---|---|
+| 1 | **A — Town integrity** | Slower decay (`0.025`/goods tick), autonomous repair campaigns + widened critical backstop, in-sim ruin cull, disaster retune (`DISASTER_PROB=0.002`, damage `(30,55)`), God `repair_structures` + `clear_ruins` |
+| 2 | **C — Hunt + conflict** | Stock/wildlife-aware hunter precedence, hunt damage retune (`HUNT_DAMAGE=2`, `HUNT_DAMAGE_HUNTER=4`), forced hunt goals when starving with prey but no gatherable food, bounded PvP via `confront_agent` |
+| 3 | **B — Real trade** | Per-settlement `settlementStores`, authoritative caravan delivery + ocean water pathing, treaty tariffs (`TREATY_TARIFF_MAX=0.25`), new `deliver_caravan` action (full action-sync) |
+| 4 | **E — Atmosphere** | Calendar stretch (`DAY_FRAMES=18000`, `YEAR_FRAMES=432000`, `SEASON_FRAMES=108000`), four visual v2 flags, viewer lighting/seasonal terrain/weather particles/God console chrome |
 
-The user explored adding a God feature to GitServ. The concepts discussed were:
+### A — Town integrity
 
-- **Storyteller God:** authors narrative events whose mechanics are translated
-  into bounded, typed effects; agents decide how to respond.
-- **Miracle God:** directly performs visible, validated interventions such as
-  healing, resource grants, weather changes, and structure repair/damage.
-- **Avatar God:** a user-controlled in-world character. The user ultimately
-  excluded this mode.
-- **All-in-one/Sovereign God:** a disembodied combination of omniscient Sight,
-  Voice, Providence, Miracles, Storytelling, and temporary Lawgiving.
+- `STRUCTURE_DECAY_PER_GOODS_TICK = 0.025` (~23.3 h to disrepair, ~33.3 h to ruin)
+- Repair campaigns: `REPAIR_CAMPAIGN_RUIN_RATIO=0.15`, `WORKING_FRAC=0.5`, `MAX_ASSIGN=2`
+- Ruin cull: `_maybe_cull_ruins()` removes 1–3 aged unaffordable ruins per tick when pressure is high
+- Disaster retune: legacy branch `DISASTER_PROB=0.002`; storm branch unchanged at `STORM_DISASTER_PROB=0.32`
+- God mass-repair: `repair_structures` (batch condition restore / un-ruin) and `clear_ruins` (registry deletion)
 
-The resulting plan is deliberately control-plane based. Divine commands are not
-agent decisions and do not enter `DECISION_ACTIONS`, `DECISION_SCHEMA`,
-`SYSTEM_PROMPT` as selectable actions, `apply_decision()`, `available_actions`,
-or viewer `ACTION_LABELS`. If a future change adds an agent action such as
-`pray`, it must satisfy the full action-sync invariant separately.
+### C — Hunt + conflict
 
-## Planned feature shape
+- Hunter promoted ahead of unfilled farmer/fisher when wildlife present and meat scarce
+- Forced hunt goals when `hunger ≤ STARVING_HUNGER`, prey in range, no reachable gatherable edible
+- `confront_agent` action: contact-range PvP with rivalry/pressure gating, steal + flee, non-lethal floor unless target already critical
 
-The plan currently specifies:
+### B — Real trade
 
-- default-dark, startup-only enablement through `SIM_GOD_MODE=1`;
-- a required non-empty `SIM_GOD_TOKEN` for private and mutating routes;
-- authenticated Sight separated from the public `/state` projection;
-- public proclamations, public non-binding providence, and private omens;
-- bounded immediate miracles for vitals, known resources, structure condition,
-  and weather;
-- timed allowlisted modifiers for gathering, fish yield, hunger drain, health
-  regeneration, structure decay, and spoilage;
-- atomic Storyteller events composed from those typed primitives;
-- a feature-gated Divine Console with preview/apply/cancel workflow;
-- persisted `civilization["godState"]`, bounded intervention/idempotency history,
-  and a dedicated `divine.jsonl` audit stream;
-- an optional, deferred free-prose story compiler that may only draft a typed
-  preview and requires separate model-contention measurement.
+- `civilization["settlementStores"][sid]` — local gather overflow and caravan credits prefer settlement store; repair/craft draws own store then village stockpile fallback
+- `_deliver_caravan` debits traveler, credits destination store, applies treaty tariff split
+- Ocean corridor pathing when transit unlocked; `deliver_caravan` in full action-sync chain
 
-Dangerous powers are explicitly deferred: avatar control, resurrection, forced
-death, teleportation, agent creation/deletion, direct belief or relationship
-rewriting, forced council/election outcomes, arbitrary structure spawning, and
-arbitrary state-path editing.
+### E — Atmosphere
 
-## Review and revisions
+- **Calendar stretch (+33% real-time cadence):** 7.5 → 10 min days, 45 → 60 min seasons, 4 h in-world year (24 day/night cycles)
+- **New visual flags** (all default on, echoed in `/state` `config.flags`):
+  - `VISUAL_LIGHTING_V2_ENABLED`
+  - `VISUAL_SEASONAL_TERRAIN_ENABLED`
+  - `WEATHER_PARTICLES_V2_ENABLED`
+  - `GOD_CONSOLE_CHROME_V2_ENABLED`
+- Viewer: stronger day/night lighting, seasonal terrain palettes, weather particle v2, Divine Console chrome polish
+- Plan docs: `docs/plan-visual-1-day-night-lighting.md`, `docs/plan-visual-2-seasonal-terrain-grading.md`, `docs/plan-visual-atmosphere-systems.md`
 
-The initial plan was reviewed as an implementation handoff. It was not considered
-implementation-ready until the following contracts were corrected. The plan now
-contains all of these revisions:
+## How to verify
 
-1. **Spec synchronization:** Phase 0 is plan approval only and cannot edit
-   canonical specs. Each behavior phase updates its owning specs in the same
-   commit as code.
-2. **Preview binding:** preview creates a short-lived, opaque, server-held
-   `previewId`, canonical command digest, and precondition fingerprint. Apply
-   accepts only `{previewId, requestId}` and revalidates under the engine lock.
-3. **Idempotency:** persisted `recentRequests` records retain the original
-   bounded authoritative response. Same-ID retries return it; mismatched reuse
-   rejects.
-4. **Stored-content safety:** divine text is normalized plain text and must be
-   rendered through `textContent`/`escapeHtml`; hostile stored-string cases are
-   part of verification.
-5. **Expiry ownership:** effect lookups enforce
-   `startFrame <= frameTick < expiresFrame`; `_expire_divine_effects()` runs
-   immediately after frame advancement and before affected systems.
-6. **Modifier arithmetic:** gathering, survival, decay, and spoilage now have
-   defined ordering, rounding, zero-result, identity, and resource-specific
-   precedence rules.
-7. **Stable private targets and memory:** private omens use `agent["id"]`, not
-   names. They remain a dedicated prompt line while active and enter ordinary
-   agent/vector memory exactly once on expiry or revocation.
-8. **Operational enablement:** `SIM_GOD_MODE` is read at startup; runtime enable
-   routes are forbidden. Both the flag and token are required.
+Deterministic smokes (no Ollama, no live `state.db`):
 
-v2's phases (renumbered from v1):
+```bash
+uv run python scripts/sid_parity_smoke.py
+uv run python scripts/path1_smoke.py
+uv run python scripts/god_mode_smoke.py
+uv run python scripts/town_integrity_smoke.py
+uv run python scripts/hunt_conflict_smoke.py
+```
 
-0. Contract freeze — planning only, no spec edits.
-1. SPEC 00 identity amendment — prose only, its own commit.
-2. Secure kernel, persistence, preview, and audit.
-3. Voice and providence.
-4. Bounded immediate miracles.
-5. Storyteller events and temporary laws.
-6. Weather override — promoted out of the baseline.
-7. Divine Console and public presentation.
-8. Optional free-prose story compiler.
+Live soak (optional): start server in a titled `simserver` cmd window, open `http://127.0.0.1:5001`, watch browser + `simulation/logs/<timestamp>/`. After any server touch, confirm only one `simulation/server.py` process (see CLAUDE.md).
 
-Phases 2–5 overlap heavily in `simulation/sim_engine.py` and must be sequential.
-The recommended first delivery slice, after explicit approval, is Phases 1–3.
-Phase 3's cognition measurement gate is open-ended research and is the schedule
-risk in that slice.
+Branch change inventory: [changes.md](../changes.md) at repo root.
 
-## Validation already performed
+## God mode (already implemented upstream)
 
-Planning-only checks:
+This branch builds on the God-mode feature stack already merged upstream of these breakthroughs. The original planning artifacts remain useful context but **implementation is done** — do not treat them as pending work:
 
-- confirmed the plan includes all eight corrected contracts listed above;
-- confirmed no trailing whitespace in the plan;
-- confirmed the plan is documentation-only;
-- no canonical spec, Python, JavaScript, runtime flag, route, state database, or
-  server configuration was changed;
-- no server was started, stopped, or restarted during plan creation/revision.
+- [plan-sovereign-god-mode-v2.md](plan-sovereign-god-mode-v2.md) — contract reference (preview/apply, idempotency, modifier arithmetic)
+- [plan-sovereign-god-mode.md](plan-sovereign-god-mode.md) — superseded history
 
-No implementation smoke, live God-mode test, visual QA, or Ollama cognition
-measurement exists because the feature has not been implemented.
+Shipped God-mode surface (unchanged by A/C/B/E except A's mass-repair additions):
 
-## Earlier agent-beliefs review
+- Startup-only `SIM_GOD_MODE=1` + required `SIM_GOD_TOKEN`
+- Authenticated `/control/god/*` routes (Sight, Voice, Providence, Miracles, Storyteller, Laws)
+- Divine Console in viewer; `divine.jsonl` audit stream
+- `civilization["godState"]` persistence
 
-The conversation began with a review of the untracked
-[agent-beliefs.md](agent-beliefs.md). Two findings were reported, but the file
-was not edited:
+Phase **A** extended God mode with `repair_structures` and `clear_ruins` (amended specs/02 invariants and updated `god_mode_smoke.py`).
 
-- it names `CULTURE_ENABLED` as the belief-system flag, while founding,
-  availability, adoption, and voting are primarily governed by `MEMES_ENABLED`;
-- its "Current live state" section is a volatile runtime snapshot and should be
-  labeled as such or moved to a dated run note.
+## Exclusions (still out of scope)
 
-At the time of that review, the running `/state` snapshot did match the document:
-14 agents held both seed beliefs except Ash, who held neither, and the registry
-contained only the two seeds. That was a 2026-07-27 observation and must not be
-treated as current without rechecking.
-
-## Dirty worktree and ownership cautions
-
-Current relevant files:
-
-- `docs/HANDOFF.md` — replaced with this handoff at the user's request.
-- `docs/plan-sovereign-god-mode.md` — untracked planning artifact created in this
-  conversation.
-- `docs/agent-beliefs.md` — pre-existing untracked user file; reviewed but not
-  modified.
-
-Nothing has been staged or committed. Preserve `docs/agent-beliefs.md` and do not
-fold it into God-mode work without explicit user direction.
+- **D** — God Compiler Phase 8 (free-prose story compiler)
+- **F** — `ALWAYS_ON_MODULES` / PIANO re-soak
 
 ## Next-agent checklist
 
-1. Read `CLAUDE.md` and the complete God-mode plan.
-2. Check `git status` before touching files.
-3. Do not treat the plan's recommended defaults as user approval.
-4. If the user requests implementation, resolve the required Sonnet 5
-   implementation-agent availability before editing code.
-5. Keep Phase 0 non-canonical; update specs only with their implementing behavior.
-6. Implement sequentially, preserve the thin-viewer/server-authoritative
-   boundary, and use the plan's validation gates.
-7. If cognition prompts change, measure them before shipping and record fresh
-   post-restart evidence in `specs/03-cognition.md`; restored cached PIANO reports
-   do not count.
-8. Finish any server-touching implementation with the single-instance/port-5001
-   verification required by `CLAUDE.md`.
+1. Read `CLAUDE.md` and the plan at `.cursor/plans/two_sim_breakthroughs_634bb2dd.plan.md`.
+2. Run all five smokes above before merging or starting new work.
+3. SDD: edit owning specs before code; keep specs synchronized with behavior.
+4. New/changed agent actions require full action-sync (server.py, sim_engine.py, index.html, specs/07).
+5. God routes stay off the agent decision catalog.
+6. Do not commit `state.db`, `simulation/logs/`, or credentials.
+7. Branch stays open until user approves merge/PR to main.

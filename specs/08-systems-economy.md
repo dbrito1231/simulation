@@ -356,8 +356,8 @@ sub-systems, all deterministic (no LLM).
 | **Spoilage** | `SPOILAGE_RATIO = 0.25` | `_tick_spoilage`: edible overflow beyond `_storage_capacity` rots at 25% (min 1) per tick — stockpile first, then largest holders, never below `EDIBLE_RESERVE` per agent. Escape: build storage (granary `stores`), eat, or contribute. |
 | **Structure decay** | `STRUCTURE_DECAY_PER_GOODS_TICK = 0.025`, `STRUCTURE_DISREPAIR_THRESHOLD = 30`, `REPAIR_CONDITION_RESTORE = 50` | `condition` starts at 100, decays 0.025/tick (~23.3h to disrepair, ~33.3h to full ruin at 0). Below the disrepair threshold a structure stops "working" (no produce/boost/houses/stores); at 0 it becomes a ruin. `repair_structure` restores `REPAIR_CONDITION_RESTORE`; rebuilding a ruin costs half the original needs (min 1 each). `/state` surfaces the raw `condition`/`isRuin` plus server-derived `conditionTier`: `pristine` (>=60), `worn` (>=30 and <60), `crumbling` (<30), or `ruin` (`isRuin` or <=0). |
 | **Disasters** | `DISASTER_PROB = 0.002`, `DISASTER_DAMAGE = (30, 55)`, `STORM_DISASTER_PROB = 0.32` | See below — storm-gated when `WEATHER_ENABLED`, legacy random roll otherwise. |
-| **Shelter** | `DAY_FRAMES = 13500`, `HOUSE_SHELTER_OCCUPANTS = 2`, `SHELTER_HUNGER_PENALTY = 6`, `SHELTER_HUNGER_FLOOR = 20` | `_tick_shelter()` once per day-frame: each working house shelters up to 2 occupants (homeowners guaranteed their own home under `ECONOMY_ENABLED`, else nearest-first); unsheltered agents lose `SHELTER_HUNGER_PENALTY` hunger, floored at 20 (never into the `STARVING_HUNGER` band). |
-| **Seasons** | `YEAR_FRAMES = 324,000`, `SEASON_FRAMES = 81,000` (4 seasons), `SEASON_REGROW_MULT = {spring: 2, summer: 1, autumn: 1, winter: 0}` | Pure function of `frameTick`; multiplies district ecology stock regrowth (winter halts it) — see [05-world.md](05-world.md). |
+| **Shelter** | `DAY_FRAMES = 18000` (~10.0 min real at 30/s), `HOUSE_SHELTER_OCCUPANTS = 2`, `SHELTER_HUNGER_PENALTY = 6`, `SHELTER_HUNGER_FLOOR = 20` | `_tick_shelter()` once per day-frame: each working house shelters up to 2 occupants (homeowners guaranteed their own home under `ECONOMY_ENABLED`, else nearest-first); unsheltered agents lose `SHELTER_HUNGER_PENALTY` hunger, floored at 20 (never into the `STARVING_HUNGER` band). |
+| **Seasons** | `YEAR_FRAMES = 432,000` (4 real h = 24 day/night cycles), `SEASON_FRAMES = 108,000` (~60 min = 6 day/night cycles; 4 seasons), `SEASON_REGROW_MULT = {spring: 2, summer: 1, autumn: 1, winter: 0}` | Pure function of `frameTick`; multiplies district ecology stock regrowth (winter halts it) — see [05-world.md](05-world.md). Calendar stretch 2026-07-31: +33% real-time cadence (7.5→10 min days, 45→60 min seasons). |
 | **Vehicles/carry** | `CART_CARRY_BONUS = 20` (cart), `WAGON_CARRY_BONUS = 40`/`WAGON_SPEED_MULT = 1.4` (wagon, tier-2, `TECH_TREE_ENABLED`) | `_carry_cap`/`_vehicle_speed_mult` add query-time bonuses on top of `COLLECT_CAP` for the holder. |
 
 Composable-build blocks with `shelter: True` (`wall`, `fence` — see
@@ -484,7 +484,7 @@ when **all** of the following hold:
 1. `ruin_ratio > REPAIR_CAMPAIGN_RUIN_RATIO` (same ratio as repair campaigns).
 2. The oldest eligible ruin has `ruinedSinceFrame` (or equivalent ruin-age
    field) at least `RUIN_CULL_AGE_FRAMES = DAY_FRAMES` (~1 sim day,
-   `13500` frames at 30/s ≈ 7.5 real min) ago.
+   `18000` frames at 30/s ≈ 10.0 real min) ago.
 3. Village-wide rebuild remains unaffordable — combined village stockpile plus
    agent carry cannot fund the half-cost `repair_structure` rebuild of the
    candidate ruin(s).
