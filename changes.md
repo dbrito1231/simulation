@@ -211,6 +211,8 @@ dd4a47b docs: plan visual atmosphere pack
 4ae6707 engine: calendar stretch + visual atmosphere flags
 f184df4 viewer: atmosphere pack lighting, seasonal terrain, weather FX, god chrome
 3576656 docs(sdd): atmosphere calendar, visual flags, viewer v2
+d72dc0b docs: HANDOFF refresh after four breakthroughs A/C/B/E
+b357b50 docs: changes.md for four breakthroughs ACE
 ```
 
 ---
