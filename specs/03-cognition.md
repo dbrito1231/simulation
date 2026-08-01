@@ -160,7 +160,10 @@ the mode were `"json_object"`, or `None` if `"off"` or auto-disabled.
 `DECISION_SCHEMA` (server.py:780-839): `additionalProperties: False`;
 `required: ["action", "reasoning"]`. Key properties: `action` (enum =
 `DECISION_ACTIONS`, 43 entries — see specs/07-actions.md, not repeated here),
-`target`/`target_district`/`message`/`new_role` (nullable strings),
+`divine_response` (nullable object, **required on every decision turn while
+active Voice guidance is unacknowledged** — see "Voice binding guidance"
+below; omitted on turns with no active unacked guidance), `target`/
+`target_district`/`message`/`new_role` (nullable strings),
 `relationship_update` (nullable object, values constrained to
 ally/neutral/rival), `blueprint` (nullable object: id/name/needs/new_resources/
 visual_style/sprite/function), `recipe` (nullable object: id/name/inputs/
@@ -246,7 +249,7 @@ server folds it in only when set) and rides the existing think cycle — no new
 LLM call, no new context section, just this one line so agents can reference
 storm conditions in council.
 
-### Sovereign God mode (Phase 3): providence/omen prompt lines
+### Sovereign God mode (Phase 3): Voice binding guidance
 
 `_build_think_payload` computes `divine_public_line`/`divine_private_line` per
 agent via `_divine_prompt_lines(agent)` (sim_engine.py) — placed immediately
@@ -268,15 +271,54 @@ phase — immediately after the `Civilization directive: {directive}` line via
 a `{divine_lines}` template slot:
 
 ```text
-Divine omen: Prepare for a difficult winter. You may interpret or ignore it.
-Private omen: Seek reconciliation with Ash. You may interpret or ignore it.
+Divine guidance (binding): Prepare for a difficult winter. State whether you follow or continue in divine_response.
+Private guidance (binding): Seek reconciliation with Ash. State whether you follow or continue in divine_response.
 ```
 
-The fixed "You may interpret or ignore it." suffix is verbatim per the plan's
-"Bounded cognition impact" contract and preserves agent autonomy — nothing
-about accepting a decision governed by a divine line differs from an
-ordinary decision; there is no separate compliance check. At most one public
-line and one private line, each already capped at `GOD_TEXT_MAX_CHARS = 240`
+**Binding contract.** Public providence and private omens are **binding Voice
+guidance**, not optional flavor. Every routine/high-stakes decision turn while
+an agent has **active, unacknowledged** Voice guidance (public providence
+and/or a private omen aimed at that agent) must include a `divine_response`
+object in the returned JSON:
+
+```json
+{"stance": "follow" | "continue", "reason": "<short string>"}
+```
+
+`stance: "follow"` means the agent accepts the guidance as governing intent
+for this turn; the engine clears `goal` and `assignedTask` before applying the
+chosen `action` (the LLM still picks the concrete action — guidance steers
+intent, it does not pin the action). `stance: "continue"` means the agent
+explicitly declines to let the guidance override current plans; goals and
+assigned tasks are left intact. The `reason` is a short, human-readable
+explanation surfaced to operators in Sight and the Voice Adherence panel.
+
+**Missing/invalid `divine_response`.** When Voice guidance is active and
+unacknowledged but the model omits `divine_response`, returns a malformed
+object, or supplies an unknown `stance`, `normalize_decision` **does not**
+reject the turn — it **synthesizes** `{"stance": "continue", "reason":
+"missing_divine_response"}` and still applies the validated `action`. This is
+an explicit non-compliance signal for operators, not a hard fallback to
+`rest`. The synthesized record is written to the divine-response log (see
+[02-engine-core.md](02-engine-core.md)) exactly once per guidance ack.
+
+**Acknowledgement.** A turn counts as acknowledged when a valid or
+synthesized `divine_response` is recorded against the active guidance id(s).
+Until then, every subsequent think for that agent carries the same binding
+prompt lines and the `divine_response` requirement.
+
+**Special-turn cancellation.** While Voice guidance is active and
+unacknowledged for an agent, any pending `sprite_design_only` or
+`invention_only` special turn for that agent is **cancelled/dropped** — not
+soft-deferred. The engine clears the special-turn flag and returns the agent
+to the ordinary decision path on the next think. Applying new Voice guidance
+(providence, private omen, whisper target, or a proclamation that auto-applies
+as providence) also cancels any in-flight special turn for affected agents at
+apply time. Matrix anoint/bush/story soft prompt lines are unchanged — only
+providence/private-omen Voice guidance participates in this binding contract.
+
+At most one public line and one private line, each already capped at
+`GOD_TEXT_MAX_CHARS = 240`
 
 **Divine Matrix memory surgery (Phase 3).** `memory_insert` and `belief_plant`
 write into the same `memory` slice `_memory_for_prompt` composes — via
@@ -295,14 +337,11 @@ with separate labels, and an agent sees them as two distinct sources of
 guidance (village leadership vs. an unexplained divine signal), never as one
 merged instruction.
 
-**Measurement gate.** The plan calls for a fixed-case cognition comparison
-(no omen / neutral omen / strong omen) confirming agents can both follow and
-ignore guidance without invalid decisions and without context overflow,
-before enabling guidance by default in a live deployment. That comparison is
-Ollama-required and has not been run as part of this phase's deterministic
-delivery — `SIM_GOD_MODE` ships dark (see [01](01-architecture.md)), so no
-default-on run is affected, but treat this as open before recommending an
-always-on god-guided deployment.
+**Measurement gate.** Binding Voice guidance ships with the providence/omen
+apply path; operators should still spot-check `llm.jsonl` for
+`divine_response` presence and `divine.jsonl` / Sight for adherence before
+recommending an always-on god-guided deployment. `SIM_GOD_MODE` ships dark
+(see [01](01-architecture.md)), so no default-on run is affected.
 
 ### Divine Matrix Phase 2: per-agent sampling overlay (Temperature Dial)
 
@@ -783,6 +822,7 @@ surfaces to the agent's next prompt):
 | `switch_role` | `new_role` (or `target`) must be a key in `ROLES` |
 | `move_to_district` | promotes `target_district` into `target` if target is empty (the engine only reads `target`) |
 | `talk_to_nearby` | target/message both required, target must be in the nearby-agents list, nearby list non-empty |
+| `divine_response` (when active Voice guidance is unacknowledged) | must be an object with `stance` in `follow`/`continue` and a non-empty `reason` string; missing/invalid values are **not** rejected — see Voice binding guidance above |
 | every other action | passed through as-is (any `blueprint` key stripped unless the action is one of the blueprint-carrying ones) |
 
 `role_fallback_action(role, agent_data)` (server.py:1890-2022) priority

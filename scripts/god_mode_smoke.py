@@ -77,7 +77,7 @@ def make_engine(roster_size=4):
         "log_activity": lambda *a, **k: None,
         "log_conversation": lambda *a, **k: None,
         "log_benchmark": lambda *a, **k: None,
-        "log_divine": lambda **k: None,
+        "log_divine": lambda *a, **k: None,
         "log_compiler": lambda **k: None,
         "validate_blueprint": lambda *a, **k: (False, "unused"),
         "canonical_effect_vector": lambda *a, **k: (),
@@ -435,16 +435,17 @@ def test_idempotent_apply_and_conflict():
         pid1 = preview1["previewId"]
         resp1 = engine.god_apply(pid1, "req-idem")
         assert_true(resp1["ok"] and resp1["interventionId"] == "divine-1", resp1)
-        assert_true(len(engine.civilization["godState"]["recentInterventions"]) == 1,
+        # Proclamation also arms providence (Voice binding) -- two audit records.
+        assert_true(len(engine.civilization["godState"]["recentInterventions"]) == 2,
                     engine.civilization["godState"]["recentInterventions"])
 
         # Exact replay: same requestId + same previewId returns the ORIGINAL
         # response without re-applying (the preview was already consumed).
         resp1_replay = engine.god_apply(pid1, "req-idem")
         assert_true(resp1_replay == resp1, (resp1_replay, resp1))
-        assert_true(len(engine.civilization["godState"]["recentInterventions"]) == 1,
+        assert_true(len(engine.civilization["godState"]["recentInterventions"]) == 2,
                     "replay re-applied instead of returning the stored response")
-        assert_true(engine.civilization["godState"]["nextInterventionSeq"] == 2,
+        assert_true(engine.civilization["godState"]["nextInterventionSeq"] == 3,
                     "replay incremented the intervention sequence")
 
         # Same requestId, a DIFFERENT preview -> conflict, apply nothing.
@@ -454,7 +455,7 @@ def test_idempotent_apply_and_conflict():
         assert_true(conflict == {
             "ok": False, "reason": "requestId already used with a different preview",
         }, conflict)
-        assert_true(len(engine.civilization["godState"]["recentInterventions"]) == 1,
+        assert_true(len(engine.civilization["godState"]["recentInterventions"]) == 2,
                     "conflicting requestId reuse mutated state")
         print("  OK idempotent replay returns the original response; "
               "different-preview reuse conflicts and applies nothing")
@@ -555,9 +556,10 @@ def test_godstate_roundtrip_save_restore():
         assert_true(restored.restore_state(), "restore_state failed against the just-written db")
         god = restored.civilization["godState"]
         assert_true(god["intervened"] is True, god)
-        assert_true(god["nextInterventionSeq"] == 2, god)
-        assert_true(len(god["recentInterventions"]) == 1
-                    and god["recentInterventions"][0]["text"] == "A season of plenty.", god)
+        assert_true(god["nextInterventionSeq"] == 3, god)
+        assert_true(len(god["recentInterventions"]) == 2
+                    and any(r.get("text") == "A season of plenty."
+                            for r in god["recentInterventions"]), god)
         # Restore also invalidates any outstanding preview/idempotency state.
         assert_true(restored._god_preview_cache == {}, restored._god_preview_cache)
         assert_true(restored._god_requests == {}, restored._god_requests)
@@ -1953,20 +1955,233 @@ def test_prompt_size_cap_and_divine_lines_render():
 
         prompt_with = _server.build_user_prompt(payload_with)
         prompt_without = _server.build_user_prompt(payload_without)
-        assert_true(f"Divine omen: {max_text} You may interpret or ignore it." in prompt_with,
-                    "public omen line missing or mangled")
-        assert_true(f"Private omen: {max_text} You may interpret or ignore it." in prompt_with,
-                    "private omen line missing or mangled")
-        assert_true("Divine omen:" not in prompt_without and "Private omen:" not in prompt_without,
+        public_line = _server._format_voice_guidance_line("public", max_text)
+        private_line = _server._format_voice_guidance_line("private", max_text)
+        assert_true(public_line in prompt_with, "public binding guidance line missing or mangled")
+        assert_true(private_line in prompt_with, "private binding guidance line missing or mangled")
+        assert_true("may interpret or ignore" not in prompt_with,
+                    "Voice binding lines must not use soft omen wording")
+        assert_true("Divine guidance (binding):" not in prompt_without
+                    and "Private guidance (binding):" not in prompt_without,
                     "a divine line rendered when unset -- flag-off/no-guidance prompts must be byte-identical")
 
         added = len(prompt_with) - len(prompt_without)
-        # "Divine omen: " (14) + text + " You may interpret or ignore it.\n" (34)
-        # + "Private omen: " (15) + text + " You may interpret or ignore it.\n" (34)
-        expected_max = 2 * (20 + se.GOD_TEXT_MAX_CHARS + 40)
+        # _format_voice_guidance_line prefixes/suffixes + two max-length texts.
+        expected_max = len(public_line) + len(private_line)
         assert_true(added <= expected_max, (added, expected_max))
         print(f"  OK divine prompt lines add <= {expected_max} chars at max ({se.GOD_TEXT_MAX_CHARS}-char) "
               f"omen length; absent entirely when unset")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_voice_binding_wording_and_guidance_active():
+    """Private omen arms binding Voice guidance in think payload and prompt."""
+    import server as srv  # noqa: E402
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        secret = "Seek the hidden spring."
+        preview = engine.god_preview(
+            _omen_envelope(agent["id"], secret, duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        applied = engine.god_apply(preview["previewId"], "req-voice-binding-1")
+        assert_true(applied["ok"], applied)
+        omen_id = applied["outcome"]["interventionId"]
+
+        with engine.lock:
+            payload = engine._build_think_payload(agent)
+        assert_true(payload.get("voice_guidance_active") is True, payload)
+        assert_true(payload.get("divine_private_line") == secret, payload)
+        assert_true(payload.get("voice_guidance_id") == omen_id, payload)
+
+        prompt = srv.build_user_prompt(payload)
+        assert_true("Private guidance (binding):" in prompt, prompt)
+        assert_true(secret in prompt, prompt)
+        assert_true("may interpret or ignore" not in prompt, prompt)
+        print("  OK private omen sets voice_guidance_active + binding prompt wording")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_synthesize_divine_response_missing_and_valid():
+    """synthesize_divine_response fills missing divine_response on Voice turns."""
+    from server import synthesize_divine_response  # noqa: E402
+
+    agent_data = {"voice_guidance_active": True}
+    missing = synthesize_divine_response({"action": "rest", "reasoning": "smoke"}, agent_data)
+    assert_true(missing.get("divine_response") == {
+        "stance": "continue",
+        "reason": "missing_divine_response",
+    }, missing)
+    assert_true(missing.get("divine_response_synthetic") is True, missing)
+
+    valid = synthesize_divine_response({
+        "action": "rest",
+        "reasoning": "smoke",
+        "divine_response": {"stance": "follow", "reason": "The sign is clear."},
+    }, agent_data)
+    assert_true(valid.get("divine_response") == {
+        "stance": "follow",
+        "reason": "The sign is clear.",
+    }, valid)
+    assert_true("divine_response_synthetic" not in valid, valid)
+
+    inactive = synthesize_divine_response({"action": "rest"}, {"voice_guidance_active": False})
+    assert_true("divine_response" not in inactive, inactive)
+    print("  OK synthesize_divine_response: missing -> continue; valid preserved")
+
+
+def test_voice_follow_clears_goal_continue_keeps():
+    """follow stance clears goal/assignedTask; continue leaves them intact."""
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        agent["goal"] = "Build a granary"
+        agent["assignedTask"] = "gather wood"
+        preview = engine.god_preview(
+            _omen_envelope(agent["id"], "Abandon your task.", duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        engine.god_apply(preview["previewId"], "req-voice-follow-1")
+
+        with engine.lock:
+            engine._apply_gated_decision(agent, {
+                "action": "rest",
+                "reasoning": "I heed the sign.",
+                "divine_response": {"stance": "follow", "reason": "The omen commands it."},
+            })
+        assert_true(agent.get("goal") is None, agent)
+        assert_true(agent.get("assignedTask") is None, agent)
+        responses = engine.civilization["godState"].get("recentDivineResponses") or []
+        assert_true(any(r.get("stance") == "follow" for r in responses), responses)
+
+        engine2 = make_engine()
+        agent2 = engine2.agents[0]
+        agent2["goal"] = "Keep building"
+        agent2["assignedTask"] = "carry stone"
+        preview2 = engine2.god_preview(
+            _omen_envelope(agent2["id"], "Stay your course.", duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        engine2.god_apply(preview2["previewId"], "req-voice-continue-1")
+        with engine2.lock:
+            engine2._apply_gated_decision(agent2, {
+                "action": "rest",
+                "reasoning": "I carry on.",
+                "divine_response": {"stance": "continue", "reason": "My path remains."},
+            })
+        assert_true(agent2.get("goal") == "Keep building", agent2)
+        assert_true(agent2.get("assignedTask") == "carry stone", agent2)
+        print("  OK follow clears goal/assignedTask; continue preserves them")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_voice_omen_cancels_special_turns_not_defer():
+    """Private omen cancels invention/sprite special turns immediately."""
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        agent["inventionTurn"] = True
+        agent["spriteDesignTurn"] = {"role": agent["role"], "frame": engine.frameTick}
+
+        preview = engine.god_preview(
+            _omen_envelope(agent["id"], "Drop your craft.", duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        applied = engine.god_apply(preview["previewId"], "req-voice-cancel-special")
+        assert_true(applied["ok"], applied)
+        assert_true(agent.get("inventionTurn") is False, agent)
+        assert_true(agent.get("spriteDesignTurn") is None, agent)
+
+        with engine.lock:
+            payload = engine._build_think_payload(agent)
+        assert_true(payload.get("voice_guidance_active") is True, payload)
+        assert_true(payload.get("divine_private_line") == "Drop your craft.", payload)
+        assert_true(payload.get("invention_only") is False, payload)
+        assert_true(payload.get("sprite_design_only") is False, payload)
+        print("  OK private omen cancels special turns; think payload is Voice-only")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_proclamation_sets_providence_and_cancels_special_turns():
+    """Proclamation broadcasts publicly and arms providence for binding Voice."""
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        for agent in engine.agents:
+            if agent.get("deathFrame") is None:
+                agent["inventionTurn"] = True
+                agent["spriteDesignTurn"] = {"role": agent["role"]}
+
+        text = "A season of trial begins."
+        preview = engine.god_preview(_proclamation_envelope(text))
+        applied = engine.god_apply(preview["previewId"], "req-proc-prov-1")
+        assert_true(applied["ok"], applied)
+
+        god = engine.civilization["godState"]
+        prov = god.get("providence")
+        assert_true(isinstance(prov, dict) and prov.get("text") == text, prov)
+        assert_true(isinstance(prov.get("expiresFrame"), int), prov)
+
+        for agent in engine.agents:
+            if agent.get("deathFrame") is None:
+                assert_true(agent.get("inventionTurn") is False, agent)
+                assert_true(agent.get("spriteDesignTurn") is None, agent)
+
+        assert_true(any(text in line for line in engine.activityLog), engine.activityLog[:3])
+        chronicle = engine.civilization.get("chronicle") or []
+        assert_true(any(entry.get("text") == text for entry in chronicle), chronicle[-3:])
+        print("  OK proclamation -> providence + public chronicle; special turns cancelled")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
+def test_sight_recent_divine_responses_and_snapshot_privacy():
+    """Sight exposes adherence log; /state god allowlist stays private."""
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        secret = "Only you hear this."
+        preview = engine.god_preview(
+            _omen_envelope(agent["id"], secret, duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        engine.god_apply(preview["previewId"], "req-sight-voice-1")
+
+        with engine.lock:
+            engine._apply_gated_decision(agent, {
+                "action": "rest",
+                "reasoning": "I obey.",
+                "divine_response": {"stance": "follow", "reason": "The omen is binding."},
+            })
+
+        sight = engine.god_sight()
+        assert_true(sight.get("ok"), sight)
+        responses = sight.get("recentDivineResponses") or []
+        assert_true(any(
+            r.get("stance") == "follow"
+            and r.get("reason") == "The omen is binding."
+            and r.get("action") == "rest"
+            for r in responses
+        ), responses)
+
+        snap = engine.snapshot()
+        snap_dump = json.dumps(snap)
+        assert_true(secret not in snap_dump, "private omen text leaked into /state")
+        assert_true("recentDivineResponses" not in snap_dump,
+                    "recentDivineResponses leaked into /state god allowlist")
+        god_block = snap.get("god") or {}
+        assert_true("recentDivineResponses" not in god_block, god_block)
+
+        assert_true(not any(secret in line for line in engine.activityLog),
+                    "private omen leaked into public activity log")
+        chronicle = engine.civilization.get("chronicle") or []
+        assert_true(not any(secret in (entry.get("text") or "") for entry in chronicle),
+                    "private omen leaked into Chronicle")
+        print("  OK Sight shows recentDivineResponses; /state omits private Voice data")
     finally:
         se.GOD_MODE_ENABLED = old
 
@@ -4261,6 +4476,12 @@ def main():
     test_directive_and_providence_stay_separate()
     test_prompt_lines_frame_window()
     test_prompt_size_cap_and_divine_lines_render()
+    test_voice_binding_wording_and_guidance_active()
+    test_synthesize_divine_response_missing_and_valid()
+    test_voice_follow_clears_goal_continue_keeps()
+    test_voice_omen_cancels_special_turns_not_defer()
+    test_proclamation_sets_providence_and_cancels_special_turns()
+    test_sight_recent_divine_responses_and_snapshot_privacy()
     test_restore_does_not_refire_omen_memory()
 
     print("Sovereign God mode Phase 4 smoke -- bounded immediate miracles")

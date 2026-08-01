@@ -428,6 +428,7 @@ GOD_PREVIEW_CACHE_MAX = 32          # bounded, in-memory, never persisted
 GOD_PREVIEW_TTL_SECONDS = 60        # wall-clock, not frame-based (previews are a request-scoped concept)
 GOD_REQUEST_CACHE_MAX = 100         # bounded, in-memory idempotency store (never persisted -- see docs/plan)
 GOD_RECENT_INTERVENTIONS_CAP = 100  # persisted viewer-history ring inside godState
+GOD_DIVINE_RESPONSE_LOG_MAX = 50    # Voice adherence ring (Sight only, never /state)
 GOD_ACTIVE_EVENTS_CAP = 8           # bounded timed-effect ring (Phase 5 payload; plumbing only in Phase 2)
 GOD_TEXT_MAX_CHARS = 240            # title/narration/proclamation cap (post-NFC-normalization character count)
 GOD_TEXT_MAX_BYTES = 600            # a tighter-than-4x-chars UTF-8 byte cap so the byte check is load-bearing,
@@ -7403,36 +7404,187 @@ class SimEngine:
     def _divine_prompt_lines(self, agent):
         """Sovereign God mode (Phase 3): the at-most-two divine cognition
         lines for one agent's think payload -- (public_line, private_line),
-        either or both None. Deliberately SEPARATE from _current_directive:
-        elder leadership and divine providence are different fields that
-        must never overwrite or shadow each other (see docs/plan "Bounded
-        cognition impact" + this repo's own directive/providence
-        distinction). Enforces the exact
-        `startFrame <= frameTick < expiresFrame` predicate itself rather
-        than trusting _expire_divine_effects to have already run this same
-        tick -- an expired-but-not-yet-swept record must still never reach a
-        prompt."""
+        either or both None. Only active, unacknowledged binding Voice
+        guidance is injected; Matrix soft lines use separate helpers.
+        Deliberately SEPARATE from _current_directive: elder leadership and
+        divine providence are different fields that must never overwrite or
+        shadow each other."""
         if not GOD_MODE_ENABLED:
             return None, None
         god = self.civilization.get("godState")
         if not isinstance(god, dict):
             return None, None
-        ft = self.frameTick
+        agent_key = str(agent["id"])
         public_line = None
         prov = god.get("providence")
-        if isinstance(prov, dict):
-            start = prov.get("createdFrame", 0)
-            expires = prov.get("expiresFrame")
-            if isinstance(expires, int) and start <= ft < expires:
+        if isinstance(prov, dict) and self._voice_guidance_in_window(prov):
+            acked = prov.get("ackedAgentIds") or {}
+            if not acked.get(agent_key):
                 public_line = prov.get("text")
         private_line = None
-        omen = (god.get("privateOmens") or {}).get(str(agent["id"]))
-        if isinstance(omen, dict):
-            start = omen.get("createdFrame", 0)
-            expires = omen.get("expiresFrame")
-            if isinstance(expires, int) and start <= ft < expires:
+        omen = (god.get("privateOmens") or {}).get(agent_key)
+        if isinstance(omen, dict) and self._voice_guidance_in_window(omen):
+            if not omen.get("acked"):
                 private_line = omen.get("text")
         return public_line, private_line
+
+    def _cancel_voice_blocked_special_turns(self, agent_ids):
+        """Drop pending invention/sprite special turns for Voice-affected agents."""
+        for aid in agent_ids:
+            agent = aid if isinstance(aid, dict) else self._find_agent_by_id(aid)
+            if not agent:
+                continue
+            agent["inventionTurn"] = False
+            agent["inventionRetryUsed"] = False
+            agent["inventionBuildContext"] = None
+            agent["spriteDesignTurn"] = None
+
+    def _voice_guidance_in_window(self, record):
+        if not isinstance(record, dict):
+            return False
+        start = record.get("createdFrame", 0)
+        expires = record.get("expiresFrame")
+        return isinstance(expires, int) and start <= self.frameTick < expires
+
+    def _active_voice_guidance(self, agent):
+        """Active, unacknowledged binding Voice guidance for one agent."""
+        result = {
+            "voice_guidance_active": False,
+            "voice_guidance_id": None,
+            "voice_guidance_text": None,
+            "voice_guidance_public": False,
+            "voice_guidance_private": False,
+            "unacked_guidance": [],
+        }
+        if not GOD_MODE_ENABLED:
+            return result
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return result
+        agent_key = str(agent["id"])
+        unacked = []
+        prov = god.get("providence")
+        if isinstance(prov, dict) and self._voice_guidance_in_window(prov):
+            acked = prov.get("ackedAgentIds") or {}
+            if not acked.get(agent_key):
+                unacked.append({
+                    "id": prov.get("id"),
+                    "kind": "providence",
+                    "public": True,
+                    "text": prov.get("text"),
+                })
+        omen = (god.get("privateOmens") or {}).get(agent_key)
+        if isinstance(omen, dict) and self._voice_guidance_in_window(omen):
+            if not omen.get("acked"):
+                unacked.append({
+                    "id": omen.get("id"),
+                    "kind": "private_omen",
+                    "public": False,
+                    "text": omen.get("text"),
+                })
+        if not unacked:
+            return result
+        result["voice_guidance_active"] = True
+        result["unacked_guidance"] = unacked
+        primary = next((g for g in unacked if g["kind"] == "private_omen"), unacked[0])
+        result["voice_guidance_id"] = primary.get("id")
+        result["voice_guidance_text"] = primary.get("text")
+        result["voice_guidance_public"] = any(g["public"] for g in unacked)
+        result["voice_guidance_private"] = any(not g["public"] for g in unacked)
+        return result
+
+    def _mark_voice_guidance_acked(self, agent, guidance_entries):
+        """Record first response for each (agentId, guidanceId) pair."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        agent_key = str(agent["id"])
+        for entry in guidance_entries:
+            gid = entry.get("id")
+            kind = entry.get("kind")
+            if kind == "providence":
+                prov = god.get("providence")
+                if isinstance(prov, dict) and prov.get("id") == gid:
+                    acked = prov.setdefault("ackedAgentIds", {})
+                    acked[agent_key] = True
+            elif kind == "private_omen":
+                omen = (god.get("privateOmens") or {}).get(agent_key)
+                if isinstance(omen, dict) and omen.get("id") == gid:
+                    omen["acked"] = True
+
+    def _record_divine_response_adherence(self, agent, decision, voice):
+        """Log Voice adherence after a decision is applied. Lock held."""
+        if not voice.get("voice_guidance_active"):
+            return
+        unacked = list(voice.get("unacked_guidance") or [])
+        if not unacked:
+            return
+        divine_response = decision.get("divine_response")
+        if not isinstance(divine_response, dict):
+            divine_response = {
+                "stance": "continue",
+                "reason": "missing_divine_response",
+            }
+            synthetic = True
+        else:
+            synthetic = bool(decision.get("divine_response_synthetic"))
+        stance = divine_response.get("stance")
+        if stance not in ("follow", "continue"):
+            stance = "continue"
+            synthetic = True
+        reason = divine_response.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            reason = "missing_divine_response"
+            synthetic = True
+        else:
+            reason = reason.strip()[:GOD_TEXT_MAX_CHARS]
+        action = decision.get("action") or agent.get("lastAction") or "rest"
+        reaction = decision.get("message")
+        if not isinstance(reaction, str) or not reaction.strip():
+            reaction = reason
+        else:
+            reaction = reaction.strip()[:GOD_TEXT_MAX_CHARS]
+        god = self.civilization["godState"]
+        log_ring = god.setdefault("recentDivineResponses", [])
+        if not isinstance(log_ring, list):
+            log_ring = []
+            god["recentDivineResponses"] = log_ring
+        for entry in unacked:
+            record = {
+                "agentId": agent["id"],
+                "agentName": agent["name"],
+                "guidanceId": entry.get("id"),
+                "guidanceKind": entry.get("kind"),
+                "stance": stance,
+                "reason": reason,
+                "synthetic": synthetic,
+                "frameTick": self.frameTick,
+                "action": action,
+                "public": bool(entry.get("public")),
+            }
+            log_ring.insert(0, record)
+            kind_label = "public guidance" if entry.get("public") else "private guidance"
+            self._push_activity(
+                f'{agent["name"]} {stance}d divine {kind_label}: {reaction}')
+            self._push_communication(
+                "divine_response", agent["name"], "divine",
+                f"{stance}: {reason}", outcome=action, source="divine")
+            self._log_divine(
+                entry.get("id"), None, "voice_adherence",
+                {"agentId": agent["id"], "guidanceKind": entry.get("kind")},
+                {
+                    "stance": stance,
+                    "reason": reason,
+                    "action": action,
+                    "synthetic": synthetic,
+                    "agentName": agent["name"],
+                },
+                "adherence",
+                public=bool(entry.get("public")),
+            )
+        if len(log_ring) > GOD_DIVINE_RESPONSE_LOG_MAX:
+            del log_ring[GOD_DIVINE_RESPONSE_LOG_MAX:]
+        self._mark_voice_guidance_acked(agent, unacked)
 
     def _active_burning_bush_record(self, agent_id):
         """Active Burning Bush session for one agent, or None."""
@@ -14727,9 +14879,11 @@ class SimEngine:
 
         actives = self._active_project_districts()
         invention_required = self._invention_required()
+        voice_guidance = self._active_voice_guidance(agent)
+        voice_guidance_active = bool(voice_guidance.get("voice_guidance_active"))
         # One-shot invention-only turn (set by _maybe_invention_backstop):
         # the server swaps in a slim, proposal-only prompt for this call.
-        invention_turn = bool(agent.get("inventionTurn"))
+        invention_turn = bool(agent.get("inventionTurn")) and not voice_guidance_active
         # inventionBuildContext deliberately survives past this point (unlike
         # inventionTurn) -- it's read later in apply_decision's propose_blueprint
         # branch, which runs after the async LLM round-trip, and clearing it
@@ -14738,7 +14892,11 @@ class SimEngine:
             if invention_turn and agent.get("inventionBuildContext") else None
         if invention_turn:
             agent["inventionTurn"] = False
-        sprite_design_turn = bool(agent.get("spriteDesignTurn"))
+        elif voice_guidance_active:
+            self._cancel_voice_blocked_special_turns([agent["id"]])
+        sprite_design_turn = bool(agent.get("spriteDesignTurn")) and not voice_guidance_active
+        if voice_guidance_active and agent.get("spriteDesignTurn"):
+            agent["spriteDesignTurn"] = None
         # A saved mid-meeting session may still exist after the rollback flag
         # is switched off. Treat it as inert: no council prompt/actions may be
         # offered until the feature is explicitly re-enabled.
@@ -15433,6 +15591,9 @@ class SimEngine:
             # directive line, in either direction.
             "divine_public_line": divine_public_line,
             "divine_private_line": divine_private_line,
+            "voice_guidance_active": voice_guidance_active,
+            "voice_guidance_id": voice_guidance.get("voice_guidance_id"),
+            "voice_guidance_text": voice_guidance.get("voice_guidance_text"),
             "divine_burning_bush_line": self._burning_bush_prompt_line(agent),
             "divine_anointment_line": self._anointment_prompt_line(agent),
             "divine_sampling": self._god_divine_sampling_for_think(agent),
@@ -16752,6 +16913,7 @@ class SimEngine:
             "privateOmens": {},
             "activeEvents": [],
             "recentInterventions": [],
+            "recentDivineResponses": [],
             # Divine Matrix interventions (godState v2) — whisperCampaigns + agentSampling live.
             "whisperCampaigns": {},
             "agentSampling": {},  # Phase 2: live per-agent LLM sampling overrides
@@ -16810,6 +16972,16 @@ class SimEngine:
             [r for r in recent if isinstance(r, dict)][-GOD_RECENT_INTERVENTIONS_CAP:]
             if isinstance(recent, list) else []
         )
+        divine_responses = raw.get("recentDivineResponses")
+        out["recentDivineResponses"] = (
+            [r for r in divine_responses if isinstance(r, dict)][-GOD_DIVINE_RESPONSE_LOG_MAX:]
+            if isinstance(divine_responses, list) else []
+        )
+        if isinstance(out.get("providence"), dict):
+            out["providence"].setdefault("ackedAgentIds", {})
+        for omen in out.get("privateOmens", {}).values():
+            if isinstance(omen, dict):
+                omen.setdefault("acked", False)
         # godState v2: Matrix intervention maps — setdefault/backfill; drop malformed
         # entries conservatively (same discipline as privateOmens above).
         campaigns_raw = raw.get("whisperCampaigns")
@@ -19985,6 +20157,14 @@ class SimEngine:
             "frameTick": self.frameTick, "text": text, "status": "applied",
             "public": True,
         })
+        self._god_apply_providence({
+            "text": text,
+            "durationFrames": GOD_GUIDANCE_DEFAULT_DURATION_FRAMES,
+        })
+        living_ids = [
+            a["id"] for a in self.agents if a.get("deathFrame") is None
+        ]
+        self._cancel_voice_blocked_special_turns(living_ids)
         return {"interventionId": intervention_id, "kind": "proclamation", "text": text}
 
     def _god_apply_providence(self, payload):
@@ -20002,6 +20182,7 @@ class SimEngine:
         god["providence"] = {
             "id": intervention_id, "text": text, "createdFrame": self.frameTick,
             "expiresFrame": expires_frame, "visibility": "public",
+            "ackedAgentIds": {},
         }
         self._push_activity(f'A divine providence settles over the village: "{text}"')
         self._push_communication("divine_providence", "divine", "everyone", text,
@@ -20012,6 +20193,10 @@ class SimEngine:
             "text": text, "expiresFrame": expires_frame, "status": "applied",
             "public": True,
         })
+        living_ids = [
+            a["id"] for a in self.agents if a.get("deathFrame") is None
+        ]
+        self._cancel_voice_blocked_special_turns(living_ids)
         return {"interventionId": intervention_id, "kind": "providence", "text": text,
                 "expiresFrame": expires_frame,
                 "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None}
@@ -20037,12 +20222,14 @@ class SimEngine:
             "targetName": agent["name"] if agent else None,
             "text": text, "createdFrame": self.frameTick,
             "expiresFrame": expires_frame, "memoryWritten": False,
+            "acked": False,
         }
         self._god_record_intervention({
             "id": intervention_id, "kind": "private_omen", "frameTick": self.frameTick,
             "targetId": target_id, "text": text, "expiresFrame": expires_frame,
             "status": "applied", "public": False,
         })
+        self._cancel_voice_blocked_special_turns([target_id])
         return {"interventionId": intervention_id, "kind": "private_omen",
                 "targetId": target_id, "expiresFrame": expires_frame,
                 "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None}
@@ -20922,12 +21109,29 @@ class SimEngine:
 
         Sage emergency rush-heal and in-flight Sage discard call apply_decision
         directly (bypass_gate=True) so survival stays authoritative over story."""
+        voice = self._active_voice_guidance(agent)
+        if voice.get("voice_guidance_active"):
+            divine_response = decision.get("divine_response")
+            if not isinstance(divine_response, dict):
+                divine_response = {
+                    "stance": "continue",
+                    "reason": "missing_divine_response",
+                }
+                decision["divine_response"] = divine_response
+                decision["divine_response_synthetic"] = True
+            if divine_response.get("stance") == "follow":
+                agent["goal"] = None
+                agent["assignedTask"] = None
         if bypass_gate:
             self.apply_decision(agent, decision)
+            if voice.get("voice_guidance_active"):
+                self._record_divine_response_adherence(agent, decision, voice)
             return True
         gate = self._god_active_decision_gate_record(agent["id"])
         if not gate:
             self.apply_decision(agent, decision)
+            if voice.get("voice_guidance_active"):
+                self._record_divine_response_adherence(agent, decision, voice)
             return True
         mode = gate.get("mode")
         if mode == "possession":
@@ -20969,6 +21173,8 @@ class SimEngine:
                     source="divine")
                 return False
         self.apply_decision(agent, decision)
+        if voice.get("voice_guidance_active"):
+            self._record_divine_response_adherence(agent, decision, voice)
         return True
 
     def _expire_decision_gates(self, restore=False):
@@ -21825,7 +22031,24 @@ class SimEngine:
                 omen = omens.get(str(agent_id))
                 if not isinstance(omen, dict):
                     return None
-                return {"active": True, "expiresFrame": omen.get("expiresFrame")}
+                if not self._voice_guidance_in_window(omen):
+                    return None
+                return {
+                    "active": True,
+                    "expiresFrame": omen.get("expiresFrame"),
+                    "unacked": not omen.get("acked"),
+                }
+
+            def _providence_status(agent_id):
+                prov = god.get("providence")
+                if not isinstance(prov, dict) or not self._voice_guidance_in_window(prov):
+                    return None
+                acked = prov.get("ackedAgentIds") or {}
+                return {
+                    "active": True,
+                    "expiresFrame": prov.get("expiresFrame"),
+                    "unacked": not acked.get(str(agent_id)),
+                }
 
             def _sampling_status(agent_id):
                 rec = self._god_active_agent_sampling_record(agent_id)
@@ -21966,6 +22189,7 @@ class SimEngine:
                 "lastReasoning": (a.get("lastReasoning") or "")[:240] or None,
                 "currentDistrict": a.get("currentDistrict"),
                 "omen": _omen_status(a["id"]),
+                "providence": _providence_status(a["id"]),
                 "sampling": _sampling_status(a["id"]),
                 "contextMask": _mask_status(a["id"]),
                 "decisionGate": _gate_status(a["id"]),
@@ -21980,6 +22204,14 @@ class SimEngine:
                 },
                 "beliefCount": len(a.get("beliefs") or ()),
             } for a in self.agents]
+            recent_divine_responses = list(god.get("recentDivineResponses") or [])
+            if isinstance(filters, dict):
+                filter_agent_id = filters.get("agentId")
+                if filter_agent_id is not None:
+                    recent_divine_responses = [
+                        r for r in recent_divine_responses
+                        if isinstance(r, dict) and r.get("agentId") == filter_agent_id
+                    ]
             return {
                 "ok": True,
                 "frameTick": self.frameTick,
@@ -21987,6 +22219,7 @@ class SimEngine:
                 "providence": god.get("providence"),
                 "activeEvents": list(god.get("activeEvents") or [])[:GOD_ACTIVE_EVENTS_CAP],
                 "recentInterventions": list(god.get("recentInterventions") or [])[-GOD_RECENT_INTERVENTIONS_CAP:],
+                "recentDivineResponses": recent_divine_responses[:GOD_DIVINE_RESPONSE_LOG_MAX],
                 "architectZones": _architect_zones_sight_summary(),
                 "checkpoints": _checkpoints_sight_summary(),
                 "agents": agents,

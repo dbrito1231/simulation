@@ -1256,6 +1256,18 @@ DECISION_SCHEMA = {
                 "grid": {"type": "array"},
             },
         },
+        # Required on every decision turn while voice_guidance_active is true
+        # (binding Voice guidance). Missing/invalid values are synthesized in
+        # synthesize_divine_response() — not rejected.
+        "divine_response": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "properties": {
+                "stance": {"type": "string", "enum": ["follow", "continue"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["stance", "reason"],
+        },
     },
 }
 
@@ -2453,6 +2465,34 @@ def role_fallback_action(role, agent_data):
             "reasoning": "Working toward civilization goals."}
 
 
+def synthesize_divine_response(decision, agent_data):
+    """When binding Voice guidance is active, ensure divine_response is present.
+
+    Missing/invalid values synthesize continue + missing_divine_response without
+    rejecting the validated action."""
+    if not isinstance(decision, dict) or not agent_data.get("voice_guidance_active"):
+        return decision
+    raw = decision.get("divine_response")
+    valid = (
+        isinstance(raw, dict)
+        and raw.get("stance") in ("follow", "continue")
+        and isinstance(raw.get("reason"), str)
+        and raw.get("reason", "").strip()
+    )
+    if valid:
+        decision["divine_response"] = {
+            "stance": raw["stance"],
+            "reason": raw["reason"].strip()[:240],
+        }
+        return decision
+    decision["divine_response"] = {
+        "stance": "continue",
+        "reason": "missing_divine_response",
+    }
+    decision["divine_response_synthetic"] = True
+    return decision
+
+
 def normalize_decision(decision, agent_data):
     """Reject invalid talk_to_nearby and substitute role fallback."""
     if not isinstance(decision, dict):
@@ -3463,6 +3503,12 @@ def build_invention_prompt(data):
     )
 
 
+def _format_voice_guidance_line(kind, text):
+    """Binding Voice prompt line for public providence or private omen."""
+    label = "Divine guidance (binding)" if kind == "public" else "Private guidance (binding)"
+    return f"{label}: {text} State whether you follow or continue in divine_response.\n"
+
+
 def build_user_prompt(data, slim=False):
     """Fill in USER_PROMPT_TEMPLATE from the agent/civilization state. When
     slim=True (the context-overflow retry, see run_agent_decision), drop the
@@ -3540,23 +3586,16 @@ def build_user_prompt(data, slim=False):
     # entry) so flag-off / empty-chronicle prompts stay byte-identical.
     chronicle_line_raw = data.get("chronicle_line")
     chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
-    # Sovereign God mode (Phase 3, docs/plan-sovereign-god-mode-v2.md "Bounded
-    # cognition impact"): at most one public providence line and one private
-    # omen line, each rendered ONLY when the engine's Phase-3 fields are set
-    # (GOD_MODE_ENABLED and an active record within its frame window) --
-    # same fold-in-only-when-set pattern as every other optional line above,
-    # so flag-off / no-active-guidance prompts stay byte-identical. The
-    # fixed "You may interpret or ignore it." wording preserves agent
-    # autonomy per the plan's own example lines. These are SEPARATE from
-    # `directive` (elder leadership) both here and in the payload -- never
-    # folded together in either direction.
+    # Sovereign God mode (Phase 3 — Voice binding): public providence and
+    # private omens use binding prompt lines requiring divine_response; Matrix
+    # anoint/bush/story lines keep soft "interpret or ignore" wording.
     divine_lines_parts = []
     divine_public_raw = data.get("divine_public_line")
     if divine_public_raw:
-        divine_lines_parts.append(f"Divine omen: {divine_public_raw} You may interpret or ignore it.\n")
+        divine_lines_parts.append(_format_voice_guidance_line("public", divine_public_raw))
     divine_private_raw = data.get("divine_private_line")
     if divine_private_raw:
-        divine_lines_parts.append(f"Private omen: {divine_private_raw} You may interpret or ignore it.\n")
+        divine_lines_parts.append(_format_voice_guidance_line("private", divine_private_raw))
     divine_bush_raw = data.get("divine_burning_bush_line")
     if divine_bush_raw:
         divine_lines_parts.append(
@@ -4052,7 +4091,10 @@ def run_agent_decision(data):
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
                                           error=error_kind or "bad_response")
 
-        decision = score_belief_pitch_decision(normalize_decision(decision, agent_data), data)
+        decision = synthesize_divine_response(
+            score_belief_pitch_decision(normalize_decision(decision, agent_data), data),
+            agent_data,
+        )
 
         log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=error_kind)
         return decision
@@ -4138,6 +4180,7 @@ _ENGINE_DEPS = {
     "run_piano_module": run_piano_module,
     "run_meta_update": run_meta_update,
     "normalize_decision": normalize_decision,
+    "synthesize_divine_response": synthesize_divine_response,
     "build_agent_data": build_agent_data,
 }
 
@@ -4393,6 +4436,10 @@ def control_god_capabilities():
                                      "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
                                      "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES}},
                 "reversibilityClass": "irreversible",
+                "notes": (
+                    "Chronicle/activity proclamation plus auto-applies as timed "
+                    "providence (same text, default duration, replace slot)."
+                ),
             },
             # Sovereign God mode Phase 3 (docs/plan-sovereign-god-mode-v2.md
             # "Voice and providence").

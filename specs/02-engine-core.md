@@ -330,7 +330,7 @@ of `civilization` (no serializer change) and always exists, flag on or off:
 {
   "version": 2, "intervened": false, "nextInterventionSeq": 1,
   "providence": null, "privateOmens": {}, "activeEvents": [],
-  "recentInterventions": [],
+  "recentInterventions": [], "recentDivineResponses": [],
   "whisperCampaigns": {}, "agentSampling": {}, "contextMasks": {},
   "decisionGates": {}, "burningBush": {}, "anointments": {},
   "identityForges": {}, "architectZones": [], "checkpoints": []
@@ -374,19 +374,23 @@ the lock, stores the response, and consumes the preview (single-use once
 applied).
 
 **Command catalog (Phase 2).** `kind == "proclamation"` is applyable:
-`{"kind": "proclamation", "payload": {"text": str}}`. `text` passes through
-`_normalize_divine_text` (Unicode NFC; rejects NUL and C0/C1 controls other
-than space; rejects embedded newlines; enforces both a 240-character and a
-600-UTF-8-byte cap post-normalization — the byte cap is intentionally tighter
-than `4 * 240` so it is load-bearing, not merely redundant with the character
-cap) and is stored as plain text, never HTML. Applying a proclamation
-consumes `godState["nextInterventionSeq"]` for an id like `divine-1`, sets
-`intervened = True` (monotonic `false → true`), and writes an activity line,
-a `conversationLog` entry (`kind="divine_proclamation"`, `source="divine"`),
-and a chronicle entry (`kind="divine"`, `source="divine"`) — all with
-explicit non-emergent attribution. `story_event` (Phase 5, timed/composite)
-still validates far enough to be rejected cleanly with "not implemented in
-this phase"; an unrecognized kind is rejected as unknown.
+`{"kind": "proclamation", "payload": {"text": str, "durationFrames": int?}}`.
+`text` passes through `_normalize_divine_text` (Unicode NFC; rejects NUL and
+C0/C1 controls other than space; rejects embedded newlines; enforces both a
+240-character and a 600-UTF-8-byte cap post-normalization — the byte cap is
+intentionally tighter than `4 * 240` so it is load-bearing, not merely
+redundant with the character cap). **Proclamation auto-converts to
+providence:** applying a proclamation does **not** write a separate
+one-shot public record — it routes through the same `_god_apply_providence`
+machinery as a standalone `providence` command, occupying the single
+`godState["providence"]` slot with the same default/clamped `durationFrames`,
+disclose-then-replace fingerprint, `revoke_guidance`/`god_cancel` closure, and
+expiry discipline documented below. Activity/`conversationLog`/chronicle
+still attribute the event as a divine proclamation (`kind=
+"divine_proclamation"`, `source="divine"`) for operator readability, but
+cognition and adherence use the providence record. `story_event` (Phase 5,
+timed/composite) still validates far enough to be rejected cleanly with "not
+implemented in this phase"; an unrecognized kind is rejected as unknown.
 `god_cancel(target_id)` is plumbing only — there is nothing it handles;
 `revoke_guidance` (Phase 3, below) is the real cancellation path for
 providence and private omens, and it always returns a clean
@@ -411,15 +415,17 @@ work; providence/omen expiry is live from Phase 3 (below).
 `intervened`/`active_effects`/`rejected_commands` detail — see
 [12-ops.md](12-ops.md).
 
-## Sovereign God mode (Phase 3 — voice and providence)
+## Sovereign God mode (Phase 3 — Voice binding guidance)
 
 Three more catalog kinds are applyable, and `god_sight` gains the per-agent
-omen status field this section describes. Cognition-side rendering (the two
-prompt lines, the elder-directive separation) is [03](03-cognition.md).
+omen status field and `recentDivineResponses` adherence log this section
+describes. Cognition-side rendering (binding prompt lines, `divine_response`,
+the elder-directive separation) is [03](03-cognition.md).
 
 **`providence`** — `{"text": str, "durationFrames": int?}`. One active public
-non-binding line at a time, stored in `civilization["godState"]["providence"]`
-as `{id, text, createdFrame, expiresFrame, visibility: "public"}`.
+**binding** guidance line at a time, stored in
+`civilization["godState"]["providence"]` as `{id, text, createdFrame,
+expiresFrame, visibility: "public", ackedAgentIds?: {}}`.
 `durationFrames` is optional (default `GOD_GUIDANCE_DEFAULT_DURATION_FRAMES =
 5400`, ~3 minutes, mirroring `DIRECTIVE_TTL_FRAMES`) and is silently clamped
 into `GOD_GUIDANCE_MIN_DURATION_FRAMES..GOD_GUIDANCE_MAX_DURATION_FRAMES`
@@ -441,10 +447,11 @@ deceased (`deathFrame is not None`) target is rejected before the text is
 even normalized. Stored in `civilization["godState"]["privateOmens"]`, keyed
 **only** by `str(agent["id"])`, one record per agent:
 `{id, targetId, targetName, text, createdFrame, expiresFrame,
-memoryWritten}`. `targetName` is a non-authoritative display snapshot only.
-Never touches public activity/`conversationLog`/chronicle. Replacement
-follows the same disclose-then-replace fingerprint mechanism as providence,
-keyed per-target.
+memoryWritten, acked?: bool}`. `targetName` is a non-authoritative display
+snapshot only. **Binding** — same `divine_response` contract as public
+providence ([03](03-cognition.md)). Never touches public activity/
+`conversationLog`/chronicle. Replacement follows the same disclose-then-
+replace fingerprint mechanism as providence, keyed per-target.
 
 **`whisper_campaign`** — `{"theme": str, "durationFrames": int?,
 "whispers": [{targetId, text}, ...]}` (max `GOD_WHISPER_CAMPAIGN_MAX_TARGETS =
@@ -660,6 +667,40 @@ resume. Audit `public: true`. `deja_vu_replay` rejects when
 stub). Sight lists checkpoint summaries (no absolute disk paths); `checkpoints`
 metadata is **not** in `/state` `god` allowlist.
 
+**Voice apply side effects.** `_god_apply_providence`, `_god_apply_private_omen`,
+whisper-campaign per-target omens, and proclamation (via the providence path)
+each call `_cancel_voice_blocked_special_turns(affected_agent_ids)` at apply
+time. That helper drops any pending `sprite_design_only` or `invention_only`
+turn for those agents — clears the special-turn flag, does not reschedule it.
+The same cancellation runs on every tick while Voice guidance remains active
+and unacknowledged for an agent ([03](03-cognition.md)). This is a hard drop,
+not a soft defer to after guidance expires.
+
+**Divine-response log.** `godState["recentDivineResponses"]` is a bounded
+newest-first ring (cap `GOD_DIVINE_RESPONSE_LOG_MAX`, same order of magnitude
+as `recentInterventions`) of adherence records written when an agent's think
+records a valid or synthesized `divine_response` against active guidance:
+
+```json
+{
+  "agentId": 3,
+  "agentName": "Ash",
+  "guidanceId": "divine-12",
+  "guidanceKind": "providence" | "private_omen",
+  "stance": "follow" | "continue",
+  "reason": "…",
+  "synthetic": false,
+  "frameTick": 120450,
+  "action": "contribute_resources"
+}
+```
+
+`synthetic: true` when the engine supplied `missing_divine_response`.
+`reason` is always operator-visible in Sight; private-omen **text** itself
+never appears here — only the agent's stated adherence reason. The log is
+**private** (never in `/state`); `god_sight()` exposes it in full for the
+authenticated operator. Entries are never folded into agent prompts.
+
 **`revoke_guidance`** — `{"id": str}`. Ends an active providence or private
 omen early by its intervention id, whichever it matches (checked in that
 order); an id that no longer resolves to anything active — already expired,
@@ -699,12 +740,15 @@ replace, or a `revoke_guidance` targeting one sets `"public": False`, and
 this is the one guard standing between a private omen and a public `/state`
 leak, so every new intervention-recording call site MUST set `"public"`
 explicitly. `god_sight(filters)`'s per-agent projection exposes omen
-**status** only — `{"active": true, "expiresFrame": int}` or `None` — never
-the omen's text; the text itself is still reachable through
-`recentInterventions` in the same `god_sight` response (an "intervention
-outcome", explicitly in scope for the authenticated sight route) or by the
-operator recalling what they wrote. No omen content ever reaches unauthenticated
-surfaces.
+**status** only — `{"active": true, "expiresFrame": int, "unacked": bool}` or
+`None` — never the omen's text; `unacked` is true while the agent has not yet
+recorded a `divine_response` for that guidance id. The authenticated sight
+response also carries `recentDivineResponses` (the bounded adherence ring
+above) and per-agent slices filtered from it. Guidance text itself is still
+reachable through `recentInterventions` in the same `god_sight` response (an
+"intervention outcome", explicitly in scope for the authenticated sight route)
+or by the operator recalling what they wrote. No omen content ever reaches
+unauthenticated surfaces.
 
 ## Sovereign God mode (Phase 4 — bounded immediate miracles)
 
@@ -1024,13 +1068,14 @@ its normal closure path (`_close_providence`, `_close_omen`, or
 `_close_story_event`) and returns `{"ok": true, "cancelled": true,
 "targetId": ..., "targetKind": "providence"|"private_omen"|"story_event"}`.
 No match — including any id minted by an irreversible Phase 4 miracle
-(`agent_vitals`/`grant_resource`/`structure_condition`) or a one-shot
-`proclamation`, none of which is ever stored in any of the three searched
-stores — returns the same `{"ok": true, "cancelled": false, "reason":
-"nothing to cancel", "targetId": ...}` shape Phase 2 already established, so
-a miracle id is refused by construction rather than through a kind-specific
-carve-out. This is a direct, lock-held mutation with no preview/apply step,
-matching the shape Phase 2 already gave this route.
+(`agent_vitals`/`grant_resource`/`structure_condition`), none of which is
+ever stored in any of the three searched stores — returns the same
+`{"ok": true, "cancelled": false, "reason": "nothing to cancel",
+"targetId": ...}` shape Phase 2 already established, so a miracle id is
+refused by construction rather than through a kind-specific carve-out.
+(Proclamation applies as providence and is cancellable via the providence
+slot when still active.) This is a direct, lock-held mutation with no
+preview/apply step, matching the shape Phase 2 already gave this route.
 
 **Preview — divine vs. custom-rule composition.** When a `story_event`
 preview's `modifiers` include `gather_yield_multiplier` or

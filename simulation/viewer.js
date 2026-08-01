@@ -2691,7 +2691,11 @@ resetBtn.addEventListener("click", doReset);
 
 // Keyboard shortcut (R) kept for convenience alongside the visible button.
 document.addEventListener("keydown", (e) => {
-  if (e.key === "r" || e.key === "R") doReset();
+  if (e.key !== "r" && e.key !== "R") return;
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  const t = e.target;
+  if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/i.test(t.tagName))) return;
+  doReset();
 });
 
 // (No tab-hidden warning anymore: the legacy client sim paused when the tab
@@ -2887,6 +2891,7 @@ const godHistoryListEl = document.getElementById("godHistoryList");
 const godLawsActiveEl = document.getElementById("godLawsActive");
 const godSightOutputEl = document.getElementById("godSightOutput");
 const godSightAgentSelectEl = document.getElementById("godSightAgentSelect");
+const godVoiceAdherenceListEl = document.getElementById("godVoiceAdherenceList");
 
 const DIVINE_FEATURE_ICONS = {
   unlock:  '<svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 7.5-2"/></svg>',
@@ -3368,6 +3373,10 @@ function openDivineModal(name) {
   divineModalOpenFeature = name;
   if (divineModalScrimEl) divineModalScrimEl.classList.add("open");
   if (name === "sight" && godEffectivelyAuthorized()) refreshGodSight();
+  if (name === "voice" && godEffectivelyAuthorized()) {
+    if (godLastSight) renderGodVoiceAdherence();
+    else refreshGodSight();
+  }
   if (name === "laws") renderGodLawsActive();
   if (name === "history") renderGodHistory();
   renderGodPinRow();
@@ -3531,7 +3540,7 @@ function wireDivineForm(formSelector, opts) {
 }
 
 function refreshGodSightIfOpen() {
-  if (godActiveTab === "sight" && godEffectivelyAuthorized()) refreshGodSight();
+  if ((godActiveTab === "sight" || godActiveTab === "voice") && godEffectivelyAuthorized()) refreshGodSight();
   if (godActiveTab === "laws") renderGodLawsActive();
 }
 
@@ -3646,20 +3655,84 @@ function renderGodAppliedHtml(data) {
   return html;
 }
 
+function godStanceBadgeHtml(stance) {
+  const norm = String(stance || "").toLowerCase();
+  const css = norm === "follow" ? "divine-voice-stance-follow" : "divine-voice-stance-continue";
+  const label = norm === "follow" ? "follow" : "continue";
+  return `<span class="divine-badge ${css}">${escapeHtml(label)}</span>`;
+}
+
+function godFilterDivineResponsesForAgent(responses, agent) {
+  if (!agent) return [];
+  const agentId = agent.id;
+  const agentName = agent.name;
+  return (responses || []).filter((r) => {
+    if (!r || typeof r !== "object") return false;
+    if (agentId != null && r.agentId === agentId) return true;
+    return agentName && r.agentName === agentName;
+  });
+}
+
+const GOD_VOICE_ADHERENCE_SIGHT_CAP = 20;
+
+function godRenderDivineResponseRows(entries, opts) {
+  const showAgent = !(opts && opts.hideAgent);
+  if (!entries.length) {
+    return `<div class="divine-note">${escapeHtml((opts && opts.emptyText) || "No adherence records yet.")}</div>`;
+  }
+  const head = showAgent
+    ? "<tr><th>Agent</th><th>Stance</th><th>Reason</th><th>Kind</th><th>Action</th><th>Frame</th></tr>"
+    : "<tr><th>Stance</th><th>Reason</th><th>Kind</th><th>Action</th><th>Frame</th></tr>";
+  const rows = entries.map((r) => {
+    const synthetic = r.synthetic
+      ? ' <span class="divine-voice-synthetic" title="Server synthesized missing divine_response">synthetic</span>'
+      : "";
+    const reason = escapeHtml(String(r.reason || "—"));
+    const kind = escapeHtml(String(r.guidanceKind || "—"));
+    const action = escapeHtml(String(r.action || "—"));
+    const frame = escapeHtml(String(r.frameTick ?? "—"));
+    const agentCell = showAgent
+      ? `<td>${escapeHtml(String(r.agentName || r.agentId || "—"))}</td>`
+      : "";
+    return `<tr>${agentCell}<td>${godStanceBadgeHtml(r.stance)}${synthetic}</td><td class="divine-voice-reason">${reason}</td><td>${kind}</td><td>${action}</td><td>${frame}</td></tr>`;
+  }).join("");
+  return `<table class="divine-voice-adherence-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderGodVoiceAdherence() {
+  if (!godVoiceAdherenceListEl) return;
+  if (!godLastSight) {
+    godVoiceAdherenceListEl.innerHTML = `<div class="divine-note">Refresh Sight first (or click Refresh above).</div>`;
+    return;
+  }
+  const entries = (godLastSight.recentDivineResponses || []).slice();
+  godVoiceAdherenceListEl.innerHTML = godRenderDivineResponseRows(entries, {
+    emptyText: "No village adherence records yet.",
+  });
+}
+
 // --- Sight ---------------------------------------------------------------
 async function refreshGodSight() {
   const resp = await godApiFetch("/control/god/sight");
   if (!resp.data || !resp.data.ok) {
     godLastSight = null;
     renderGodError(godSightOutputEl, (resp.data && resp.data.reason) || "sight unavailable");
+    if (godVoiceAdherenceListEl) {
+      godVoiceAdherenceListEl.innerHTML = `<div class="divine-note">Sight unavailable — refresh failed.</div>`;
+    }
     return;
   }
   godLastSight = resp.data;
   renderGodSight();
+  renderGodVoiceAdherence();
   populateGodCheckpointRestoreSelect();
   if (godActiveTab === "laws") renderGodLawsActive();
 }
 document.getElementById("godSightRefreshBtn").addEventListener("click", refreshGodSight);
+const godVoiceAdherenceRefreshBtn = document.getElementById("godVoiceAdherenceRefreshBtn");
+if (godVoiceAdherenceRefreshBtn) {
+  godVoiceAdherenceRefreshBtn.addEventListener("click", refreshGodSight);
+}
 
 function renderGodSight() {
   if (!godLastSight) { godSightOutputEl.innerHTML = ""; return; }
@@ -3668,8 +3741,15 @@ function renderGodSight() {
   if (!agent) { godSightOutputEl.innerHTML = `<div class="divine-note">No agents.</div>`; return; }
   const resourceRows = Object.entries(agent.resources || {})
     .map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(String(v))}`).join(", ") || "(none)";
+  const omenUnacked = agent.omen && agent.omen.unacked
+    ? ' <span class="divine-voice-unacked">unacked</span>' : "";
   const omen = agent.omen
-    ? `active, ${escapeHtml(godCountdownLabel(agent.omen.expiresFrame))}`
+    ? `active, ${escapeHtml(godCountdownLabel(agent.omen.expiresFrame))}${omenUnacked}`
+    : "none";
+  const providenceUnacked = agent.providence && agent.providence.unacked
+    ? ' <span class="divine-voice-unacked">unacked</span>' : "";
+  const providence = agent.providence
+    ? `active, ${escapeHtml(godCountdownLabel(agent.providence.expiresFrame))}${providenceUnacked}`
     : "none";
   const sampling = agent.sampling
     ? `active, ${escapeHtml(agent.sampling.model || "?")} @ ${escapeHtml(String(agent.sampling.temperature))}${agent.sampling.expiresFrame ? `, ${escapeHtml(godCountdownLabel(agent.sampling.expiresFrame))}` : " (until revoke)"}`
@@ -3681,17 +3761,27 @@ function renderGodSight() {
     .filter((e) => e.status === "active")
     .map((e) => `<li>${escapeHtml(e.kind === "story_event" ? (e.title || e.kind) : e.kind)} — ${escapeHtml(godCountdownLabel(e.expiresFrame))}${e.visibility === "private" ? " <span class=\"divine-history-badge divine-history-private\">private</span>" : ""}</li>`)
     .join("") || "<li>(none)</li>";
+  const agentResponses = godFilterDivineResponsesForAgent(
+    godLastSight.recentDivineResponses, agent
+  ).slice(0, GOD_VOICE_ADHERENCE_SIGHT_CAP);
+  const adherenceHtml = godRenderDivineResponseRows(agentResponses, {
+    hideAgent: true,
+    emptyText: "No adherence records for this agent yet.",
+  });
   godSightOutputEl.innerHTML =
     `<div><span class="divine-kv-key">Health:</span> ${escapeHtml(String(agent.health))} &nbsp; <span class="divine-kv-key">Hunger:</span> ${escapeHtml(String(agent.hunger))}</div>` +
     `<div><span class="divine-kv-key">Incapacitated:</span> ${escapeHtml(String(!!agent.incapacitated))} &nbsp; <span class="divine-kv-key">District:</span> ${escapeHtml(String(agent.currentDistrict || "—"))}</div>` +
     `<div><span class="divine-kv-key">Resources:</span> ${resourceRows}</div>` +
     `<div><span class="divine-kv-key">Last action:</span> ${escapeHtml(String(agent.lastAction || "—"))}</div>` +
     `<div><span class="divine-kv-key">Private omen:</span> ${omen}</div>` +
+    `<div><span class="divine-kv-key">Providence:</span> ${providence}</div>` +
     `<div><span class="divine-kv-key">Sampling override:</span> ${sampling}</div>` +
     `<div><span class="divine-kv-key">Context mask:</span> ${contextMask}</div>` +
     `<div><span class="divine-kv-key">Memory tiers:</span> working ${escapeHtml(String((agent.memoryCounts || {}).working ?? 0))}, shortTerm ${escapeHtml(String((agent.memoryCounts || {}).shortTerm ?? 0))}</div>` +
     `<div><span class="divine-kv-key">Beliefs held:</span> ${escapeHtml(String(agent.beliefCount ?? 0))}</div>` +
-    `<div><span class="divine-kv-key">Active effects (village-wide, this authenticated view):</span><ul>${active}</ul></div>`;
+    `<div><span class="divine-kv-key">Active effects (village-wide, this authenticated view):</span><ul>${active}</ul></div>` +
+    `<div class="divine-voice-adherence-sight"><span class="divine-kv-key">Voice adherence:</span>${adherenceHtml}` +
+    `<p class="divine-note divine-voice-adherence-xlink">See Voice → Adherence for the full village feed.</p></div>`;
   const checkpoints = (godLastSight.checkpoints || [])
     .map((c) => `<li>${escapeHtml(String(c.label || c.id))} — frame ${escapeHtml(String(c.frameTick))} (${escapeHtml(String(c.id))})</li>`)
     .join("") || "<li>(none)</li>";

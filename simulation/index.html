@@ -234,6 +234,7 @@
         <div class="divine-tab-panel" id="divineTab-voice" style="display:none">
           <fieldset class="divine-fieldset" id="godProclamationFieldset">
             <legend data-tip='{"t":"Proclamation","d":"A one-off public announcement. Writes to activity + the Chronicle as a divine event. No lasting cognition effect."}'>Proclamation (public, one-shot)</legend>
+            <p class="divine-help"><strong>Binding guidance.</strong> Agents with active providence must answer via <code>divine_response</code> (follow or continue + reason) on their next think. Proclamation also sets timed providence (same slot, duration, and revoke as Providence).</p>
             <div class="divine-row"><label data-tip='{"t":"Message","d":"Public text shown to the village and Chronicle."}'>Text <textarea id="godProcText"></textarea></label></div>
             <div class="divine-actions">
               <button type="button" id="godProcPreviewBtn" data-tip='{"t":"Preview","d":"Validate the command without mutating the world. Apply stays disabled until preview succeeds."}'>Preview</button>
@@ -243,6 +244,7 @@
           </fieldset>
           <fieldset class="divine-fieldset" id="godProvidenceFieldset">
             <legend data-tip='{"t":"Providence","d":"A public, cancellable guidance banner that expires after a duration."}'>Providence (public, cancellable)</legend>
+            <p class="divine-help"><strong>Binding guidance.</strong> Every agent must answer via <code>divine_response</code> (follow or continue + reason) while providence is active. Check adherence under Adherence below or in Sight.</p>
             <div class="divine-row"><label data-tip='{"t":"Providence text","d":"Public guidance shown while the providence is active."}'>Text <textarea id="godProvText"></textarea></label></div>
             <div class="divine-row"><label data-tip='{"t":"Duration","d":"How long providence stays active, in 30-frames-per-second sim time."}'>Duration (frames) <input type="number" id="godProvDuration" /></label></div>
             <div class="divine-actions">
@@ -253,6 +255,7 @@
           </fieldset>
           <fieldset class="divine-fieldset" id="godOmenFieldset">
             <legend data-tip='{"t":"Private omen","d":"A guidance line seen ONLY by one agent, and never in public /state. On expiry it enters that agent&#39;s memory exactly once."}'>Private omen (one agent, cancellable)</legend>
+            <p class="divine-help"><strong>Binding guidance.</strong> The target agent must answer via <code>divine_response</code> (follow or continue + reason) while the omen is active. Omen text never appears in adherence logs — only the agent&#39;s stated reason.</p>
             <div class="divine-row"><label data-tip='{"t":"Target","d":"One living agent. Keyed by stable id, so a rename never misroutes it."}'>Agent <select id="godOmenAgentSelect"></select></label></div>
             <div class="divine-row"><label data-tip='{"t":"Omen text","d":"Private guidance visible only to the target agent."}'>Text <textarea id="godOmenText"></textarea></label></div>
             <div class="divine-row"><label data-tip='{"t":"Duration","d":"How long the omen stays active, in 30-frames-per-second sim time."}'>Duration (frames) <input type="number" id="godOmenDuration" /></label></div>
@@ -264,6 +267,7 @@
           </fieldset>
           <fieldset class="divine-fieldset" id="godWhisperCampaignFieldset">
             <legend data-tip='{"t":"Whisper campaign","d":"Batch private omens to multiple agents under one theme. Each agent sees only their whisper; campaign theme never appears in public /state."}'>Whisper campaign (multi-agent, cancellable)</legend>
+            <p class="divine-help"><strong>Binding guidance.</strong> Each targeted agent must answer via <code>divine_response</code> (follow or continue + reason) for their whisper. Whisper text never appears in adherence logs.</p>
             <div class="divine-row"><label data-tip='{"t":"Theme","d":"Shared campaign label for operator audit — not injected into agent prompts."}'>Theme <input type="text" id="godWhisperTheme" /></label></div>
             <div class="divine-row"><label data-tip='{"t":"Duration","d":"How long each whisper omen stays active."}'>Duration (frames) <input type="number" id="godWhisperDuration" /></label></div>
             <div id="godWhisperRows" class="divine-whisper-rows"></div>
@@ -276,6 +280,15 @@
             </div>
             <div class="divine-result" id="godWhisperResult"></div>
           </fieldset>
+          <div class="divine-voice-adherence-section">
+            <h3 class="divine-section-title">Adherence</h3>
+            <p class="divine-help">Village-wide log of how agents answered binding Voice guidance. Refreshes from Sight — private omen text is never shown, only each agent&#39;s stated reason.</p>
+            <div class="divine-actions">
+              <button type="button" id="godVoiceAdherenceRefreshBtn"
+                data-tip='{"t":"Refresh adherence","d":"Re-fetch /control/god/sight and update the village-wide adherence log."}'>Refresh</button>
+            </div>
+            <div id="godVoiceAdherenceList" class="divine-voice-adherence-list divine-result"></div>
+          </div>
         </div>
 
         <div class="divine-tab-panel" id="divineTab-matrix" style="display:none">

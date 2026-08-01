@@ -83,7 +83,7 @@ engine lock for a consistent read:
 | `activity` | recent activity log entries |
 | `conversation` | last 30 conversation log entries |
 | `config` | `{WORLD_W, WORLD_H, flags: {...}}` — the full flag-value snapshot echoed to the viewer, see specs/01-architecture.md's flag index |
-| `god` | **Present only when `GOD_MODE_ENABLED`.** `{intervened, providence, activePublicEvents, recentPublicInterventions}` (Phase 3 adds `providence`, public by design — [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-and-providence)) — `snapshot()` builds `civ` as an explicit allowlist dict, so this key is opt-in by construction; `privateOmens`, the in-memory idempotency store, and the token can never leak by omission, and `recentPublicInterventions` is additionally filtered to `"public": True` records so a private omen's outcome can never appear here either. See "Sovereign God mode" below. |
+| `god` | **Present only when `GOD_MODE_ENABLED`.** `{intervened, providence, activePublicEvents, recentPublicInterventions}` (Phase 3 adds `providence`, public by design — [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-binding-guidance)) — `snapshot()` builds `civ` as an explicit allowlist dict, so this key is opt-in by construction; `privateOmens`, `recentDivineResponses`, the in-memory idempotency store, and the token can never leak by omission, and `recentPublicInterventions` is additionally filtered to `"public": True` records so a private omen's outcome can never appear here either. See "Sovereign God mode" below. |
 
 ## Server startup/shutdown
 
@@ -160,8 +160,10 @@ one uniform failure shape:
   preview. See [02-engine-core.md](02-engine-core.md) for the full
   preview/idempotency/expiry contract these routes front.
 
-Phase 2 shipped exactly one applyable command kind, `proclamation`; Phase 3
-added `providence`/`private_omen`/`revoke_guidance`; Divine Matrix Phase 1 adds
+Phase 2 shipped exactly one applyable command kind, `proclamation` (which
+auto-applies as timed providence — see
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-binding-guidance));
+Phase 3 added `providence`/`private_omen`/`revoke_guidance`; Divine Matrix Phase 1 adds
 `whisper_campaign` (batch private omens); Divine Matrix Phase 2 adds
 `agent_sampling` / `revoke_agent_sampling` (per-agent LLM sampling overlay,
 private); Divine Matrix Phase 3 adds `memory_insert` / `memory_delete` /
@@ -217,11 +219,12 @@ intervention `id`), every active `architectZones` entry (by zone `id`), then eve
 finds through that record's normal closure path (also closing a
 `story_event`'s linked providence, if any, in the same step) and returning
 `{"ok": true, "cancelled": true, "targetId", "targetKind"}`. No match —
-including an id minted by an irreversible Phase 4 miracle or a one-shot
-`proclamation`, neither of which is ever stored in any of the three searched
-stores — returns `{"ok": true, "cancelled": false, "reason": "nothing to
-cancel", "targetId"}`, so miracle ids are refused by construction rather than
-through a special-cased error. See
+including an id minted by an irreversible Phase 4 miracle, none of which is
+ever stored in any of the searched stores — returns `{"ok": true,
+"cancelled": false, "reason": "nothing to cancel", "targetId"}`, so miracle
+ids are refused by construction rather than through a special-cased error.
+(Proclamation applies as providence and is cancellable when still active.)
+See
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
 for the full Phase 5 contract.
 
@@ -232,9 +235,12 @@ is the first and only client of all five routes. It reads
 `god_preview()`'s response (documented in
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel))
 to drive its preview→apply flow, and reads `god_sight()`'s `agents`/
-`activeEvents`/`recentInterventions` for its Sight tab. No new response shape
-was needed for the viewer — every field it reads was already documented by
-Phases 2–6.
+`activeEvents`/`recentInterventions`/`recentDivineResponses` for its Sight
+and Voice Adherence panels. `/control/god/capabilities` documents that
+`proclamation` applies as timed providence (optional `durationFrames`, same
+slot/revoke/expiry as `providence`). No new response shape was needed for the
+viewer beyond `recentDivineResponses` — every other field it reads was
+already documented by Phases 2–6.
 
 ### Optional Phase 8: `/control/god/compile`
 

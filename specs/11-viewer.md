@@ -65,7 +65,8 @@ world state beyond a cached palette/season key.
 - Controls (Pause/Resume/Reset) POST to `/control/pause|resume|reset` via
   `postControl()` (`viewer.js`) with optimistic local flips
   reconciled by the next poll; keyboard shortcut `R` also resets
-  (`viewer.js`). Reset additionally prompts for the `SIM_RESET_PASSWORD`
+  (`viewer.js`), ignored while focus is in an input, textarea, select, or
+  contenteditable field. Reset additionally prompts for the `SIM_RESET_PASSWORD`
   value (default `reset` when unset) after the confirm dialog; cancel/empty
   aborts, and HTTP 401 shows an alert — see [04-http-api.md](04-http-api.md).
 
@@ -753,14 +754,27 @@ conflict the same way — see this phase's report for the underlying gap.
   every other panel already reads) plus a Refresh button that calls
   `GET /control/god/sight` and renders the selected agent's health/hunger/
   incapacitated/district/resources/last action, private-omen status
-  (active + countdown only, never the omen text — matching `god_sight()`'s
-  own restraint), and every active effect from the authenticated
+  (active + countdown + `unacked` flag only, never the omen text — matching
+  `god_sight()`'s own restraint), every active effect from the authenticated
   `activeEvents` list (including private-visibility ones, tagged with a
-  `private` badge) with a countdown each.
+  `private` badge) with a countdown each, and a **Voice adherence** subsection
+  listing `recentDivineResponses` entries for the selected agent (newest first,
+  capped display): agent name, guidance kind/id, `follow`/`continue` stance,
+  reason (including `missing_divine_response` when synthetic), frame, and the
+  applied `action`. Private omen text never appears in this list.
 - **Voice** — four independent subforms (`proclamation`, `providence` with
   a duration field, `private_omen` with an agent selector and duration, and
   `whisper_campaign` with shared theme + per-agent whisper rows up to 12),
-  each following the Preview → Apply contract above.
+  each following the Preview → Apply contract above. **Proclamation** applies
+  as timed providence (same slot, duration, revoke) per
+  [02-engine-core.md](02-engine-core.md); capabilities echoes optional
+  `durationFrames` on the proclamation kind.
+- **Voice Adherence** — a dedicated panel section (reachable from the Voice
+  feature window and cross-linked from Sight) that renders the full authenticated
+  `recentDivineResponses` ring from the latest `god_sight()` refresh: all
+  agents, newest first, with stance/reason/synthetic flag/guidance kind/action/
+  frame. This is the operator's primary adherence surface; it never shows private
+  omen text, only each agent's stated reason. Refresh reuses the same Sight fetch.
 - **Matrix** — brain, memory, distortion, possession, dialogue, identity, zone,
   and checkpoint interventions (see phase list below). Each tool fieldset shows
   an always-visible `.divine-help` blurb under its legend plus `data-tip`

@@ -251,7 +251,7 @@ revocation, or replacement — whichever happens first), its text is written
 into the target's ordinary memory via
 `_push_memory(agent, text, kind="divine_omen")`, guarded by a `memoryWritten`
 flag on the omen record so a restore-time re-sweep of an already-closed omen
-can never fire it twice. See [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-and-providence)
+can never fire it twice. See [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-binding-guidance)
 for the full closure/expiry mechanics.
 
 `god_sight(filters)`'s per-agent projection exposes omen **status** only —
@@ -273,7 +273,7 @@ memories use kinds `divine_false_memory` (default insert) or `divine_belief`
 other recalled line, but never in public activity/communication/chronicle.
 `belief_plant` may also write `civilization["memeTexts"]` when
 `plantInMemeTexts` is true. See
-[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-and-providence)
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-3--voice-binding-guidance)
 for command payloads and `MemoryStore.delete_where`.
 
 ## Divine Matrix: Identity Forge (Phase 8)
