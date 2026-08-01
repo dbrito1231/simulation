@@ -4,7 +4,7 @@
 
 **Branch:** `feature/four-breakthroughs-ace`
 
-**HEAD:** `3576656 docs(sdd): atmosphere calendar, visual flags, viewer v2`
+**HEAD:** `b0584ef docs(sdd): note atmosphere rendering is permanent in specs/11`
 
 **Status:** Four breakthroughs **A**, **C**, **B**, and **E** are implemented on this branch (based on the God-mode feature stack). Plan-level exclusions **D** (God Compiler Phase 8) and **F** (`ALWAYS_ON_MODULES` / PIANO re-soak) remain out of scope.
 
@@ -25,7 +25,7 @@ Commits since `fad699d` (storm presence pack on main):
 | 1 | **A — Town integrity** | Slower decay (`0.025`/goods tick), autonomous repair campaigns + widened critical backstop, in-sim ruin cull, disaster retune (`DISASTER_PROB=0.002`, damage `(30,55)`), God `repair_structures` + `clear_ruins` |
 | 2 | **C — Hunt + conflict** | Stock/wildlife-aware hunter precedence, hunt damage retune (`HUNT_DAMAGE=2`, `HUNT_DAMAGE_HUNTER=4`), forced hunt goals when starving with prey but no gatherable food, bounded PvP via `confront_agent` |
 | 3 | **B — Real trade** | Per-settlement `settlementStores`, authoritative caravan delivery + ocean water pathing, treaty tariffs (`TREATY_TARIFF_MAX=0.25`), new `deliver_caravan` action (full action-sync) |
-| 4 | **E — Atmosphere** | Calendar stretch (`DAY_FRAMES=18000`, `YEAR_FRAMES=432000`, `SEASON_FRAMES=108000`), four visual v2 flags, viewer lighting/seasonal terrain/weather particles/God console chrome |
+| 4 | **E — Atmosphere** | Calendar stretch (`DAY_FRAMES=18000`, `YEAR_FRAMES=432000`, `SEASON_FRAMES=108000`), permanent viewer lighting/seasonal terrain/weather particles/God console chrome |
 
 ### A — Town integrity
 

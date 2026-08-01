@@ -1,5 +1,8 @@
 # Plan — Day/Night Lighting v2
 
+> **Superseded (2026-07-31):** `VISUAL_LIGHTING_V2_ENABLED` removed; v2 lighting is the
+> permanent viewer default. See `specs/11-viewer.md` § Atmosphere rendering.
+
 **Parent:** [two_sim_breakthroughs plan](../.cursor/plans/two_sim_breakthroughs_634bb2dd.plan.md) § E — Full atmosphere pack  
 **Status:** Planned — documentation only (Phase 4a). Implementation in Phase 4c.  
 **Branch:** `feature/four-breakthroughs-ace`  

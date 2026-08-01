@@ -1,5 +1,10 @@
 # Plan — Atmosphere Systems (weather FX, God chrome, calendar, flags)
 
+> **Superseded (2026-07-31):** The four atmosphere visual flags described below were
+> removed in favor of permanent viewer defaults. Canonical contract:
+> `specs/11-viewer.md` § Atmosphere rendering. Historical flag-gate design
+> record only.
+
 **Parent:** [two_sim_breakthroughs plan](../.cursor/plans/two_sim_breakthroughs_634bb2dd.plan.md) § E — Full atmosphere pack  
 **Status:** Planned — documentation only (Phase 4a).  
 **Branch:** `feature/four-breakthroughs-ace`  

@@ -155,10 +155,10 @@
 
 ### Specs
 
-- `specs/11-viewer.md` — lighting, terrain, particles, God chrome, flag semantics
-- `specs/01-architecture.md` — four new flags in flag index
+- `specs/11-viewer.md` — lighting, terrain, particles, God chrome (permanent defaults)
+- `specs/01-architecture.md` — flag index (52 module-level flags after atmosphere flags removed)
 - `specs/02-engine-core.md` — calendar constants and real-time cadence
-- `specs/12-ops.md` — visual flag operator notes
+- `specs/12-ops.md` — Divine Console operator notes
 
 ---
 

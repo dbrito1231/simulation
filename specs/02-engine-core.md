@@ -591,7 +591,7 @@ Payload (conceptual):
 
 ```json
 {
-  "scope": "ids" | "all_critical" | {"districtId": int},
+  "scope": "ids" | "all_critical" | {"districtId": string},
   "structureIds": [int]?,
   "conditionTarget": number?,
   "unRuin": true?
@@ -624,7 +624,7 @@ engine cull cleanup). Payload (conceptual):
 {
   "structureIds": [int]?,
   "minAgeFrames": int?,
-  "districtId": int?
+  "districtId": string?
 }
 ```
 
