@@ -6,6 +6,7 @@ No LLM runtime (Ollama) required. Run:
 """
 from __future__ import annotations
 
+import ast
 import os
 import re
 import sys
@@ -537,6 +538,181 @@ def test_market_only_settles_in_gold():
     print("  OK market-only (no mint) still settles priced trades in gold, unchanged")
 
 
+def _seed_two_settlements(engine):
+    """Ensure home + outpost settlements exist for trade smokes."""
+    c = engine.civilization
+    engine._init_settlements()
+    if len(c["settlements"]) >= 2:
+        return "home", "outpost"
+    outpost_did = "village_east"
+    c["settlements"].append({
+        "id": "outpost", "name": "Frontier Outpost", "districts": [outpost_did],
+    })
+    c["districts"][outpost_did]["settlementId"] = "outpost"
+    engine._ensure_settlement_stores()
+    return "home", "outpost"
+
+
+def _seed_ocean_transit(engine, district_id="beach"):
+    c = engine.civilization
+    c["projectRegistry"]["dock"] = {
+        "name": "Dock",
+        "function": {"unlocks": [
+            {"kind": "transit", "terrain": "ocean", "consumes": {"boat": 1}},
+        ]},
+    }
+    c["structures"].append({
+        "id": 9710, "type": "dock", "districtId": district_id,
+        "condition": 100, "isRuin": False,
+    })
+    c["stockpile"]["boat"] = 2
+
+
+def _caravan_ready_agent(engine, settlement_district="village_core"):
+    agent = engine.agents[0]
+    agent["currentDistrict"] = settlement_district
+    agent["resources"] = {"cart": 1, "wood": 8}
+    agent["goal"] = None
+    return agent
+
+
+def test_settlement_stores_isolate():
+    engine = make_engine()
+    home_sid, outpost_sid = _seed_two_settlements(engine)
+    agent_home = engine.agents[0]
+    agent_out = engine.agents[1]
+    agent_home["currentDistrict"] = "village_core"
+    agent_out["currentDistrict"] = "village_east"
+
+    engine._credit_settlement_overflow(agent_home, "wood", 5)
+    engine._credit_settlement_overflow(agent_out, "stone", 7)
+
+    home_store = engine._settlement_store_bucket(home_sid)
+    outpost_store = engine._settlement_store_bucket(outpost_sid)
+    assert_true(home_store.get("wood") == 5, home_store)
+    assert_true(home_store.get("stone", 0) == 0, home_store)
+    assert_true(outpost_store.get("stone") == 7, outpost_store)
+    assert_true(outpost_store.get("wood", 0) == 0, outpost_store)
+    print("  OK settlementStores isolate between settlements")
+
+
+def test_caravan_delivery_moves_goods():
+    engine = make_engine()
+    home_sid, outpost_sid = _seed_two_settlements(engine)
+    agent = _caravan_ready_agent(engine, "village_east")
+    before_agent_wood = agent["resources"]["wood"]
+    dest_store = engine._settlement_store_bucket(outpost_sid)
+    assert_true(dest_store.get("wood", 0) == 0, dest_store)
+
+    delivered = engine._deliver_caravan(agent, outpost_sid, source_settlement_id=home_sid)
+    assert_true(delivered, "expected caravan delivery to succeed")
+    assert_true(agent["resources"].get("wood", 0) == 0, agent["resources"])
+    assert_true(before_agent_wood > 0, before_agent_wood)
+    assert_true(dest_store.get("wood", 0) == before_agent_wood, dest_store)
+    log = engine.civilization.get("caravanLog") or []
+    assert_true(log and log[-1]["to"] == outpost_sid, log[-1] if log else None)
+    print(f"  OK delivery moved {before_agent_wood} wood traveler -> dest store")
+
+
+def test_caravan_ocean_route_when_transit_unlocked():
+    engine = make_engine()
+    home_sid, outpost_sid = _seed_two_settlements(engine)
+    _seed_ocean_transit(engine, district_id="beach")
+    assert_true(se.TRANSIT_ENABLED, "TRANSIT_ENABLED must be on")
+    assert_true(engine._has_ocean_transit(), "dock should unlock ocean transit")
+
+    agent = _caravan_ready_agent(engine, "village_core")
+    dest_district = "village_east"
+    legs = engine._caravan_route_legs(agent, dest_district)
+    assert_true("ocean" in legs, legs)
+    assert_true(legs[0] == "beach", legs)
+    assert_true(legs[-1] == dest_district, legs)
+
+    se.TRANSIT_ENABLED = False
+    try:
+        direct = engine._caravan_route_legs(agent, dest_district)
+        assert_true(direct == [dest_district], direct)
+    finally:
+        se.TRANSIT_ENABLED = True
+    print(f"  OK ocean corridor route when transit unlocked: {legs}")
+
+
+def test_caravan_tariff_splits_bundle():
+    engine = make_engine()
+    home_sid, outpost_sid = _seed_two_settlements(engine)
+    engine.civilization["treaties"].append({
+        "id": "trade_pact", "name": "Trade Pact", "kind": "treaty", "tariff": 0.25,
+    })
+    assert_true(engine._enacted_treaty_tariff() == 0.25, engine._enacted_treaty_tariff())
+
+    agent = _caravan_ready_agent(engine, "village_east")
+    agent["resources"]["wood"] = 10
+    home_store = engine._settlement_store_bucket(home_sid)
+    outpost_store = engine._settlement_store_bucket(outpost_sid)
+
+    assert_true(engine._deliver_caravan(agent, outpost_sid, source_settlement_id=home_sid), "delivery")
+    assert_true(home_store.get("wood") == 2, home_store)
+    assert_true(outpost_store.get("wood") == 8, outpost_store)
+    print("  OK tariff split: 25% -> source store, remainder -> dest store")
+
+
+def test_deliver_caravan_available_actions_gating():
+    engine = make_engine()
+    _seed_two_settlements(engine)
+    agent = _caravan_ready_agent(engine)
+    assert_true(engine._caravan_eligible(agent), "agent should be caravan-eligible")
+
+    payload = engine._build_think_payload(agent)
+    offered = set(payload.get("available_actions") or [])
+    assert_true("deliver_caravan" in offered, sorted(offered))
+
+    agent["resources"].pop("cart", None)
+    payload2 = engine._build_think_payload(agent)
+    offered2 = set(payload2.get("available_actions") or [])
+    assert_true("deliver_caravan" not in offered2, sorted(offered2))
+    print("  OK deliver_caravan gated in available_actions by caravan eligibility")
+
+
+def test_deliver_caravan_action_sync():
+    action = "deliver_caravan"
+    server_source = (ROOT / "simulation" / "server.py").read_text(encoding="utf-8")
+    engine_source = (ROOT / "simulation" / "sim_engine.py").read_text(encoding="utf-8")
+    viewer_source = (ROOT / "simulation" / "index.html").read_text(encoding="utf-8")
+    prompts_source = (ROOT / "simulation" / "prompts.py").read_text(encoding="utf-8")
+
+    tree = ast.parse(server_source)
+    action_names = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "DECISION_ACTIONS" for t in node.targets):
+            action_names = ast.literal_eval(node.value)
+            break
+    assert_true(action_names is not None and action in action_names, action_names)
+    assert_true('"action": {"type": "string", "enum": DECISION_ACTIONS}' in server_source,
+                "DECISION_SCHEMA enum")
+    assert_true(action in prompts_source, "prompts mention deliver_caravan")
+    assert_true(f'elif action == "{action}"' in engine_source, "apply_decision branch")
+    assert_true(f'action_name != "{action}"' in engine_source, "available_actions gate")
+    assert_true(f"{action}:" in viewer_source, "ACTION_LABELS entry")
+    print(f"  OK action-sync checklist for {action}")
+
+
+def test_deliver_caravan_action_assigns_goal():
+    engine = make_engine()
+    _seed_two_settlements(engine)
+    agent = _caravan_ready_agent(engine)
+    summary = engine.apply_decision(agent, {
+        "action": "deliver_caravan",
+        "target_district": "village_east",
+        "reasoning": "smoke caravan",
+    })
+    assert_true("caravan" in summary.lower(), summary)
+    goal = agent.get("goal") or {}
+    assert_true(goal.get("kind") == "caravan", goal)
+    assert_true(goal.get("target_district") == "village_east", goal)
+    print(f"  OK deliver_caravan action: {summary}")
+
+
 def test_transit_migration_from_instance():
     """Light and transit restore migrations must recreate retired registry
     entries from standing structure instances through the shared fallback.
@@ -642,6 +818,13 @@ def main():
     test_transit_and_economy_sinks()
     test_mint_coin_currency()
     test_market_only_settles_in_gold()
+    test_settlement_stores_isolate()
+    test_caravan_delivery_moves_goods()
+    test_caravan_ocean_route_when_transit_unlocked()
+    test_caravan_tariff_splits_bundle()
+    test_deliver_caravan_available_actions_gating()
+    test_deliver_caravan_action_sync()
+    test_deliver_caravan_action_assigns_goal()
     test_transit_migration_from_instance()
     import py_compile
     py_compile.compile(str(ROOT / "simulation" / "sim_engine.py"), doraise=True)
