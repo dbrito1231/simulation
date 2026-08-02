@@ -1,0 +1,722 @@
+# LLM fallback & validation-rejection evidence
+
+Read-only gather of local `simulation/logs/` evidence for two patterns:
+
+1. **Fallback (no usable AI answer)** — LLM call logged with a non-null `error` (`llm timeout`, `llm offline`, `bad_response`, `compute_error`, `model_not_found`, etc.), so the engine substituted a role fallback without a usable model decision.
+2. **Rejected then fell back (bad AI answer)** — model responded (`error: null`, usually `http_status: 200`), but `normalize_decision()` rejected the payload (`*_rejection_note` and/or `(invalid …)` in `reasoning`) and substituted `role_fallback_action()`.
+
+**Choices used for this gather:** evidence at repo root; scan `llm.jsonl` + `lm_studio.jsonl` + related `activity.jsonl` / `conversation.jsonl` hints; Pattern 1 reported explicitly even if empty; every Pattern 2 match included in full; branch+push only (no PR); no code changes.
+
+## Method
+
+- Scanned all **20** session folders under `simulation/logs/`.
+- Primary source: every non-empty `llm.jsonl` line (22 total LLM records across 2 sessions).
+- Also checked for `lm_studio.jsonl` (legacy): **none present**.
+- Related hints: scanned all `activity.jsonl` / `conversation.jsonl` for fallback/rejection keywords; keyword scan alone found 0 hits (those files use plain English messages). Manually correlated timestamps from Pattern 2 LLM rows into activity/conversation echoes (listed below).
+- Role is **not** present on these LLM log lines (`agent_name` only).
+- Raw logs themselves are **not** committed (gitignored); this file is the durable evidence extract.
+
+## Inventory of sessions scanned
+
+| Session | llm.jsonl bytes | lm_studio.jsonl | activity.jsonl bytes | conversation.jsonl bytes |
+|---|---:|---|---:|---:|
+| `2026-08-02T01-08-44` | 0 | absent | 438 | 764 |
+| `2026-08-02T01-08-43` | 0 | absent | 438 | 764 |
+| `2026-08-02T01-08-42` | 0 | absent | 438 | 764 |
+| `2026-08-02T01-08-41` | 0 | absent | 1096 | 1600 |
+| `2026-08-02T01-08-39` | 0 | absent | 438 | 764 |
+| `2026-08-02T01-08-38` | 0 | absent | 437 | 763 |
+| `2026-08-02T01-08-14` | 18227 | absent | 14498 | 2000 |
+| `2026-08-02T01-07-39` | 1899 | absent | 1671 | 765 |
+| `2026-08-02T01-07-02` | 0 | absent | 437 | 763 |
+| `2026-08-02T00-23-03` | 0 | absent | 438 | 764 |
+| `2026-08-02T00-23-02` | 0 | absent | 437 | 763 |
+| `2026-08-01T23-57-03` | 0 | absent | 875 | 1527 |
+| `2026-08-01T23-57-01` | 0 | absent | 1095 | 1599 |
+| `2026-08-01T23-54-23` | 0 | absent | 877 | 1529 |
+| `2026-08-01T23-14-44` | 0 | absent | 439 | 765 |
+| `2026-08-01T23-14-43` | 0 | absent | 438 | 764 |
+| `2026-08-01T23-14-09` | 0 | absent | 438 | 764 |
+| `2026-08-01T23-14-08` | 0 | absent | 438 | 764 |
+| `2026-08-01T23-13-32` | 0 | absent | 439 | 765 |
+| `2026-08-01T23-13-31` | 0 | absent | 438 | 764 |
+
+- Sessions with non-empty `llm.jsonl`: **2** (`2026-08-02T01-07-39, 2026-08-02T01-08-14`)
+- Empty `llm.jsonl` sessions: **18**
+- Total LLM records parsed: **22**
+- Error value distribution across all LLM records: `{'None': 22}`
+- Rejection-note key counts across all LLM records: `{'sprite_rejection_note': 6, 'council_rejection_note': 3}`
+
+## Pattern 1 — Fallback (no usable AI answer)
+
+**Count: 0**
+
+No examples found after a thorough scan of all 20 sessions / 22 LLM records. Every logged LLM call had `error: null` (and, where present, `http_status: 200`). There were no `llm timeout`, `llm offline`, `bad_response`, `compute_error`, or `model_not_found` entries in the current local logs.
+
+Sessions confirmed empty for Pattern 1 criteria (all scanned):
+
+- `2026-08-02T01-08-44`
+- `2026-08-02T01-08-43`
+- `2026-08-02T01-08-42`
+- `2026-08-02T01-08-41`
+- `2026-08-02T01-08-39`
+- `2026-08-02T01-08-38`
+- `2026-08-02T01-08-14`
+- `2026-08-02T01-07-39`
+- `2026-08-02T01-07-02`
+- `2026-08-02T00-23-03`
+- `2026-08-02T00-23-02`
+- `2026-08-01T23-57-03`
+- `2026-08-01T23-57-01`
+- `2026-08-01T23-54-23`
+- `2026-08-01T23-14-44`
+- `2026-08-01T23-14-43`
+- `2026-08-01T23-14-09`
+- `2026-08-01T23-14-08`
+- `2026-08-01T23-13-32`
+- `2026-08-01T23-13-31`
+
+## Pattern 2 — Rejected then fell back (bad AI answer)
+
+**Count: 9** (all matches below, full decision + full response_preview)
+
+### Pattern 2 example 1: Ivy @ 2026-08-02T05:07:57.072261+00:00
+
+- **Session / line:** `2026-08-02T01-07-39` / `llm.jsonl` line 1
+- **Agent:** Ivy (role not logged)
+- **frame_tick:** 14668680
+- **http_status / latency_ms:** 200 / 16801
+- **error:** `None`
+- **sprite_design_only / high_stakes_reason:** `True` / `repeated_rejections`
+- **Rejection notes:** `{"sprite_rejection_note": "sprite must be an object with palette and grid"}`
+
+**response_preview (full as logged):**
+
+```text
+{
+  "action": "submit_structure_sprite",
+  "reasoning": "The previous sprite was rejected for being too small (14x14). The new design must strictly exceed these dimensions to qualify as 'tier 5' and represent a grown-up farm plot. I will cr…
+```
+
+**decision applied after normalize/fallback (full):**
+
+```json
+{
+  "action": "collect_resource",
+  "target": "iron_ore",
+  "message": null,
+  "new_role": null,
+  "relationship_update": null,
+  "reasoning": "Gathering resources for the village. (invalid sprite: sprite must be an object with palette and grid)",
+  "sprite_rejection_note": "sprite must be an object with palette and grid"
+}
+```
+
+<details><summary>Full LLM log record</summary>
+
+```json
+{
+  "ts": "2026-08-02T05:07:57.072261+00:00",
+  "session_id": "2026-08-02T01-07-39",
+  "type": "llm",
+  "agent_name": "Ivy",
+  "frame_tick": 14668680,
+  "latency_ms": 16801,
+  "invention_only": false,
+  "sprite_design_only": true,
+  "high_stakes_reason": "repeated_rejections",
+  "high_stakes_active": true,
+  "high_stakes_capped": false,
+  "prompt_chars": 946,
+  "system_chars": 844,
+  "nudges_total": 1,
+  "nudges_dropped": 0,
+  "http_status": 200,
+  "decision": {
+    "action": "collect_resource",
+    "target": "iron_ore",
+    "message": null,
+    "new_role": null,
+    "relationship_update": null,
+    "reasoning": "Gathering resources for the village. (invalid sprite: sprite must be an object with palette and grid)",
+    "sprite_rejection_note": "sprite must be an object with palette and grid"
+  },
+  "error": null,
+  "response_preview": "{\n  \"action\": \"submit_structure_sprite\",\n  \"reasoning\": \"The previous sprite was rejected for being too small (14x14). The new design must strictly exceed these dimensions to qualify as 'tier 5' and represent a grown-up farm plot. I will cr…"
+}
+```
+
+</details>
+
+### Pattern 2 example 2: Rex @ 2026-08-02T05:08:34.618017+00:00
+
+- **Session / line:** `2026-08-02T01-08-14` / `llm.jsonl` line 4
+- **Agent:** Rex (role not logged)
+- **frame_tick:** 14669129
+- **http_status / latency_ms:** 200 / 5273
+- **error:** `None`
+- **sprite_design_only / high_stakes_reason:** `True` / `None`
+- **Rejection notes:** `{"sprite_rejection_note": "sprite must be an object with palette and grid"}`
+
+**response_preview (full as logged):**
+
+```text
+{"action":"submit_structure_sprite","reasoning":"The previous sprite was rejected for being too small (max 14x14). The user requested a 'strictly bigger' grid, meaning >14 rows and >14 columns. I will design a 16x16 pixel-art farm plot that…
+```
+
+**decision applied after normalize/fallback (full):**
+
+```json
+{
+  "action": "assign_task",
+  "target": "Kane",
+  "message": "gather or contribute iron_ore to the active project",
+  "new_role": null,
+  "relationship_update": null,
+  "reasoning": "Assigning work to an idle villager. (invalid sprite: sprite must be an object with palette and grid)",
+  "sprite_rejection_note": "sprite must be an object with palette and grid"
+}
+```
+
+<details><summary>Full LLM log record</summary>
+
+```json
+{
+  "ts": "2026-08-02T05:08:34.618017+00:00",
+  "session_id": "2026-08-02T01-08-14",
+  "type": "llm",
+  "agent_name": "Rex",
+  "frame_tick": 14669129,
+  "latency_ms": 5273,
+  "invention_only": false,
+  "sprite_design_only": true,
+  "high_stakes_reason": null,
+  "high_stakes_active": true,
+  "high_stakes_capped": false,
+  "prompt_chars": 858,
+  "system_chars": 844,
+  "nudges_total": 1,
+  "nudges_dropped": 0,
+  "http_status": 200,
+  "decision": {
+    "action": "assign_task",
+    "target": "Kane",
+    "message": "gather or contribute iron_ore to the active project",
+    "new_role": null,
+    "relationship_update": null,
+    "reasoning": "Assigning work to an idle villager. (invalid sprite: sprite must be an object with palette and grid)",
+    "sprite_rejection_note": "sprite must be an object with palette and grid"
+  },
+  "error": null,
+  "response_preview": "{\"action\":\"submit_structure_sprite\",\"reasoning\":\"The previous sprite was rejected for being too small (max 14x14). The user requested a 'strictly bigger' grid, meaning >14 rows and >14 columns. I will design a 16x16 pixel-art farm plot that…"
+}
+```
+
+</details>
+
+### Pattern 2 example 3: Rex @ 2026-08-02T05:08:48.762601+00:00
+
+- **Session / line:** `2026-08-02T01-08-14` / `llm.jsonl` line 8
+- **Agent:** Rex (role not logged)
+- **frame_tick:** 14669384
+- **http_status / latency_ms:** 200 / 7870
+- **error:** `None`
+- **sprite_design_only / high_stakes_reason:** `True` / `None`
+- **Rejection notes:** `{"sprite_rejection_note": "sprite must be an object with palette and grid"}`
+
+**response_preview (full as logged):**
+
+```text
+{
+  "action": "submit_structure_sprite",
+  "reasoning": "The previous sprite was rejected because it did not exceed the minimum dimensions (14x14). This new design for the upgraded Farm Plot strictly exceeds those limits with a 16-row by 20…
+```
+
+**decision applied after normalize/fallback (full):**
+
+```json
+{
+  "action": "assign_task",
+  "target": "Dex",
+  "message": "gather or contribute iron_ore to the active project",
+  "new_role": null,
+  "relationship_update": null,
+  "reasoning": "Assigning work to an idle villager. (invalid sprite: sprite must be an object with palette and grid)",
+  "sprite_rejection_note": "sprite must be an object with palette and grid"
+}
+```
+
+<details><summary>Full LLM log record</summary>
+
+```json
+{
+  "ts": "2026-08-02T05:08:48.762601+00:00",
+  "session_id": "2026-08-02T01-08-14",
+  "type": "llm",
+  "agent_name": "Rex",
+  "frame_tick": 14669384,
+  "latency_ms": 7870,
+  "invention_only": false,
+  "sprite_design_only": true,
+  "high_stakes_reason": null,
+  "high_stakes_active": true,
+  "high_stakes_capped": false,
+  "prompt_chars": 875,
+  "system_chars": 844,
+  "nudges_total": 1,
+  "nudges_dropped": 0,
+  "http_status": 200,
+  "decision": {
+    "action": "assign_task",
+    "target": "Dex",
+    "message": "gather or contribute iron_ore to the active project",
+    "new_role": null,
+    "relationship_update": null,
+    "reasoning": "Assigning work to an idle villager. (invalid sprite: sprite must be an object with palette and grid)",
+    "sprite_rejection_note": "sprite must be an object with palette and grid"
+  },
+  "error": null,
+  "response_preview": "{\n  \"action\": \"submit_structure_sprite\",\n  \"reasoning\": \"The previous sprite was rejected because it did not exceed the minimum dimensions (14x14). This new design for the upgraded Farm Plot strictly exceeds those limits with a 16-row by 20…"
+}
+```
+
+</details>
+
+### Pattern 2 example 4: Ivy @ 2026-08-02T05:08:53.597446+00:00
+
+- **Session / line:** `2026-08-02T01-08-14` / `llm.jsonl` line 9
+- **Agent:** Ivy (role not logged)
+- **frame_tick:** 14669251
+- **http_status / latency_ms:** 200 / 11041
+- **error:** `None`
+- **sprite_design_only / high_stakes_reason:** `True` / `repeated_rejections`
+- **Rejection notes:** `{"sprite_rejection_note": "sprite grid must be 4-14 rows"}`
+
+**response_preview (full as logged):**
+
+```text
+{
+"action": "submit_structure_sprite",
+"reasoning": "Ivy honors the earth's bounty by expanding the Farm Plot into a grand, flourishing estate. The new design strictly exceeds 14x14 dimensions (20x20), featuring a lush green canopy of crops…
+```
+
+**decision applied after normalize/fallback (full):**
+
+```json
+{
+  "action": "move_to_district",
+  "target": "forest",
+  "message": null,
+  "new_role": null,
+  "relationship_update": null,
+  "reasoning": "Heading to the forest to gather wood. (invalid sprite: sprite grid must be 4-14 rows)",
+  "sprite_rejection_note": "sprite grid must be 4-14 rows"
+}
+```
+
+<details><summary>Full LLM log record</summary>
+
+```json
+{
+  "ts": "2026-08-02T05:08:53.597446+00:00",
+  "session_id": "2026-08-02T01-08-14",
+  "type": "llm",
+  "agent_name": "Ivy",
+  "frame_tick": 14669251,
+  "latency_ms": 11041,
+  "invention_only": false,
+  "sprite_design_only": true,
+  "high_stakes_reason": "repeated_rejections",
+  "high_stakes_active": true,
+  "high_stakes_capped": false,
+  "prompt_chars": 895,
+  "system_chars": 844,
+  "nudges_total": 1,
+  "nudges_dropped": 0,
+  "http_status": 200,
+  "decision": {
+    "action": "move_to_district",
+    "target": "forest",
+    "message": null,
+    "new_role": null,
+    "relationship_update": null,
+    "reasoning": "Heading to the forest to gather wood. (invalid sprite: sprite grid must be 4-14 rows)",
+    "sprite_rejection_note": "sprite grid must be 4-14 rows"
+  },
+  "error": null,
+  "response_preview": "{\n\"action\": \"submit_structure_sprite\",\n\"reasoning\": \"Ivy honors the earth's bounty by expanding the Farm Plot into a grand, flourishing estate. The new design strictly exceeds 14x14 dimensions (20x20), featuring a lush green canopy of crops…"
+}
+```
+
+</details>
+
+### Pattern 2 example 5: Rex @ 2026-08-02T05:09:03.323847+00:00
+
+- **Session / line:** `2026-08-02T01-08-14` / `llm.jsonl` line 12
+- **Agent:** Rex (role not logged)
+- **frame_tick:** 14669744
+- **http_status / latency_ms:** 200 / 6497
+- **error:** `None`
+- **sprite_design_only / high_stakes_reason:** `True` / `None`
+- **Rejection notes:** `{"sprite_rejection_note": "sprite must be an object with palette and grid"}`
+
+**response_preview (full as logged):**
+
+```text
+{
+  "action": "submit_structure_sprite",
+  "reasoning": "The previous sprite was rejected for being too small (14x14). The requirement is strictly more than 14 rows and columns. I will design a larger Farm Plot with dimensions of 16x18 to s…
+```
+
+**decision applied after normalize/fallback (full):**
+
+```json
+{
+  "action": "assign_task",
+  "target": "Zara",
+  "message": "gather or contribute iron_ore to the active project",
+  "new_role": null,
+  "relationship_update": null,
+  "reasoning": "Assigning work to an idle villager. (invalid sprite: sprite must be an object with palette and grid)",
+  "sprite_rejection_note": "sprite must be an object with palette and grid"
+}
+```
+
+<details><summary>Full LLM log record</summary>
+
+```json
+{
+  "ts": "2026-08-02T05:09:03.323847+00:00",
+  "session_id": "2026-08-02T01-08-14",
+  "type": "llm",
+  "agent_name": "Rex",
+  "frame_tick": 14669744,
+  "latency_ms": 6497,
+  "invention_only": false,
+  "sprite_design_only": true,
+  "high_stakes_reason": null,
+  "high_stakes_active": true,
+  "high_stakes_capped": false,
+  "prompt_chars": 906,
+  "system_chars": 844,
+  "nudges_total": 1,
+  "nudges_dropped": 0,
+  "http_status": 200,
+  "decision": {
+    "action": "assign_task",
+    "target": "Zara",
+    "message": "gather or contribute iron_ore to the active project",
+    "new_role": null,
+    "relationship_update": null,
+    "reasoning": "Assigning work to an idle villager. (invalid sprite: sprite must be an object with palette and grid)",
+    "sprite_rejection_note": "sprite must be an object with palette and grid"
+  },
+  "error": null,
+  "response_preview": "{\n  \"action\": \"submit_structure_sprite\",\n  \"reasoning\": \"The previous sprite was rejected for being too small (14x14). The requirement is strictly more than 14 rows and columns. I will design a larger Farm Plot with dimensions of 16x18 to s…"
+}
+```
+
+</details>
+
+### Pattern 2 example 6: Ivy @ 2026-08-02T05:09:13.097205+00:00
+
+- **Session / line:** `2026-08-02T01-08-14` / `llm.jsonl` line 14
+- **Agent:** Ivy (role not logged)
+- **frame_tick:** 14669896
+- **http_status / latency_ms:** 200 / 9611
+- **error:** `None`
+- **sprite_design_only / high_stakes_reason:** `True` / `repeated_rejections`
+- **Rejection notes:** `{"sprite_rejection_note": "sprite grid must be 4-14 rows"}`
+
+**response_preview (full as logged):**
+
+```text
+{
+  "action": "submit_structure_sprite",
+  "reasoning": "The previous sprite was rejected because it did not exceed the minimum dimensions (14x14). This new design for the Farm Plot is strictly larger, measuring 16 rows by 20 columns. It ma…
+```
+
+**decision applied after normalize/fallback (full):**
+
+```json
+{
+  "action": "collect_resource",
+  "target": "iron_ore",
+  "message": null,
+  "new_role": null,
+  "relationship_update": null,
+  "reasoning": "Gathering resources for the village. (invalid sprite: sprite grid must be 4-14 rows)",
+  "sprite_rejection_note": "sprite grid must be 4-14 rows"
+}
+```
+
+<details><summary>Full LLM log record</summary>
+
+```json
+{
+  "ts": "2026-08-02T05:09:13.097205+00:00",
+  "session_id": "2026-08-02T01-08-14",
+  "type": "llm",
+  "agent_name": "Ivy",
+  "frame_tick": 14669896,
+  "latency_ms": 9611,
+  "invention_only": false,
+  "sprite_design_only": true,
+  "high_stakes_reason": "repeated_rejections",
+  "high_stakes_active": true,
+  "high_stakes_capped": false,
+  "prompt_chars": 909,
+  "system_chars": 844,
+  "nudges_total": 1,
+  "nudges_dropped": 0,
+  "http_status": 200,
+  "decision": {
+    "action": "collect_resource",
+    "target": "iron_ore",
+    "message": null,
+    "new_role": null,
+    "relationship_update": null,
+    "reasoning": "Gathering resources for the village. (invalid sprite: sprite grid must be 4-14 rows)",
+    "sprite_rejection_note": "sprite grid must be 4-14 rows"
+  },
+  "error": null,
+  "response_preview": "{\n  \"action\": \"submit_structure_sprite\",\n  \"reasoning\": \"The previous sprite was rejected because it did not exceed the minimum dimensions (14x14). This new design for the Farm Plot is strictly larger, measuring 16 rows by 20 columns. It ma…"
+}
+```
+
+</details>
+
+### Pattern 2 example 7: Rex @ 2026-08-02T05:09:35.124503+00:00
+
+- **Session / line:** `2026-08-02T01-08-14` / `llm.jsonl` line 17
+- **Agent:** Rex (role not logged)
+- **frame_tick:** 14670246
+- **http_status / latency_ms:** 200 / 5938
+- **error:** `None`
+- **sprite_design_only / high_stakes_reason:** `True` / `None`
+- **Rejection notes:** `{"council_rejection_note": "not a seated active council turn"}`
+
+**response_preview (full as logged):**
+
+```text
+{
+  "action": "submit_structure_sprite",
+  "reasoning": "The Smelter in the village_core has stalled due to low rope stores and is currently under construction/upgrade. As Elder Rex, I propose a larger, more robust sprite for this structure…
+```
+
+**decision applied after normalize/fallback (full):**
+
+```json
+{
+  "action": "council_speak",
+  "message": "We should protect essentials while making steady progress.",
+  "feeling": "hopeful",
+  "topic": "world_status",
+  "reasoning": "Offering a practical council opinion. (invalid council session/action)",
+  "council_rejection_note": "not a seated active council turn"
+}
+```
+
+<details><summary>Full LLM log record</summary>
+
+```json
+{
+  "ts": "2026-08-02T05:09:35.124503+00:00",
+  "session_id": "2026-08-02T01-08-14",
+  "type": "llm",
+  "agent_name": "Rex",
+  "frame_tick": 14670246,
+  "latency_ms": 5938,
+  "invention_only": false,
+  "sprite_design_only": true,
+  "high_stakes_reason": null,
+  "high_stakes_active": true,
+  "high_stakes_capped": false,
+  "prompt_chars": 1412,
+  "system_chars": 844,
+  "nudges_total": 0,
+  "nudges_dropped": 0,
+  "http_status": 200,
+  "decision": {
+    "action": "council_speak",
+    "message": "We should protect essentials while making steady progress.",
+    "feeling": "hopeful",
+    "topic": "world_status",
+    "reasoning": "Offering a practical council opinion. (invalid council session/action)",
+    "council_rejection_note": "not a seated active council turn"
+  },
+  "error": null,
+  "response_preview": "{\n  \"action\": \"submit_structure_sprite\",\n  \"reasoning\": \"The Smelter in the village_core has stalled due to low rope stores and is currently under construction/upgrade. As Elder Rex, I propose a larger, more robust sprite for this structure…"
+}
+```
+
+</details>
+
+### Pattern 2 example 8: Nova @ 2026-08-02T05:09:41.929296+00:00
+
+- **Session / line:** `2026-08-02T01-08-14` / `llm.jsonl` line 18
+- **Agent:** Nova (role not logged)
+- **frame_tick:** 14670513
+- **http_status / latency_ms:** 200 / 3929
+- **error:** `None`
+- **sprite_design_only / high_stakes_reason:** `False` / `None`
+- **Rejection notes:** `{"council_rejection_note": "council_speak requires a message"}`
+
+**response_preview (full as logged):**
+
+```text
+{
+  "action": "council_speak",
+  "reasoning": "I must speak on feelings_about_evolution as the current speaker.",
+  "topic": "feelings_about_evolution",
+  "vote": null
+}
+```
+
+**decision applied after normalize/fallback (full):**
+
+```json
+{
+  "action": "council_speak",
+  "message": "We should protect essentials while making steady progress.",
+  "feeling": "hopeful",
+  "topic": "world_status",
+  "reasoning": "Offering a practical council opinion.",
+  "council_rejection_note": "council_speak requires a message"
+}
+```
+
+<details><summary>Full LLM log record</summary>
+
+```json
+{
+  "ts": "2026-08-02T05:09:41.929296+00:00",
+  "session_id": "2026-08-02T01-08-14",
+  "type": "llm",
+  "agent_name": "Nova",
+  "frame_tick": 14670513,
+  "latency_ms": 3929,
+  "invention_only": false,
+  "sprite_design_only": false,
+  "high_stakes_reason": null,
+  "high_stakes_active": false,
+  "high_stakes_capped": false,
+  "prompt_chars": 1425,
+  "system_chars": 1500,
+  "nudges_total": 0,
+  "nudges_dropped": 0,
+  "http_status": 200,
+  "decision": {
+    "action": "council_speak",
+    "message": "We should protect essentials while making steady progress.",
+    "feeling": "hopeful",
+    "topic": "world_status",
+    "reasoning": "Offering a practical council opinion.",
+    "council_rejection_note": "council_speak requires a message"
+  },
+  "error": null,
+  "response_preview": "{\n  \"action\": \"council_speak\",\n  \"reasoning\": \"I must speak on feelings_about_evolution as the current speaker.\",\n  \"topic\": \"feelings_about_evolution\",\n  \"vote\": null\n}"
+}
+```
+
+</details>
+
+### Pattern 2 example 9: Dex @ 2026-08-02T05:09:56.235635+00:00
+
+- **Session / line:** `2026-08-02T01-08-14` / `llm.jsonl` line 20
+- **Agent:** Dex (role not logged)
+- **frame_tick:** 14670833
+- **http_status / latency_ms:** 200 / 3742
+- **error:** `None`
+- **sprite_design_only / high_stakes_reason:** `False` / `None`
+- **Rejection notes:** `{"council_rejection_note": "council_speak requires a message"}`
+
+**response_preview (full as logged):**
+
+```text
+{
+  "action": "council_speak",
+  "reasoning": "I must speak on feelings_about_evolution as the current speaker.",
+  "topic": "feelings_about_evolution",
+  "vote": null
+}
+```
+
+**decision applied after normalize/fallback (full):**
+
+```json
+{
+  "action": "council_speak",
+  "message": "We should protect essentials while making steady progress.",
+  "feeling": "hopeful",
+  "topic": "world_status",
+  "reasoning": "Offering a practical council opinion.",
+  "council_rejection_note": "council_speak requires a message"
+}
+```
+
+<details><summary>Full LLM log record</summary>
+
+```json
+{
+  "ts": "2026-08-02T05:09:56.235635+00:00",
+  "session_id": "2026-08-02T01-08-14",
+  "type": "llm",
+  "agent_name": "Dex",
+  "frame_tick": 14670833,
+  "latency_ms": 3742,
+  "invention_only": false,
+  "sprite_design_only": false,
+  "high_stakes_reason": null,
+  "high_stakes_active": false,
+  "high_stakes_capped": false,
+  "prompt_chars": 1407,
+  "system_chars": 1500,
+  "nudges_total": 0,
+  "nudges_dropped": 0,
+  "http_status": 200,
+  "decision": {
+    "action": "council_speak",
+    "message": "We should protect essentials while making steady progress.",
+    "feeling": "hopeful",
+    "topic": "world_status",
+    "reasoning": "Offering a practical council opinion.",
+    "council_rejection_note": "council_speak requires a message"
+  },
+  "error": null,
+  "response_preview": "{\n  \"action\": \"council_speak\",\n  \"reasoning\": \"I must speak on feelings_about_evolution as the current speaker.\",\n  \"topic\": \"feelings_about_evolution\",\n  \"vote\": null\n}"
+}
+```
+
+</details>
+
+## Related activity.jsonl / conversation.jsonl hints
+
+Keyword scan for `fallback` / `rejection` / `invalid` / `bad_response` / etc. across all activity+conversation files: **0 direct hits** (those channels do not use those words).
+
+Timestamp-correlated echoes of Pattern 2 fallbacks:
+
+### activity.jsonl
+
+- `2026-08-02T01-07-39` line 7 @ `2026-08-02T05:07:58.269155+00:00` — **Ivy heads to gather iron_ore** — _Matches Pattern 2 #1 fallback collect_resource iron_ore after sprite rejection_
+- `2026-08-02T01-08-14` line 13 @ `2026-08-02T05:08:34.619588+00:00` — **Elder Rex tasked Kane: Gather or contribute iron_ore to the active project** — _Matches Pattern 2 Rex assign_task fallback after sprite rejection_
+- `2026-08-02T01-08-14` line 36 @ `2026-08-02T05:08:48.763659+00:00` — **Rex could not assign that task** — _World applied Rex assign_task fallback toward Dex but assignment failed in-engine_
+- `2026-08-02T01-08-14` line 39 @ `2026-08-02T05:08:53.598504+00:00` — **Ivy heads to forest** — _Matches Pattern 2 Ivy move_to_district forest after sprite rejection_
+- `2026-08-02T01-08-14` line 44 @ `2026-08-02T05:09:03.325951+00:00` — **Elder Rex tasked Zara: Gather or contribute iron_ore to the active project** — _Matches Pattern 2 Rex assign_task fallback after sprite rejection_
+- `2026-08-02T01-08-14` line 56 @ `2026-08-02T05:09:13.098237+00:00` — **Ivy heads to gather iron_ore** — _Matches Pattern 2 Ivy collect_resource iron_ore after sprite rejection_
+- `2026-08-02T01-08-14` line 55 @ `2026-08-02T05:09:12.257334+00:00` — **Daily Council convenes: 8 attend** — _Context for subsequent council rejection/fallback cluster_
+- `2026-08-02T01-08-14` line 69 @ `2026-08-02T05:09:35.125544+00:00` — **Rex spoke to the Daily Council** — _Fallback council_speak applied after council_rejection_note (not a seated active council turn); activity still records speech_
+- `2026-08-02T01-08-14` line 75 @ `2026-08-02T05:09:41.930331+00:00` — **Nova spoke to the Daily Council** — _Fallback council_speak after missing message field_
+- `2026-08-02T01-08-14` line 81 @ `2026-08-02T05:09:56.236691+00:00` — **Dex spoke to the Daily Council** — _Fallback council_speak after missing message field_
+
+### conversation.jsonl
+
+- `2026-08-02T01-08-14` line 4 @ `2026-08-02T05:08:34.619062+00:00` — `directive` Rex→Kane: **Gather or contribute iron_ore to the active project** — _Conversation echo of Rex Pattern 2 assign_task fallback_
+- `2026-08-02T01-08-14` line 5 @ `2026-08-02T05:09:03.324370+00:00` — `directive` Rex→Zara: **Gather or contribute iron_ore to the active project** — _Conversation echo of Rex Pattern 2 assign_task fallback_
+
+## Short pattern summary (plain language)
+
+- **Pattern 1:** not present in current local logs.
+- **Pattern 2 dominant failure:** `submit_structure_sprite` rejected for missing/invalid sprite object or grid outside 4–14 rows (often after prompts pushing >14×14). Engine fell back to elder `assign_task` or gather/move actions.
+- **Pattern 2 secondary failure:** `council_speak` rejected for wrong turn / missing `message`; engine injected canned council fallback speech, which activity still recorded as council speech.
+
