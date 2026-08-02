@@ -2741,6 +2741,7 @@ async function pollState() {
       if (payload.stateGeneration != null) stateGeneration = payload.stateGeneration;
       return;
     }
+    let snapshot;
     if (payload.full || statePollFull || !world || !world.agents) {
       snapshot = payload;
       statePollFull = false;

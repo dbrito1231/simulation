@@ -75,8 +75,6 @@ district/road data into plain dicts/lists under the lock, then `jsonify`s
 outside the lock. The viewer keeps its last full payload on `unchanged`
 responses.
 
-responses.
-
 ## `/state` delta protocol
 
 `SimEngine.snapshot_delta(since)` (server route: `GET /state?since=<N>`).
@@ -84,11 +82,11 @@ responses.
 | Request | Response |
 |---------|----------|
 | `GET /state` or `?since=0` / missing `since` | Full snapshot (`full: true`; same top-level keys as before) |
-| `GET /state?since=<N>` and `N == frameTick` and no dirty state since last poll | `{frameTick, stateGeneration, unchanged: true}` |
-| `GET /state?since=<N>` contiguous (`since < frameTick`, gap ≤ `STATE_DELTA_MAX_GAP` ≈ 90 frames) | `{frameTick, baseFrame: N, stateGeneration, calendar, uptimeSeconds, paused? (if changed), ...partial}` — omitted key = unchanged on the client |
+| `GET /state?since=<N>` and `N == frameTick` and no state changed with `lastMod > N` | `{frameTick, stateGeneration, unchanged: true}` |
+| `GET /state?since=<N>` contiguous (`since < frameTick`, gap ≤ `STATE_DELTA_MAX_GAP` ≈ 90 frames) | `{frameTick, baseFrame: N, stateGeneration, calendar, uptimeSeconds, paused? (if changed), ...partial}` — omitted key = unchanged on the client; each included field was last modified at a frame `> N` within the gap window |
 | Gap > 90 frames / reset / `since > frameTick` / `since < last_reset_frame` | Full snapshot + `full: true`; `stateGeneration` bumps on reset/restore |
 
-Partial rules: dirty agents only in `agents[]`; dirty civ subkeys only (structure upserts may omit `sprite` unless create/upgrade/sprite-submit — full snapshots and the first poll always include `sprite` when present; the viewer keeps prior sprites when a delta upsert omits the field — `structuresRemoved` lists deletions); `config` only on full or when flags change. Lock discipline: copy/dirty under lock; JSON assembly after release where practical.
+Partial rules: dirty agents only in `agents[]`; dirty civ subkeys only (structure upserts may omit `sprite` unless create/upgrade/sprite-submit — full snapshots and the first poll always include `sprite` when present; the viewer keeps prior sprites when a delta upsert omits the field — `structuresRemoved` lists deletions); `config` only on full or when flags change. The engine tracks per-key `lastMod` frame stamps (not cleared per poll) and emits entries with `lastMod > since`, pruning entries older than `frameTick - STATE_DELTA_MAX_GAP` so multiple clients with different `since` values each receive one-time updates within the gap window. Lock discipline: copy/dirty under lock; JSON assembly after release where practical.
 
 ## `/state` payload — top-level keys
 
@@ -103,7 +101,7 @@ and `stateGeneration`; full snapshots also set `full: true`.
 | `frameTick` | current tick counter — specs/02-engine-core.md |
 | `stateGeneration` | monotonic counter bumped on reset/restore; client forces a full resync when it changes |
 | `full` | present and `true` only on full snapshots (omit on delta/unchanged) |
-| `unchanged` | present and `true` only when `?since=frameTick` and nothing changed |
+| `unchanged` | present and `true` only when `?since=frameTick` and nothing has `lastMod > since` |
 | `baseFrame` | on deltas only — the client's `since` value this patch applies after |
 | `paused` | bool |
 | `uptimeSeconds` | process wall-clock uptime |

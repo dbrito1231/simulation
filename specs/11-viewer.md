@@ -40,6 +40,9 @@ world state beyond a cached palette/season key.
   `unchanged: true` keeps `world`; partial payloads replace agents by `id`,
   deep-merge allowlisted `civilization` keys (structure upserts by `id`,
   `structuresRemoved` tombstones), and replace any other included top-level keys.
+  The server emits only fields whose `lastMod` frame is greater than the
+  client's `since` (within `STATE_DELTA_MAX_GAP`); multiple tabs with different
+  `since` cursors each receive the same one-time updates.
   Responses with `frameTick` older than the last applied frame are ignored
   (stale poll race). On fetch failure, patches `world.lmStatus = "disconnected"`
   while keeping the last-known snapshot and sets `statePollFull` so the next

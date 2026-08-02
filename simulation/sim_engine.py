@@ -2203,7 +2203,7 @@ class SimEngine:
         self._last_saved_hash = None
         self._last_save_considered_at = 0.0
         # Persistence: structure sprite rows upserted only when dirty (separate
-        # from HTTP delta _dirty_structure_sprites, which clears each poll).
+        # from HTTP delta last-mod maps, which are pruned not cleared per poll).
         self._persist_dirty_structure_sprites = set()
         self._persist_sprite_removals = set()
         self._reset_world(roster_size)
@@ -2544,66 +2544,120 @@ class SimEngine:
 
     # --- /state delta dirty tracking (Contract 2) ---
     def _init_state_delta_sets(self):
-        """Ensure dirty-set attributes exist (safe during _reset_world before bump)."""
-        self._dirty_agents = set()
-        self._dirty_civ_keys = set()
-        self._dirty_structure_upserts = set()
-        self._dirty_structure_removals = set()
-        self._dirty_structure_sprites = set()
-        self._dirty_top_keys = set()
-        self._dirty_paused = False
-        self._dirty_config = False
+        """Ensure last-mod frame maps exist (safe during _reset_world before bump)."""
+        self._dirty_agents = {}
+        self._dirty_civ_keys = {}
+        self._dirty_structure_upserts = {}
+        self._dirty_structure_removals = {}
+        self._dirty_structure_sprites = {}
+        self._dirty_top_keys = {}
+        self._paused_mod_frame = None
+        self._config_mod_frame = None
+        self._dirty_this_frame = set()
 
     def _on_world_replaced(self):
-        """Bump generation and clear dirty sets after reset/restore/cold start."""
+        """Bump generation and reset dirty maps after reset/restore/cold start."""
         self.stateGeneration = getattr(self, "stateGeneration", 0) + 1
         self._init_state_delta_sets()
-        self._dirty_paused = True
+        self._paused_mod_frame = self.frameTick
+        self._dirty_this_frame.add("paused")
         self._last_reset_frame = self.frameTick
 
-    def _has_state_dirty(self):
-        return bool(
-            self._dirty_agents or self._dirty_civ_keys or self._dirty_structure_upserts
-            or self._dirty_structure_removals or self._dirty_top_keys
-            or self._dirty_paused or self._dirty_config
-        )
+    def _delta_include_mod(self, last_mod, since_int, frame_tag=None):
+        """Whether a last-mod stamp should appear in a delta for *since_int*."""
+        if last_mod > since_int:
+            return True
+        if (frame_tag and since_int == self.frameTick
+                and frame_tag in self._dirty_this_frame):
+            return True
+        return False
 
-    def _clear_state_dirty(self):
-        self._dirty_agents.clear()
-        self._dirty_civ_keys.clear()
-        self._dirty_structure_upserts.clear()
-        self._dirty_structure_removals.clear()
-        self._dirty_structure_sprites.clear()
-        self._dirty_top_keys.clear()
-        self._dirty_paused = False
-        self._dirty_config = False
+    def _discard_frame_tags(self, since_int, *tags):
+        """Drop same-frame pending tags once a client has caught up to *last_mod*."""
+        if since_int >= self.frameTick:
+            for tag in tags:
+                self._dirty_this_frame.discard(tag)
+
+    def _has_state_dirty(self, since=0):
+        """True when any tracked key was modified after frame *since*."""
+        if since == self.frameTick and self._dirty_this_frame:
+            return True
+        if any(v > since for v in self._dirty_agents.values()):
+            return True
+        if any(v > since for v in self._dirty_civ_keys.values()):
+            return True
+        if any(v > since for v in self._dirty_structure_upserts.values()):
+            return True
+        if any(v > since for v in self._dirty_structure_removals.values()):
+            return True
+        if any(v > since for v in self._dirty_top_keys.values()):
+            return True
+        if self._paused_mod_frame is not None and self._paused_mod_frame > since:
+            return True
+        if self._config_mod_frame is not None and self._config_mod_frame > since:
+            return True
+        return False
+
+    def _prune_state_dirty(self, ft):
+        """Drop last-mod entries older than the delta gap window."""
+        cutoff = ft - STATE_DELTA_MAX_GAP
+
+        def _prune_map(m):
+            for k in list(m.keys()):
+                if m[k] <= cutoff:
+                    del m[k]
+
+        _prune_map(self._dirty_agents)
+        _prune_map(self._dirty_civ_keys)
+        _prune_map(self._dirty_structure_upserts)
+        _prune_map(self._dirty_structure_removals)
+        _prune_map(self._dirty_structure_sprites)
+        _prune_map(self._dirty_top_keys)
+        if self._paused_mod_frame is not None and self._paused_mod_frame <= cutoff:
+            self._paused_mod_frame = None
+        if self._config_mod_frame is not None and self._config_mod_frame <= cutoff:
+            self._config_mod_frame = None
 
     def _mark_agent_dirty(self, agent_or_id):
         aid = agent_or_id["id"] if isinstance(agent_or_id, dict) else agent_or_id
-        self._dirty_agents.add(aid)
+        self._dirty_agents[aid] = self.frameTick
+        self._dirty_this_frame.add(f"a:{aid}")
 
     def _mark_civ_dirty(self, *keys):
-        self._dirty_civ_keys.update(keys)
+        ft = self.frameTick
+        for key in keys:
+            self._dirty_civ_keys[key] = ft
+            self._dirty_this_frame.add(f"c:{key}")
 
     def _mark_structure_dirty(self, structure, sprite_changed=False):
         sid = structure["id"] if isinstance(structure, dict) else structure
-        self._dirty_structure_upserts.add(sid)
-        self._dirty_civ_keys.add("structures")
+        ft = self.frameTick
+        self._dirty_structure_upserts[sid] = ft
+        self._dirty_civ_keys["structures"] = ft
+        self._dirty_this_frame.add(f"su:{sid}")
+        self._dirty_this_frame.add("c:structures")
         if sprite_changed:
-            self._dirty_structure_sprites.add(sid)
+            self._dirty_structure_sprites[sid] = ft
+            self._dirty_this_frame.add(f"sp:{sid}")
             self._persist_dirty_structure_sprites.add(sid)
 
     def _mark_structure_removed(self, structure_id):
         sid = structure_id["id"] if isinstance(structure_id, dict) else structure_id
-        self._dirty_structure_removals.add(sid)
-        self._dirty_structure_upserts.discard(sid)
-        self._dirty_structure_sprites.discard(sid)
+        ft = self.frameTick
+        self._dirty_structure_removals[sid] = ft
+        self._dirty_structure_upserts.pop(sid, None)
+        self._dirty_structure_sprites.pop(sid, None)
         self._persist_dirty_structure_sprites.discard(sid)
         self._persist_sprite_removals.add(sid)
-        self._dirty_civ_keys.add("structures")
+        self._dirty_civ_keys["structures"] = ft
+        self._dirty_this_frame.add(f"sr:{sid}")
+        self._dirty_this_frame.add("c:structures")
 
     def _mark_top_dirty(self, *keys):
-        self._dirty_top_keys.update(keys)
+        ft = self.frameTick
+        for key in keys:
+            self._dirty_top_keys[key] = ft
+            self._dirty_this_frame.add(f"t:{key}")
 
     # --- logging helpers (mirror pushActivity / pushCommunication) ---
     def _push_activity(self, line):
@@ -23596,12 +23650,14 @@ class SimEngine:
     def pause(self):
         with self.lock:
             self.paused = True
-            self._dirty_paused = True
+            self._paused_mod_frame = self.frameTick
+            self._dirty_this_frame.add("paused")
 
     def resume(self):
         with self.lock:
             self.paused = False
-            self._dirty_paused = True
+            self._paused_mod_frame = self.frameTick
+            self._dirty_this_frame.add("paused")
 
     def reset(self, roster_size=None):
         with self.lock:
@@ -23936,7 +23992,8 @@ class SimEngine:
             snap = self._build_snapshot_core()
             snap["stateGeneration"] = self.stateGeneration
             snap["full"] = True
-            self._clear_state_dirty()
+            self._dirty_this_frame.clear()
+            self._prune_state_dirty(self.frameTick)
             return snap
 
     def snapshot_delta(self, since):
@@ -23949,20 +24006,22 @@ class SimEngine:
             except (TypeError, ValueError):
                 since_int = 0
 
-            def _full_and_clear():
+            def _full_and_prune():
                 snap = self._build_snapshot_core()
                 snap["stateGeneration"] = gen
                 snap["full"] = True
-                self._clear_state_dirty()
+                self._dirty_this_frame.clear()
+                self._prune_state_dirty(ft)
                 return snap
 
             if since is None or since_int <= 0:
-                return _full_and_clear()
+                return _full_and_prune()
             if since_int > ft or since_int < self._last_reset_frame:
-                return _full_and_clear()
+                return _full_and_prune()
             if ft - since_int > STATE_DELTA_MAX_GAP:
-                return _full_and_clear()
-            if since_int == ft and not self._has_state_dirty():
+                return _full_and_prune()
+            if since_int == ft and not self._has_state_dirty(since_int):
+                self._prune_state_dirty(ft)
                 return {"frameTick": ft, "stateGeneration": gen, "unchanged": True}
 
             payload = {
@@ -23972,47 +24031,85 @@ class SimEngine:
                 "calendar": self._calendar(),
                 "uptimeSeconds": time.time() - self.processStartTime,
             }
-            if self._dirty_paused:
+            if (self._paused_mod_frame is not None
+                    and self._delta_include_mod(
+                        self._paused_mod_frame, since_int, "paused")):
                 payload["paused"] = self.paused
+                self._discard_frame_tags(since_int, "paused")
 
-            if self._dirty_agents:
+            dirty_agents = [
+                aid for aid, mod in self._dirty_agents.items()
+                if self._delta_include_mod(mod, since_int, f"a:{aid}")
+            ]
+            if dirty_agents:
                 by_id = {a["id"]: a for a in self.agents}
                 payload["agents"] = [
                     self._agent_snapshot_row(by_id[aid])
-                    for aid in sorted(self._dirty_agents) if aid in by_id
+                    for aid in sorted(dirty_agents) if aid in by_id
                 ]
+                self._discard_frame_tags(
+                    since_int, *(f"a:{aid}" for aid in dirty_agents))
 
-            if self._dirty_civ_keys or self._dirty_structure_upserts or self._dirty_structure_removals:
+            dirty_civ_keys = [
+                k for k, mod in self._dirty_civ_keys.items()
+                if self._delta_include_mod(mod, since_int, f"c:{k}")
+            ]
+            dirty_upserts = [
+                sid for sid, mod in self._dirty_structure_upserts.items()
+                if self._delta_include_mod(mod, since_int, f"su:{sid}")
+            ]
+            dirty_removals = [
+                sid for sid, mod in self._dirty_structure_removals.items()
+                if self._delta_include_mod(mod, since_int, f"sr:{sid}")
+            ]
+            if dirty_civ_keys or dirty_upserts or dirty_removals:
                 full_civ = self._build_civ_snapshot()
                 civ_partial = {}
-                for key in self._dirty_civ_keys:
+                for key in dirty_civ_keys:
                     if key == "structures":
                         continue
                     if key in full_civ:
                         civ_partial[key] = full_civ[key]
-                if self._dirty_structure_upserts or self._dirty_structure_removals:
+                if dirty_upserts or dirty_removals:
                     env_lit_types = self._env_lit_types() if ENV_EFFECTS_ENABLED else set()
                     by_struct = {s["id"]: s for s in self.civilization["structures"]}
                     upserts = []
-                    for sid in sorted(self._dirty_structure_upserts):
+                    for sid in sorted(dirty_upserts):
                         s = by_struct.get(sid)
                         if s:
+                            sprite_mod = self._dirty_structure_sprites.get(sid, 0)
+                            include_sprite = self._delta_include_mod(
+                                sprite_mod, since_int, f"sp:{sid}")
                             upserts.append(self._structure_snapshot_row(
-                                s, env_lit_types,
-                                include_sprite=(sid in self._dirty_structure_sprites)))
+                                s, env_lit_types, include_sprite=include_sprite))
                     if upserts:
                         civ_partial["structures"] = upserts
-                    if self._dirty_structure_removals:
-                        civ_partial["structuresRemoved"] = sorted(self._dirty_structure_removals)
+                    if dirty_removals:
+                        civ_partial["structuresRemoved"] = sorted(dirty_removals)
                 if civ_partial:
                     payload["civilization"] = civ_partial
+                self._discard_frame_tags(
+                    since_int,
+                    *(f"c:{k}" for k in dirty_civ_keys),
+                    *(f"su:{sid}" for sid in dirty_upserts),
+                    *(f"sp:{sid}" for sid in dirty_upserts),
+                    *(f"sr:{sid}" for sid in dirty_removals),
+                )
 
-            for key in sorted(self._dirty_top_keys):
+            dirty_top_keys = [
+                k for k, mod in self._dirty_top_keys.items()
+                if self._delta_include_mod(mod, since_int, f"t:{k}")
+            ]
+            for key in sorted(dirty_top_keys):
                 k, val = self._snapshot_delta_top_key(key)
                 if k is not None:
                     payload[k] = val
-            if self._dirty_config:
+            if dirty_top_keys:
+                self._discard_frame_tags(
+                    since_int, *(f"t:{k}" for k in dirty_top_keys))
+            if self._config_mod_frame is not None and self._config_mod_frame > since_int:
                 payload["config"] = self._build_snapshot_config()
+                self._discard_frame_tags(since_int, "config")
 
-            self._clear_state_dirty()
+            self._prune_state_dirty(ft)
             return payload

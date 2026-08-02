@@ -171,6 +171,58 @@ def test_sprite_delta_and_persistence():
             se.DB_PATH = old_db
 
 
+def test_multi_client_delta_since():
+    """Two clients with different since cursors both receive the same upsert."""
+    eng = make_engine()
+    eng.pause()
+    sprite = _sample_sprite()
+
+    with eng.lock:
+        struct = {
+            "id": "multi_client_house",
+            "type": "house",
+            "x": 50.0,
+            "y": 60.0,
+            "visualStyle": "generic",
+            "sprite": sprite,
+            "name": "Multi Client House",
+            "districtId": "village",
+            "condition": 100.0,
+            "isRuin": False,
+            "homeOf": None,
+            "level": 1,
+            "visualTier": 1,
+            "renderScale": 1.0,
+        }
+        eng.civilization["structures"].append(struct)
+        eng.frameTick = max(eng.frameTick, 20)
+        client_a_since = eng.frameTick
+        eng._mark_structure_dirty(struct, sprite_changed=True)
+        change_frame = eng.frameTick
+
+    delta_a = eng.snapshot_delta(client_a_since)
+    upsert_a = next(
+        (s for s in (delta_a.get("civilization") or {}).get("structures") or []
+         if s.get("id") == "multi_client_house"),
+        None,
+    )
+    assert upsert_a is not None, delta_a
+    assert upsert_a.get("sprite") == sprite
+
+    client_b_since = max(0, change_frame - 5)
+    assert change_frame - client_b_since <= se.STATE_DELTA_MAX_GAP
+    delta_b = eng.snapshot_delta(client_b_since)
+    upsert_b = next(
+        (s for s in (delta_b.get("civilization") or {}).get("structures") or []
+         if s.get("id") == "multi_client_house"),
+        None,
+    )
+    assert upsert_b is not None, (
+        "older since must still receive upsert after another client polled",
+        delta_b,
+    )
+
+
 def main():
     eng = make_engine()
     eng.pause()
@@ -205,6 +257,7 @@ def main():
     assert huge.get("full") is True
 
     test_sprite_delta_and_persistence()
+    test_multi_client_delta_since()
 
     print("state_delta_smoke: OK")
 
