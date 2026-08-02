@@ -19,8 +19,8 @@ for the action catalog.
   prompts, calls Ollama, validates the response, and hands a decision back to the
   engine.
 - `simulation/index.html` (shell) + `simulation/viewer.js` + `simulation/sprites.js`
-  poll `GET /state` (~10 Hz) and render; closing the browser tab does not stop
-  the simulation.
+  poll `GET /state` (~10 Hz, delta after the first full snapshot) and render;
+  closing the browser tab does not stop the simulation.
 
 The engine mutates state only under `self.lock`; the full world is persisted to
 `simulation/state.db` (see [02-engine-core.md](02-engine-core.md)).

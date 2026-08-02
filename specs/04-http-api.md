@@ -40,7 +40,7 @@ configured; see "Sovereign God mode" below.
 | `/memory/clean` | POST | Dedupe/trim the memory store | `{frame_tick?}` | `{ok, removed, size}` |
 | `/agent/think` | POST | **Legacy** — calls `run_agent_decision()` directly | full think-payload dict (see specs/03) | validated decision dict |
 | `/council-llm-log` | GET | Slim decision records (`llm.jsonl`) for a council frame window (blueprint pitches/verdicts only). **Scans the live session's `llm.jsonl` first**; only reads older retained session directories when the requested `[start_frame, end_frame]` is not fully covered by the live file's frame range (`frame_tick` is monotonic across restarts, but each session only spans frames recorded while that server run was alive — a past council window may fall entirely in an older session). Out-of-range files are skipped using cached per-file `(min_frame, max_frame)` when possible. Matches from all scanned directories are merged and re-sorted by `frame_tick` | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
-| `/state` | GET | Full world snapshot for the thin viewer | — | `engine.snapshot()` — see key inventory below |
+| `/state` | GET | World snapshot for the thin viewer (full or delta via `?since=`) | query param `since` (int, optional) — client's last applied `frameTick`; omit or `0` for full | See **/state delta protocol** below and key inventory |
 | `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected). Supports conditional polls via `districtsEpoch` | query param `since` (int, optional) — last seen `epoch` from a prior response | **First / gap:** `{districts: [...], roadNodes: {...}, roadEdges: [...], epoch: int}`. **Unchanged:** when `since == engine.districtsEpoch`, HTTP 200 with tiny body `{unchanged: true, epoch: int}` (no district/road payload). `districtsEpoch` bumps on district founding, tile place/remove, terrain dig/plant, road-graph change, architect paint/revert, restore, and reset |
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
 | `/control/resume` | POST | Resume the tick loop | — | `{ok: true, paused: false}` |
@@ -75,14 +75,36 @@ district/road data into plain dicts/lists under the lock, then `jsonify`s
 outside the lock. The viewer keeps its last full payload on `unchanged`
 responses.
 
+responses.
+
+## `/state` delta protocol
+
+`SimEngine.snapshot_delta(since)` (server route: `GET /state?since=<N>`).
+
+| Request | Response |
+|---------|----------|
+| `GET /state` or `?since=0` / missing `since` | Full snapshot (`full: true`; same top-level keys as before) |
+| `GET /state?since=<N>` and `N == frameTick` and no dirty state since last poll | `{frameTick, stateGeneration, unchanged: true}` |
+| `GET /state?since=<N>` contiguous (`since < frameTick`, gap ≤ `STATE_DELTA_MAX_GAP` ≈ 90 frames) | `{frameTick, baseFrame: N, stateGeneration, calendar, uptimeSeconds, paused? (if changed), ...partial}` — omitted key = unchanged on the client |
+| Gap > 90 frames / reset / `since > frameTick` / `since < last_reset_frame` | Full snapshot + `full: true`; `stateGeneration` bumps on reset/restore |
+
+Partial rules: dirty agents only in `agents[]`; dirty civ subkeys only (structure upserts may omit `sprite` unless create/upgrade/sprite-submit — `structuresRemoved` lists deletions); `config` only on full or when flags change. Lock discipline: copy/dirty under lock; JSON assembly after release where practical.
+
 ## `/state` payload — top-level keys
 
-From `SimEngine.snapshot()` (sim_engine.py:9907-10049), returned under the
-engine lock for a consistent read:
+From `SimEngine.snapshot()` / `SimEngine.snapshot_delta()` (sim_engine.py),
+returned under the engine lock for a consistent read. Full responses include
+every key below; delta responses omit unchanged keys (client merges — see
+[specs/11-viewer.md](11-viewer.md)). Both modes always include `frameTick`
+and `stateGeneration`; full snapshots also set `full: true`.
 
 | Key | Contents (detail owned elsewhere) |
 |---|---|
 | `frameTick` | current tick counter — specs/02-engine-core.md |
+| `stateGeneration` | monotonic counter bumped on reset/restore; client forces a full resync when it changes |
+| `full` | present and `true` only on full snapshots (omit on delta/unchanged) |
+| `unchanged` | present and `true` only when `?since=frameTick` and nothing changed |
+| `baseFrame` | on deltas only — the client's `since` value this patch applies after |
 | `paused` | bool |
 | `uptimeSeconds` | process wall-clock uptime |
 | `calendar` | day/season/year — specs/02-engine-core.md |

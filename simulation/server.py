@@ -4475,7 +4475,16 @@ def council_llm_log():
 @app.route("/state")
 def state():
     """Consistent world snapshot for the thin viewer (Contract 2)."""
-    return jsonify(engine.snapshot())
+    since_raw = request.args.get("since")
+    since = None
+    if since_raw is not None:
+        try:
+            since = int(since_raw)
+        except (TypeError, ValueError):
+            since = None
+    if since is None:
+        return jsonify(engine.snapshot())
+    return jsonify(engine.snapshot_delta(since))
 
 
 @app.route("/districts.js")

@@ -32,9 +32,18 @@ world state beyond a cached palette/season key.
 
 ## Polling and render loop
 
-- `STATE_POLL_MS = 100` (`viewer.js`, `pollState()`) drives polling: fetches
-  `GET /state`, replaces `world` wholesale, and on fetch failure patches
-  `world.lmStatus = "disconnected"` while keeping the last-known snapshot.
+- `STATE_POLL_MS = 100` (`viewer.js`, `pollState()`) drives polling: the first
+  successful fetch uses `GET /state` (full snapshot); thereafter
+  `GET /state?since=<lastFrameTick>` unless an error or `stateGeneration`
+  mismatch forces another full fetch. The client merges deltas into module-level
+  `world` (`mergeStateDelta()`): full/`full: true` replaces wholesale;
+  `unchanged: true` keeps `world`; partial payloads replace agents by `id`,
+  deep-merge allowlisted `civilization` keys (structure upserts by `id`,
+  `structuresRemoved` tombstones), and replace any other included top-level keys.
+  Responses with `frameTick` older than the last applied frame are ignored
+  (stale poll race). On fetch failure, patches `world.lmStatus = "disconnected"`
+  while keeping the last-known snapshot and sets `statePollFull` so the next
+  poll retries with a full snapshot.
   **Offline behavior**: the last good frame stays on
   screen and the sidebar status dot goes gray (`#9E9E9E`, `renderSidebar()`)
   with the hint "Showing last frame; retrying /state…"
