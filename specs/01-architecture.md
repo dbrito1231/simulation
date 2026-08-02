@@ -18,8 +18,13 @@ for the action catalog.
 - `simulation/server.py` is the Flask app plus the cognition layer: it builds
   prompts, calls Ollama, validates the response, and hands a decision back to the
   engine.
-- `simulation/index.html` + `simulation/sprites.js` poll `GET /state` (~10 Hz) and
-  render; closing the browser tab does not stop the simulation.
+- `simulation/index.html` (shell) + `simulation/viewer.js` + `simulation/sprites.js`
+  poll `GET /state` (~10 Hz, delta after the first full snapshot) and render;
+  closing the browser tab does not stop the simulation. Delta responses include
+  only keys whose server-side `lastMod` frame is greater than the client's
+  `?since=` value (within `STATE_DELTA_MAX_GAP`); maps are pruned, not cleared
+  per poll, so multiple viewers with different `since` cursors each receive
+  one-time updates.
 
 The engine mutates state only under `self.lock`; the full world is persisted to
 `simulation/state.db` (see [02-engine-core.md](02-engine-core.md)).
@@ -68,7 +73,7 @@ locations, or the engine and the LLM-facing schema will silently diverge:
 | `SYSTEM_PROMPT` | server.py:885 | Prose description of each action for the model |
 | `apply_decision` | sim_engine.py:7885 | Server-side effect when an action is chosen |
 | `available_actions` (payload) | sim_engine.py:9143 | Flag-filtered action list actually offered to an agent this think |
-| `ACTION_LABELS` | index.html:1357 | Human-readable label shown in the viewer (display only, no logic) |
+| `ACTION_LABELS` | viewer.js | Human-readable label shown in the viewer (display only, no logic) |
 
 Full action-by-action detail (params, gates, effects) lives in
 [07-actions.md](07-actions.md) — this file only states the invariant.
@@ -80,7 +85,45 @@ their instructions are in `SYSTEM_PROMPT`, and the engine filters them when
 maps; server startup maps remain seed-only conveniences and are not a second role
 registry.
 
-## Flag index (complete — 49 module-level flags, sim_engine.py)
+## Control-plane data flow (Sovereign God mode)
+
+A second, deliberately separate control plane exists alongside the normal
+agent think cycle above: `/control/god/*` (server.py), gated by
+`GOD_MODE_ENABLED` (sim_engine.py, always required) and, when
+`GOD_AUTH_REQUIRED` is True (default False), a token check (server.py). It never
+enters `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT`/`apply_decision`/
+`available_actions`/`ACTION_LABELS` — the action-sync invariant above does not
+apply to it, by design (a future agent-facing action, e.g. `pray`, would be a
+separate change that does). God wildlife kinds (`wildlife_spawn`,
+`wildlife_despawn`, `wildlife_set_hp` — [02-engine-core.md](02-engine-core.md))
+are control-plane interventions under this same rule: they never join the
+decision action-sync set.
+
+- server.py checks the module flag before a request ever reaches the engine;
+  when `GOD_AUTH_REQUIRED` is True, it also checks `X-God-Token` (constant-
+  time compare). Every God route acquires `self.lock` itself once it does.
+- `god_preview()` validates and normalizes a command with NO mutation,
+  returning a short-lived, bounded, in-memory preview record.
+- `god_apply()` accepts only `{previewId, requestId}` — never a client-
+  returned command — resolves the server-held preview, revalidates it against
+  current state, and applies atomically under the lock.
+- `god_cancel()` / `god_sight()` are the remaining two entry points; see
+  [02-engine-core.md](02-engine-core.md) for their Phase 2 shape.
+- `god_compile_prose()` (Optional Phase 8) is a SECOND-gated entry point —
+  `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED` — that only ever produces a
+  `god_preview()`-shaped draft; it never mutates and has no apply-adjacent
+  behavior of its own. See [03-cognition.md](03-cognition.md#sovereign-god-mode-optional-phase-8-free-prose-story-compiler)
+  and [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler).
+
+`GOD_MODE_ENABLED` is also the **first** env-var-backed flag in
+`sim_engine.py` (`os.environ.get("SIM_GOD_MODE", ...)`, read once at import).
+`GOD_AUTH_REQUIRED` is likewise env-backed in sim_engine.py (`SIM_GOD_AUTH`,
+default False). Every prior env-var precedent (`SIM_HOST`, `SIM_PORT`,
+`SIM_AGENTS`, `SIM_LOG_RETENTION`) lives only in server.py; sim_engine.py
+previously read no environment state at all. The companion `SIM_GOD_TOKEN`
+env var stays in server.py only, since the token check itself lives there.
+
+## Flag index (complete — 52 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -133,7 +176,16 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `ECONOMY_SINKS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WIKI_MEMORY` | False | yes | [03](03-cognition.md) |
 | `CROP_GROWTH_ENABLED` | True | yes | [05](05-world.md) |
-| `WILDLIFE_ENABLED` | True | yes | [05](05-world.md) |
+| `WILDLIFE_ENABLED` | True | yes | [05](05-world.md) (authoritative fauna + hunt + motion; also [02](02-engine-core.md), [07](07-actions.md), [08](08-systems-economy.md), [11](11-viewer.md)) |
 | `CARAVAN_VISUALS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WEATHER_ENABLED` | True | yes | [05](05-world.md) |
 | `WEATHER_GOVERNANCE_ENABLED` | True | yes | [05](05-world.md) |
+| `GOD_MODE_ENABLED` | True (env-backed, `SIM_GOD_MODE`; disable via `0`/`false`/`no`/`off`) | yes | [02](02-engine-core.md), [04](04-http-api.md) |
+| `GOD_AUTH_REQUIRED` | False (env-backed, `SIM_GOD_AUTH`; enable via `1`/`true`/`yes`/`on`) | yes | [04](04-http-api.md), [12](12-ops.md) |
+| `GOD_COMPILER_ENABLED` | False (env-backed, `SIM_GOD_COMPILER`) | no (advertised only via `/control/god/capabilities`'s `compiler.enabled`, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
+| `GOD_DEJA_VU_REPLAY` | False (env-backed, `SIM_GOD_DEJA_VU_REPLAY`) | yes | [02](02-engine-core.md), [04](04-http-api.md), [12](12-ops.md) |
+
+`civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
+Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder
+maps); persisted private maps from that shape never appear in `/state` `god`
+(see [02-engine-core.md](02-engine-core.md)).

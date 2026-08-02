@@ -21,15 +21,15 @@ Runs every tick via `_update_survival(agent)` (sim_engine.py:1837), gated
 | `HUNGER_RATE` | 0.3/tick | passive hunger drain |
 | `EAT_THRESHOLD` | 65 | auto-eats a held edible once hunger drops below this |
 | `FOOD_RESTORE` | 45 | hunger restored per meal/heal-donation |
-| `EDIBLE_RESOURCES` | `["food", "fish"]` | auto-eat candidates, checked in order |
+| `EDIBLE_RESOURCES` | `["food", "fish", "meat"]` | auto-eat candidates, checked in order |
 | `HEALTH_RATE` | 2/tick | health lost while hunger is at 0 |
 | `HEALTH_REGEN` | 1.5/tick | health regained while fed (hunger > 0) |
 | `COLLAPSE_REGEN` | 0.5/tick | health regen while incapacitated |
 | `COLLAPSE_REVIVE_HEALTH` | 15 | health at which a collapsed agent revives |
 | `REVIVE_HUNGER` | 35 | hunger floor on revival (else 0-hunger re-collapse in ~8s) |
-| `EDIBLE_RESERVE` | 3 | food/fish an agent keeps back from builds/auto-share |
+| `EDIBLE_RESERVE` | 3 | per-agent carry reserve for `EDIBLE_RESOURCES` only — food/fish/meat an agent keeps back from builds/auto-share; not used for village-wide scarcity or Daily Council agenda |
 | `SHARE_RADIUS` | 120px | range for the anti-hoarding auto-share backstop |
-| `STARVING_HUNGER` | 10 | below this a foodless agent deterministically seeks food |
+| `STARVING_HUNGER` | 10 | below this, deterministic survival backstops fire (seek-food reflex and, when prey is nearer than any gatherable edible, forced hunt — see [Starvation reflex and forced hunt precedence](#starvation-reflex-and-forced-hunt-precedence)) |
 
 Sequence each `_update_survival` call: auto-eat if hungry and holding an
 edible → `_share_edible_with` backstop if starving (hunger ≤ 0) and holding
@@ -54,6 +54,168 @@ non-heal choice can never land mid-emergency.
 Related actions: `heal_agent` (`HEAL_AMOUNT = 25` base, boosted by
 `SKILL_HEAL_BONUS_PER_LEVEL` under `CULTURE_ENABLED`) — see
 [07-actions.md](07-actions.md).
+
+## Huntable wildlife yields (`WILDLIFE_ENABLED`)
+
+Fauna population lives in `civilization["wildlife"]` (engine-owned creature
+records — see [02-engine-core.md](02-engine-core.md)). It is **not** part of
+`districtStocks` and does not deplete ecology gather stocks when a creature
+is killed; ecology stage still gates spawn density only
+([05-world.md](05-world.md)).
+
+**`meat` good.** A base edible resource (in `BASE_RESOURCES` /
+`resourceRegistry` alongside `food`/`fish`). Flows through the same
+survival auto-eat, share, spoilage, storage-cap, contribute, trade, and
+priced-market paths as the other edibles. `BASE_PRICE` treats `meat` like
+`food`/`fish` (base 1). Kill grants never map land game into `food`.
+
+**Kill yield table** (`WILDLIFE_YIELD` / kind pools; +1 unit on kill via
+`hunt_wildlife`):
+
+| District pool | Kinds | Yield resource |
+|---|---|---|
+| forest | `bird`, `squirrel`, `deer`, `fox`, `boar`, `owl` | `meat` |
+| farm | `cow`, `rabbit`, `chicken`, `mouse` | `meat` |
+| farm | `bee` | none — decorative; not a valid hunt target |
+| beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
+
+Grant uses the same carry-cap / overflow-to-stockpile split every other
+resource-gain path uses.
+
+**Hunt damage (retuned).** Multi-hit combat constants (sim_engine.py, Phase 2b
+implements):
+
+| Constant | Value | Role |
+|---|---:|---|
+| `HUNT_DAMAGE` | `2` | per-hit damage for non-`hunter` actors |
+| `HUNT_DAMAGE_HUNTER` | `4` | per-hit damage when actor `role == "hunter"` (2× base bonus preserved) |
+| `HUNT_RADIUS` | `90` | max px from actor to valid prey |
+| `WILDLIFE_FLEE_RADIUS` | `120` | proximity flee before combat (agent within radius → prey flees) |
+
+On every successful hit, prey always force-flees (retarget 80–120px away from
+the attacker). Minimum damage per hit remains `1` after int coercion.
+
+**Expected hits to kill** against shipped `WILDLIFE_MAX_HP` tiers
+([02-engine-core.md](02-engine-core.md)):
+
+| Prey tier | Examples (maxHp) | Non-hunter hits | Hunter hits |
+|---|---|---:|---:|
+| Low | bird, squirrel, rabbit, mouse, fish, crab, gull (1) | 1 | 1 |
+| Low-mid | chicken (2) | 1 | 1 |
+| Mid | fox, owl (3) | 2 | 1 |
+| Mid-high | deer, cow, turtle (4) | 2 | 1 |
+| High | seal (5) | 3 | 2 |
+| High | boar (6) | 3 | 2 |
+
+Hunters clear common 1–4 HP prey in one hit; the heaviest game (`boar`,
+`seal`) still requires two hunter swings or three non-hunter swings — wildlife
+is faster food than farming when stocks fail, not a zero-cost tap.
+
+Related action: `hunt_wildlife`
+([07-actions.md](07-actions.md)); hunter specialty `meat`
+([06-agents.md](06-agents.md)).
+
+([06-agents.md](06-agents.md)).
+
+## Survival role rebalance (`EMERGENT_ROLES`)
+
+`_village_needed_role()` branch **(2) survival-critical** replaces the old
+fixed-order `farmer → fisher → hunter` walk with a stock-aware,
+wildlife-aware precedence. Fires when `len(starving) >= ROLE_STARVE_NEED_THRESHOLD`
+(`2`) among living, non-incapacitated agents with `hunger <= STARVING_HUNGER`.
+Helper predicates (Phase 2b):
+
+- **`_edible_scarce(rid)`** — village-wide held + stockpiled quantity for
+  edible `rid` is at or below `EDIBLE_SCARCITY_THRESHOLD = 3` (same order of
+  magnitude as `DAILY_COUNCIL_SCARCITY_THRESHOLD`).
+- **`_gather_failing(rid)`** — `rid` has a gather zone **and** every district
+  of that zone has ecology ratio `< STOCK_LOW_RATIO` (0.25), i.e. in-ground
+  gathering is depleted/low.
+- **`_wildlife_present()`** — at least one living, huntable creature exists
+  village-wide (`WILDLIFE_ENABLED`).
+- **`_meat_scarce()`** — `_edible_scarce("meat")` **or** total edible held +
+  stockpiled (`food`+`fish`+`meat`) is at or below `EDIBLE_SCARCITY_THRESHOLD`.
+
+**Selection order** (first match wins):
+
+1. **`hunter`** — `_wildlife_present()` **and** hunter unfilled **and**
+   (`_meat_scarce()` or `_edible_scarce` on any edible) **and**
+   (`_gather_failing("food")` or `_gather_failing("fish")`) — promotes hunter
+   **ahead of** unfilled farmer/fisher when farms/fish zones are barren but prey
+   exists (the regression the old fixed-order loop missed).
+2. **`farmer`** — `_edible_scarce("food")` and farmer role unfilled.
+3. **`fisher`** — `_edible_scarce("fish")` and fisher role unfilled.
+4. **First-unfilled fallback** — walk `EDIBLE_RESOURCES` gather roles in registry
+   order (`food`, `fish`, `meat`) and return the first unfilled role (preserves
+   legacy behavior when none of the stock/wildlife signals fire).
+
+Branch **(3) ecology scarcity** additionally registers **`meat`** despite
+`gatherZone: None`: scarcity ratio = `(stockpile["meat"] + Σ agent held meat) /
+MEAT_SCARCITY_CAP` where `MEAT_SCARCITY_CAP = 12` (roughly one boar kill +
+reserve per ~3 agents). When ratio `< STOCK_LOW_RATIO` and hunter is unfilled,
+hunter is eligible in the scarce-role sort alongside district-stock resources.
+Other edibles continue to use aggregated `districtStocks` ratios as today.
+
+No change to `AUTOSWITCH_PROTECTED_ROLES` or `_is_flexible_role`: switching
+**to** hunter already works for flexible candidates.
+
+## Starvation reflex and forced hunt precedence
+
+Two deterministic backstops share the `RULES_TICK_FRAMES` (150) unconditional
+batch ([02-engine-core.md](02-engine-core.md)) and the same hunger band
+(`hunger <= STARVING_HUNGER`). They must never assign conflicting goals on the
+same tick — ordering is load-bearing.
+
+### 1) Seek-food reflex (`_maybe_feed_starving`)
+
+Existing behavior, documented here for precedence. For each eligible agent
+(not incapacitated, not holding any edible, not a Sage-emergency responder):
+
+1. Scan `EDIBLE_RESOURCES` for gather zones that exist (`_gather_zone_for_resource`).
+2. Pick the nearest district of any such zone (food@farm, fish@beach, etc.).
+3. If found: clear competing goals, walk there (`_set_agent_target`) or
+   `collect_resource` immediately when already in-zone; may install a short
+   `gather` goal for follow-through.
+
+This path wins whenever **any gatherable edible source is reachable** (a gather
+zone exists for that resource — reachability is district distance, not ecology
+stock level). Starving agents head to farms/beaches even when stocks are low;
+gather may fail on arrival, but the reflex still fires first.
+
+### 2) Forced hunt goal (`_maybe_forced_hunt`)
+
+Runs **after** `_maybe_feed_starving` on the same tick, only for agents still
+eligible and **without** a gatherable edible source:
+
+**Gate (all required):**
+
+- `SURVIVAL_ENABLED` and `WILDLIFE_ENABLED`.
+- Agent living, not incapacitated, not a Sage-emergency responder.
+- `hunger <= STARVING_HUNGER`.
+- `prey_in_range` — at least one huntable creature within `HUNT_RADIUS` of the
+  agent (same predicate as think payload / `_nearest_huntable_wildlife`).
+- **Edible below reserve:** personal held edibles plus accessible village edibles
+  (stockpile share within `SHARE_RADIUS` backstop semantics) sum to `<
+  EDIBLE_RESERVE` (`3`) for every edible type combined.
+- **No gatherable edible:** step (1) found no gather zone for any edible **or**
+  the nearest gather zone is farther than the nearest huntable prey (prey is
+  strictly the closer survival option).
+
+**Assignment:** `goal = {"kind": "hunt", "target": <wildlife_id>, "ttl":
+FORCED_HUNT_GOAL_TTL}` where `FORCED_HUNT_GOAL_TTL = STALL_THRESHOLD` (`600`,
+~20s — same scale as `seek_shelter`). Target id is the nearest valid prey.
+Applies to **any** living agent, not only hunters; when multiple agents qualify
+the same tick, prefer candidates whose role is `hunter`, then nearest to prey.
+
+**Goal execution (`_step_goal`, kind `hunt`):** each `GOAL_STEP_FRAMES` tick,
+synthesize `hunt_wildlife` with `target` set to the goal prey id until kill,
+prey flees out of range, goal TTL expires, or agent becomes incapacitated.
+Incoming inbox messages still interrupt per ordinary `USE_GOALS` rules.
+
+**Mutual exclusion:** if step (1) assigned movement or a `gather` goal, step (2)
+is a no-op that tick. If step (1) skipped because no gather zone exists but prey
+is in range, step (2) may assign `hunt`. Both never write `goal` for the same
+agent in one batch pass.
 
 ## CRAFTING_ENABLED
 
@@ -95,8 +257,12 @@ Goal kinds (`g["kind"]`): `craft_gather` (walk to gather missing craft
 inputs), `plant_terrain` (apply `plant_terrain` once), `seek_shelter`
 (walk to a district with shelter, `PRESSURE_LOOP_ENABLED`), `dig_relocate`
 (walk to a diggable district, then `_dig_terrain` until carry-capped),
-`caravan` (walk to the other settlement, `PATH1_DIPLOMACY_ENABLED`), plus
-generic `gather`/`deliver`/`build` goals resolved against a target district.
+`caravan` (walk to the other settlement and deliver goods on arrival,
+`PATH1_DIPLOMACY_ENABLED` — see
+[Settlement stores and inter-settlement trade](#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)),
+**`hunt`** (synthesize `hunt_wildlife` against `target` wildlife id —
+[Starvation reflex and forced hunt precedence](#starvation-reflex-and-forced-hunt-precedence)),
+plus generic `gather`/`deliver`/`build` goals resolved against a target district.
 An incoming message always interrupts a goal (falls through to a normal
 think that turn) so agents stay responsive to being talked to.
 
@@ -188,10 +354,10 @@ sub-systems, all deterministic (no LLM).
 | Sub-system | Constants | Behavior |
 |---|---|---|
 | **Spoilage** | `SPOILAGE_RATIO = 0.25` | `_tick_spoilage`: edible overflow beyond `_storage_capacity` rots at 25% (min 1) per tick — stockpile first, then largest holders, never below `EDIBLE_RESERVE` per agent. Escape: build storage (granary `stores`), eat, or contribute. |
-| **Structure decay** | `STRUCTURE_DECAY_PER_GOODS_TICK = 0.05`, `STRUCTURE_DISREPAIR_THRESHOLD = 30`, `REPAIR_CONDITION_RESTORE = 50` | `condition` starts at 100, decays 0.05/tick (~11.7h to disrepair, ~16.7h to full ruin at 0). Below the disrepair threshold a structure stops "working" (no produce/boost/houses/stores); at 0 it becomes a ruin. `repair_structure` restores `REPAIR_CONDITION_RESTORE`; rebuilding a ruin costs half the original needs (min 1 each). `/state` surfaces the raw `condition`/`isRuin` plus server-derived `conditionTier`: `pristine` (>=60), `worn` (>=30 and <60), `crumbling` (<30), or `ruin` (`isRuin` or <=0). |
-| **Disasters** | `DISASTER_PROB = 0.005`, `DISASTER_DAMAGE = (40, 70)`, `STORM_DISASTER_PROB = 0.32` | See below — storm-gated when `WEATHER_ENABLED`, legacy random roll otherwise. |
-| **Shelter** | `DAY_FRAMES = 13500`, `HOUSE_SHELTER_OCCUPANTS = 2`, `SHELTER_HUNGER_PENALTY = 6`, `SHELTER_HUNGER_FLOOR = 20` | `_tick_shelter()` once per day-frame: each working house shelters up to 2 occupants (homeowners guaranteed their own home under `ECONOMY_ENABLED`, else nearest-first); unsheltered agents lose `SHELTER_HUNGER_PENALTY` hunger, floored at 20 (never into the `STARVING_HUNGER` band). |
-| **Seasons** | `YEAR_FRAMES = 324,000`, `SEASON_FRAMES = 81,000` (4 seasons), `SEASON_REGROW_MULT = {spring: 2, summer: 1, autumn: 1, winter: 0}` | Pure function of `frameTick`; multiplies district ecology stock regrowth (winter halts it) — see [05-world.md](05-world.md). |
+| **Structure decay** | `STRUCTURE_DECAY_PER_GOODS_TICK = 0.025`, `STRUCTURE_DISREPAIR_THRESHOLD = 30`, `REPAIR_CONDITION_RESTORE = 50` | `condition` starts at 100, decays 0.025/tick (~23.3h to disrepair, ~33.3h to full ruin at 0). Below the disrepair threshold a structure stops "working" (no produce/boost/houses/stores); at 0 it becomes a ruin. `repair_structure` restores `REPAIR_CONDITION_RESTORE`; rebuilding a ruin costs half the original needs (min 1 each). `/state` surfaces the raw `condition`/`isRuin` plus server-derived `conditionTier`: `pristine` (>=60), `worn` (>=30 and <60), `crumbling` (<30), or `ruin` (`isRuin` or <=0). |
+| **Disasters** | `DISASTER_PROB = 0.002`, `DISASTER_DAMAGE = (30, 55)`, `STORM_DISASTER_PROB = 0.32` | See below — storm-gated when `WEATHER_ENABLED`, legacy random roll otherwise. |
+| **Shelter** | `DAY_FRAMES = 18000` (~10.0 min real at 30/s), `HOUSE_SHELTER_OCCUPANTS = 2`, `SHELTER_HUNGER_PENALTY = 6`, `SHELTER_HUNGER_FLOOR = 20` | `_tick_shelter()` once per day-frame: each working house shelters up to 2 occupants (homeowners guaranteed their own home under `ECONOMY_ENABLED`, else nearest-first); unsheltered agents lose `SHELTER_HUNGER_PENALTY` hunger, floored at 20 (never into the `STARVING_HUNGER` band). |
+| **Seasons** | `YEAR_FRAMES = 432,000` (4 real h = 24 day/night cycles), `SEASON_FRAMES = 108,000` (~60 min = 6 day/night cycles; 4 seasons), `SEASON_REGROW_MULT = {spring: 2, summer: 1, autumn: 1, winter: 0}` | Pure function of `frameTick`; multiplies district ecology stock regrowth (winter halts it) — see [05-world.md](05-world.md). Calendar stretch 2026-07-31: +33% real-time cadence (7.5→10 min days, 45→60 min seasons). |
 | **Vehicles/carry** | `CART_CARRY_BONUS = 20` (cart), `WAGON_CARRY_BONUS = 40`/`WAGON_SPEED_MULT = 1.4` (wagon, tier-2, `TECH_TREE_ENABLED`) | `_carry_cap`/`_vehicle_speed_mult` add query-time bonuses on top of `COLLECT_CAP` for the holder. |
 
 Composable-build blocks with `shelter: True` (`wall`, `fence` — see
@@ -201,9 +367,11 @@ Composable-build blocks with `shelter: True` (`wall`, `fence` — see
 **Disasters, storm-gated (`WEATHER_ENABLED`, living-ecosystem Phase 4).**
 `_maybe_disaster` (sim_engine.py) has two mutually exclusive branches:
 
-- **`WEATHER_ENABLED = False`:** byte-identical to the pre-Phase-4 behavior
-  — `DISASTER_PROB = 0.005` chance per goods tick (≈once/100 real min) of
-  damage (`DISASTER_DAMAGE = (40, 70)`) to a random structure anywhere.
+- **`WEATHER_ENABLED = False`:** legacy random branch — `DISASTER_PROB =
+  0.002` chance per goods tick (≈once/250 real min) of damage
+  (`DISASTER_DAMAGE = (30, 55)`) to a random structure anywhere. Retuned
+  downward from the pre-town-integrity baseline (`0.005` / `(40, 70)`) so
+  overnight ruin growth is dominated by passive decay rather than rare spikes.
 - **`WEATHER_ENABLED = True`:** damage only fires while
   `civilization["weather"]["state"] == "storm"` (see the weather state
   machine, [05-world.md](05-world.md)), at `STORM_DISASTER_PROB = 0.32` per
@@ -245,8 +413,35 @@ events/goods-tick** (measured via a standalone `SimEngine`, `random.seed`
 per run, `WEATHER_ENABLED` toggled, 200,000 goods ticks/seed with damaged
 structures repaired between checks so the candidate pool never runs dry) —
 i.e. turning weather on does **not** measurably change the long-run damage
-rate. See the Phase 4 implementation report for the full seed-by-seed
-numbers.
+rate. **Town-integrity retune:** the legacy (`WEATHER_ENABLED = False`)
+branch now uses `DISASTER_PROB = 0.002` and softened `DISASTER_DAMAGE =
+(30, 55)`, targeting **~0.002 events/goods-tick** (≈once/250 real min)
+instead of the pre-retune ~0.005 baseline; `STORM_DISASTER_PROB` is
+**unchanged** at `0.32` — a future implementation pass may re-calibrate
+storm-branch damage to match the lowered legacy expectation if soak data
+shows weather-on runs outpacing the new off-rate. See the Phase 4
+implementation report for the full seed-by-seed numbers on the pre-retune
+constants.
+
+**Repair campaigns.** When village-wide structural pressure crosses campaign
+thresholds, the engine assigns autonomous repair goals that execute through
+the ordinary `repair_structure` action path (same funding, narration, and
+`_apply_structure_condition_delta` semantics as an LLM-chosen repair).
+
+| Constant | Value | Role |
+|---|---:|---|
+| `REPAIR_CAMPAIGN_RUIN_RATIO` | `0.15` | `_village_repair_pressure()` returns campaign pressure when `ruined / total >= 0.15` **or** `working / total < REPAIR_CAMPAIGN_WORKING_FRAC`. |
+| `REPAIR_CAMPAIGN_WORKING_FRAC` | `0.5` | Same helper — also fires when fewer than half of all structures are working (`condition >= STRUCTURE_DISREPAIR_THRESHOLD` and not a ruin). |
+| `REPAIR_CAMPAIGN_MAX_ASSIGN` | `2` | `_maybe_repair_campaign` (sim_engine.py, RULES_TICK `150` batch, gated `GOODS_ENABLED`) assigns at most two living, non-incapacitated agents per call. |
+
+Each assigned agent receives `goal = {"kind": "repair", "target": structureId,
+"ttl": ...}`; goal synthesis routes to `repair_structure` until success,
+funding failure, or TTL expiry. Targets are chosen from the worst
+(lowest-condition) working or ruined structures village-wide, preferring
+critical categories (`house`, `market`, `workshop`, `foundry`, `granary`,
+`farm_plot`) when any are disrepaired or ruined. Campaign assignment runs in
+the same unconditional `150`-frame batch as `_maybe_repair_critical`
+([02-engine-core.md](02-engine-core.md)).
 
 **Critical-structure repair backstop.** `_maybe_repair_critical` (sim_engine.py,
 called unconditionally once per RULES_TICK gate, [02-engine-core.md](02-engine-core.md))
@@ -254,24 +449,60 @@ is a deterministic escape for when an entire structure category has zero
 working instances village-wide — `repair_structure` is reachable by the LLM
 and funds itself from the stockpile, but under survival pressure agents
 reliably lose the priority contest and never pick it, permanently locking the
-category. Table-driven (`_critical_structure_categories`): walks an ordered
-list of `(type_, guard, trigger, message)` entries and repairs at most ONE
-category per call (so competing emergencies don't drain the same scarce
-stockpile in a single tick), using `_repair_backstop_agent` to pick the
-nearest living, non-Sage-responding agent who can fund the repair. Categories
-covered, in priority order:
+category. **Town-integrity widening:** when `_village_repair_pressure()` is
+true (`ruin_ratio >= REPAIR_CAMPAIGN_RUIN_RATIO` or `working_frac <
+REPAIR_CAMPAIGN_WORKING_FRAC`), the backstop also runs its table even if some
+non-zero working instances remain in a category — it still repairs at most ONE
+category per call, but no longer waits for a category to hit absolute zero
+before acting under mass-decay pressure. Table-driven
+(`_critical_structure_categories`): walks an ordered list of `(type_, guard,
+trigger, message)` entries and repairs at most ONE category per call (so
+competing emergencies don't drain the same scarce stockpile in a single
+tick), using `_repair_backstop_agent` to pick the nearest living,
+non-Sage-responding agent who can fund the repair. Categories covered, in
+priority order:
 
 | Type | Guard | Trigger |
 |---|---|---|
-| `house` | `GOODS_ENABLED` | zero working houses |
-| `market` | `GOODS_ENABLED`, `ECONOMY_ENABLED`, at least one market built | `not _market_active()` (no pricing-unlock market working) |
-| `workshop` | `GOODS_ENABLED`, at least one workshop built | zero working workshops |
-| `foundry` | `GOODS_ENABLED`, `path1_on("TIER3_CONTENT_ENABLED")`, at least one foundry built | zero working foundries |
-| `granary` | `GOODS_ENABLED`, `CRAFTING_ENABLED`, at least one granary built | zero working granaries |
-| `farm_plot` | `GOODS_ENABLED`, at least one farm plot built | zero working farm plots |
+| `house` | `GOODS_ENABLED` | zero working houses, **or** `_village_repair_pressure()` with any disrepaired/ruined house |
+| `market` | `GOODS_ENABLED`, `ECONOMY_ENABLED`, at least one market built | `not _market_active()` (no pricing-unlock market working), **or** pressure with any disrepaired/ruined market |
+| `workshop` | `GOODS_ENABLED`, at least one workshop built | zero working workshops, **or** pressure with any disrepaired/ruined workshop |
+| `foundry` | `GOODS_ENABLED`, `path1_on("TIER3_CONTENT_ENABLED")`, at least one foundry built | zero working foundries, **or** pressure with any disrepaired/ruined foundry |
+| `granary` | `GOODS_ENABLED`, `CRAFTING_ENABLED`, at least one granary built | zero working granaries, **or** pressure with any disrepaired/ruined granary |
+| `farm_plot` | `GOODS_ENABLED`, at least one farm plot built | zero working farm plots, **or** pressure with any disrepaired/ruined farm plot |
 
 Related actions: `repair_structure`, `upgrade_structure`, `craft_item`
 (cart/wagon recipes) — [07-actions.md](07-actions.md).
+
+**Ruin cull (in-sim registry deletion).** `_maybe_cull_ruins()` (sim_engine.py,
+same RULES_TICK `150` batch and `GOODS_ENABLED` gate as `_maybe_repair_campaign`)
+deterministically removes aged, unaffordable ruins from
+`civilization["structures"]` so routine soak runs do not require offline
+[`scripts/prune_ruins.py`](../scripts/prune_ruins.py). A cull tick fires only
+when **all** of the following hold:
+
+1. `ruin_ratio > REPAIR_CAMPAIGN_RUIN_RATIO` (same ratio as repair campaigns).
+2. The oldest eligible ruin has `ruinedSinceFrame` (or equivalent ruin-age
+   field) at least `RUIN_CULL_AGE_FRAMES = DAY_FRAMES` (~1 sim day,
+   `18000` frames at 30/s ≈ 10.0 real min) ago.
+3. Village-wide rebuild remains unaffordable — combined village stockpile plus
+   agent carry cannot fund the half-cost `repair_structure` rebuild of the
+   candidate ruin(s).
+
+Each call removes **1–3** ruins (`RUIN_CULL_MIN_PER_CALL = 1`,
+`RUIN_CULL_MAX_PER_CALL = 3`), preferring non-critical types and duplicate
+ruins before the last working-critical instance of `house`, `market`,
+`workshop`, `foundry`, `granary`, or `farm_plot`. Removal mirrors the offline
+prune script: drop the structure from `civilization["structures"]`, clear any
+agent `homeStructureId` pointing at it, and filter `reorgTasks` entries
+referencing it. Writes an `activity` line and updates the `structure_health`
+benchmark detail (`ruined` count drops; `total` drops with it). **Contract
+amendment:** this is an explicit exception to the prior invariant that
+structures are never removed from `civilization["structures"]` — passive
+decay/disaster damage still produces ruins (never auto-deletes); only
+`_maybe_cull_ruins()`, the God `clear_ruins` command
+([02-engine-core.md](02-engine-core.md#sovereign-god-mode-town-integrity--mass-structure-repair-and-ruin-clearance)),
+or offline `prune_ruins.py` may delete registry entries.
 
 **`structure_health` benchmark.** `_tick_structure_health_benchmark`
 (sim_engine.py) logs a `structure_health` benchmark every `GOODS_TICK_FRAMES`
@@ -291,10 +522,13 @@ can reconstruct the full picture, not just the ratio.
 
 `ECONOMY_SINKS_ENABLED` defaults to True. Repairs prefer one plank when
 available; tier-2+ projects add one crafted material (planks, then bricks,
-then tools); and comfort consumption drains one pottery or dried fish per
-living agent every `COMFORT_EVERY_N_GOODS_TICKS = 4` goods ticks (i.e. every
-~2 real minutes), giving a small hunger (+2) and health (+1) benefit, capped
-at one unit per agent per firing.
+then tools); and comfort consumption *opportunistically* drains one `pottery`
+or `dried_fish` per living agent every `COMFORT_EVERY_N_GOODS_TICKS = 4`
+goods ticks (i.e. every ~2 real minutes) when stock is available — neither id
+is seeded with a producer; the sink fires only if an invention supplies them,
+and either id may be pruned by the orphan GC (`_maybe_retire_custom_resource`).
+Each firing gives a small hunger (+2) and health (+1) benefit, capped at one
+unit per agent per firing.
 
 Drain arithmetic (why every 4th tick): a goods tick fires every 30 real
 seconds, so per-tick consumption would drain ~1,080 goods/hour at ~9 living
@@ -310,7 +544,7 @@ Activates once a market structure exists and is working
 `pricing` kind).
 
 **Pricing** (`_resource_price`): `base * multiplier`,
-no persisted state. `base` from `BASE_PRICE` (food/fish/water/wood/herbs=1,
+no persisted state. `base` from `BASE_PRICE` (food/fish/meat/water/wood/herbs=1,
 stone/planks/bricks=2, tools=3, cart=4, wagon=6; gold and coin are always 1
 — a currency never prices itself, whichever one is the active trade medium).
 `multiplier = 1 + (1 - scarcity) * (PRICE_SCARCITY_MULT - 1)`,
@@ -394,6 +628,48 @@ coin yet — the mechanism is ready the moment one does.
 
 Related actions: `trade_resource` — [07-actions.md](07-actions.md).
 
+## Settlement stores and inter-settlement trade (PATH1_DIPLOMACY_ENABLED)
+
+Gated by `path1_on("PATH1_DIPLOMACY_ENABLED")`. Adds authoritative
+per-settlement stockpiles alongside the village-wide `stockpile`.
+
+**Shape:** `civilization["settlementStores"][settlement_id][resource_id] =
+qty`. Cold start initializes an empty dict per settlement id in
+`_init_settlements()`; `restore_state()` migrates missing keys to `{}` per
+known settlement so old saves gain the field without inventing goods.
+
+**Credit/debit precedence:**
+- **Gather overflow** — when an agent's carry is full, surplus from
+  `_collect_resource`, hunt yields, and similar grants route to the agent's
+  current settlement store (`_settlement_for_agent`) before the village
+  `stockpile`.
+- **Local spend** — repair (`_repair_structure`), craft input pulls, and
+  other local settlement-scoped funding draw from the agent's settlement
+  store first, then the village `stockpile` (mirrors district-stock-first
+  upkeep in `STRUCTURE_EFFECTS_ENABLED`).
+- **Caravan delivery** — credits destination `settlementStores`; debits
+  the traveler's held bundle (vehicles and personal `EDIBLE_RESERVE` exempt).
+
+**Delivery pipeline** (`_caravan_trade_bundle`, `_deliver_caravan`,
+sim_engine.py — wired from `_maybe_caravan_goal` on arrival and from the
+`deliver_caravan` action):
+1. `_caravan_trade_bundle(agent, dest_settlement_id)` — selects transferable
+   held resources (positive qty, not cart/wagon, respecting edible reserve).
+2. `_deliver_caravan(agent, dest_settlement_id)` — debits the bundle from
+   the traveler; for each resource, applies the enacted treaty `tariff`
+   fraction (see [10-path1.md](10-path1.md#treaty-tariffs)): tariff share →
+   source settlement store (or village `stockpile` when unset); remainder →
+   destination settlement store; calls `_emit_shipment(from_district,
+   to_district, resource)` after each transfer; appends
+   `caravanLog` `{goods, from, to, frame}` and logs activity.
+
+**Prompt/viewer:** think payload includes a per-settlement store summary;
+`/state` exposes `civilization.settlementStores` when diplomacy is on
+([04-http-api.md](04-http-api.md)).
+
+Related actions: `deliver_caravan`, `propose_treaty`, `vote_treaty` —
+[07-actions.md](07-actions.md).
+
 ## CARAVAN_VISUALS_ENABLED
 
 `CARAVAN_VISUALS_ENABLED` defaults to True. Living-ecosystem Phase 3
@@ -403,7 +679,8 @@ graph when goods move between districts.
 
 **Hard constraint — shipments never gate the economy.** `_emit_shipment`
 is called strictly *after* the authoritative transfer has already mutated
-agent inventories / district-project `contributed` / the village stockpile
+agent inventories / district-project `contributed` / settlement stores /
+the village stockpile
 — trade, contributions, and market settlement remain exactly as
 instantaneous as they were before this flag existed. A shipment is an
 animation receipt of a transfer that already happened, never a precondition
@@ -422,6 +699,8 @@ call):
   agent currently stands in (`_resolve_contribution_district`'s
   most-stalled-district fallback), i.e. a genuine stockpile transfer
   between districts.
+- `_deliver_caravan` — each resource moved between settlement stores on
+  caravan arrival ([Settlement stores](#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
 
 **Shape**: `{id, fromDistrict, toDistrict, resource, path, startFrame,
 endFrame, mode}`. `path` is the list of `{x, y}` road-graph waypoints
@@ -455,3 +734,192 @@ itself is echoed in `config.flags.CARAVAN_VISUALS_ENABLED`. Off means the
 key is simply absent and the viewer draws nothing extra — the moored
 `physicalProps` boats (`TRANSIT_ENABLED`, [11](11-viewer.md)) are entirely
 unaffected by this flag either way.
+
+## Sovereign God mode: `grant_resource` semantics (Phase 4)
+
+`{"kind": "grant_resource", "payload": {"resourceId": str, "amount": int,
+"target": "stockpile" | {"agentId": int}?}}` — full command/reversibility
+details in
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-4--bounded-immediate-miracles);
+this section documents the resource-transfer contract specifically.
+
+**Known-resource gate.** `resourceId` must already exist as a key in the live
+`civilization["resourceRegistry"]` — the same registry `_perform_gather`,
+crafting, invention, and cognition's `known_resource_ids` all read from
+(seeded from `BASE_RESOURCES`/`CRAFTED_RESOURCES` plus any invented custom
+resources). There is no separate "known resource" allowlist for God mode; a
+`resourceId` that has never been seeded or invented is rejected as "unknown
+resource id" before any other check. A retired custom resource id fails this
+gate until it is re-invented.
+
+**Caps.** `amount` is a positive integer, capped per command at
+`GOD_GRANT_PER_COMMAND_CAP = 200`. A second, cumulative cap,
+`GOD_GRANT_SESSION_CAP = 2000`, bounds the running total of every
+`grant_resource` command *applied* (not merely previewed) since process
+start, tracked by `self._god_grant_session_total` — in-memory only, like
+`self._god_preview_cache`/`self._god_requests`, reset by `reset()` and never
+written to `state.db`. A command whose `amount` would push the running total
+past the session cap is rejected at validation time (both at preview and at
+apply-time revalidation), applying nothing.
+
+**Storage/carry semantics, preserved explicitly.** `target` omitted or the
+literal string `"stockpile"` adds `amount` straight to
+`civilization["stockpile"][resourceId]` — identical to how tax collection,
+rationing, and every other stockpile-crediting path already writes it.
+`target: {"agentId": int}` must resolve to a living agent, and the grant is
+split through the exact same two sinks `_perform_gather`'s carry-cap clamp
+and every other gain-resource path already use, via `_carry_cap(agent)`:
+
+```text
+cap    = _carry_cap(agent)                       # COLLECT_CAP (+cart/wagon bonus)
+held   = agent["resources"].get(resourceId, 0)
+room   = max(0, cap - held)
+agent_added     = min(amount, room)               # fills the agent's carry room first
+stockpile_added = amount - agent_added            # remainder routes to the village stockpile
+```
+
+This is the plan's chosen resolution for "if a grant would exceed carry
+capacity, either clamp to capacity or route the remainder to the
+stockpile": the remainder is **routed to the stockpile**, never clamped away
+and lost, and never a third bypass sink distinct from the two every ordinary
+resource-gain path already writes to. `god_preview()`'s `previewOutcome` for
+this kind reports `agentAdded`/`stockpileAdded` computed against the agent's
+*current* held amount, so the operator sees the exact split before
+committing to apply.
+
+## Sovereign God mode: timed lawgiver modifiers — the arithmetic contract (Phase 5)
+
+Seven allowlisted `float` keys, each read through one helper —
+`_divine_modifier(key, default=1.0)` — at the exact existing calculation
+site each already had, in the exact existing order, before the existing
+clamp. With no active effect for a key (flag off, or flag on with nothing
+occupying that key) the helper returns exactly `1.0`, so multiplying by it
+is always safe to leave in the code path unconditionally: `1.0 * x == x`
+(for the `int`/`floor` cases below, `math.floor(x * 1.0) == x` for any `x`
+already an `int`), which is *why* an untouched or all-`1.0` run is
+byte-identical to the feature-off baseline rather than merely similar to it.
+See [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
+for the `activeEvents`/`story_event` state this reads and the
+one-value-per-key composition rule.
+
+**Gathering (`_perform_gather`).** The existing sequence: base `amount`,
+then `+= self._custom_rule_modifier("collect_resource", ...)` (an
+agent-authored village-law addition), then an ecology-scale
+`max(1, int(amount * scale))`, then a grove-ratio `max(1, int(amount *
+grove_mult))`, then a carry-cap clamp `max(1, min(amount, cap_room))`, then
+`collectSuccesses += 1` and the tool benchmark. The divine step is inserted
+**after** the grove-ratio line and **before** the carry-cap clamp:
+
+```text
+mult   = fish_yield_multiplier if resource == "fish" and active
+         else gather_yield_multiplier
+amount = floor(amount * mult)
+if amount <= 0:
+    return early — before the carry-cap clamp
+```
+
+**Ordering is load-bearing, not stylistic.** The carry-cap clamp is `max(1,
+min(...))` — applying the divine multiplier *after* that clamp would
+resurrect a `0.0`/near-zero result back to `1`, silently defeating the
+headline "a divine famine nulls the harvest" case. Multiplying *before* the
+clamp and returning early on a non-positive result is the only ordering that
+lets a divine multiplier actually produce zero.
+
+**The zero-path is a full early return**, not merely skipping the resource
+add. It happens *before*: the resource being added to `agent["resources"]`,
+`c["collectSuccesses"] += 1`, `self._path1_tool_benchmark(resource, True)`,
+ecology stock depletion (`_deplete_district_stock`), harvest-quota recording
+(`_record_harvest_quota_use`), and gather-skill practice (`_practice_skill`).
+It still sets `agent["lastGatherRejection"]` (the same field every other
+gather-rejection branch sets) and returns a "found nothing" narration in the
+same voice as its neighbors, so a divinely-nulled gather is indistinguishable
+from any other legitimate rejection in the agent's own eyes — and, crucially,
+never inflates `collectSuccesses` or the tool-tier benchmark, which is
+exactly the evidence stream God-mode's `intervened` marker exists to keep
+honest.
+
+**Fish precedence.** `fish_yield_multiplier` *replaces* — never multiplies
+with — `gather_yield_multiplier` for `resource == "fish"`. A fish gather
+reads only `_divine_modifier("fish_yield_multiplier")`; it never falls back
+to or combines with the general key, even when only the general key is
+active. `gather_yield_multiplier`'s range is `0.25..3.0` (it can never reach
+`0.0` on its own — a base `amount == 1` gather already floors to `0` at its
+own minimum, `floor(1 * 0.25) == 0`, so the zero-path is still reachable
+through the general key at its floor); `fish_yield_multiplier`'s range is
+`0.0..3.0`, reaching true zero directly.
+
+**Divine law scales village law, not the other way around.** The divine
+multiplier is applied *after* `_custom_rule_modifier`'s additive village-law
+bonus (an agent-authored governance effect, e.g. a "Wood Charter" custom
+rule), not instead of it — a divine famine suppresses a village's own
+harvest bonus too, which is the intended default. `god_preview()`'s
+`previewOutcome` for a `story_event` naming `gather_yield_multiplier` or
+`fish_yield_multiplier` adds a `customRuleContext` list (one `{ruleId,
+subject, value}` entry per currently-enacted village rule that modifies
+`collect_resource`) alongside the proposed `modifiers`, so an operator sees
+both contributions **named separately** — the divine value is never merged
+into or replacing the custom-rule value in the preview response, only in the
+live arithmetic where composition is genuinely intended.
+
+**Hunger drain (`_update_survival`).** `agent["hunger"] = max(0,
+agent["hunger"] - HUNGER_RATE * _divine_modifier("hunger_drain_multiplier"))`
+— the multiplier scales the delta *before* the existing `max(0, ...)` clamp.
+`0.0` suppresses drain entirely for that tick without touching any other
+survival effect.
+
+**Starvation damage (`_update_survival`, the `hunger <= 0` branch).**
+`agent["health"] = max(0, agent["health"] - HEALTH_RATE *
+_divine_modifier("starvation_damage_multiplier"))` — same before-the-clamp
+ordering. New relative to the vitals-miracle catalog: this is the only knob
+that lets a divine effect reduce *ongoing* starvation damage rather than
+granting a one-off vitals bump, which is what makes a "Merciful Rain" story
+template mechanically possible.
+
+**Fed regen (`_update_survival`, the `hunger > 0`, not-incapacitated
+branch).** `agent["health"] = min(100, agent["health"] + HEALTH_REGEN *
+_divine_modifier("health_regen_multiplier"))` — same before-the-clamp
+ordering. This is the **only** consumer site `health_regen_multiplier`
+reaches.
+
+**`COLLAPSE_REGEN` is deliberately excluded from divine scaling.** The
+`agent["incapacitated"]` branch — `agent["health"] = min(100,
+agent["health"] + COLLAPSE_REGEN)` — is left completely untouched by
+`health_regen_multiplier` or any other divine modifier. `COLLAPSE_REGEN` is
+what lets an incapacitated agent climb back to `COLLAPSE_REVIVE_HEALTH = 15`;
+if a `0.0` `health_regen_multiplier` reached this line, a collapsed agent
+would be permanently stranded below the revive threshold with no
+deterministic escape. This is the one line in the entire seven-key catalog
+where "scale everything uniformly" was rejected on purpose — the smoke suite
+proves a collapsed agent still recovers under an active `0.0`
+`health_regen_multiplier`.
+
+**Structure decay (`_tick_structure_decay`).** The passive per-goods-tick
+delta is scaled before being handed to the shared helper: `decay =
+STRUCTURE_DECAY_PER_GOODS_TICK * _divine_modifier("structure_decay_multiplier")`,
+then `self._apply_structure_condition_delta(s, -decay)` for every
+non-ruined structure — the identical helper the `structure_condition`
+miracle (Phase 4) and direct disaster damage both call with their own
+deltas. Only *this* passive-decay call site is scaled; a miracle's own
+`delta` and any disaster-damage delta are untouched by
+`structure_decay_multiplier`.
+
+**Spoilage (`_tick_spoilage`).** The existing computation — `base_spoil =
+max(1, int(overflow * SPOILAGE_RATIO))` (the floor-of-1 guarantee that
+normal spoilage always removes at least one unit once there is any overflow
+at all) — is now followed by `to_spoil = min(overflow, floor(base_spoil *
+_divine_modifier("spoilage_multiplier")))`. The divine multiplier is applied
+to `base_spoil` **before** the existing `min(overflow, ...)` bound is
+re-applied, so spoilage can never remove more than the eligible overflow
+regardless of how large the multiplier is (`3.0` max), and an active `0.0`
+overrides the normal floor-of-1 guarantee entirely — no spoilage happens
+that tick.
+
+**Identity.** For every site above, an effective `1.0` — flag off, or flag
+on with nothing occupying that key — executes the identical multiplication
+and produces the identical clamp result as the feature-off baseline; no
+site special-cases "is God mode on" to skip the multiplication, because
+`_divine_modifier`'s own default already makes doing so unnecessary. The
+smoke suite proves this for every site (gather, survival, structure decay,
+spoilage) by running identical operations against two independently
+constructed engines — one with the flag off, one with the flag on and every
+key pinned to `1.0` — and asserting the observable results match exactly.

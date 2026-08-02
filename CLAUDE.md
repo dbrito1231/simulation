@@ -35,7 +35,9 @@ uv run python simulation/server.py   # start server, then open http://127.0.0.1:
 
 - **[simulation/sim_engine.py](simulation/sim_engine.py)** — the engine (`SimEngine`). Owns ALL world state, runs the 30/s tick loop, applies decisions via `apply_decision()`, runs every deterministic system, dispatches LLM think jobs to a bounded worker pool, persists to `simulation/state.db`.
 - **[simulation/server.py](simulation/server.py)** — Flask app + cognition. Serves viewer/state/controls; `run_agent_decision()` prompts Ollama, extracts JSON; `normalize_decision()` + `role_fallback_action()` reject invalid actions. `SessionLogger` writes per-session JSONL.
-- **[simulation/index.html](simulation/index.html)** — thin viewer only. Polls `GET /state` (~10 Hz) and renders; closing it does not stop the sim.
+- **[simulation/index.html](simulation/index.html)** — thin viewer shell (markup only).
+- **[simulation/viewer.js](simulation/viewer.js)** — polling, render loop, sidebar, Divine Console.
+- **[simulation/viewer.css](simulation/viewer.css)** — viewer layout and panel chrome.
 - **[simulation/sprites.js](simulation/sprites.js)** — pure, stateless Canvas drawing.
 - **[simulation/roles.json](simulation/roles.json)** — **single source of truth for role definitions**; edit role data here, never in code maps.
 
@@ -43,7 +45,7 @@ Data flow: tick thread advances world → think timer fires → `_build_think_pa
 
 ## Critical invariants
 
-- New actions must stay in sync across `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT` (server.py), `apply_decision()` + payload `available_actions` (sim_engine.py), and `ACTION_LABELS` (index.html, display only) — [specs/01-architecture.md](specs/01-architecture.md#action-sync-invariant).
+- New actions must stay in sync across `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT` (server.py), `apply_decision()` + payload `available_actions` (sim_engine.py), and `ACTION_LABELS` (viewer.js, display only) — [specs/01-architecture.md](specs/01-architecture.md#action-sync-invariant).
 - The engine mutates world state only under its lock; full world persists to `simulation/state.db` (autosave + graceful-exit flush; `restore_state()` resumes old saves) — [specs/02-engine-core.md](specs/02-engine-core.md).
 - `MAX_CONCURRENT_LLM = 3` (sim_engine.py); Ollama's `num_ctx` must cover ~3,400 tokens × parallel slots (`uv run python scripts/ollama_setup.py` applies target config; see `ollama_config.md`) — [specs/03-cognition.md](specs/03-cognition.md).
 - Core loop is the build pipeline: `start_project` → gather → contribute → `build_structure`, plus a blueprint flow where elder Sage approves new types; Sage's survival is protected by a deterministic emergency system — [specs/07-actions.md](specs/07-actions.md), [specs/02-engine-core.md](specs/02-engine-core.md#sage-emergency).
@@ -55,7 +57,7 @@ Data flow: tick thread advances world → think timer fires → `_build_think_pa
 
 ## Logs
 
-Each server run writes to `simulation/logs/<timestamp>/` (gitignored): `activity.jsonl` (world events), `conversation.jsonl` (agent dialogue), `llm.jsonl` (full LLM request/response/decision per call; sessions predating the Ollama migration used `lm_studio.jsonl`). Primary debugging surface — read `llm.jsonl` to see what the model actually returned and which fallback fired. Ollama's own log (token usage, per-request checkpoints) lives outside the repo at `%LOCALAPPDATA%\Ollama\server.log`.
+Each server run writes to `simulation/logs/<timestamp>/` (gitignored): `activity.jsonl` (world events), `conversation.jsonl` (agent dialogue), `llm.jsonl` (full LLM request/response/decision per call; sessions predating the Ollama migration used `lm_studio.jsonl`), `benchmarks.jsonl` (Sid-parity metrics: specialization index, rule adherence, meme adoption, memory-store size, module-activation timeline), `divine.jsonl` (Sovereign God mode intervention audit trail — dark by default, see `specs/12-ops.md`), and `compiler.jsonl` (Sovereign God mode Optional Phase 8 free-prose compiler attempts — draft/rejection, dark by default behind its own `GOD_COMPILER_ENABLED` flag, see `specs/12-ops.md`). Primary debugging surface — read `llm.jsonl` to see what the model actually returned and which fallback fired. Ollama's own log (token usage, per-request checkpoints) lives outside the repo at `%LOCALAPPDATA%\Ollama\server.log`.
 
 ## Docs map
 

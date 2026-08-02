@@ -109,28 +109,59 @@ to counteract dig-driven grove loss; `_maybe_expand_field` auto-assigns a
 
 ## PATH1_DIPLOMACY_ENABLED
 
-`_init_settlements()` (sim_engine.py:4198) seeds a single `"home"`
+`_init_settlements()` (sim_engine.py:5723) seeds a single `"home"`
 settlement owning every starter district. `_maybe_found_settlement()`
 (tick-gated backstop) founds a second settlement — `"outpost"`, on a
 claimed frontier plot — once `structures ≥ SETTLEMENT_STRUCT_THRESHOLD = 5`
 (non-ruin) and `living ≥ SETTLEMENT_POP_THRESHOLD = 6`; caps at 2
 settlements total.
 
+**Settlement stores:** `civilization["settlementStores"][settlement_id] =
+{resource_id: qty}` — per-settlement stockpiles distinct from the
+village-wide `stockpile`. Initialized empty for every known settlement on
+cold start and migrated empty on `restore_state()` (`setdefault` per
+settlement id). Local gather overflow and caravan delivery credits prefer
+the agent's current settlement store; local repair/craft funding draws from
+the agent's settlement store first, then falls back to the village
+`stockpile` (same district-store-first pattern as upkeep — see
+[08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
+Think payload and `/state` expose per-settlement stores when this flag is on.
+
 **Treaties:** `RULE_KINDS` gains `"treaty"` under this flag (see
 [09-systems-society.md](09-systems-society.md) for the shared propose/vote
 scaffold). `propose_treaty`/`vote_treaty`
-(`_propose_treaty`/`_vote_treaty`, sim_engine.py:4282) reuse the rules
+(`_propose_treaty`/`_vote_treaty`, sim_engine.py:5908) reuse the rules
 `pendingRules`/`_tally_and_maybe_enact` machinery directly — a treaty is a
-rule with `kind: "treaty"`, requiring `id`/`name` on the proposal.
+rule with `kind: "treaty"`, requiring `id`/`name` on the proposal. Enacted
+treaties may carry an optional `tariff` fraction (`0`–`0.25`, default `0`);
+see [Treaty tariffs](#treaty-tariffs) below.
 
-**Caravans:** `_maybe_caravan_goal` (sim_engine.py:4256) — an agent holding
+**Caravans:** `_maybe_caravan_goal` (sim_engine.py:5781) — an agent holding
 a cart/wagon (raising `_carry_cap`) and at least `CARAVAN_CARRY_MIN = 3`
 total resources, once a second settlement exists, is assigned a `caravan`
-goal (`USE_GOALS`) to walk to the other settlement's first district; on
-arrival it logs to `civilization["caravanLog"]` and an
-`inter_village_trades` benchmark. `_border_settlement_agent` flags an agent
-within 150px of an agent from a different settlement (used for
-diplomacy-flavored prompt lines).
+goal (`USE_GOALS`) to walk to the other settlement's first district. On
+arrival, `_caravan_trade_bundle` + `_deliver_caravan` debit the traveler's
+trade goods, credit the destination `settlementStores`, apply treaty
+tariffs, call `_emit_shipment` per transferred resource, and append an
+enriched `caravanLog` entry (`goods`, `from`, `to`, `frame`) plus an
+`inter_village_trades` benchmark. Live persisted `civilization["caravanLog"]`
+is capped at `CARAVAN_LOG_CAP = 20` (oldest entries drop on each append);
+`/state` projects the same bounded tail. The LLM may also start a caravan run via
+the `deliver_caravan` action ([07-actions.md](07-actions.md)); the goal
+still completes authoritative delivery on arrival. `_border_settlement_agent`
+flags an agent within 150px of an agent from a different settlement (used
+for diplomacy-flavored prompt lines).
+
+### Treaty tariffs
+
+Enacted `kind: "treaty"` rules (and matching entries in
+`civilization["treaties"]`) gain an optional `tariff` field: a fraction
+`0`–`0.25`, default `0`. On caravan delivery, the tariff share of each
+resource in the bundle is credited to the **source** settlement's store (or
+the village `stockpile` when the source settlement has no store entry); the
+remainder is credited to the destination settlement store. Proposers supply
+`tariff` through the existing `propose_treaty` `rule` object (schema detail
+in [09-systems-society.md](09-systems-society.md)).
 
 ## TRANSIT_ENABLED
 
@@ -138,9 +169,22 @@ diplomacy-flavored prompt lines).
 unlock has the shape `{"kind":"transit","terrain":"ocean",
 "consumes":{"boat":1}}`; `terrain` is currently limited to `ocean` and all
 consumed resource ids must be known positive quantities. A working transit
-structure permits ocean-zone gathering and consumes its cost when an abstract
-caravan arrives at another settlement. Agents retain ordinary district/road
-movement: this does not add water pathing or vehicle entities.
+structure permits ocean-zone gathering and consumes its cost via
+`_consume_ocean_transit` when a caravan crosses settlement boundaries by
+water.
+
+**Bounded ocean corridor (caravan/transit only):** when `TRANSIT_ENABLED`
+and `_has_ocean_transit()` are true, inter-settlement `caravan` goals that
+cross settlement boundaries route through an ocean corridor — source
+dock/shipyard district → ocean waypoint(s) → destination dock/district —
+instead of road-only arrival. Transit cost is consumed once per crossing via
+`_consume_ocean_transit` (village stockpile first today; settlement-store
+precedence lands in Phase 3b). Ordinary agent movement, gather, and
+non-caravan goals remain district/road-bound; there is no free-swim
+everywhere and no persistent vehicle entities. Movement geometry is owned
+by [05-world.md](05-world.md#inter-settlement-movement-ocean-corridor); shipment
+`mode: "boat"` visuals reuse the same boundary signal
+([08-systems-economy.md](08-systems-economy.md#caravan_visuals_enabled)).
 
 Save migration (`restore_state()`): the `dock` and `shipyard` types gain a
 `{"kind":"transit","terrain":"ocean","consumes":{"boat":1}}` unlock when
@@ -182,13 +226,17 @@ first night-pressure tick of the day) is exempt from the exposure damage.
 The `night_shelter_rate` benchmark payload gains a `lit` count when any
 agent was spared by light.
 
-**Wildlife:** `_tick_wildlife()` runs on the `GOODS_TICK_FRAMES` gate
-(900 ticks) with `WILDLIFE_EVENT_PROB = 0.02` chance per check
-(only when `SURVIVAL_ENABLED`). Picks a random living, non-incapacitated
-forest-district agent as a candidate victim; if any non-incapacitated guard
-is within `WILDLIFE_GUARD_RADIUS = 120` of the victim, the attack is
-deterred (activity log only); otherwise the victim takes 5 health damage
-(floored at 5).
+**Wildlife (pressure event):** `_tick_wildlife()` runs on the
+`GOODS_TICK_FRAMES` gate (900 ticks) with `WILDLIFE_EVENT_PROB = 0.02` chance
+per check (only when `SURVIVAL_ENABLED`). Picks a random living,
+non-incapacitated forest-district agent as a candidate victim; if any
+non-incapacitated guard is within `WILDLIFE_GUARD_RADIUS = 120` of the
+victim, the attack is deterred (activity log only); otherwise the victim
+takes 5 health damage (floored at 5). **Name disambiguation:** this Path-1
+pressure helper is unrelated to huntable fauna
+(`_move_wildlife` / `_tick_huntable_wildlife` under `WILDLIFE_ENABLED` —
+[02-engine-core.md](02-engine-core.md), [05-world.md](05-world.md)); do not
+reuse or conflate them.
 
 **Shelter-seeking:** `_maybe_seek_shelter(agent)` (sim_engine.py:4387) — at night, an
 unsheltered agent with no active goal is assigned a `seek_shelter` goal

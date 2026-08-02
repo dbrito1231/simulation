@@ -12,16 +12,21 @@ normalize_decision, role_fallback_action, MemoryStore, lm_complete) is reused
 from server.py and injected at construction time to avoid a circular import.
 """
 
+import hashlib
+import copy
 import json
 import math
 import os
 import random
+import shutil
 import re
+import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 
 # Full-state persistence (Contract 3), backed by a SQLite database. Resolved
@@ -30,8 +35,14 @@ from datetime import datetime, timezone
 # STATE_VERSION was bumped 1 -> 2 for the world-expansion plan
 # (civilization.activeProject -> districtProjects, new
 # districts/roadNodes/roadEdges/frontierPlots); v1 saves are no longer
-# supported.
-STATE_VERSION = 2
+# supported. v2 -> 3 splits structure sprite grids out of the civ JSON blob
+# into a structure_sprites table (restore still accepts v2 with embedded
+# sprites once, then re-saves as v3).
+STATE_VERSION = 3
+# Restore accepts these versions; v2 DBs may still embed sprites in civ JSON.
+RESTORE_STATE_VERSIONS = (2, 3)
+# Max frame gap for GET /state?since= before the server returns a full snapshot.
+STATE_DELTA_MAX_GAP = 90  # ~3s at 30Hz
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.db")
 AUTOSAVE_SECONDS = 10
 # Sets on the civilization that serialize to JSON arrays and back.
@@ -48,7 +59,12 @@ CREATE TABLE IF NOT EXISTS memory (
 CREATE TABLE IF NOT EXISTS council_transcript (
     rowid_pk INTEGER PRIMARY KEY, meeting_id INTEGER, who TEXT, type TEXT, text TEXT,
     feeling TEXT, frame_tick INTEGER, ts TEXT);
+CREATE TABLE IF NOT EXISTS structure_sprites (
+    structure_id TEXT PRIMARY KEY, sprite_json TEXT NOT NULL, updated_frame INTEGER NOT NULL);
 """
+
+# Payload keys used only for save I/O and hashing — never written to meta/civ.
+_STATE_HASH_SKIP_KEYS = frozenset({"savedAt", "_sprite_upserts", "_sprite_removals"})
 
 
 def _connect_db(path):
@@ -59,11 +75,53 @@ def _connect_db(path):
     return conn
 
 
+def _json_safe_copy(value):
+    """Deep-copy a value into JSON-serializable form (sets -> sorted lists)."""
+    if isinstance(value, set):
+        return sorted(_json_safe_copy(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _json_safe_copy(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_copy(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe_copy(v) for v in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _structure_sprites_fingerprint(civilization):
+    """Stable digest of all in-memory structure sprites (for autosave hash)."""
+    sprites = {}
+    for s in (civilization or {}).get("structures") or []:
+        sid = s.get("id")
+        sp = s.get("sprite")
+        if sid and sp:
+            sprites[sid] = sp
+    if not sprites:
+        return None
+    blob = json.dumps(
+        _json_safe_copy(sprites), sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _state_content_hash(payload):
+    """Stable SHA-256 of a save payload, excluding ephemeral save keys."""
+    canonical = {k: v for k, v in payload.items() if k not in _STATE_HASH_SKIP_KEYS}
+    blob = json.dumps(
+        canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def _write_state_db(path, payload):
     """Atomically persist a Contract-3 payload dict into the SQLite state
     database at `path`. All table rewrites happen in a single transaction so
     a crash mid-write can never leave the DB half-updated. May raise; callers
     (SimEngine.save_state) swallow exceptions."""
+    sprite_upserts = payload.get("_sprite_upserts") or {}
+    sprite_removals = payload.get("_sprite_removals") or []
     conn = _connect_db(path)
     try:
         civ = payload.get("civilization") or {}
@@ -115,6 +173,21 @@ def _write_state_db(path, payload):
                   r.get("feeling"), r.get("frame_tick"), r.get("ts"))
                  for r in council_transcript],
             )
+            for sid in sprite_removals:
+                conn.execute(
+                    "DELETE FROM structure_sprites WHERE structure_id = ?",
+                    (sid,),
+                )
+            for sid, row in sprite_upserts.items():
+                sprite = row.get("sprite") if isinstance(row, dict) else row
+                frame = row.get("updated_frame", 0) if isinstance(row, dict) else 0
+                if not sprite:
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO structure_sprites "
+                    "(structure_id, sprite_json, updated_frame) VALUES (?, ?, ?)",
+                    (sid, json.dumps(sprite, ensure_ascii=False), int(frame)),
+                )
         try:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception:
@@ -174,6 +247,14 @@ def _read_state_db(path):
                 "FROM council_transcript ORDER BY rowid_pk"
             ).fetchall()
         ]
+        structure_sprites = {}
+        try:
+            for sid, sprite_json in conn.execute(
+                "SELECT structure_id, sprite_json FROM structure_sprites"
+            ).fetchall():
+                structure_sprites[sid] = json.loads(sprite_json)
+        except sqlite3.OperationalError:
+            pass
         return {
             "version": version,
             "frameTick": frame_tick,
@@ -183,6 +264,7 @@ def _read_state_db(path):
             "agents": agents,
             "memory": memory,
             "council_transcript": council_transcript,
+            "structureSprites": structure_sprites,
         }
     except Exception:
         return None
@@ -239,13 +321,53 @@ ECOLOGY_ENABLED = True
 # _set_agent_target to the old straight-to-random-interior-point behavior so
 # routing can be A/B compared.
 ROADS_ENABLED = True
-# Living-ecosystem Phase 2: viewer-only projections of the existing
-# districtStocks ecology (see DISTRICT_ECOLOGY_* above). Neither flag alters
-# gather yields, regrowth, or any simulation mechanic -- they only gate
-# whether /state includes the districtEcology projection and whether the
-# viewer renders growth-stage terrain / ambient wildlife from it.
+# Living-ecosystem Phase 2: districtEcology projection (CROP_GROWTH_ENABLED)
+# plus server-authoritative huntable fauna (WILDLIFE_ENABLED). Crop growth is
+# still viewer-facing only; WILDLIFE_ENABLED now also gates engine fauna
+# state, motion, spawn/respawn/migration, hunt helpers, and /state wildlife[].
+# Off → no fauna mutation and an empty wildlife projection.
 CROP_GROWTH_ENABLED = True
 WILDLIFE_ENABLED = True
+# Huntable wildlife (distinct from Path-1 _tick_wildlife forest-attack pressure).
+WILDLIFE_KIND_POOLS = {
+    "forest": ["bird", "squirrel", "deer", "fox", "boar", "owl"],
+    "farm": ["cow", "rabbit", "chicken", "mouse", "bee"],
+    "beach": ["fish", "crab", "gull", "turtle", "seal"],
+}
+WILDLIFE_DECORATIVE_KINDS = {"bee"}
+WILDLIFE_YIELD = {
+    "bird": "meat", "squirrel": "meat", "deer": "meat", "fox": "meat",
+    "boar": "meat", "owl": "meat",
+    "cow": "meat", "rabbit": "meat", "chicken": "meat", "mouse": "meat",
+    "fish": "fish", "crab": "fish", "gull": "fish", "turtle": "fish", "seal": "fish",
+}
+# HP tiers: low ≈1–2, mid ≈3–4, high boar/seal ≈5–6; bee decorative.
+WILDLIFE_MAX_HP = {
+    "bird": 1, "squirrel": 1, "rabbit": 1, "chicken": 2, "mouse": 1,
+    "fish": 1, "crab": 1, "gull": 1, "bee": 1,
+    "deer": 4, "fox": 3, "owl": 3, "cow": 4, "turtle": 4,
+    "boar": 6, "seal": 5,
+}
+WILDLIFE_SPEED = {
+    "bird": 3.2, "squirrel": 2.8, "deer": 3.0, "fox": 3.4, "boar": 2.0, "owl": 2.6,
+    "cow": 1.8, "rabbit": 3.5, "chicken": 2.2, "mouse": 2.4, "bee": 2.0,
+    "fish": 2.5, "crab": 1.4, "gull": 3.0, "turtle": 1.2, "seal": 2.2,
+}
+HUNT_RADIUS = 90
+WILDLIFE_FLEE_RADIUS = 120
+# Retuned Phase 2b: hunters clear 1–4 HP prey in one hit; boar/seal need two.
+HUNT_DAMAGE = 2
+HUNT_DAMAGE_HUNTER = 4
+WILDLIFE_RESPAWN_FRAMES = 600
+WILDLIFE_POP_TICK_FRAMES = 600
+WILDLIFE_MIGRATE_CHECK_FRAMES = 600
+WILDLIFE_MIGRATE_CHANCE = 0.05
+WILDLIFE_STAGE_COUNT = {"barren": 0, "sparse": 1, "healthy": 2, "lush": 4}
+WILDLIFE_CAP_PER_DISTRICT = 4
+WILDLIFE_SHORE_STRIP = 70
+WILDLIFE_HABITAT_INSET = 16
+WILDLIFE_BEACH_WATER_KINDS = {"fish", "crab", "turtle", "seal"}
+WILDLIFE_HABITAT_KINDS = set(WILDLIFE_KIND_POOLS.keys())
 # Living-ecosystem Phase 3: purely cosmetic in-flight "shipment" records
 # emitted AFTER an existing transfer (trade_resource, the priced-trade
 # market path, district-project contributions) has already mutated the
@@ -324,6 +446,222 @@ STORM_DISASTER_PROB = 0.32
 WEATHER_GOVERNANCE_ENABLED = True
 WEATHER_STORM_REGROW_MULT = 0.3     # suppression multiplier for storm-affected districts
 WEATHER_CLEARING_REGROW_MULT = 1.5  # post-storm "rain" boost for the same districts while clearing
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
+# GOD_MODE_ENABLED is an environment-backed, READ-ONCE-AT-IMPORT module flag,
+# not a runtime toggle: no HTTP route may change it, and there is no live
+# on/off switch by design -- enabling or disabling it requires the normal
+# single-instance server restart with SIM_GOD_MODE set (or unset) in the
+# process environment beforehand. Absent/blank/anything not explicitly
+# false-like resolves to enabled, which is the default -- the Divine Console
+# bar is now a normal, permanent part of the viewer. Set SIM_GOD_MODE to a
+# false-like value ("0"/"false"/"no"/"off") before starting the server to
+# opt back out and hide the console bar entirely. This is also the FIRST
+# env-var-backed flag in sim_engine.py (every prior env-var precedent, e.g.
+# SIM_HOST/SIM_PORT/SIM_AGENTS/SIM_LOG_RETENTION, lives only in server.py);
+# see specs/01-architecture.md for that precedent note. God routes use a
+# two-gate model: GOD_MODE_ENABLED must be True (this flag), and token auth
+# is optional via GOD_AUTH_REQUIRED / SIM_GOD_AUTH (default off). See
+# server.py's God-mode section and specs/12-ops.md -- security-relevant
+# because HOST binds 0.0.0.0 (LAN-wide).
+GOD_MODE_ENABLED = str(os.environ.get("SIM_GOD_MODE", "1")).strip().lower() not in (
+    "0", "false", "no", "off",
+)
+# GOD_AUTH_REQUIRED is env-backed, read-once-at-import; default False (no
+# token gate). Set SIM_GOD_AUTH=1 to restore the SIM_GOD_TOKEN check.
+# Security-relevant: server.py HOST binds 0.0.0.0 (see specs/12-ops.md).
+GOD_AUTH_REQUIRED = str(os.environ.get("SIM_GOD_AUTH", "0")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+GOD_STATE_VERSION = 3               # schema version for civilization["godState"]
+GOD_WHISPER_CAMPAIGN_MAX_TARGETS = 12  # max agents per whisper_campaign batch
+GOD_CROWD_COMPULSION_MAX_TARGETS = 12   # max agents per crowd_compulsion batch
+GOD_DREAM_BROADCAST_MAX_TARGETS = 12    # max agents per dream_broadcast batch
+# Divine Matrix Phase 3: memory surgery kinds (private, never in public logs).
+GOD_MEMORY_DEFAULT_KIND = "divine_false_memory"
+GOD_BELIEF_MEMORY_KIND = "divine_belief"
+GOD_MEMORY_KIND_MAX_LEN = 48
+# Divine Matrix Phase 2: per-agent decision sampling overlay (Temperature Dial).
+GOD_AGENT_SAMPLING_MODELS = frozenset({"sim-smart", "sim-fast"})
+GOD_AGENT_SAMPLING_TEMP_MIN = 0.0
+GOD_AGENT_SAMPLING_TEMP_MAX = 1.5
+GOD_AGENT_SAMPLING_TOP_P_MIN = 0.0
+GOD_AGENT_SAMPLING_TOP_P_MAX = 1.0
+GOD_AGENT_SAMPLING_TOP_K_MIN = 0
+GOD_AGENT_SAMPLING_TOP_K_MAX = 200
+GOD_AGENT_SAMPLING_MIN_P_MIN = 0.0
+GOD_AGENT_SAMPLING_MIN_P_MAX = 1.0
+GOD_AGENT_SAMPLING_FAST_DECISION_CAP = 1  # max living agents on sim-fast decision override
+# Divine Matrix Phase 4: reality distortion / context masks (private cognition layer).
+GOD_CONTEXT_MASK_MODES = frozenset({"dream", "blue_pill", "red_pill", "whisper_chain"})
+GOD_CONTEXT_MASK_DREAM_KEYS = frozenset({
+    "nearby_agents", "resources", "weather_line", "recent_conversations",
+    "district_stocks", "nearby_wildlife", "nearby_wildlife_line",
+    "hunger", "health",
+})
+GOD_CONTEXT_MASK_FORGED_MAX = 8
+# Divine Matrix Phase 5: decision gate (compulsion / thought veto / possession).
+GOD_DECISION_GATE_MODES = frozenset({"compulsion", "veto", "possession"})
+GOD_VETO_HOLD_CAP = 3
+GOD_PREVIEW_CACHE_MAX = 32          # bounded, in-memory, never persisted
+GOD_PREVIEW_TTL_SECONDS = 60        # wall-clock, not frame-based (previews are a request-scoped concept)
+GOD_REQUEST_CACHE_MAX = 100         # bounded, in-memory idempotency store (never persisted -- see docs/plan)
+GOD_RECENT_INTERVENTIONS_CAP = 100  # persisted viewer-history ring inside godState
+GOD_DIVINE_RESPONSE_LOG_MAX = 50    # Voice adherence ring (Sight only, never /state)
+GOD_ACTIVE_EVENTS_CAP = 8           # bounded timed-effect ring (Phase 5 payload; plumbing only in Phase 2)
+GOD_TEXT_MAX_CHARS = 240            # title/narration/proclamation cap (post-NFC-normalization character count)
+GOD_TEXT_MAX_BYTES = 600            # a tighter-than-4x-chars UTF-8 byte cap so the byte check is load-bearing,
+                                     # not merely redundant with the character cap (see _normalize_divine_text)
+# Divine Matrix Phase 6: Burning Bush dialogue + Merovingian Bargain (private).
+GOD_BURNING_BUSH_THREAD_MAX = 20
+GOD_BURNING_BUSH_PROMPT_MAX_CHARS = GOD_TEXT_MAX_CHARS * 2
+GOD_BARGAIN_PREDICATES = frozenset({
+    "agent_has_resource", "structure_built", "frame_reached", "agent_health_below",
+})
+GOD_BARGAIN_PRIMITIVE_KINDS = frozenset({"agent_vitals", "grant_resource"})
+# Divine Matrix Phase 7: Anointed (destiny + stigmata + oracle hints — private).
+GOD_ANOINT_STIGMATA_MAX = 6
+GOD_ANOINT_STIGMATA_TAG_MAX_CHARS = 40
+GOD_ANOINT_ORACLE_HINTS_MAX = 8
+GOD_ANOINT_PROMPT_MAX_CHARS = GOD_TEXT_MAX_CHARS * 2
+# Divine Matrix Phase 8: Identity Forge (persona/personality/role mutation).
+GOD_IDENTITY_PERSONA_MAX_CHARS = 200
+GOD_IDENTITY_PERSONALITY_MAX_CHARS = GOD_TEXT_MAX_CHARS
+GOD_IDENTITY_COPY_MEMORIES_MAX = 3
+# Divine Matrix Phase 9: Architect Zones (paint / keyed door / limbo hold).
+GOD_LIMBO_STATION = (140, 500)  # ocean district — Trainman limbo platform
+GOD_ARCHITECT_ZONE_MAX_CELLS = 64
+GOD_ARCHITECT_ZONES_MAX = 16
+GOD_ARCHITECT_KEY_MAX_LEN = 32
+# Divine Matrix Phase 10: Reload / Déjà Vu checkpoints (disk snapshots).
+GOD_CHECKPOINT_MAX = 5
+GOD_CHECKPOINT_ROOT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "backup", "god-checkpoints")
+# Stub-only tick replay — default off; enable via SIM_GOD_DEJA_VU_REPLAY=1.
+GOD_DEJA_VU_REPLAY = str(os.environ.get("SIM_GOD_DEJA_VU_REPLAY", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+GOD_DECISION_DIGEST_CAP = 200          # bounded ring in godState["decisionDigests"]
+GOD_DEJA_VU_MAX_STEPS = 8              # max replay steps (K) per deja_vu_replay apply
+GOD_DEJA_VU_SESSION_CAP = 12           # max applied replays per process lifetime (in-memory)
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Optional Phase 8) ---
+# GOD_COMPILER_ENABLED is a SECOND, independent, env-backed, read-once-at-
+# import dark flag, gated on GOD_MODE_ENABLED as well (both must be True --
+# see god_compile_prose and server.py's route). The plan is explicit that
+# this phase's contention gate is NOT cleared by shipping the code: the
+# compiler "needs its own A/B contention check" that "is not required for a
+# complete structured Storyteller God" (docs/plan "Optional Phase 8"). No
+# A/B measurement has been run in this change, so the flag ships OFF by
+# default and stays off until that measurement happens -- see specs/12-ops.md
+# "not-yet-A/B-measured" section for the recommended protocol.
+GOD_COMPILER_ENABLED = str(os.environ.get("SIM_GOD_COMPILER", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+GOD_COMPILER_MIN_INTERVAL_SEC = 5.0    # per-process rate limit, distinct from agent cognition
+GOD_COMPILER_SESSION_CAP = 60          # hard ceiling on compiles for this process's lifetime
+GOD_COMPILER_TIMEOUT_SEC = 10.0        # aggressive: a hung Ollama request must not lock the console
+GOD_COMPILER_PROSE_MAX_CHARS = 800     # operator free-prose input cap (post-NFC-normalization character count)
+GOD_COMPILER_PROSE_MAX_BYTES = 2400    # byte cap scaled to the larger prose cap (see GOD_TEXT_MAX_BYTES's ratio)
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 3) ---
+# Voice/providence duration bounds, frame-based like every other timed system
+# (DIRECTIVE_TTL_FRAMES above is the closest precedent -- 5400 frames is the
+# same ~3-minute default this reuses). A caller may omit durationFrames (the
+# default applies) or supply one, silently clamped into range rather than
+# rejected -- consistent with the plan's "clamped values" preview contract.
+GOD_GUIDANCE_MIN_DURATION_FRAMES = 300      # ~10s at 30 ticks/s
+GOD_GUIDANCE_MAX_DURATION_FRAMES = 54000    # ~30 min at 30 ticks/s
+GOD_GUIDANCE_DEFAULT_DURATION_FRAMES = 5400  # ~3 min, mirrors DIRECTIVE_TTL_FRAMES
+GOD_VETO_HOLD_TIMEOUT_FRAMES = GOD_GUIDANCE_DEFAULT_DURATION_FRAMES
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 4) ---
+# Immediate miracles: agent_vitals, grant_resource, structure_condition. All
+# three are irreversible (docs/plan "Honest reversibility" -- the default
+# branch of _god_reversibility_class already covers any kind that is not
+# providence/private_omen, so no change was needed there).
+#
+# agent_vitals "cannot kill" (Decision #6): health <= 0 is the
+# _update_survival incapacitation threshold (see HEALTH_RATE/COLLAPSE_REGEN
+# above), not death -- death only ever happens through _agent_dies (old age,
+# or a future cause), never as a direct consequence of health hitting 0. A
+# divine negative health delta is still clamped to stop ONE full point above
+# that threshold rather than at it, so a miracle can never itself be the
+# thing that flips incapacitated=True -- the "floor above death" the plan's
+# Phase 4 section requires documented. Hunger has no such floor: hunger
+# reaching 0 does not incapacitate or kill by itself (it only makes the next
+# _update_survival tick apply HEALTH_RATE loss instead of HEALTH_REGEN gain),
+# so hunger clamps to the ordinary 0..100 survival range like health's
+# positive/upper bound does.
+GOD_VITALS_HEALTH_FLOOR = 1
+GOD_VITALS_DELTA_MAX = 100   # per-command |delta| cap, health and hunger independently
+# grant_resource: per-command cap bounds a single miracle's blast radius;
+# per-session cap (Decision-adjacent, new in Phase 4) bounds the cumulative
+# total across every grant_resource command applied since process start --
+# in-memory only (self._god_grant_session_total), like every other God-mode
+# counter that is not part of the persisted godState ring buffers.
+GOD_GRANT_PER_COMMAND_CAP = 200
+GOD_GRANT_SESSION_CAP = 2000
+# structure_condition: per-command |delta| cap. Repair/damage both reuse the
+# SAME shared _apply_structure_condition_delta helper _tick_structure_decay
+# uses (see sim_engine.py's structure-decay section), so disrepair/ruin
+# transitions -- including the homeOf homeless handling -- fire through their
+# normal narration rather than a parallel code path.
+GOD_STRUCTURE_DELTA_MAX = 100
+# Town-integrity mass structure commands (repair_structures / clear_ruins).
+GOD_REPAIR_STRUCTURES_CONDITION_MAX = 100
+GOD_REPAIR_STRUCTURES_BATCH_MAX = 10
+GOD_CLEAR_RUINS_BATCH_MAX = 10
+
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 5) ---
+# Timed lawgiver modifiers + storyteller events. "One active value per key":
+# a new event whose modifiers include a key already held by another ACTIVE
+# event is rejected unless it declares replaceEffectId naming that event.
+# Base module constants (HUNGER_RATE etc.) are unchanged -- every consumer
+# site multiplies its own local delta/amount by _divine_modifier(key), which
+# returns exactly 1.0 with no active effect for that key, so a feature-off
+# (or effect-free) run is byte-identical to before this phase (see
+# specs/08-systems-economy.md "Exact consumer sites and arithmetic").
+GOD_MODIFIER_RANGES = {
+    "gather_yield_multiplier": (0.25, 3.0),
+    "fish_yield_multiplier": (0.0, 3.0),
+    "hunger_drain_multiplier": (0.0, 3.0),
+    "health_regen_multiplier": (0.0, 3.0),   # fed regen ONLY -- never COLLAPSE_REGEN, see _update_survival
+    "starvation_damage_multiplier": (0.0, 3.0),
+    "structure_decay_multiplier": (0.0, 3.0),
+    "spoilage_multiplier": (0.0, 3.0),
+}
+# Non-fatal preview warnings: both keys present and stressed above neutral (1.0).
+GOD_MODIFIER_CONFLICT_RULES = (
+    ("gather_yield_multiplier", "hunger_drain_multiplier",
+     "High gather yield with faster hunger drain sends mixed survival signals."),
+    ("gather_yield_multiplier", "spoilage_multiplier",
+     "High gather yield with faster spoilage wastes abundance before it can be used."),
+    ("fish_yield_multiplier", "hunger_drain_multiplier",
+     "High fish yield with faster hunger drain sends mixed survival signals."),
+    ("health_regen_multiplier", "starvation_damage_multiplier",
+     "Stronger fed regen combined with harsher starvation damage sends mixed survival signals."),
+    ("gather_yield_multiplier", "structure_decay_multiplier",
+     "High gather yield while structures decay faster strains long-term village stability."),
+)
+
+
+def _god_modifier_conflict_warnings(modifiers):
+    """Return non-fatal warning strings when modifier keys fight in one envelope."""
+    if not isinstance(modifiers, dict) or not modifiers:
+        return []
+    warnings = []
+    for key_a, key_b, message in GOD_MODIFIER_CONFLICT_RULES:
+        va = modifiers.get(key_a)
+        vb = modifiers.get(key_b)
+        if va is None or vb is None:
+            continue
+        if va > 1.0 and vb > 1.0:
+            warnings.append(message)
+    return warnings
+GOD_EVENT_TITLE_MAX_CHARS = 80        # shorter than GOD_TEXT_MAX_CHARS -- a title is a label, not narration
+GOD_STORY_EVENT_MAX_PRIMITIVES = 5    # bounded blast radius for one atomic story event
+GOD_STORY_EVENT_MAX_MODIFIERS = len(GOD_MODIFIER_RANGES)  # every key, at most once each
 
 # --- World geometry ---
 # WORLD_H was 1000, then 2700 (to stop the village/farm build-out grids from
@@ -521,12 +859,14 @@ HEALTH_RATE = 2
 HEALTH_REGEN = 1.5
 EAT_THRESHOLD = 65
 FOOD_RESTORE = 45
-EDIBLE_RESOURCES = ["food", "fish"]
+EDIBLE_RESOURCES = ["food", "fish", "meat"]
 HEAL_AMOUNT = 25
 COLLAPSE_REGEN = 0.5
 COLLAPSE_REVIVE_HEALTH = 15
 REVIVE_HUNGER = 35          # hunger floor on revival, else 0-hunger re-collapse in ~8s
-EDIBLE_RESERVE = 3          # food/fish an agent keeps back from builds/sharing
+EDIBLE_RESERVE = 3          # food/fish/meat an agent keeps back from builds/sharing
+EDIBLE_SCARCITY_THRESHOLD = 3   # village-wide edible scarcity (matches council threshold)
+MEAT_SCARCITY_CAP = 12          # ecology branch meat ratio denominator (~one boar + reserve)
 SHARE_RADIUS = 120          # auto-share edibles with a starving neighbour within this range
 STARVING_HUNGER = 10        # below this, a foodless agent deterministically seeks the nearest food zone
 
@@ -663,6 +1003,10 @@ MAX_CUSTOM_RECIPES = 12
 # elder's verdict means something across many think cycles, short enough that
 # a 9h soak sees several amnesty waves).
 BLUEPRINT_AMNESTY_FRAMES = STALL_THRESHOLD * 60
+# Orphan custom resources (registry entry with no references) retire after this
+# window (~40 min at 30 ticks/s: ~2× the blueprint amnesty, so a resource can
+# sit unused between approval and first build without being pruned prematurely).
+CUSTOM_RESOURCE_RETIRE_FRAMES = STALL_THRESHOLD * 120
 # A pending blueprint whose sage review never lands (elder offline/incapacitated
 # the whole window) auto-skips the review after this many frames rather than
 # blocking approval forever -- same deadlock-avoidance shape as the amnesty
@@ -804,6 +1148,12 @@ MODULE_REFRESH_TIMEOUT_S = 60
 # PIANO_MODULE_TIMEOUT_S (15s) HTTP timeout so that timeout, not this one,
 # is what fires and gets logged/counted as a drop in the normal case.
 PIANO_MODULE_TIMEOUT_WAIT_S = 18
+# Orphaned Ollama timeouts (client gave up but server-side generation continues)
+# share the sim-smart/sim-fast parallel budget. After this many decision or
+# PIANO module timeouts in a row, pause new decision dispatches briefly so
+# in-flight orphans can drain -- see _record_llm_orphan_timeout / _schedule_think.
+LLM_ORPHAN_TIMEOUT_THRESHOLD = 3
+LLM_ORPHAN_COOLDOWN_S = 30.0
 LLM_MIN_GAP_MS = 250
 # When _schedule_think can't dispatch (worker pool full, cooldown, min-gap),
 # the agent retries this soon instead of waiting a full thinkInterval (up to
@@ -842,12 +1192,12 @@ SPOILAGE_RATIO = 0.25
 # Cart (the first vehicle): holding one raises the carry cap query-time, the
 # same pattern as _gather_yield_bonus. COLLECT_CAP itself stays unchanged.
 CART_CARRY_BONUS = 20
-# Shelter: one night per DAY_FRAMES (~7.5 min real time). Each *working* house
+# Shelter: one night per DAY_FRAMES (~10.0 min real time). Each *working* house
 # shelters HOUSE_SHELTER_OCCUPANTS; unsheltered agents lose a little hunger --
 # a nudge, never a punishment: ~1/7 of one meal (FOOD_RESTORE 45), floored at
 # SHELTER_HUNGER_FLOOR (20), i.e. a night outside can never push anyone into
 # the starvation-reflex band (STARVING_HUNGER 10).
-DAY_FRAMES = 13500
+DAY_FRAMES = 18000
 HOUSE_SHELTER_OCCUPANTS = 2
 SHELTER_HUNGER_PENALTY = 6
 SHELTER_HUNGER_FLOOR = 20
@@ -860,15 +1210,29 @@ SHELTER_HUNGER_FLOOR = 20
 # Mid retune 0.1/tick (~5.8h to disrepair, ~8.3h to ruin) still failed the
 # 2026-07-10 morning soak on a reset world: ruins 11→154 over ~13.5h real /
 # ~8.6h sim while agents were heal-spamming, all 15 houses non-working, births
-# stalled (pop 16→5). Now 0.05/tick: ~11.7h of neglect to disrepair, ~16.7h to
-# ruin -- survives one unattended overnight; sprawl still decays across days.
+# stalled (pop 16→5). 0.05/tick (~11.7h to disrepair, ~16.7h to ruin) still
+# outran repair under soak. Town-integrity retune 0.025/tick: ~23.3h to
+# disrepair, ~33.3h to ruin -- paired with repair campaigns, critical backstop
+# widening, and ruin cull so sprawl decays across days without offline prune.
 # Paired with _maybe_repair_critical (house category) so zero working houses
 # can't permanently lock the population cap. A ruin is rebuilt via
 # repair_structure for half the original needs (min 1 each) -- cheaper than
 # new, the deterministic escape.
-STRUCTURE_DECAY_PER_GOODS_TICK = 0.05
+STRUCTURE_DECAY_PER_GOODS_TICK = 0.025
 STRUCTURE_DISREPAIR_THRESHOLD = 30
 REPAIR_CONDITION_RESTORE = 50
+# Repair campaigns: autonomous repair goals when village-wide pressure rises.
+REPAIR_CAMPAIGN_RUIN_RATIO = 0.15
+REPAIR_CAMPAIGN_WORKING_FRAC = 0.5
+REPAIR_CAMPAIGN_MAX_ASSIGN = 2
+REPAIR_CAMPAIGN_GOAL_TTL = STALL_THRESHOLD * 2
+REPAIR_CAMPAIGN_CRITICAL_TYPES = (
+    "house", "market", "workshop", "foundry", "granary", "farm_plot",
+)
+# Ruin cull: in-sim registry deletion for aged, unaffordable ruins.
+RUIN_CULL_AGE_FRAMES = DAY_FRAMES
+RUIN_CULL_MIN_PER_CALL = 1
+RUIN_CULL_MAX_PER_CALL = 3
 
 
 def structure_condition_tier(structure):
@@ -881,22 +1245,24 @@ def structure_condition_tier(structure):
     if condition < 60:
         return "worn"
     return "pristine"
-# Disaster: rare random damage so decay isn't perfectly predictable. 0.005 per
-# ~30s goods tick => expected roughly once per 100 minutes of runtime.
-DISASTER_PROB = 0.005
-DISASTER_DAMAGE = (40, 70)
+# Disaster: rare random damage so decay isn't perfectly predictable.
+# Town-integrity retune: 0.002 per ~30s goods tick => ~once per 250 real min;
+# damage softened to (30, 55). STORM_DISASTER_PROB unchanged.
+DISASTER_PROB = 0.002
+DISASTER_DAMAGE = (30, 55)
 # Seasons: a four-season clock derived purely from frameTick (no extra state to
-# persist). YEAR_FRAMES is the single canonical in-world year -- 3 real hours
+# persist). YEAR_FRAMES is the single canonical in-world year -- 4 real hours
 # = exactly 24 day/night cycles (DAY_FRAMES) -- and seasons and aging both
 # derive from it, so the GUI calendar, the season clock, and agent ages stay
-# in sync. One season = YEAR_FRAMES/4 (~45 min = exactly 6 day/night cycles;
+# in sync. One season = YEAR_FRAMES/4 (~60 min = exactly 6 day/night cycles;
 # an overnight soak sees several winters). The season multiplies district
 # stock regrowth: spring booms, winter stops regrowth entirely. Escapes:
 # stores/granary capacity built before winter (spoilage permitting), and the
-# season simply turning. Note: winter lengthened 30->45 min in the 2026-07-14
-# year unification -- watch food runway across winter on the next soak.
-YEAR_FRAMES = 324_000
-SEASON_FRAMES = YEAR_FRAMES // 4  # 81_000: one season = 45 min = exactly 6 day/night cycles
+# season simply turning. Note: calendar stretch 2026-07-31 (+33% real-time
+# cadence: 7.5->10 min days, 45->60 min seasons) -- watch food runway across
+# winter on the next soak.
+YEAR_FRAMES = 432_000
+SEASON_FRAMES = YEAR_FRAMES // 4  # 108_000: one season = 60 min = exactly 6 day/night cycles
 SEASONS = ["spring", "summer", "autumn", "winter"]
 SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}
 
@@ -937,6 +1303,9 @@ DAILY_COUNCIL_SESSION_TTL_FRAMES = STALL_THRESHOLD * 30
 DAILY_COUNCIL_LOG_CAP = 12
 DAILY_COUNCIL_DIGEST_CAP = 5
 DAILY_COUNCIL_TRANSCRIPT_RETENTION_MEETINGS = 30
+# Inherited from EDIBLE_RESERVE misuse at the agenda scan; now independently tunable.
+DAILY_COUNCIL_SCARCITY_THRESHOLD = 3   # village-wide holdings at/below this read as "low stores"
+DAILY_COUNCIL_SCARCITY_TOPICS = 8      # caps scarce ids and active_projects slices in _daily_council_agenda
 # A council with no verdict dissolves after this many frames (STALL_THRESHOLD=600
 # frames = 20s at 30fps, so x20 = ~6.7 min). Sized for THINKING_TIMEOUT_S=75s
 # per member (server.py) queued behind MAX_CONCURRENT_LLM=2 workers, plus the
@@ -970,7 +1339,7 @@ ECONOMY_ENABLED = True
 # caps at BASE_PRICE * PRICE_SCARCITY_MULT, so no resource can ever demand more
 # gold than a villager could plausibly gather toward across a few turns
 # (COLLECT_CAP=20, so a 4x spike on a BASE_PRICE=1-3 good tops out under 12g).
-BASE_PRICE = {"food": 1, "fish": 1, "water": 1, "wood": 1, "herbs": 1,
+BASE_PRICE = {"food": 1, "fish": 1, "meat": 1, "water": 1, "wood": 1, "herbs": 1,
               "stone": 2, "planks": 2, "bricks": 2, "tools": 3, "cart": 4, "wagon": 6}
 PRICE_SCARCITY_MULT = 4.0
 PRICE_MIN = 1
@@ -1014,12 +1383,12 @@ LIFECYCLE_ENABLED = True
 # cohorts overnight; 0.005 (~1y/33min) still felt too fast -- retuned to
 # 0.001 (~1y/2.8h, 0→90 in ~10.4 days) so multi-day 24/7 soaks see gradual
 # turnover, not near-extinction every night. 2026-07-14: derived from
-# YEAR_FRAMES instead of a hand-tuned constant (~1y/3.0h, 0→90 in ~11.25
+# YEAR_FRAMES instead of a hand-tuned constant (~1y/4.0h, 0→90 in ~15.0
 # days) so aging stays locked to the same canonical year as the season clock
 # and GUI calendar. Smoke-testing forces this by temporarily shrinking the
 # gate/increment, never by waiting.
 LIFECYCLE_TICK_FRAMES = 300
-AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES  # = 1/1080: exactly 1 year per YEAR_FRAMES (3.0 h)
+AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES  # = 1/1440: exactly 1 year per YEAR_FRAMES (4.0 h)
 ADULT_AGE = 18                      # below this, an agent cannot be a birth parent or election candidate
 ELDER_AGE = 55                      # life-stage label switches to "elder" (age word only, not the elder ROLE)
 MAX_LIFE_EXPECTANCY = 90            # death chance saturates approaching this age
@@ -1093,6 +1462,10 @@ CHRONICLE_MILESTONE_KINDS = frozenset({
     "death", "burial", "election", "belief_founded", "belief_adoption",
     "meme_mutation", "knowledge_preserved", "disaster", "district_founded",
     "emergency_measure",
+    # Sovereign God mode (Phase 2): a proclamation's chronicle entry. Viewer
+    # rendering of this kind is out of scope until the later Divine Console
+    # phase, but the milestone-set membership itself is data-shape only.
+    "divine",
 })
 # Memes: mutation is capped and event-driven -- at most one lm_complete call
 # per mutation ATTEMPT (itself gated to a low probability on ordinary
@@ -1120,6 +1493,14 @@ PERSONALITY_DRIFT_CAP = 3
 # for LIFECYCLE_ENABLED's permanent death.
 CEMETERY_ENABLED = True
 BURY_CONTACT_DIST = 80                # matches heal_agent's contact radius
+CONFRONT_CONTACT_DIST = 80            # bounded PvP adjacency (heal/bury/trade parity)
+CONFRONT_DAMAGE = 10
+CONFRONT_INCAP_HEALTH = 1             # non-lethal floor unless target already critical
+CONFRONT_LETHAL_THRESHOLD = 15
+CONFRONT_FLEE_DIST = 60
+CONFRONT_COOLDOWN_FRAMES = STALL_THRESHOLD * 4
+CONFRONT_PRESSURE_WINDOW_FRAMES = STALL_THRESHOLD * 2
+FORCED_HUNT_GOAL_TTL = STALL_THRESHOLD
 BURIAL_BACKSTOP_FRAMES = STALL_THRESHOLD * 3  # ~1 min grace for organic bury_agent before the backstop buries directly
 
 # --- Path 1: Minecraft-like world depth (PATH1_ENABLED) ---
@@ -1271,6 +1652,7 @@ BASE_RESOURCES = {
     "gold": {"name": "Gold", "gatherZone": "cave", "color": "#FFC107"},
     "stone": {"name": "Stone", "gatherZone": "cave", "color": "#9E9E9E"},
     "fish": {"name": "Fish", "gatherZone": "beach", "color": "#4FC3F7"},
+    "meat": {"name": "Meat", "gatherZone": None, "color": "#C62828"},
     "herbs": {"name": "Herbs", "gatherZone": "forest", "color": "#8BC34A"},
     "water": {"name": "Water", "gatherZone": "village", "color": "#03A9F4"},
 }
@@ -1431,6 +1813,7 @@ RESOURCE_MIN_TOOL = {
 }
 TOOL_YIELD_BONUS = 1
 TERRAIN_TYPES = ("soil", "rock", "grove", "water")
+GOD_ARCHITECT_PAINT_TERRAINS = frozenset((*TERRAIN_TYPES, "sand"))
 BLOCK_TYPES = {
     "wall": {"cost": {"wood": 1}, "shelter": True},
     "floor": {"cost": {"wood": 1}, "shelter": False},
@@ -1444,6 +1827,9 @@ WILDLIFE_GUARD_RADIUS = 120
 SETTLEMENT_STRUCT_THRESHOLD = 5
 SETTLEMENT_POP_THRESHOLD = 6
 CARAVAN_CARRY_MIN = 3
+CARAVAN_LOG_CAP = 20              # bounded ring -- oldest caravan deliveries drop first
+CARAVAN_VEHICLE_RESOURCES = frozenset({"cart", "wagon"})
+TREATY_TARIFF_MAX = 0.25
 PATH1_GRID_COLS = 8
 PATH1_GRID_ROWS = 8
 
@@ -1539,10 +1925,11 @@ AGENT_DEFS = [
     {"id": 10, "name": "Dex", "role": "blacksmith", "personality": "focused and proud", "color": "#607D8B", "zone": "market"},
     {"id": 11, "name": "Nova", "role": "explorer", "personality": "bold and impulsive", "color": "#FF5722", "zone": "beach"},
     {"id": 12, "name": "Sage", "role": "elder", "personality": "wise and slow-moving", "color": "#FFC107", "zone": "village_core"},
+    {"id": 13, "name": "Kane", "role": "hunter", "personality": "quiet and relentless", "color": "#A1887F", "zone": "forest"},
 ]
 ROSTER = ["Zara", "Sage", "Aria", "Luna", "Marco", "Colt", "Finn", "Mia"]
 
-# Sid-parity Phase 6: scale headroom past the 12 hand-written AGENT_DEFS.
+# Sid-parity Phase 6: scale headroom past the hand-written AGENT_DEFS.
 # Not a bid for Project Sid's ~500-agent scale (explicit non-goal, see
 # specs/00-overview.md) -- just enough room that emergent roles (Phase 2) and
 # belief factions (Phase 3) can differentiate into more than a 2-3 person
@@ -1552,9 +1939,9 @@ MAX_ROSTER_SIZE = 20
 
 # Fixed pools for procedurally generated agents (roster indices
 # len(AGENT_DEFS)..MAX_ROSTER_SIZE-1) -- see _generated_agent_defs. Sized to
-# exactly cover MAX_ROSTER_SIZE - len(AGENT_DEFS) = 8 slots; if MAX_ROSTER_SIZE
-# ever grows past that, _generated_agent_defs appends a numeric suffix rather
-# than silently duplicating a name.
+# cover MAX_ROSTER_SIZE - len(AGENT_DEFS) headroom; if MAX_ROSTER_SIZE
+# ever grows past the name pool, _generated_agent_defs appends a numeric
+# suffix rather than silently duplicating a name.
 _GENERATED_AGENT_NAMES = ["Wren", "Ash", "Briar", "Juno", "Rowan", "Sable", "Tarn", "Vesper"]
 _GENERATED_AGENT_PERSONALITIES = [
     "steady and dependable", "watchful and reserved", "eager and talkative",
@@ -1566,11 +1953,11 @@ _GENERATED_AGENT_COLORS = ["#3F51B5", "#009688", "#CDDC39", "#673AB7",
 
 
 def _generated_agent_defs(count):
-    """AGENT_DEFS-shaped entries for roster slots beyond the 12 hand-written
+    """AGENT_DEFS-shaped entries for roster slots beyond the hand-written
     ones. Deterministic in `count` (no randomness) so a given roster_size
     always yields the same generated roster, which every other system --
     roles, beliefs, relationships, think scheduling -- treats identically to
-    a hand-written def. Role/zone rotate across the seed's 11 non-elder
+    a hand-written def. Role/zone rotate across the seed's non-elder
     roles.json roles (one generated agent per role before any role repeats),
     reusing the zone the matching hand-written def already spawns into, so
     generated agents spread across specialties instead of clustering into
@@ -1747,6 +2134,7 @@ class SimEngine:
         self.paused = False
         self.lmStatus = "offline"
         self.llm_cooldown_until = 0.0
+        self._llm_orphan_timeouts = 0
         self.last_llm_dispatch_ms = 0.0
         self.activityLog = []      # most-recent-first, capped 30
         self.conversationLog = []  # most-recent-first, capped 100
@@ -1788,6 +2176,36 @@ class SimEngine:
         # never written to state.db.
         self.shipments = []
         self._shipment_seq = 0
+        # Sovereign God mode (Phase 2): both caches are deliberately kept off
+        # the civilization dict, in-memory only, never persisted to state.db
+        # -- restart/reset/restore always start empty (see reset() and
+        # restore_state()). _god_preview_cache: previewId -> preview record
+        # (bounded GOD_PREVIEW_CACHE_MAX, each valid GOD_PREVIEW_TTL_SECONDS
+        # wall-clock seconds). _god_requests: requestId -> apply outcome
+        # (bounded GOD_REQUEST_CACHE_MAX), the idempotency store.
+        self._god_preview_cache = {}
+        self._god_requests = {}
+        self._god_rejected_count = 0  # session-lifetime counter, benchmark metadata only
+        # Sovereign God mode (Phase 4): cumulative grant_resource total across
+        # every applied command this process lifetime, in-memory only, never
+        # persisted -- see GOD_GRANT_SESSION_CAP above.
+        self._god_grant_session_total = 0
+        self._god_deja_vu_session_total = 0
+        # Sovereign God mode (Optional Phase 8): compiler rate-limit +
+        # session-cap state, in-memory only, never persisted -- mirrors
+        # _god_preview_cache/_god_requests above. lastCompileWallTime
+        # enforces GOD_COMPILER_MIN_INTERVAL_SEC; compileCount enforces
+        # GOD_COMPILER_SESSION_CAP for this process's lifetime (bumped even
+        # on a rejected/failed compile -- see god_compile_prose).
+        self._god_compiler_state = {"lastCompileWallTime": 0.0, "compileCount": 0}
+        # Autosave skip-if-unchanged: last successful write hash + last tick
+        # the saver considered a write (even when skipped).
+        self._last_saved_hash = None
+        self._last_save_considered_at = 0.0
+        # Persistence: structure sprite rows upserted only when dirty (separate
+        # from HTTP delta last-mod maps, which are pruned not cleared per poll).
+        self._persist_dirty_structure_sprites = set()
+        self._persist_sprite_removals = set()
         self._reset_world(roster_size)
 
     # --- roster + cold start ---
@@ -1875,6 +2293,11 @@ class SimEngine:
                 "lastHomelessNudgeFrame": None,
                 # Agent-driven reorg: structureId this agent is relocating, or None.
                 "reorgTask": None,
+                # Divine Matrix Phase 5: veto hold pauses movement + think scheduling.
+                "divineHold": False,
+                # Divine Matrix Phase 9: god-granted key tags for architect door zones.
+                "godKeys": set(),
+                "architectLimbo": None,
             }
             if LIFECYCLE_ENABLED:
                 # Phase F: staggered starting ages so the roster isn't a single
@@ -1922,6 +2345,7 @@ class SimEngine:
         return agents
 
     def _reset_world(self, roster_size):
+        self._init_state_delta_sets()
         self.RECIPES = {k: {"name": v["name"], "inputs": dict(v["inputs"]), "station": v["station"],
                             **({"tier": v.get("tier", 1)} if TECH_TREE_ENABLED else {})}
                         for k, v in SEED_RECIPES.items()}
@@ -2040,6 +2464,9 @@ class SimEngine:
             "births": 0,
             "deaths": 0,
             "nextGeneratedAgentId": 1000,  # synthetic ids for generated villagers once AGENT_DEFS is exhausted
+            "nextWildlifeId": 1,           # huntable fauna creature ids (WILDLIFE_ENABLED)
+            "wildlife": [],                # civilization["wildlife"] fauna records
+            "confrontCooldowns": {},       # pairKey -> frameTick when cooldown expires
             "pendingSuccession": None,     # {electionId, candidates:[names], startFrame, deadline}
             "lastSuccessionActivityFrame": 0,
             "harvestQuotas": {},            # rule id -> {"district": id|None, "resource": id|None, "value": n}
@@ -2063,6 +2490,7 @@ class SimEngine:
             "settlements": [],
             "treaties": [],
             "caravanLog": [],
+            "settlementStores": {},
             "path1Placements": 0,
             "path1TerrainMutations": 0,
             # Agent-driven structure reorganization (footprint-overlap fixup):
@@ -2076,6 +2504,15 @@ class SimEngine:
             # districts exist, since "storm" picks from them); restore_state
             # setdefaults this for old saves without re-rolling an existing one.
             "weather": None,
+            # Sovereign God mode (docs/plan-sovereign-god-mode-v2.md Phase 2):
+            # set to a real default below via _default_god_state(), mirroring
+            # the weather pattern above. Persists wholesale with the rest of
+            # civilization (see save_state/_serialize_state) with NO
+            # serializer change needed -- civ persists everything except
+            # _CIV_SET_KEYS. recentRequests (the idempotency store) is
+            # deliberately NOT part of this dict -- it lives only in
+            # self._god_requests, in-memory, never persisted.
+            "godState": None,
         }
         self._effect_period_fired = 0
         self._module_period_runs = 0
@@ -2087,6 +2524,7 @@ class SimEngine:
         if ECOLOGY_ENABLED:
             self.civilization["districtStocks"] = self._init_district_stocks(self.civilization["districts"])
         self.civilization["weather"] = self._weather_default(0)
+        self.civilization["godState"] = self._default_god_state()
         if path1_on():
             for d in self.civilization["districts"].values():
                 d.setdefault("tiles", {})
@@ -2099,25 +2537,158 @@ class SimEngine:
         self.agents = self._make_agents(active_defs)
         self.frameTick = 0
         self._seed_beliefs()
+        if WILDLIFE_ENABLED:
+            self._seed_wildlife_population()
+        self.districtsEpoch = 1
+        self._on_world_replaced()
+
+    # --- /state delta dirty tracking (Contract 2) ---
+    def _init_state_delta_sets(self):
+        """Ensure last-mod frame maps exist (safe during _reset_world before bump)."""
+        self._dirty_agents = {}
+        self._dirty_civ_keys = {}
+        self._dirty_structure_upserts = {}
+        self._dirty_structure_removals = {}
+        self._dirty_structure_sprites = {}
+        self._dirty_top_keys = {}
+        self._paused_mod_frame = None
+        self._config_mod_frame = None
+        self._dirty_this_frame = set()
+
+    def _on_world_replaced(self):
+        """Bump generation and reset dirty maps after reset/restore/cold start."""
+        self.stateGeneration = getattr(self, "stateGeneration", 0) + 1
+        self._init_state_delta_sets()
+        self._paused_mod_frame = self.frameTick
+        self._dirty_this_frame.add("paused")
+        self._last_reset_frame = self.frameTick
+
+    def _delta_include_mod(self, last_mod, since_int, frame_tag=None):
+        """Whether a last-mod stamp should appear in a delta for *since_int*."""
+        if last_mod > since_int:
+            return True
+        if (frame_tag and since_int == self.frameTick
+                and frame_tag in self._dirty_this_frame):
+            return True
+        return False
+
+    def _discard_frame_tags(self, since_int, *tags):
+        """Drop same-frame pending tags once a client has caught up to *last_mod*."""
+        if since_int >= self.frameTick:
+            for tag in tags:
+                self._dirty_this_frame.discard(tag)
+
+    def _has_state_dirty(self, since=0):
+        """True when any tracked key was modified after frame *since*."""
+        if since == self.frameTick and self._dirty_this_frame:
+            return True
+        if any(v > since for v in self._dirty_agents.values()):
+            return True
+        if any(v > since for v in self._dirty_civ_keys.values()):
+            return True
+        if any(v > since for v in self._dirty_structure_upserts.values()):
+            return True
+        if any(v > since for v in self._dirty_structure_removals.values()):
+            return True
+        if any(v > since for v in self._dirty_top_keys.values()):
+            return True
+        if self._paused_mod_frame is not None and self._paused_mod_frame > since:
+            return True
+        if self._config_mod_frame is not None and self._config_mod_frame > since:
+            return True
+        return False
+
+    def _prune_state_dirty(self, ft):
+        """Drop last-mod entries older than the delta gap window."""
+        cutoff = ft - STATE_DELTA_MAX_GAP
+
+        def _prune_map(m):
+            for k in list(m.keys()):
+                if m[k] <= cutoff:
+                    del m[k]
+
+        _prune_map(self._dirty_agents)
+        _prune_map(self._dirty_civ_keys)
+        _prune_map(self._dirty_structure_upserts)
+        _prune_map(self._dirty_structure_removals)
+        _prune_map(self._dirty_structure_sprites)
+        _prune_map(self._dirty_top_keys)
+        if self._paused_mod_frame is not None and self._paused_mod_frame <= cutoff:
+            self._paused_mod_frame = None
+        if self._config_mod_frame is not None and self._config_mod_frame <= cutoff:
+            self._config_mod_frame = None
+
+    def _mark_agent_dirty(self, agent_or_id):
+        aid = agent_or_id["id"] if isinstance(agent_or_id, dict) else agent_or_id
+        self._dirty_agents[aid] = self.frameTick
+        self._dirty_this_frame.add(f"a:{aid}")
+
+    def _mark_civ_dirty(self, *keys):
+        ft = self.frameTick
+        for key in keys:
+            self._dirty_civ_keys[key] = ft
+            self._dirty_this_frame.add(f"c:{key}")
+
+    def _mark_structure_dirty(self, structure, sprite_changed=False):
+        sid = structure["id"] if isinstance(structure, dict) else structure
+        ft = self.frameTick
+        self._dirty_structure_upserts[sid] = ft
+        self._dirty_civ_keys["structures"] = ft
+        self._dirty_this_frame.add(f"su:{sid}")
+        self._dirty_this_frame.add("c:structures")
+        if sprite_changed:
+            self._dirty_structure_sprites[sid] = ft
+            self._dirty_this_frame.add(f"sp:{sid}")
+            self._persist_dirty_structure_sprites.add(sid)
+
+    def _mark_structure_removed(self, structure_id):
+        sid = structure_id["id"] if isinstance(structure_id, dict) else structure_id
+        ft = self.frameTick
+        self._dirty_structure_removals[sid] = ft
+        self._dirty_structure_upserts.pop(sid, None)
+        self._dirty_structure_sprites.pop(sid, None)
+        self._persist_dirty_structure_sprites.discard(sid)
+        self._persist_sprite_removals.add(sid)
+        self._dirty_civ_keys["structures"] = ft
+        self._dirty_this_frame.add(f"sr:{sid}")
+        self._dirty_this_frame.add("c:structures")
+
+    def _mark_top_dirty(self, *keys):
+        ft = self.frameTick
+        for key in keys:
+            self._dirty_top_keys[key] = ft
+            self._dirty_this_frame.add(f"t:{key}")
 
     # --- logging helpers (mirror pushActivity / pushCommunication) ---
     def _push_activity(self, line):
         self.activityLog.insert(0, line)
         del self.activityLog[30:]
+        self._mark_top_dirty("activity")
         try:
             self.d["log_activity"](line, self.frameTick)
         except Exception:
             pass
 
-    def _push_communication(self, kind, frm, to, message, outcome=None):
+    def _push_communication(self, kind, frm, to, message, outcome=None, source=None):
         entry = {"kind": kind, "from": frm, "to": to, "message": message}
         if outcome:
             entry["outcome"] = outcome
+        if source:
+            # Explicit non-emergent attribution (Sovereign God mode Phase 2's
+            # "source: divine" contract). Additive-only: every pre-existing
+            # caller passes no source and gets byte-identical entries/log
+            # calls to before this parameter existed.
+            entry["source"] = source
         self.conversationLog.insert(0, entry)
         del self.conversationLog[100:]
+        self._mark_top_dirty("conversation")
         try:
+            log_outcome = outcome
+            if source:
+                log_outcome = dict(outcome or {})
+                log_outcome["source"] = source
             self.d["log_conversation"](frm, to, message, self.frameTick,
-                                       kind=kind, outcome=outcome)
+                                       kind=kind, outcome=log_outcome)
         except Exception:
             pass
 
@@ -2163,6 +2734,119 @@ class SimEngine:
         except Exception:
             pass
 
+    def _god_memory_insert(self, agent, text, salience, kind=GOD_MEMORY_DEFAULT_KIND):
+        """Divine Matrix Phase 3: insert a false/recall memory for one agent.
+        Mirrors into local working/shortTerm tiers and MemoryStore. Never
+        touches public activity/communication/chronicle."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        try:
+            salience = max(0.0, min(1.0, float(salience)))
+        except (TypeError, ValueError):
+            salience = 0.5
+        line = text[:280]
+        m = agent["memory"]
+        m["working"].append(line)
+        while len(m["working"]) > WORKING_MEM_CAP:
+            evicted = m["working"].pop(0)
+            if salience >= 0.7:
+                m["shortTerm"].append(evicted)
+                if len(m["shortTerm"]) > SHORT_MEM_CAP:
+                    m["shortTerm"].pop(0)
+        entry = None
+        ms = self.d.get("memory_store")
+        if ms is not None:
+            try:
+                entry = ms.store(agent["name"], line, salience=salience,
+                                 kind=kind or GOD_MEMORY_DEFAULT_KIND,
+                                 frame_tick=self.frameTick)
+            except Exception:
+                pass
+        return entry
+
+    def _god_memory_delete(self, agent, *, keyword=None, frameFrom=None,
+                           frameTo=None, kinds=None):
+        """Delete matching MemoryStore rows and purge keyword hits from local
+        working/shortTerm lists. Requires at least one filter (validated at
+        god envelope). Returns count deleted from MemoryStore."""
+        ms = self.d.get("memory_store")
+        deleted = 0
+        if ms is not None:
+            try:
+                deleted = ms.delete_where(
+                    agent=agent["name"],
+                    keyword=keyword,
+                    frame_from=frameFrom,
+                    frame_to=frameTo,
+                    kinds=kinds,
+                )
+            except Exception:
+                deleted = 0
+        if keyword:
+            kw = keyword.lower()
+            mem = agent.get("memory") or {}
+            for tier in ("working", "shortTerm"):
+                rows = mem.get(tier)
+                if isinstance(rows, list):
+                    mem[tier] = [line for line in rows
+                                 if kw not in (line or "").lower()]
+        return deleted
+
+    def _god_memory_match_count(self, agent, *, keyword=None, frameFrom=None,
+                                frameTo=None, kinds=None):
+        ms = self.d.get("memory_store")
+        if ms is None:
+            return 0
+        try:
+            return ms.count_where(
+                agent=agent["name"],
+                keyword=keyword,
+                frame_from=frameFrom,
+                frame_to=frameTo,
+                kinds=kinds,
+            )
+        except Exception:
+            return 0
+
+    def _god_belief_plant(self, agent, *, belief_id=None, custom_text=None,
+                          salience=0.7, plant_in_meme_texts=False):
+        """Plant a belief on one agent (private). Returns (belief_id, tenet)
+        or (None, reason) on failure."""
+        if not MEMES_ENABLED:
+            return None, "memes disabled"
+        registry = self._belief_registry()
+        tenet = None
+        resolved_id = belief_id
+        if isinstance(custom_text, str) and custom_text.strip():
+            tenet = custom_text.strip()[:160]
+        if resolved_id:
+            if resolved_id not in registry and resolved_id not in MEMES:
+                return None, "unknown belief id"
+            if not tenet:
+                tenet = self._belief_text(resolved_id)
+        else:
+            if not tenet:
+                return None, "belief text is required when beliefId is omitted"
+            digest = hashlib.sha256(tenet.encode("utf-8")).hexdigest()[:8]
+            resolved_id = f"divine_{digest}"
+            if resolved_id not in registry:
+                registry[resolved_id] = {
+                    "id": resolved_id,
+                    "name": "Divine planting",
+                    "tenet": tenet,
+                    "affinity": [],
+                    "authoredBy": "divine",
+                    "createdFrame": self.frameTick,
+                    "seed": False,
+                }
+        if plant_in_meme_texts and tenet:
+            self.civilization.setdefault("memeTexts", {})[resolved_id] = tenet
+        agent.setdefault("beliefs", set()).add(resolved_id)
+        self._god_memory_insert(
+            agent, f"I believe: {tenet}", salience, kind=GOD_BELIEF_MEMORY_KIND)
+        return resolved_id, tenet
+
     def _memory_for_prompt(self, agent):
         m = agent["memory"]
         lines = m["longTerm"][-3:] + m["shortTerm"][-4:] + m["working"][-4:]
@@ -2184,6 +2868,14 @@ class SimEngine:
     def _find_agent(self, name):
         for a in self.agents:
             if a["name"] == name:
+                return a
+        return None
+
+    def _find_agent_by_id(self, agent_id):
+        """Sovereign God mode (Phase 3): omens/miracles target stable int
+        ids, never names (see docs/plan "Agent ids are stable ints")."""
+        for a in self.agents:
+            if a["id"] == agent_id:
                 return a
         return None
 
@@ -2262,10 +2954,14 @@ class SimEngine:
                 continue
             d = _dist(agent["x"], agent["y"], o["x"], o["y"])
             if d <= NEARBY_RADIUS:
-                near.append((d, {"name": o["name"], "role": o["role"],
-                             "food": o["resources"].get("food", 0),
-                             "wood": o["resources"].get("wood", 0),
-                             "gold": o["resources"].get("gold", 0)}))
+                entry = {"name": o["name"], "role": o["role"],
+                         "food": o["resources"].get("food", 0),
+                         "wood": o["resources"].get("wood", 0),
+                         "gold": o["resources"].get("gold", 0)}
+                stigmata = self._anointment_stigmata_tags(o["id"])
+                if stigmata:
+                    entry["stigmata"] = stigmata
+                near.append((d, entry))
         # C3: sort nearest-first before the MAX_NEARBY_AGENTS_PROMPT cap below
         # so a crowded radius always keeps the closest agents, not an
         # arbitrary iteration-order slice.
@@ -2286,6 +2982,10 @@ class SimEngine:
         return _dist(a["x"], a["y"], b["x"], b["y"])
 
     # --- districts + roads ---
+    def _bump_districts_epoch(self):
+        """Content revision for GET /districts.js ?since= polls."""
+        self.districtsEpoch = getattr(self, "districtsEpoch", 0) + 1
+
     def _districts_of_kind(self, kind):
         return [did for did, d in self.civilization["districts"].items() if d["kind"] == kind]
 
@@ -2459,44 +3159,54 @@ class SimEngine:
             self._set_agent_target_to_agent(agent, target_name)
 
     def _move_agent(self, agent, scale=1.0):
+        prior_x, prior_y = agent["x"], agent["y"]
         dx = agent["targetX"] - agent["x"]
         dy = agent["targetY"] - agent["y"]
         dist = math.sqrt(dx * dx + dy * dy)
         # Phase D: wagon holders travel faster (query-time vehicle effect).
         step = agent["speed"] * scale * self._vehicle_speed_mult(agent)
         if dist <= step:
-            agent["x"] = agent["targetX"]
-            agent["y"] = agent["targetY"]
-            waypoints = agent.get("waypoints") or []
-            if waypoints:
-                nxt = waypoints.pop(0)
-                agent["targetX"] = nxt["x"]
-                agent["targetY"] = nxt["y"]
-                agent["idleFrames"] = 0
-            elif DAILY_COUNCIL_ENABLED and agent.get("councilTurn"):
-                # A seated councillor remains at the persisted seat instead of
-                # triggering the ordinary 60-frame idle-wander behavior.
-                agent["idleFrames"] = 0
-            else:
-                agent["idleFrames"] = agent.get("idleFrames", 0) + 1
-                if agent["idleFrames"] >= 60:
-                    cur = agent.get("currentDistrict")
-                    if cur:
-                        wander = cur
-                    else:
-                        wander = random.choice(list(self.civilization["districts"].keys()))
-                    self._set_agent_target(agent, wander)
-                    agent["idleCycles"] = agent.get("idleCycles", 0) + 1
-                    agent["idleFrames"] = 0
+            new_x, new_y = agent["targetX"], agent["targetY"]
+            arrived = True
         else:
-            agent["x"] += (dx / dist) * step
-            agent["y"] += (dy / dist) * step
+            new_x = agent["x"] + (dx / dist) * step
+            new_y = agent["y"] + (dy / dist) * step
+            arrived = False
+        if self._architect_door_blocks_move(agent, prior_x, prior_y, new_x, new_y):
             agent["idleFrames"] = 0
+        else:
+            agent["x"], agent["y"] = new_x, new_y
+            if arrived:
+                waypoints = agent.get("waypoints") or []
+                if waypoints:
+                    nxt = waypoints.pop(0)
+                    agent["targetX"] = nxt["x"]
+                    agent["targetY"] = nxt["y"]
+                    agent["idleFrames"] = 0
+                elif DAILY_COUNCIL_ENABLED and agent.get("councilTurn"):
+                    # A seated councillor remains at the persisted seat instead of
+                    # triggering the ordinary 60-frame idle-wander behavior.
+                    agent["idleFrames"] = 0
+                else:
+                    agent["idleFrames"] = agent.get("idleFrames", 0) + 1
+                    if agent["idleFrames"] >= 60:
+                        cur = agent.get("currentDistrict")
+                        if cur:
+                            wander = cur
+                        else:
+                            wander = random.choice(list(self.civilization["districts"].keys()))
+                        self._set_agent_target(agent, wander)
+                        agent["idleCycles"] = agent.get("idleCycles", 0) + 1
+                        agent["idleFrames"] = 0
+            else:
+                agent["idleFrames"] = 0
         prior_district = agent.get("currentDistrict")
         agent["currentZone"] = get_zone(self.civilization["districts"], agent["x"], agent["y"])
         agent["currentDistrict"] = get_district(self.civilization["districts"], agent["x"], agent["y"])
         if agent.get("currentDistrict") != prior_district:
             self._mark_context_dirty(agent)
+        if agent["x"] != prior_x or agent["y"] != prior_y:
+            self._mark_agent_dirty(agent)
 
     # --- survival ---
     def _first_edible(self, agent):
@@ -2543,8 +3253,16 @@ class SimEngine:
             self._push_activity(f"{agent['name']} ate {edible}")
         if not edible and agent["hunger"] <= 0:
             self._share_edible_with(agent)
-        agent["hunger"] = max(0, agent["hunger"] - HUNGER_RATE)
+        # Sovereign God mode Phase 5: hunger drain is scaled BEFORE the
+        # max(0, ...) clamp -- 0.0 suppresses drain entirely without
+        # touching any other survival effect.
+        agent["hunger"] = max(0, agent["hunger"] - HUNGER_RATE * self._divine_modifier("hunger_drain_multiplier"))
         if agent["incapacitated"]:
+            # COLLAPSE_REGEN is DELIBERATELY excluded from divine scaling
+            # (docs/plan "Collapse recovery -- deliberately excluded"):
+            # health_regen_multiplier must never reach this line, or a 0.0
+            # value would permanently strand an incapacitated agent below
+            # COLLAPSE_REVIVE_HEALTH with no deterministic escape.
             agent["health"] = min(100, agent["health"] + COLLAPSE_REGEN)
             if agent["health"] >= COLLAPSE_REVIVE_HEALTH:
                 agent["incapacitated"] = False
@@ -2552,9 +3270,14 @@ class SimEngine:
                 self._push_activity(f"{agent['name']} recovered")
         else:
             if agent["hunger"] <= 0:
-                agent["health"] = max(0, agent["health"] - HEALTH_RATE)
+                # Starvation damage scaled BEFORE the max(0, ...) clamp.
+                agent["health"] = max(0, agent["health"]
+                                      - HEALTH_RATE * self._divine_modifier("starvation_damage_multiplier"))
             else:
-                agent["health"] = min(100, agent["health"] + HEALTH_REGEN)
+                # Fed regen scaled BEFORE the min(100, ...) clamp. This is
+                # the ONLY health_regen_multiplier consumer site.
+                agent["health"] = min(100, agent["health"]
+                                      + HEALTH_REGEN * self._divine_modifier("health_regen_multiplier"))
             if agent["health"] <= 0:
                 agent["incapacitated"] = True
                 agent["goal"] = None
@@ -2565,6 +3288,8 @@ class SimEngine:
         if any((old_hunger > t) != (agent["hunger"] > t) for t in thresholds) \
                 or any((old_health > t) != (agent["health"] > t) for t in (60, SAGE_CRITICAL_HEALTH, 0)):
             self._mark_context_dirty(agent)
+        if old_hunger != agent["hunger"] or old_health != agent["health"]:
+            self._mark_agent_dirty(agent)
 
     def _neediest_nearby(self, agent):
         nearby = [self._find_agent(n) for n in self._get_nearby_agents(agent)]
@@ -2612,6 +3337,7 @@ class SimEngine:
         return responders
 
     def _rush_to_heal(self, agent, target):
+        """Sage-priority emergency heal — bypasses decision gates (survival > story)."""
         agent["goal"] = None
         if self._distance_to(agent, target) > 80:
             self._auto_move_toward_target(agent, target["name"])
@@ -2734,6 +3460,31 @@ class SimEngine:
     def _gather_zone_for_resource(self, rid):
         d = self.civilization["resourceRegistry"].get(rid)
         return d.get("gatherZone") if d else None
+
+    def _resource_is_obtainable(self, rid):
+        if self._gather_zone_for_resource(rid):
+            return True
+        c = self.civilization
+        if rid in self.RECIPES or any(p["id"] == rid for p in c.get("pendingRecipes") or []):
+            return True
+        type_ids = set(c.get("projectRegistry") or {})
+        type_ids.update(s.get("type") for s in c.get("structures") or [] if s.get("type"))
+        for type_id in type_ids:
+            if self._resource_in_function(rid, self._structure_function_for_type(type_id)):
+                return True
+        # The one exception to "producers must be declarative": coin is minted
+        # deterministically while a working Mint exists (see _maybe_mint_coin).
+        if ECONOMY_ENABLED and rid == "coin" and self._mint_active():
+            return True
+        return False
+
+    def _village_holdings(self, rid):
+        """Stockpile plus every agent inventory; excludes districtStocks (in-ground
+        deposits, not village stores — those feed _format_district_stocks_for_prompt)."""
+        c = self.civilization
+        total = (c.get("stockpile") or {}).get(rid, 0)
+        total += sum(a["resources"].get(rid, 0) for a in self.agents)
+        return total
 
     def _get_zone_resources(self, zone):
         return [rid for rid, d in self.civilization["resourceRegistry"].items()
@@ -3338,9 +4089,7 @@ class SimEngine:
                    for s in self.civilization["structures"])
 
     # --- structure function registry (Phase A consequence engine) ---
-    def _get_structure_function(self, type_):
-        if not STRUCTURE_EFFECTS_ENABLED:
-            return {}
+    def _structure_function_for_type(self, type_):
         c = self.civilization
         tmpl = c["projectRegistry"].get(type_) or PROJECT_TEMPLATES.get(type_) or {}
         fn = tmpl.get("function")
@@ -3351,6 +4100,30 @@ class SimEngine:
         if tmpl.get("custom"):
             return {"produces": [dict(LEGACY_CUSTOM_PRODUCE)]}
         return {}
+
+    def _resource_in_function(self, rid, fn):
+        if not fn:
+            return False
+        for prod in fn.get("produces") or []:
+            if prod.get("resource") == rid:
+                return True
+        for boost in fn.get("boosts") or []:
+            if rid in (boost.get("resources") or []):
+                return True
+        for store in fn.get("stores") or []:
+            if store.get("resource") == rid:
+                return True
+        upkeep = fn.get("upkeep")
+        if isinstance(upkeep, dict) and upkeep.get("resource") == rid:
+            return True
+        for unlock in fn.get("unlocks") or []:
+            if unlock.get("kind") == "transit":
+                if rid in (unlock.get("consumes") or {}):
+                    return True
+        return False
+
+    def _get_structure_function(self, type_):
+        return self._structure_function_for_type(type_) if STRUCTURE_EFFECTS_ENABLED else {}
 
     def _canonical_effect_vector(self, function):
         return self.d["canonical_effect_vector"](function)
@@ -3613,6 +4386,60 @@ class SimEngine:
             self._push_activity(f"The storm passes; skies begin to clear over {where}")
         elif state == "clear":
             w["districts"] = []
+
+    def _weather_enter_forced(self, state, districts, exit_frame):
+        """Sovereign God mode Phase 6 (docs/plan Answer 3 -- "RNG
+        discipline"): enters `state` with an OPERATOR-chosen district list
+        and an exit frame DERIVED from the divine event's expiresFrame
+        (Answer 1: the event owns the clock), drawing NO RNG at all --
+        unlike _weather_enter, this never calls random.randint or
+        random.sample; state/districts/exitFrame all come straight from the
+        already-validated god command. Emits the SAME narration
+        _weather_enter emits for that state, so a forced storm/clearing
+        reads identically to a natural one in activity. Left completely
+        separate from _weather_enter (which stays untouched and still
+        RNG-driven) rather than adding a branch to it, so the natural
+        machine's RNG-consumption contract can never be affected by this
+        code path existing."""
+        c = self.civilization
+        w = c["weather"]
+        w["state"] = state
+        w["since"] = self.frameTick
+        w["exitFrame"] = exit_frame
+        w["districts"] = list(districts)
+        if state == "storm":
+            where = ", ".join(w["districts"]) if w["districts"] else "the village"
+            self._push_activity(f"Storm clouds break over {where} -- structures may take damage")
+        elif state == "clearing":
+            where = ", ".join(w["districts"]) if w["districts"] else "the village"
+            self._push_activity(f"The storm passes; skies begin to clear over {where}")
+        elif state == "clear":
+            w["districts"] = []
+
+    def _weather_handoff_successor(self, state):
+        """Sovereign God mode Phase 6 (docs/plan Answer 2 -- "returning to
+        the natural cycle"): the natural _tick_weather successor for the
+        OVERRIDDEN `state`, entered via the SAME RNG-drawing _weather_enter()
+        the natural machine always uses -- mirrors _tick_weather's
+        transition table exactly (clear -> gathering, gathering -> storm or
+        clear (same probability branch), storm -> clearing, clearing ->
+        clear), but is invoked unconditionally at override-close time (the
+        caller -- _close_weather_override -- already knows the override is
+        ending) rather than gated on civilization["weather"]["exitFrame"].
+        Deliberately does NOT restore the pre-override state -- that would
+        double back and desync the strict cycle. Callers in a deterministic
+        smoke must random.seed() a fixed value before invoking this (via
+        expiry or cancel) to keep the resulting draw reproducible."""
+        if state == "clear":
+            self._weather_enter("gathering")
+        elif state == "gathering":
+            storminess = WEATHER_SEASON_STORMINESS.get(self._current_season(), 1.0)
+            p_storm = min(0.95, max(0.05, WEATHER_BASE_STORM_CHANCE * storminess))
+            self._weather_enter("storm" if random.random() < p_storm else "clear")
+        elif state == "storm":
+            self._weather_enter("clearing")
+        else:  # "clearing" (or any unknown legacy value) -> clear
+            self._weather_enter("clear")
 
     def _tick_weather(self):
         """Living-ecosystem Phase 4: deterministic clear -> gathering ->
@@ -4077,6 +4904,8 @@ class SimEngine:
         self._maybe_disaster()
         self._tick_comfort_consumption()
         self._prune_shipments()
+        self._mark_civ_dirty("stockpile", "season")
+        self._mark_top_dirty("weather")
 
     def _tick_comfort_consumption(self):
         if not ECONOMY_SINKS_ENABLED:
@@ -4110,7 +4939,15 @@ class SimEngine:
             overflow = stock + held - cap
             if overflow <= 0:
                 continue
-            to_spoil = min(overflow, max(1, int(overflow * SPOILAGE_RATIO)))
+            # Sovereign God mode Phase 5: the divine spoilage multiplier
+            # scales the ordinary computed to_spoil amount (base_spoil,
+            # which already floors at 1 to guarantee normal-rate spoilage)
+            # BEFORE the existing min(overflow, ...) bound, so spoilage can
+            # never exceed the eligible overflow -- an active 0.0 multiplier
+            # means no spoilage at all that tick, overriding the normal
+            # floor-of-1 guarantee.
+            base_spoil = max(1, int(overflow * SPOILAGE_RATIO))
+            to_spoil = min(overflow, math.floor(base_spoil * self._divine_modifier("spoilage_multiplier")))
             spoiled = min(to_spoil, stock)
             if spoiled > 0:
                 c["stockpile"][rid] = stock - spoiled
@@ -4131,6 +4968,43 @@ class SimEngine:
             c["lastSpoilage"] = {"reason": reason, "frame": self.frameTick}
             self._push_activity(reason[0].upper() + reason[1:])
 
+    def _apply_structure_condition_delta(self, s, delta):
+        """Shared condition-delta + ruin-transition helper. Used by BOTH the
+        passive per-goods-tick decay below (always a negative delta) AND the
+        Sovereign God mode structure_condition miracle (docs/plan-sovereign-
+        god-mode-v2.md Phase 4: "Reuse condition/ruin helpers ... so disrepair
+        and ruin transitions fire with their normal narration"). A no-op on
+        an already-ruined structure (cond <= 0) -- callers that can reach a
+        ruin (the miracle) reject it earlier in validation instead. Returns
+        the new condition. Must be called with self.lock already held (both
+        callers already hold it: the tick loop and god_apply)."""
+        cond = s.get("condition", 100.0)
+        if cond <= 0:
+            return cond
+        new_cond = min(100.0, cond + delta) if delta >= 0 else max(0.0, cond + delta)
+        s["condition"] = new_cond
+        name = s.get("name") or s.get("type")
+        did = s.get("districtId") or "the village"
+        if cond >= STRUCTURE_DISREPAIR_THRESHOLD > new_cond:
+            self._push_activity(
+                f"The {name} in {did} has fallen into disrepair -- it stops "
+                f"working until someone uses repair_structure")
+        if new_cond <= 0:
+            s["isRuin"] = True
+            s.setdefault("ruinedSinceFrame", self.frameTick)
+            self._push_activity(
+                f"The {name} in {did} has collapsed into a ruin! "
+                f"repair_structure can rebuild it for half the original materials")
+            if ECONOMY_ENABLED and s.get("homeOf"):
+                owner = self._find_agent(s["homeOf"])
+                if owner and owner.get("homeStructureId") == s["id"]:
+                    owner["homeStructureId"] = None
+                self._push_activity(f"{s['homeOf']} is left homeless — the {name} they lived in is a ruin")
+                s["homeOf"] = None
+        if new_cond != cond:
+            self._mark_structure_dirty(s)
+        return new_cond
+
     def _tick_structure_decay(self):
         """Structures decay STRUCTURE_DECAY_PER_GOODS_TICK per goods tick.
         Below STRUCTURE_DISREPAIR_THRESHOLD they stop working (produces/
@@ -4138,29 +5012,15 @@ class SimEngine:
         they collapse into a ruin, rebuildable via repair_structure for half
         the original materials (the deterministic escape)."""
         c = self.civilization
+        # Sovereign God mode Phase 5: scales only ordinary passive decay --
+        # direct disaster damage and the god_apply structure_condition
+        # miracle both call _apply_structure_condition_delta directly with
+        # their own delta and are unaffected.
+        decay = STRUCTURE_DECAY_PER_GOODS_TICK * self._divine_modifier("structure_decay_multiplier")
         for s in c["structures"]:
-            cond = s.get("condition", 100.0)
-            if cond <= 0:
+            if s.get("condition", 100.0) <= 0:
                 continue
-            new_cond = max(0.0, cond - STRUCTURE_DECAY_PER_GOODS_TICK)
-            s["condition"] = new_cond
-            name = s.get("name") or s.get("type")
-            did = s.get("districtId") or "the village"
-            if cond >= STRUCTURE_DISREPAIR_THRESHOLD > new_cond:
-                self._push_activity(
-                    f"The {name} in {did} has fallen into disrepair -- it stops "
-                    f"working until someone uses repair_structure")
-            if new_cond <= 0:
-                s["isRuin"] = True
-                self._push_activity(
-                    f"The {name} in {did} has collapsed into a ruin! "
-                    f"repair_structure can rebuild it for half the original materials")
-                if ECONOMY_ENABLED and s.get("homeOf"):
-                    owner = self._find_agent(s["homeOf"])
-                    if owner and owner.get("homeStructureId") == s["id"]:
-                        owner["homeStructureId"] = None
-                    self._push_activity(f"{s['homeOf']} is left homeless — the {name} they lived in is a ruin")
-                    s["homeOf"] = None
+            self._apply_structure_condition_delta(s, -decay)
 
     def _tick_structure_health_benchmark(self):
         """Logs a `structure_health` benchmark every goods tick so village-wide
@@ -4404,36 +5264,19 @@ class SimEngine:
             return f"{agent['name']} found nothing that needs repair"
         cost = self._repair_cost(s)
         name = s.get("name") or s.get("type")
-        # Fund each resource from the agent's inventory first, then the village
-        # stockpile (2026-07-07 audit: repairs drew from personal inventory
-        # only, so 320 repair attempts failed while the stockpile held 29k
-        # planks -- the gather->contribute loop could never fund the escape
-        # hatch). Refuse only when both together fall short.
-        c = self.civilization
-        plan = {}
-        missing = []
-        for res, amt in cost.items():
-            held = agent["resources"].get(res, 0)
-            from_agent = min(held, amt)
-            from_stock = amt - from_agent
-            if from_stock > int(c["stockpile"].get(res, 0)):
-                missing.append(res)
-            else:
-                plan[res] = (from_agent, from_stock)
+        paid, missing = self._pay_local_cost(agent, cost)
         if missing:
             cost_str = ", ".join(f"{amt} {res}" for res, amt in cost.items())
             agent["lastRepairRejection"] = {
-                "reason": (f"repairing the {name} needs {cost_str} -- you and the "
-                           f"village stockpile together lack {', '.join(missing)}"),
+                "reason": (f"repairing the {name} needs {cost_str} -- you, your settlement store, "
+                           f"and the village stockpile together lack {', '.join(missing)}"),
                 "frame": self.frameTick}
             return f"{agent['name']} lacks {', '.join(missing)} to repair the {name}"
-        stock_parts = []
-        for res, (from_agent, from_stock) in plan.items():
-            if from_agent:
-                agent["resources"][res] -= from_agent
-            if from_stock:
-                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
-                stock_parts.append(f"{from_stock} {res}")
+        store_parts, stock_parts = paid
+        if store_parts:
+            self._push_activity(
+                f"The {self._settlement_for_agent(agent)} settlement store supplied "
+                f"{', '.join(store_parts)} for {agent['name']}'s repair of the {name}")
         if stock_parts:
             self._push_activity(
                 f"The village stockpile supplied {', '.join(stock_parts)} for "
@@ -4670,32 +5513,20 @@ class SimEngine:
         return total
 
     def _pay_upgrade_cost(self, agent, cost, name):
-        c = self.civilization
-        plan = {}
-        missing = []
-        for res, amt in cost.items():
-            held = agent["resources"].get(res, 0)
-            from_agent = min(held, amt)
-            from_stock = amt - from_agent
-            if from_stock > int(c["stockpile"].get(res, 0)):
-                missing.append(res)
-            else:
-                plan[res] = (from_agent, from_stock)
+        paid, missing = self._pay_local_cost(agent, cost)
         if missing:
             cost_str = ", ".join(f"{amt} {res}" for res, amt in cost.items())
             agent["lastUpgradeRejection"] = {
-                "reason": (f"upgrading {name} needs {cost_str} -- you and the stockpile "
-                           f"together lack {', '.join(missing)}"),
+                "reason": (f"upgrading {name} needs {cost_str} -- you, your settlement store, "
+                           f"and the stockpile together lack {', '.join(missing)}"),
                 "frame": self.frameTick,
             }
             return False
-        stock_parts = []
-        for res, (from_agent, from_stock) in plan.items():
-            if from_agent:
-                agent["resources"][res] -= from_agent
-            if from_stock:
-                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
-                stock_parts.append(f"{from_stock} {res}")
+        store_parts, stock_parts = paid
+        if store_parts:
+            self._push_activity(
+                f"The {self._settlement_for_agent(agent)} settlement store supplied "
+                f"{', '.join(store_parts)} for {agent['name']}'s upgrade of the {name}")
         if stock_parts:
             self._push_activity(
                 f"The village stockpile supplied {', '.join(stock_parts)} for "
@@ -4737,6 +5568,7 @@ class SimEngine:
             # The upgrade may have grown this structure's footprint enough to
             # overlap a neighbor; the upgrader becomes the relocator.
             self._enqueue_reorg_for_overlaps(s, preferred_agent=agent)
+        self._mark_structure_dirty(s, sprite_changed=(new_tier > old_tier))
         agent["lastUpgradeRejection"] = None
         self._push_activity(f"{agent['name']} upgraded the {name} to level {new_level}")
         self._log_benchmark("structure_upgraded", new_level,
@@ -4770,6 +5602,7 @@ class SimEngine:
         agent["spriteDesignTurn"] = None
         agent["lastSpriteRejection"] = None
         name = s.get("name") or s.get("type")
+        self._mark_structure_dirty(s, sprite_changed=True)
         self._push_activity(f"{agent['name']} refined the sprite for the {name}")
         # An agent-refined sprite can also grow the drawn footprint enough to
         # overlap a neighbor -- same reorg trigger as a tier upgrade.
@@ -4903,6 +5736,9 @@ class SimEngine:
         }
         c["structures"].append(new_structure)
         c["nextStructureId"] += 1
+        self._mark_structure_dirty(new_structure, sprite_changed=bool(new_structure.get("sprite")))
+        self._mark_civ_dirty("districtProjects", "completedProjects", "level", "builtTypes")
+        self._mark_agent_dirty(agent)
         built_name = project["name"]
         c["districtProjects"][district_id] = None
         c["completedProjects"] += 1
@@ -4966,8 +5802,42 @@ class SimEngine:
             if did:
                 grove_mult = 0.5 + self._terrain_grove_ratio(did)
                 amount = max(1, int(amount * grove_mult))
-        amount = max(1, min(amount, self._carry_cap(agent) - agent["resources"].get(resource, 0)))
-        agent["resources"][resource] = agent["resources"].get(resource, 0) + amount
+        # Sovereign God mode Phase 5 (docs/plan-sovereign-god-mode-v2.md
+        # "Exact consumer sites and arithmetic"): the divine yield multiplier
+        # is applied AFTER the custom-rule addition above (line ~5095) and
+        # the ecology/grove scaling, and BEFORE the carry-cap clamp below --
+        # that clamp is `max(1, min(...))`, so multiplying after it would
+        # resurrect a 0.0 result back to 1. Fish gets its own modifier that
+        # REPLACES (never multiplies with) the general gather modifier. A
+        # resulting amount <= 0 returns HERE, before the resource is added
+        # and before collectSuccesses/the tool benchmark/ecology depletion/
+        # harvest-quota recording/skill practice, so a divinely-nulled gather
+        # never inflates that evidence stream. With no active effect for the
+        # relevant key, _divine_modifier returns exactly 1.0 and
+        # floor(amount * 1.0) == amount, so this is byte-identical to the
+        # feature-off baseline.
+        divine_mult = (self._divine_modifier("fish_yield_multiplier")
+                       if resource == "fish"
+                       else self._divine_modifier("gather_yield_multiplier"))
+        amount = math.floor(amount * divine_mult)
+        if amount <= 0:
+            reason = "a divine hand stills the harvest"
+            agent["lastGatherRejection"] = {"reason": reason, "frame": self.frameTick}
+            return f"{agent['name']} found nothing — {reason}"
+        intended = amount
+        room = max(0, self._carry_cap(agent) - agent["resources"].get(resource, 0))
+        agent_add = min(intended, room)
+        overflow = intended - agent_add
+        if agent_add <= 0 and overflow <= 0 and intended > 0:
+            overflow = intended
+        elif agent_add <= 0 and room > 0:
+            agent_add = min(intended, max(1, room))
+            overflow = intended - agent_add
+        amount = agent_add + overflow
+        if agent_add:
+            agent["resources"][resource] = agent["resources"].get(resource, 0) + agent_add
+        if overflow:
+            self._credit_settlement_overflow(agent, resource, overflow)
         c["collectSuccesses"] += 1
         self._path1_tool_benchmark(resource, True)
         if ECOLOGY_ENABLED:
@@ -4983,7 +5853,10 @@ class SimEngine:
         bonus_note = ""
         if amount > 1:
             bonus_note = " (structure effects boosted the harvest)"
-        return f"{agent['name']} collected {resource}" + (f" x{amount}{bonus_note}" if amount > 1 else "")
+        summary = f"{agent['name']} collected {resource}" + (f" x{amount}{bonus_note}" if amount > 1 else "")
+        if overflow:
+            summary += f" ({overflow} overflow to settlement store)"
+        return summary
 
     # --- Path 1: tool tiers ---
     def _gather_tool_tier(self, agent):
@@ -5138,6 +6011,7 @@ class SimEngine:
         for res, n in bt["cost"].items():
             agent["resources"][res] -= n
         tiles[key] = block_type
+        self._bump_districts_epoch()
         agent["lastBlockRejection"] = None
         c = self.civilization
         c["path1Placements"] = c.get("path1Placements", 0) + 1
@@ -5160,6 +6034,7 @@ class SimEngine:
         if not block_type:
             agent["lastBlockRejection"] = {"reason": "no block here", "frame": self.frameTick}
             return f"{agent['name']} found no block to remove"
+        self._bump_districts_epoch()
         bt = BLOCK_TYPES.get(block_type, {})
         for res, n in bt.get("cost", {}).items():
             refund = max(0, int(n * BLOCK_REFUND_RATIO)) or 1
@@ -5195,8 +6070,10 @@ class SimEngine:
         gained = None
         if current == "grove":
             d["terrain"][key] = "soil"
+            self._bump_districts_epoch()
         elif current == "soil":
             d["terrain"][key] = "rock"
+            self._bump_districts_epoch()
             gained = "stone"
         else:
             # This tile is exhausted (rock/sand/water) -- relocate to the
@@ -5265,6 +6142,7 @@ class SimEngine:
             return f"{agent['name']} cannot plant on {current}"
         agent["resources"]["wood"] -= 1
         d["terrain"][key] = "grove"
+        self._bump_districts_epoch()
         c = self.civilization
         c["path1TerrainMutations"] = c.get("path1TerrainMutations", 0) + 1
         self._log_benchmark("terrain_mutations", c["path1TerrainMutations"], {"action": "plant", "district": did})
@@ -5305,6 +6183,272 @@ class SimEngine:
             c["districts"][did].setdefault("settlementId", "home")
         c.setdefault("treaties", [])
         c.setdefault("caravanLog", [])
+        stores = c.setdefault("settlementStores", {})
+        for sid in (s["id"] for s in c["settlements"]):
+            stores.setdefault(sid, {})
+
+    def _ensure_settlement_stores(self):
+        self._init_settlements()
+        stores = self.civilization.setdefault("settlementStores", {})
+        for sid in (s["id"] for s in self.civilization["settlements"]):
+            stores.setdefault(sid, {})
+
+    def _settlement_store_bucket(self, settlement_id):
+        self._ensure_settlement_stores()
+        return self.civilization["settlementStores"].setdefault(settlement_id, {})
+
+    def _credit_settlement_overflow(self, agent, resource, amount):
+        if amount <= 0:
+            return
+        c = self.civilization
+        if path1_on("PATH1_DIPLOMACY_ENABLED"):
+            bucket = self._settlement_store_bucket(self._settlement_for_agent(agent))
+            bucket[resource] = bucket.get(resource, 0) + amount
+        else:
+            c["stockpile"][resource] = c["stockpile"].get(resource, 0) + amount
+
+    def _pay_local_cost(self, agent, cost):
+        """Fund from agent inventory, settlement store, then village stockpile."""
+        c = self.civilization
+        sid = self._settlement_for_agent(agent)
+        store = (self._settlement_store_bucket(sid)
+                 if path1_on("PATH1_DIPLOMACY_ENABLED") else {})
+        plan = {}
+        missing = []
+        for res, amt in cost.items():
+            remaining = amt
+            from_agent = min(agent["resources"].get(res, 0), remaining)
+            remaining -= from_agent
+            from_store = min(int(store.get(res, 0)), remaining) if store else 0
+            remaining -= from_store
+            from_stock = remaining
+            if from_stock > int(c["stockpile"].get(res, 0)):
+                missing.append(res)
+            else:
+                plan[res] = (from_agent, from_store, from_stock)
+        if missing:
+            return None, missing
+        store_parts = []
+        stock_parts = []
+        for res, (from_agent, from_store, from_stock) in plan.items():
+            if from_agent:
+                agent["resources"][res] -= from_agent
+            if from_store:
+                store[res] = int(store.get(res, 0)) - from_store
+                store_parts.append(f"{from_store} {res}")
+            if from_stock:
+                c["stockpile"][res] = int(c["stockpile"].get(res, 0)) - from_stock
+                stock_parts.append(f"{from_stock} {res}")
+        return (store_parts, stock_parts), None
+
+    def _format_settlement_stores_for_prompt(self, agent):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return None
+        self._ensure_settlement_stores()
+        stores = self.civilization.get("settlementStores") or {}
+        if not stores:
+            return None
+        parts = []
+        my_sid = self._settlement_for_agent(agent)
+        for sid, bucket in stores.items():
+            if not bucket:
+                continue
+            label = sid + (" (yours)" if sid == my_sid else "")
+            items = ", ".join(f"{qty} {res}" for res, qty in sorted(bucket.items()) if qty > 0)
+            if items:
+                parts.append(f"{label}: {items}")
+        return "; ".join(parts) if parts else "per-settlement stores empty"
+
+    def _enacted_treaty_tariff(self):
+        tariff = 0.0
+        for entry in (self.civilization.get("treaties") or []):
+            try:
+                tval = float(entry.get("tariff") or 0)
+            except (TypeError, ValueError):
+                tval = 0.0
+            tariff = max(tariff, tval)
+        for rule in (self.civilization.get("rules") or []):
+            if rule.get("kind") != "treaty":
+                continue
+            try:
+                tval = float(rule.get("tariff") or 0)
+            except (TypeError, ValueError):
+                tval = 0.0
+            tariff = max(tariff, tval)
+        return max(0.0, min(TREATY_TARIFF_MAX, tariff))
+
+    def _parse_treaty_tariff(self, raw):
+        try:
+            tariff = float(raw if raw is not None else 0)
+        except (TypeError, ValueError):
+            return None
+        if 0 <= tariff <= TREATY_TARIFF_MAX:
+            return tariff
+        return None
+
+    def _caravan_trade_bundle(self, agent, dest_settlement_id=None):
+        bundle = {}
+        for res, qty in agent["resources"].items():
+            if qty <= 0 or res in CARAVAN_VEHICLE_RESOURCES:
+                continue
+            if res in EDIBLE_RESOURCES:
+                transferable = max(0, qty - EDIBLE_RESERVE)
+            else:
+                transferable = qty
+            if transferable > 0:
+                bundle[res] = transferable
+        return bundle
+
+    def _deliver_caravan(self, agent, dest_settlement_id, source_settlement_id=None):
+        c = self.civilization
+        bundle = self._caravan_trade_bundle(agent, dest_settlement_id)
+        if not bundle:
+            return False
+        source_sid = source_settlement_id or next(
+            (s["id"] for s in c["settlements"] if s["id"] != dest_settlement_id),
+            self._settlement_for_agent(agent),
+        )
+        dest_stores = self._settlement_store_bucket(dest_settlement_id)
+        source_stores = self._settlement_store_bucket(source_sid)
+        tariff = self._enacted_treaty_tariff()
+        from_district = agent.get("currentDistrict")
+        dest_settlement = next(
+            (s for s in c["settlements"] if s["id"] == dest_settlement_id), None)
+        dest_district = (
+            (dest_settlement or {}).get("districts") or [from_district])[0]
+        goods = {}
+        for res, qty in bundle.items():
+            agent["resources"][res] -= qty
+            tariff_qty = int(qty * tariff) if tariff > 0 else 0
+            dest_qty = qty - tariff_qty
+            if tariff_qty > 0:
+                if path1_on("PATH1_DIPLOMACY_ENABLED"):
+                    source_stores[res] = source_stores.get(res, 0) + tariff_qty
+                else:
+                    c["stockpile"][res] = c["stockpile"].get(res, 0) + tariff_qty
+            if dest_qty > 0:
+                dest_stores[res] = dest_stores.get(res, 0) + dest_qty
+            if from_district and dest_district:
+                self._emit_shipment(from_district, dest_district, res)
+            goods[res] = qty
+        c["caravanLog"].append({
+            "goods": goods,
+            "from": source_sid,
+            "to": dest_settlement_id,
+            "frame": self.frameTick,
+            "agent": agent["name"],
+        })
+        c["caravanLog"] = c["caravanLog"][-CARAVAN_LOG_CAP:]
+        self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
+                            {"agent": agent["name"], "dest": dest_settlement_id, "goods": goods})
+        dest_name = (dest_settlement or {}).get("name") or dest_settlement_id
+        parts = ", ".join(f"{n} {r}" for r, n in goods.items())
+        self._push_activity(
+            f"{agent['name']} delivered {parts} to {dest_name}"
+            + (f" (tariff {int(tariff * 100)}%)" if tariff > 0 else ""))
+        return True
+
+    def _transit_district_for_settlement(self, settlement_id):
+        c = self.civilization
+        candidates = []
+        for s in c["structures"]:
+            if s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD:
+                continue
+            if s.get("type") not in ("dock", "shipyard"):
+                continue
+            did = s.get("districtId")
+            if did and c["districts"].get(did, {}).get("settlementId") == settlement_id:
+                candidates.append(did)
+        if candidates:
+            return candidates[0]
+        for did, d in c["districts"].items():
+            if d.get("settlementId") == settlement_id and d.get("kind") == "beach":
+                return did
+        for settlement in c["settlements"]:
+            if settlement["id"] == settlement_id and settlement.get("districts"):
+                return settlement["districts"][0]
+        return None
+
+    def _ocean_district_id(self):
+        ocean = self._wildlife_ocean_district()
+        if ocean:
+            for did, dist in self.civilization["districts"].items():
+                if dist is ocean:
+                    return did
+        return "ocean" if "ocean" in self.civilization["districts"] else None
+
+    def _caravan_route_legs(self, agent, dest_district_id):
+        c = self.civilization
+        my_sid = self._settlement_for_agent(agent)
+        dest_sid = (c["districts"].get(dest_district_id) or {}).get("settlementId", "home")
+        if (my_sid == dest_sid
+                or not path1_on("PATH1_DIPLOMACY_ENABLED")
+                or not TRANSIT_ENABLED
+                or not self._has_ocean_transit()):
+            return [dest_district_id]
+        source_dock = self._transit_district_for_settlement(my_sid)
+        ocean_did = self._ocean_district_id()
+        dest_dock = self._transit_district_for_settlement(dest_sid)
+        legs = []
+        if source_dock:
+            legs.append(source_dock)
+        if ocean_did:
+            legs.append(ocean_did)
+        if dest_dock and dest_dock != dest_district_id:
+            legs.append(dest_dock)
+        legs.append(dest_district_id)
+        deduped = []
+        for leg in legs:
+            if not deduped or deduped[-1] != leg:
+                deduped.append(leg)
+        return deduped
+
+    def _caravan_next_hop(self, agent, dest_district_id):
+        legs = self._caravan_route_legs(agent, dest_district_id)
+        my_did = agent.get("currentDistrict")
+        for leg in legs:
+            if leg == my_did:
+                continue
+            if not self._en_route_to(agent, leg):
+                return leg
+        return dest_district_id
+
+    def _set_caravan_target(self, agent, dest_district_id):
+        hop = self._caravan_next_hop(agent, dest_district_id)
+        self._set_agent_target_once(agent, hop)
+
+    def _caravan_eligible(self, agent):
+        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+            return False
+        carry = self._carry_cap(agent)
+        has_vehicle = any(agent["resources"].get(v, 0) > 0 for v in CARAVAN_VEHICLE_RESOURCES)
+        if not has_vehicle or sum(agent["resources"].values()) < CARAVAN_CARRY_MIN:
+            return False
+        c = self.civilization
+        self._init_settlements()
+        return len(c["settlements"]) >= 2
+
+    def _resolve_caravan_dest(self, agent, decision):
+        c = self.civilization
+        self._init_settlements()
+        my_sid = self._settlement_for_agent(agent)
+        raw = decision.get("target_district") or decision.get("target")
+        if raw:
+            resolved = self._resolve_target_district(raw, agent)
+            if resolved:
+                return resolved
+        other = next((s for s in c["settlements"] if s["id"] != my_sid), None)
+        if other and other.get("districts"):
+            return other["districts"][0]
+        return None
+
+    def _assign_caravan_goal(self, agent, dest_district):
+        agent["goal"] = {
+            "kind": "caravan",
+            "target_district": dest_district,
+            "source_settlement": self._settlement_for_agent(agent),
+            "ttl": STALL_THRESHOLD * 4,
+        }
 
     def _maybe_found_settlement(self):
         if not path1_on("PATH1_DIPLOMACY_ENABLED"):
@@ -5354,33 +6498,27 @@ class SimEngine:
         return False
 
     def _maybe_caravan_goal(self, agent):
-        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
-            return
-        carry = self._carry_cap(agent)
-        has_vehicle = any(agent["resources"].get(v, 0) > 0 for v in ("cart", "wagon"))
-        if not has_vehicle or sum(agent["resources"].values()) < CARAVAN_CARRY_MIN:
+        if not self._caravan_eligible(agent):
             return
         c = self.civilization
-        self._init_settlements()
-        if len(c["settlements"]) < 2:
-            return
         my_sid = self._settlement_for_agent(agent)
         other = next((s for s in c["settlements"] if s["id"] != my_sid), None)
         if not other or not other["districts"]:
             return
         dest = other["districts"][0]
+        dest_sid = other["id"]
         if agent.get("currentDistrict") == dest:
-            if TRANSIT_ENABLED and self._has_ocean_transit():
-                if not self._consume_ocean_transit():
-                    return
-            c["caravanLog"].append({"agent": agent["name"], "settlement": other["id"],
-                                    "frame": self.frameTick})
-            self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
-                                {"agent": agent["name"], "dest": dest})
-            self._push_activity(f"{agent['name']} arrives at {other['name']} with trade goods")
+            goal = agent.get("goal") or {}
+            source_sid = goal.get("source_settlement") or next(
+                (s["id"] for s in c["settlements"] if s["id"] != dest_sid), my_sid)
+            if (source_sid != dest_sid and TRANSIT_ENABLED and self._has_ocean_transit()
+                    and not self._consume_ocean_transit(agent)):
+                return
+            if self._deliver_caravan(agent, dest_sid, source_settlement_id=source_sid):
+                agent["goal"] = None
             return
         if not agent.get("goal"):
-            agent["goal"] = {"kind": "caravan", "target_district": dest, "ttl": STALL_THRESHOLD * 4}
+            self._assign_caravan_goal(agent, dest)
 
     def _ocean_transit_unlocks(self):
         if not TRANSIT_ENABLED:
@@ -5397,17 +6535,31 @@ class SimEngine:
     def _has_ocean_transit(self):
         return bool(self._ocean_transit_unlocks())
 
-    def _consume_ocean_transit(self):
+    def _consume_ocean_transit(self, agent=None):
         unlock = self._ocean_transit_unlocks()[0] if self._ocean_transit_unlocks() else None
         if not unlock:
             return False
         costs = unlock.get("consumes") or {}
-        stock = self.civilization["stockpile"]
-        if any(stock.get(r, 0) < n for r, n in costs.items()):
-            self._push_activity("Ocean caravan waits for transit supplies")
-            return False
+        c = self.civilization
+        sid = self._settlement_for_agent(agent) if agent else "home"
+        store = (self._settlement_store_bucket(sid)
+                 if agent and path1_on("PATH1_DIPLOMACY_ENABLED") else {})
+        stock = c["stockpile"]
+        plan = {}
         for resource, amount in costs.items():
-            stock[resource] -= amount
+            remaining = amount
+            from_store = min(int(store.get(resource, 0)), remaining) if store else 0
+            remaining -= from_store
+            from_stock = remaining
+            if from_stock > int(stock.get(resource, 0)):
+                self._push_activity("Ocean caravan waits for transit supplies")
+                return False
+            plan[resource] = (from_store, from_stock)
+        for resource, (from_store, from_stock) in plan.items():
+            if from_store:
+                store[resource] = int(store.get(resource, 0)) - from_store
+            if from_stock:
+                stock[resource] = int(stock.get(resource, 0)) - from_stock
         self._push_activity("An ocean caravan launches, consuming " + ", ".join(f"{n} {r}" for r, n in costs.items()))
         return True
 
@@ -5465,6 +6617,7 @@ class SimEngine:
         })
         if len(self.shipments) > SHIPMENT_RING_CAP:
             del self.shipments[: len(self.shipments) - SHIPMENT_RING_CAP]
+        self._mark_top_dirty("shipments")
 
     def _prune_shipments(self):
         """Age out expired shipments. Called from the existing goods tick
@@ -5473,6 +6626,7 @@ class SimEngine:
         so this is hygiene, not a correctness requirement."""
         if self.shipments:
             self.shipments = [s for s in self.shipments if s["endFrame"] >= self.frameTick]
+            self._mark_top_dirty("shipments")
 
     def _shipment_snapshot(self):
         """Read-only /state projection: only still-live shipments."""
@@ -5487,17 +6641,23 @@ class SimEngine:
         if not isinstance(rule, dict) or not rule.get("id") or not rule.get("name"):
             agent["lastTreatyRejection"] = {"reason": "invalid treaty proposal", "frame": self.frameTick}
             return f"{agent['name']} drafted an invalid treaty"
+        tariff = self._parse_treaty_tariff(rule.get("tariff", 0))
+        if tariff is None:
+            agent["lastTreatyRejection"] = {"reason": "tariff must be 0–0.25", "frame": self.frameTick}
+            return f"{agent['name']} drafted an invalid treaty tariff"
         entry = {
             "id": rule["id"], "name": rule["name"], "kind": "treaty",
             "value": rule.get("value") or "trade",
             "description": rule.get("description", "Inter-settlement treaty"),
+            "tariff": tariff,
             "proposedBy": agent["name"], "enacted": False,
             "votes": {agent["name"]: "yes"},
         }
         self.civilization["pendingRules"].append(entry)
         self._tally_and_maybe_enact(entry)
         agent["lastTreatyRejection"] = None
-        return f'{agent["name"]} proposed treaty "{entry["name"]}"'
+        tariff_note = f" (tariff {int(tariff * 100)}%)" if tariff > 0 else ""
+        return f'{agent["name"]} proposed treaty "{entry["name"]}"{tariff_note}'
 
     def _vote_treaty(self, agent, decision):
         if not path1_on("PATH1_DIPLOMACY_ENABLED"):
@@ -5514,9 +6674,22 @@ class SimEngine:
         if pending.get("enacted"):
             self.civilization.setdefault("treaties", []).append({
                 "id": pending["id"], "name": pending["name"], "value": pending["value"],
+                "tariff": pending.get("tariff", 0),
                 "frame": self.frameTick,
             })
         return f'{agent["name"]} voted {vote} on treaty "{pending["name"]}"'
+
+    def _deliver_caravan_action(self, agent, decision):
+        if not self._caravan_eligible(agent):
+            return f"{agent['name']} cannot run a caravan yet"
+        dest = self._resolve_caravan_dest(agent, decision)
+        if not dest:
+            return f"{agent['name']} found no destination settlement"
+        dest_sid = self.civilization["districts"].get(dest, {}).get("settlementId")
+        if dest_sid == self._settlement_for_agent(agent):
+            return f"{agent['name']} is already at the destination settlement"
+        self._assign_caravan_goal(agent, dest)
+        return f"{agent['name']} sets out on a caravan toward {dest}"
 
     # --- Path 1: pressure loop ---
     def _is_night(self):
@@ -5668,6 +6841,562 @@ class SimEngine:
         self._log_benchmark("night_shelter_rate", round(rate, 2), benchmark_payload)
         if exposed:
             self._push_activity(f"Night exposure — {exposed} villager(s) took cold damage")
+
+    # --- Huntable wildlife (WILDLIFE_ENABLED; not Path-1 _tick_wildlife) ---
+
+    @staticmethod
+    def _wildlife_hash_seed(text):
+        """FNV-1a 32-bit — mirrors index.html wildlifeHashSeed for placement."""
+        h = 2166136261
+        for ch in text:
+            h ^= ord(ch)
+            h = (h * 16777619) & 0xFFFFFFFF
+        return h
+
+    def _wildlife_stage_for_district(self, district_id):
+        """Ecology stage name for a district (barren/sparse/healthy/lush)."""
+        if not ECOLOGY_ENABLED:
+            return "healthy"
+        ratio = self._district_ecology_ratio(district_id)
+        if ratio is None:
+            return None
+        stage_state = self.civilization.setdefault("districtEcologyStage", {})
+        idx = self._district_ecology_stage_with_hysteresis(ratio, stage_state.get(district_id))
+        stage_state[district_id] = idx
+        return DISTRICT_ECOLOGY_STAGES[idx]
+
+    def _wildlife_stage_target(self, district_id):
+        stage = self._wildlife_stage_for_district(district_id)
+        if stage is None:
+            return 0
+        return min(WILDLIFE_STAGE_COUNT.get(stage, 0), WILDLIFE_CAP_PER_DISTRICT)
+
+    def _wildlife_district_kind(self, district_id):
+        d = self.civilization["districts"].get(district_id)
+        if not d:
+            return None
+        kind = d.get("kind")
+        return kind if kind in WILDLIFE_KIND_POOLS else None
+
+    def _wildlife_ocean_district(self):
+        """Return the ocean district dict, preferring id 'ocean'."""
+        districts = self.civilization.get("districts") or {}
+        ocean = districts.get("ocean")
+        if ocean and ocean.get("kind") == "ocean":
+            return ocean
+        for d in districts.values():
+            if d.get("kind") == "ocean":
+                return d
+        return None
+
+    def _wildlife_habitat_rect(self, district_id, kind):
+        """Return (x1, y1, x2, y2) clamp rect for a creature kind in a district."""
+        d = self.civilization["districts"].get(district_id)
+        if not d:
+            return None
+        b = d["bounds"]
+        x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
+        dkind = d.get("kind")
+        if dkind in ("forest", "farm"):
+            inset = WILDLIFE_HABITAT_INSET
+            return (x1 + inset, y1 + inset, max(x1 + inset + 1, x2 - inset),
+                    max(y1 + inset + 1, y2 - inset))
+        if dkind == "beach":
+            if kind in WILDLIFE_BEACH_WATER_KINDS:
+                ocean = self._wildlife_ocean_district()
+                if ocean:
+                    ob = ocean["bounds"]
+                    ox1, oy1, ox2, oy2 = ob["x1"], ob["y1"], ob["x2"], ob["y2"]
+                    strip = min(WILDLIFE_SHORE_STRIP, max(1, ox2 - ox1))
+                    hy1 = max(y1, oy1)
+                    hy2 = min(y2, oy2)
+                    if hy2 <= hy1:
+                        hy1, hy2 = oy1, oy2
+                    return (ox2 - strip, hy1, ox2, hy2)
+                # fallback: beach-west strip when no ocean district
+                strip = min(WILDLIFE_SHORE_STRIP, max(1, x2 - x1))
+                return (x1, y1, x1 + strip, y2)
+            # gull (and any non-water beach kind): full beach bounds
+            return (x1, y1, x2, y2)
+        return (x1, y1, x2, y2)
+
+    def _wildlife_clamp_pos(self, district_id, kind, x, y):
+        rect = self._wildlife_habitat_rect(district_id, kind)
+        if not rect:
+            return x, y
+        x1, y1, x2, y2 = rect
+        return (max(x1, min(x2, x)), max(y1, min(y2, y)))
+
+    def _wildlife_hash_point(self, district_id, kind, index):
+        """Deterministic habitat point — ports drawWildlife hash placement."""
+        d = self.civilization["districts"].get(district_id)
+        if not d:
+            return 0.0, 0.0
+        b = d["bounds"]
+        seed = self._wildlife_hash_seed(str(district_id))
+        rx = ((seed * (index + 7) * 48271) % 2147483647) / 2147483647
+        ry = ((seed * (index + 13) * 16807) % 2147483647) / 2147483647
+        rect = self._wildlife_habitat_rect(district_id, kind)
+        if not rect:
+            return (b["x1"] + b["x2"]) / 2, (b["y1"] + b["y2"]) / 2
+        x1, y1, x2, y2 = rect
+        x = x1 + rx * max(1, x2 - x1)
+        y = y1 + ry * max(1, y2 - y1)
+        return self._wildlife_clamp_pos(district_id, kind, x, y)
+
+    def _wildlife_random_point(self, district_id, kind):
+        rect = self._wildlife_habitat_rect(district_id, kind)
+        if not rect:
+            return 0.0, 0.0
+        x1, y1, x2, y2 = rect
+        x = x1 + random.random() * max(1, x2 - x1)
+        y = y1 + random.random() * max(1, y2 - y1)
+        return self._wildlife_clamp_pos(district_id, kind, x, y)
+
+    def _next_wildlife_id(self):
+        c = self.civilization
+        wid = int(c.get("nextWildlifeId") or 1)
+        c["nextWildlifeId"] = wid + 1
+        return f"w{wid}"
+
+    def _make_wildlife_creature(self, district_id, kind, x=None, y=None, index=0):
+        max_hp = int(WILDLIFE_MAX_HP.get(kind, 1))
+        if x is None or y is None:
+            x, y = self._wildlife_hash_point(district_id, kind, index)
+        else:
+            x, y = self._wildlife_clamp_pos(district_id, kind, x, y)
+        tx, ty = self._wildlife_random_point(district_id, kind)
+        return {
+            "id": self._next_wildlife_id(),
+            "kind": kind,
+            "districtId": district_id,
+            "x": x, "y": y,
+            "targetX": tx, "targetY": ty,
+            "waypoints": [],
+            "hp": max_hp,
+            "maxHp": max_hp,
+            "alive": True,
+            "respawnAt": None,
+            "migrateDest": None,
+        }
+
+    def _normalize_wildlife_records(self):
+        """Restore-time shape fill for persisted fauna (never re-seeds)."""
+        fauna = self.civilization.setdefault("wildlife", [])
+        if not isinstance(fauna, list):
+            self.civilization["wildlife"] = []
+            return
+        for i, cre in enumerate(list(fauna)):
+            if not isinstance(cre, dict):
+                continue
+            kind = cre.get("kind") or "bird"
+            if kind == "butterfly":
+                kind = "bee"
+                cre["kind"] = kind
+            if kind == "grazer":
+                kind = "cow"
+                cre["kind"] = kind
+            did = cre.get("districtId")
+            cre.setdefault("id", self._next_wildlife_id())
+            cre.setdefault("kind", kind)
+            cre.setdefault("districtId", did)
+            cre.setdefault("alive", True)
+            cre.setdefault("respawnAt", None)
+            cre.setdefault("waypoints", [])
+            max_hp = int(cre.get("maxHp") or WILDLIFE_MAX_HP.get(kind, 1))
+            cre["maxHp"] = max_hp
+            cre.setdefault("hp", max_hp)
+            if cre.get("x") is None or cre.get("y") is None:
+                x, y = self._wildlife_hash_point(did, kind, i) if did else (0.0, 0.0)
+                cre["x"], cre["y"] = x, y
+            if cre.get("targetX") is None or cre.get("targetY") is None:
+                if did:
+                    cre["targetX"], cre["targetY"] = self._wildlife_random_point(did, kind)
+                else:
+                    cre["targetX"], cre["targetY"] = cre["x"], cre["y"]
+
+    def _seed_wildlife_population(self):
+        """Cold-start / empty-restore: fill each habitat district to stage target."""
+        if not WILDLIFE_ENABLED:
+            return
+        c = self.civilization
+        c.setdefault("wildlife", [])
+        c.setdefault("nextWildlifeId", 1)
+        if c["wildlife"]:
+            return
+        for did, d in c["districts"].items():
+            dkind = d.get("kind")
+            pool = WILDLIFE_KIND_POOLS.get(dkind)
+            if not pool:
+                continue
+            target = self._wildlife_stage_target(did)
+            for i in range(target):
+                kind = pool[i % len(pool)]
+                # Prefer a stable hash pick so cold-start mixes kinds, not only
+                # the first N of the pool list.
+                seed = self._wildlife_hash_seed(f"{did}:{i}")
+                kind = pool[seed % len(pool)]
+                c["wildlife"].append(self._make_wildlife_creature(did, kind, index=i))
+
+    def _wildlife_alive_in_district(self, district_id):
+        return [w for w in (self.civilization.get("wildlife") or [])
+                if w.get("alive") and w.get("districtId") == district_id]
+
+    def _wildlife_road_waypoints(self, from_district_id, to_district_id, dest_x, dest_y):
+        """Reuse agent road cache between districts; [] if no road path."""
+        if not ROADS_ENABLED:
+            return []
+        path_nodes = self._road_path_between_districts(from_district_id, to_district_id)
+        if not path_nodes:
+            return []
+        nodes = self.civilization.get("roadNodes") or {}
+        waypoints = [{"x": nodes[n]["x"], "y": nodes[n]["y"]}
+                     for n in path_nodes if n in nodes]
+        waypoints.append({"x": dest_x, "y": dest_y})
+        return waypoints
+
+    def _wildlife_begin_migration(self, creature, dest_district_id):
+        kind = creature["kind"]
+        dest_x, dest_y = self._wildlife_random_point(dest_district_id, kind)
+        src = creature.get("districtId")
+        waypoints = self._wildlife_road_waypoints(src, dest_district_id, dest_x, dest_y)
+        if waypoints:
+            creature["waypoints"] = waypoints[1:]
+            first = waypoints[0]
+            creature["targetX"] = first["x"]
+            creature["targetY"] = first["y"]
+        else:
+            # Straight-line toward destination habitat, then clamp on arrival.
+            creature["waypoints"] = []
+            creature["targetX"] = dest_x
+            creature["targetY"] = dest_y
+        creature["migrateDest"] = dest_district_id
+
+    def _wildlife_pick_wander_target(self, creature):
+        did = creature.get("districtId")
+        kind = creature.get("kind")
+        if not did or not kind:
+            return
+        creature["targetX"], creature["targetY"] = self._wildlife_random_point(did, kind)
+        creature["waypoints"] = []
+
+    def _wildlife_force_flee(self, creature, from_x, from_y):
+        """Retarget away from a threat; used by proximity flee and hunt hits."""
+        dx = creature["x"] - from_x
+        dy = creature["y"] - from_y
+        dist = math.sqrt(dx * dx + dy * dy) or 1.0
+        flee_dist = 80 + random.random() * 40
+        tx = creature["x"] + (dx / dist) * flee_dist
+        ty = creature["y"] + (dy / dist) * flee_dist
+        did = creature.get("districtId")
+        kind = creature.get("kind")
+        if did and kind and not creature.get("migrateDest"):
+            tx, ty = self._wildlife_clamp_pos(did, kind, tx, ty)
+        creature["targetX"] = tx
+        creature["targetY"] = ty
+        creature["waypoints"] = []
+
+    def _move_wildlife(self):
+        """Every-tick fauna motion: wander, flee, follow migration waypoints."""
+        if not WILDLIFE_ENABLED:
+            return
+        fauna = self.civilization.get("wildlife") or []
+        living_agents = [a for a in self.agents
+                         if not a.get("incapacitated")
+                         and not (LIFECYCLE_ENABLED and a.get("deathFrame") is not None)]
+        for cre in fauna:
+            if not cre.get("alive"):
+                continue
+            kind = cre.get("kind")
+            speed = WILDLIFE_SPEED.get(kind, 2.0) * MOVE_SCALE
+            # Flee if a living agent is within radius (skip while mid-migration
+            # along roads so long-range travel isn't constantly cancelled).
+            if not cre.get("migrateDest") and living_agents:
+                nearest = None
+                nearest_d = WILDLIFE_FLEE_RADIUS + 1
+                for a in living_agents:
+                    dd = _dist(cre["x"], cre["y"], a["x"], a["y"])
+                    if dd < nearest_d:
+                        nearest_d, nearest = dd, a
+                if nearest is not None and nearest_d <= WILDLIFE_FLEE_RADIUS:
+                    self._wildlife_force_flee(cre, nearest["x"], nearest["y"])
+            dx = cre["targetX"] - cre["x"]
+            dy = cre["targetY"] - cre["y"]
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist <= speed:
+                cre["x"] = cre["targetX"]
+                cre["y"] = cre["targetY"]
+                waypoints = cre.get("waypoints") or []
+                if waypoints:
+                    nxt = waypoints.pop(0)
+                    cre["targetX"] = nxt["x"]
+                    cre["targetY"] = nxt["y"]
+                elif cre.get("migrateDest"):
+                    dest = cre.pop("migrateDest", None)
+                    if dest and dest in self.civilization["districts"]:
+                        cre["districtId"] = dest
+                    cre["waypoints"] = []
+                    if cre.get("districtId") and kind:
+                        cre["x"], cre["y"] = self._wildlife_clamp_pos(
+                            cre["districtId"], kind, cre["x"], cre["y"])
+                    self._wildlife_pick_wander_target(cre)
+                else:
+                    self._wildlife_pick_wander_target(cre)
+            else:
+                cre["x"] += (dx / dist) * speed
+                cre["y"] += (dy / dist) * speed
+            # In-district habitat clamp (migration waypoints may leave habitat).
+            if not cre.get("migrateDest") and cre.get("districtId") and kind:
+                cre["x"], cre["y"] = self._wildlife_clamp_pos(
+                    cre["districtId"], kind, cre["x"], cre["y"])
+        self._mark_top_dirty("wildlife")
+
+    def _tick_huntable_wildlife(self):
+        """Slower cadence: respawn, spawn to stage target, cull excess, migrate."""
+        if not WILDLIFE_ENABLED:
+            return
+        c = self.civilization
+        fauna = c.setdefault("wildlife", [])
+        ft = self.frameTick
+        # --- revive / spawn / cull per habitat district ---
+        for did, d in list(c["districts"].items()):
+            dkind = d.get("kind")
+            pool = WILDLIFE_KIND_POOLS.get(dkind)
+            if not pool:
+                continue
+            target = self._wildlife_stage_target(did)
+            alive = self._wildlife_alive_in_district(did)
+            # Cull excess above stage cap (mark dead; schedule ordinary respawn).
+            if len(alive) > target:
+                excess = sorted(alive, key=lambda w: w.get("id") or "")[target:]
+                for cre in excess:
+                    cre["alive"] = False
+                    cre["hp"] = 0
+                    cre["respawnAt"] = ft + WILDLIFE_RESPAWN_FRAMES
+                    cre["waypoints"] = []
+                    cre.pop("migrateDest", None)
+                alive = self._wildlife_alive_in_district(did)
+            # Respawn dead creatures for this district whose timer elapsed.
+            for cre in fauna:
+                if cre.get("alive") or cre.get("districtId") != did:
+                    continue
+                respawn_at = cre.get("respawnAt")
+                if respawn_at is None or ft < respawn_at:
+                    continue
+                if len(self._wildlife_alive_in_district(did)) >= target:
+                    continue
+                kind = cre.get("kind")
+                if kind not in pool:
+                    kind = pool[self._wildlife_hash_seed(cre.get("id") or did) % len(pool)]
+                    cre["kind"] = kind
+                max_hp = int(WILDLIFE_MAX_HP.get(kind, 1))
+                x, y = self._wildlife_random_point(did, kind)
+                cre["x"], cre["y"] = x, y
+                cre["hp"] = max_hp
+                cre["maxHp"] = max_hp
+                cre["alive"] = True
+                cre["respawnAt"] = None
+                cre["waypoints"] = []
+                cre.pop("migrateDest", None)
+                self._wildlife_pick_wander_target(cre)
+            # Spawn fresh creatures if still under target.
+            while len(self._wildlife_alive_in_district(did)) < target:
+                idx = len(self._wildlife_alive_in_district(did))
+                seed = self._wildlife_hash_seed(f"{did}:spawn:{ft}:{idx}")
+                kind = pool[seed % len(pool)]
+                fauna.append(self._make_wildlife_creature(did, kind, index=idx))
+        # --- migration checks ---
+        if WILDLIFE_MIGRATE_CHECK_FRAMES and ft % WILDLIFE_MIGRATE_CHECK_FRAMES == 0:
+            for cre in list(fauna):
+                if not cre.get("alive") or cre.get("kind") in WILDLIFE_DECORATIVE_KINDS:
+                    continue
+                if cre.get("migrateDest") or (cre.get("waypoints") or []):
+                    continue
+                if random.random() > WILDLIFE_MIGRATE_CHANCE:
+                    continue
+                kind = cre.get("kind")
+                src = cre.get("districtId")
+                src_kind = self._wildlife_district_kind(src)
+                if not src_kind or kind not in WILDLIFE_KIND_POOLS.get(src_kind, []):
+                    continue
+                candidates = []
+                for did, d in c["districts"].items():
+                    if did == src or d.get("kind") != src_kind:
+                        continue
+                    if len(self._wildlife_alive_in_district(did)) >= self._wildlife_stage_target(did):
+                        continue
+                    candidates.append(did)
+                if not candidates:
+                    continue
+                dest = random.choice(candidates)
+                self._wildlife_begin_migration(cre, dest)
+
+    def _nearest_huntable_wildlife(self, agent, radius=None):
+        """Nearest living non-decorative creature within HUNT_RADIUS of agent."""
+        if not WILDLIFE_ENABLED or agent is None:
+            return None
+        r = HUNT_RADIUS if radius is None else radius
+        best, best_d = None, r + 1
+        for cre in (self.civilization.get("wildlife") or []):
+            if not cre.get("alive"):
+                continue
+            if cre.get("kind") in WILDLIFE_DECORATIVE_KINDS:
+                continue
+            if cre.get("kind") not in WILDLIFE_YIELD:
+                continue
+            dd = _dist(agent["x"], agent["y"], cre["x"], cre["y"])
+            if dd <= r and dd < best_d:
+                best, best_d = cre, dd
+        return best
+
+    def _find_wildlife_by_id(self, creature_id):
+        if creature_id is None or creature_id == "":
+            return None
+        # LLM targets often arrive as digit strings; ids are ints.
+        cid = creature_id
+        if isinstance(creature_id, str) and creature_id.isdigit():
+            cid = int(creature_id)
+        for cre in (self.civilization.get("wildlife") or []):
+            if cre.get("id") == cid or cre.get("id") == creature_id:
+                return cre
+        return None
+
+    def _grant_hunt_yield(self, agent, kind):
+        """Grant +1 meat/fish with carry-cap room first, overflow to settlement store."""
+        resource = WILDLIFE_YIELD.get(kind)
+        if not resource or not agent:
+            return 0, 0, None
+        amount = 1
+        cap = self._carry_cap(agent)
+        held = agent["resources"].get(resource, 0)
+        room = max(0, cap - held)
+        agent_added = min(amount, room)
+        overflow_added = amount - agent_added
+        if agent_added:
+            agent["resources"][resource] = held + agent_added
+        if overflow_added:
+            self._credit_settlement_overflow(agent, resource, overflow_added)
+        return agent_added, overflow_added, resource
+
+    def _apply_hunt_damage(self, agent, creature, damage=None):
+        """Apply hunt damage under the lock. Returns a result dict for apply_decision."""
+        if not WILDLIFE_ENABLED:
+            return {"ok": False, "reason": "wildlife disabled"}
+        if not creature or not creature.get("alive"):
+            return {"ok": False, "reason": "no living prey"}
+        kind = creature.get("kind")
+        if kind in WILDLIFE_DECORATIVE_KINDS or kind not in WILDLIFE_YIELD:
+            return {"ok": False, "reason": "not huntable"}
+        if damage is None:
+            damage = (HUNT_DAMAGE_HUNTER if agent and agent.get("role") == "hunter"
+                      else HUNT_DAMAGE)
+        damage = max(1, int(damage))
+        creature["hp"] = max(0, int(creature.get("hp") or 0) - damage)
+        self._wildlife_force_flee(creature, agent["x"], agent["y"])
+        if creature["hp"] > 0:
+            self._push_activity(
+                f"{agent['name']} strikes a {kind} ({creature['hp']}/{creature.get('maxHp', '?')} hp)")
+            return {"ok": True, "killed": False, "creature": creature, "damage": damage,
+                    "hp": creature["hp"], "kind": kind}
+        creature["alive"] = False
+        creature["respawnAt"] = self.frameTick + WILDLIFE_RESPAWN_FRAMES
+        creature["waypoints"] = []
+        creature.pop("migrateDest", None)
+        agent_added, overflow_added, resource = self._grant_hunt_yield(agent, kind)
+        note = f"{agent['name']} hunted a {kind}"
+        if resource:
+            note += f" (+{agent_added + overflow_added} {resource}"
+            if overflow_added:
+                note += f"; {overflow_added} overflow to settlement store"
+            note += ")"
+        self._push_activity(note)
+        return {"ok": True, "killed": True, "creature": creature, "damage": damage,
+                "kind": kind, "resource": resource, "agentAdded": agent_added,
+                "stockpileAdded": overflow_added}
+
+    def god_wildlife_spawn(self, district_id, kind, respect_cap=True):
+        """Spawn an alive creature at a habitat-legal position. Caller holds lock.
+        Returns the creature dict, or None on reject."""
+        if not WILDLIFE_ENABLED:
+            return None
+        dkind = self._wildlife_district_kind(district_id)
+        pool = WILDLIFE_KIND_POOLS.get(dkind or "", [])
+        if not dkind or kind not in pool:
+            return None
+        if respect_cap:
+            if len(self._wildlife_alive_in_district(district_id)) >= WILDLIFE_CAP_PER_DISTRICT:
+                return None
+        idx = len(self._wildlife_alive_in_district(district_id))
+        cre = self._make_wildlife_creature(district_id, kind, index=idx)
+        self.civilization.setdefault("wildlife", []).append(cre)
+        return cre
+
+    def god_wildlife_despawn(self, creature_id=None, district_id=None):
+        """Mark target(s) dead. Pass creature id, or district_id to clear a district.
+        Returns count despawned. Caller holds lock."""
+        if not WILDLIFE_ENABLED:
+            return 0
+        fauna = self.civilization.get("wildlife") or []
+        count = 0
+        for cre in fauna:
+            if not cre.get("alive"):
+                continue
+            if creature_id is not None and cre.get("id") != creature_id:
+                continue
+            if district_id is not None and cre.get("districtId") != district_id:
+                continue
+            if creature_id is None and district_id is None:
+                continue
+            cre["alive"] = False
+            cre["hp"] = 0
+            cre["respawnAt"] = self.frameTick + WILDLIFE_RESPAWN_FRAMES
+            cre["waypoints"] = []
+            cre.pop("migrateDest", None)
+            count += 1
+            if creature_id is not None:
+                break
+        return count
+
+    def god_wildlife_set_hp(self, creature_id, hp):
+        """Clamp and set hp; kill with ordinary respawn bookkeeping if hp <= 0.
+        Returns the creature or None. Caller holds lock."""
+        if not WILDLIFE_ENABLED:
+            return None
+        cre = self._find_wildlife_by_id(creature_id)
+        if not cre:
+            return None
+        max_hp = int(cre.get("maxHp") or WILDLIFE_MAX_HP.get(cre.get("kind"), 1))
+        cre["maxHp"] = max_hp
+        new_hp = max(0, min(max_hp, int(hp)))
+        cre["hp"] = new_hp
+        if new_hp <= 0:
+            cre["alive"] = False
+            cre["respawnAt"] = self.frameTick + WILDLIFE_RESPAWN_FRAMES
+            cre["waypoints"] = []
+            cre.pop("migrateDest", None)
+        else:
+            cre["alive"] = True
+            cre["respawnAt"] = None
+        return cre
+
+    def _wildlife_snapshot(self):
+        """Alive-only /state projection."""
+        if not WILDLIFE_ENABLED:
+            return []
+        out = []
+        for cre in (self.civilization.get("wildlife") or []):
+            if not cre.get("alive"):
+                continue
+            out.append({
+                "id": cre.get("id"),
+                "kind": cre.get("kind"),
+                "districtId": cre.get("districtId"),
+                "x": round(float(cre.get("x") or 0), 1),
+                "y": round(float(cre.get("y") or 0), 1),
+                "hp": int(cre.get("hp") or 0),
+                "maxHp": int(cre.get("maxHp") or 0),
+            })
+        return out
 
     def _tick_wildlife(self):
         if not path1_on("PRESSURE_LOOP_ENABLED") or not SURVIVAL_ENABLED:
@@ -5947,6 +7676,1080 @@ class SimEngine:
             return None
         return c["directive"]
 
+    def _divine_prompt_lines(self, agent):
+        """Sovereign God mode (Phase 3): the at-most-two divine cognition
+        lines for one agent's think payload -- (public_line, private_line),
+        either or both None. Only active, unacknowledged binding Voice
+        guidance is injected; Matrix soft lines use separate helpers.
+        Deliberately SEPARATE from _current_directive: elder leadership and
+        divine providence are different fields that must never overwrite or
+        shadow each other."""
+        if not GOD_MODE_ENABLED:
+            return None, None
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None, None
+        agent_key = str(agent["id"])
+        public_line = None
+        prov = god.get("providence")
+        if isinstance(prov, dict) and self._voice_guidance_in_window(prov):
+            acked = prov.get("ackedAgentIds") or {}
+            if not acked.get(agent_key):
+                public_line = prov.get("text")
+        private_line = None
+        omen = (god.get("privateOmens") or {}).get(agent_key)
+        if isinstance(omen, dict) and self._voice_guidance_in_window(omen):
+            if not omen.get("acked"):
+                private_line = omen.get("text")
+        return public_line, private_line
+
+    def _cancel_voice_blocked_special_turns(self, agent_ids):
+        """Drop pending invention/sprite special turns for Voice-affected agents."""
+        for aid in agent_ids:
+            agent = aid if isinstance(aid, dict) else self._find_agent_by_id(aid)
+            if not agent:
+                continue
+            agent["inventionTurn"] = False
+            agent["inventionRetryUsed"] = False
+            agent["inventionBuildContext"] = None
+            agent["spriteDesignTurn"] = None
+
+    def _voice_guidance_in_window(self, record):
+        if not isinstance(record, dict):
+            return False
+        start = record.get("createdFrame", 0)
+        expires = record.get("expiresFrame")
+        return isinstance(expires, int) and start <= self.frameTick < expires
+
+    def _active_voice_guidance(self, agent):
+        """Active, unacknowledged binding Voice guidance for one agent."""
+        result = {
+            "voice_guidance_active": False,
+            "voice_guidance_id": None,
+            "voice_guidance_text": None,
+            "voice_guidance_public": False,
+            "voice_guidance_private": False,
+            "unacked_guidance": [],
+        }
+        if not GOD_MODE_ENABLED:
+            return result
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return result
+        agent_key = str(agent["id"])
+        unacked = []
+        prov = god.get("providence")
+        if isinstance(prov, dict) and self._voice_guidance_in_window(prov):
+            acked = prov.get("ackedAgentIds") or {}
+            if not acked.get(agent_key):
+                unacked.append({
+                    "id": prov.get("id"),
+                    "kind": "providence",
+                    "public": True,
+                    "text": prov.get("text"),
+                })
+        omen = (god.get("privateOmens") or {}).get(agent_key)
+        if isinstance(omen, dict) and self._voice_guidance_in_window(omen):
+            if not omen.get("acked"):
+                unacked.append({
+                    "id": omen.get("id"),
+                    "kind": "private_omen",
+                    "public": False,
+                    "text": omen.get("text"),
+                })
+        if not unacked:
+            return result
+        result["voice_guidance_active"] = True
+        result["unacked_guidance"] = unacked
+        primary = next((g for g in unacked if g["kind"] == "private_omen"), unacked[0])
+        result["voice_guidance_id"] = primary.get("id")
+        result["voice_guidance_text"] = primary.get("text")
+        result["voice_guidance_public"] = any(g["public"] for g in unacked)
+        result["voice_guidance_private"] = any(not g["public"] for g in unacked)
+        return result
+
+    def _mark_voice_guidance_acked(self, agent, guidance_entries):
+        """Record first response for each (agentId, guidanceId) pair."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        agent_key = str(agent["id"])
+        for entry in guidance_entries:
+            gid = entry.get("id")
+            kind = entry.get("kind")
+            if kind == "providence":
+                prov = god.get("providence")
+                if isinstance(prov, dict) and prov.get("id") == gid:
+                    acked = prov.setdefault("ackedAgentIds", {})
+                    acked[agent_key] = True
+            elif kind == "private_omen":
+                omen = (god.get("privateOmens") or {}).get(agent_key)
+                if isinstance(omen, dict) and omen.get("id") == gid:
+                    omen["acked"] = True
+
+    def _record_divine_response_adherence(self, agent, decision, voice):
+        """Log Voice adherence after a decision is applied. Lock held."""
+        if not voice.get("voice_guidance_active"):
+            return
+        unacked = list(voice.get("unacked_guidance") or [])
+        if not unacked:
+            return
+        divine_response = decision.get("divine_response")
+        if not isinstance(divine_response, dict):
+            divine_response = {
+                "stance": "continue",
+                "reason": "missing_divine_response",
+            }
+            synthetic = True
+        else:
+            synthetic = bool(decision.get("divine_response_synthetic"))
+        stance = divine_response.get("stance")
+        if stance not in ("follow", "continue"):
+            stance = "continue"
+            synthetic = True
+        reason = divine_response.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            reason = "missing_divine_response"
+            synthetic = True
+        else:
+            reason = reason.strip()[:GOD_TEXT_MAX_CHARS]
+        action = decision.get("action") or agent.get("lastAction") or "rest"
+        reaction = decision.get("message")
+        if not isinstance(reaction, str) or not reaction.strip():
+            reaction = reason
+        else:
+            reaction = reaction.strip()[:GOD_TEXT_MAX_CHARS]
+        god = self.civilization["godState"]
+        log_ring = god.setdefault("recentDivineResponses", [])
+        if not isinstance(log_ring, list):
+            log_ring = []
+            god["recentDivineResponses"] = log_ring
+        for entry in unacked:
+            record = {
+                "agentId": agent["id"],
+                "agentName": agent["name"],
+                "guidanceId": entry.get("id"),
+                "guidanceKind": entry.get("kind"),
+                "stance": stance,
+                "reason": reason,
+                "synthetic": synthetic,
+                "frameTick": self.frameTick,
+                "action": action,
+                "public": bool(entry.get("public")),
+            }
+            log_ring.insert(0, record)
+            kind_label = "public guidance" if entry.get("public") else "private guidance"
+            self._push_activity(
+                f'{agent["name"]} {stance}d divine {kind_label}: {reaction}')
+            self._push_communication(
+                "divine_response", agent["name"], "divine",
+                f"{stance}: {reason}", outcome=action, source="divine")
+            self._log_divine(
+                entry.get("id"), None, "voice_adherence",
+                {"agentId": agent["id"], "guidanceKind": entry.get("kind")},
+                {
+                    "stance": stance,
+                    "reason": reason,
+                    "action": action,
+                    "synthetic": synthetic,
+                    "agentName": agent["name"],
+                },
+                "adherence",
+                public=bool(entry.get("public")),
+            )
+        if len(log_ring) > GOD_DIVINE_RESPONSE_LOG_MAX:
+            del log_ring[GOD_DIVINE_RESPONSE_LOG_MAX:]
+        self._mark_voice_guidance_acked(agent, unacked)
+
+    def _active_burning_bush_record(self, agent_id):
+        """Active Burning Bush session for one agent, or None."""
+        if not GOD_MODE_ENABLED:
+            return None
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("burningBush") or {}).get(str(agent_id))
+        if not isinstance(rec, dict) or rec.get("status") != "active":
+            return None
+        return rec
+
+    def _burning_bush_prompt_line(self, agent):
+        """Private Divine-audience thread for one agent's think payload."""
+        rec = self._active_burning_bush_record(agent["id"])
+        if not rec:
+            return None
+        parts = []
+        thread = rec.get("thread") or []
+        if isinstance(thread, list):
+            for entry in thread[-GOD_BURNING_BUSH_THREAD_MAX:]:
+                if not isinstance(entry, dict):
+                    continue
+                text = entry.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                role = entry.get("role")
+                if role == "god":
+                    parts.append(f"Divine audience: {text}")
+                elif role == "agent":
+                    parts.append(f"You replied: {text}")
+        bargain = rec.get("bargain")
+        if isinstance(bargain, dict) and bargain.get("status") == "open":
+            terms = bargain.get("termsText")
+            if isinstance(terms, str) and terms.strip():
+                parts.append(f"Active bargain: {terms}")
+        if not parts:
+            return None
+        combined = " ".join(parts)
+        if len(combined) > GOD_BURNING_BUSH_PROMPT_MAX_CHARS:
+            combined = combined[-GOD_BURNING_BUSH_PROMPT_MAX_CHARS:]
+        return combined
+
+    def _capture_burning_bush_reply(self, agent, decision):
+        """Append agent talk/reasoning to a private Burning Bush thread."""
+        rec = self._active_burning_bush_record(agent["id"])
+        if not rec:
+            return
+        action = decision.get("action")
+        raw = None
+        if action == "talk_to_nearby" and decision.get("message"):
+            raw = decision["message"]
+        elif decision.get("reasoning"):
+            raw = decision["reasoning"]
+        if not isinstance(raw, str) or not raw.strip():
+            return
+        text, reason = self._normalize_divine_text(raw)
+        if reason:
+            text = raw.strip()[:GOD_TEXT_MAX_CHARS]
+        thread = rec.setdefault("thread", [])
+        if not isinstance(thread, list):
+            rec["thread"] = thread = []
+        thread.append({
+            "role": "agent", "text": text, "frame": self.frameTick,
+        })
+        if len(thread) > GOD_BURNING_BUSH_THREAD_MAX:
+            del thread[:-GOD_BURNING_BUSH_THREAD_MAX]
+
+    def _god_active_anointment_record(self, agent_id):
+        """Active anointment for one agent, or None if absent/expired."""
+        if not GOD_MODE_ENABLED:
+            return None
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("anointments") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        agent = self._find_agent_by_id(agent_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return None
+        return rec
+
+    def _anointment_stigmata_tags(self, agent_id):
+        """Public-facing stigmata tags for neighbors (never includes destiny)."""
+        rec = self._god_active_anointment_record(agent_id)
+        if not rec:
+            return []
+        tags = rec.get("stigmataTags") or []
+        if not isinstance(tags, list):
+            return []
+        out = []
+        for tag in tags[:GOD_ANOINT_STIGMATA_MAX]:
+            if isinstance(tag, str) and tag.strip():
+                out.append(tag.strip())
+        return out
+
+    def _anointment_next_oracle_frame(self, rec):
+        """Earliest unrevealed oracle revealFrame, or None."""
+        hints = rec.get("oracleHints") or []
+        if not isinstance(hints, list):
+            return None
+        ft = self.frameTick
+        pending = []
+        for hint in hints:
+            if not isinstance(hint, dict):
+                continue
+            reveal = hint.get("revealFrame")
+            text = hint.get("text")
+            if not isinstance(reveal, int) or reveal <= ft:
+                continue
+            if not isinstance(text, str) or not text.strip():
+                continue
+            pending.append(reveal)
+        return min(pending) if pending else None
+
+    def _god_active_identity_forge_record(self, agent_id):
+        """Active identity-forge record for one agent, or None if absent/expired."""
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("identityForges") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        return rec
+
+    def _identity_forge_snapshot(self, agent):
+        """Capture persona/personality/role for forge restore."""
+        return {
+            "persona": agent.get("persona") or "",
+            "personality": agent.get("personality") or "",
+            "role": agent.get("role") or "",
+        }
+
+    def _restore_identity_forge_snapshot(self, agent, snapshot):
+        """Restore one agent's identity fields from a forge snapshot. Lock held."""
+        if not isinstance(snapshot, dict):
+            return
+        agent["persona"] = snapshot.get("persona") or ""
+        agent["personality"] = snapshot.get("personality") or ""
+        role = snapshot.get("role")
+        if isinstance(role, str) and role.strip():
+            agent["role"] = role.strip()
+        self._mark_context_dirty(agent)
+
+    def _blend_identity_field(self, baseline, target, progress):
+        """Blend two identity strings toward target by progress in [0, 1]."""
+        progress = max(0.0, min(1.0, float(progress)))
+        baseline = baseline or ""
+        target = target or ""
+        if progress <= 0.0:
+            return baseline
+        if progress >= 1.0:
+            return target
+        if baseline == target:
+            return baseline
+        base_chars = max(0, int(len(baseline) * (1.0 - progress)))
+        tgt_chars = max(0, int(len(target) * progress))
+        blended = (baseline[:base_chars] + target[:tgt_chars]).strip()
+        return blended or baseline or target
+
+    def _god_role_valid(self, role):
+        return isinstance(role, str) and role.strip() in self.d.get("ROLES", {})
+
+    def _god_elder_swap_warning(self, agent, new_role):
+        """Warn in preview when an identity edit would swap elder role."""
+        if not isinstance(new_role, str) or not new_role.strip():
+            return None
+        new_role = new_role.strip()
+        old_role = agent.get("role")
+        if old_role == new_role:
+            return None
+        if old_role == "elder" or new_role == "elder":
+            return (f"Elder role swap: {old_role} -> {new_role}. "
+                    "May affect council, invention, and emergency systems.")
+        return None
+
+    def _god_plant_copy_memories(self, target, source):
+        """Optional one-shot memory sync for identity copy (not a full clone)."""
+        mem = source.get("memory") or {}
+        lines = []
+        for tier in ("working", "shortTerm"):
+            for line in reversed(mem.get(tier) or []):
+                if isinstance(line, str) and line.strip():
+                    lines.append(line.strip())
+                if len(lines) >= GOD_IDENTITY_COPY_MEMORIES_MAX:
+                    break
+            if len(lines) >= GOD_IDENTITY_COPY_MEMORIES_MAX:
+                break
+        planted = 0
+        for line in lines[:GOD_IDENTITY_COPY_MEMORIES_MAX]:
+            if self._god_memory_insert(target, line, 0.6, kind=GOD_MEMORY_DEFAULT_KIND):
+                planted += 1
+        return planted
+
+    def _advance_identity_forge_on_think(self, agent):
+        """Advance identity-copy blend after one think completes. Lock held."""
+        rec = self._god_active_identity_forge_record(agent["id"])
+        if not rec or not rec.get("copyFromId"):
+            return
+        source = self._find_agent_by_id(rec["copyFromId"])
+        if source is None or source.get("deathFrame") is not None:
+            return
+        baseline = rec.get("baseline") or rec.get("snapshot") or {}
+        rate = float(rec.get("rate") or 0.0)
+        progress = float(rec.get("progress") or 0.0)
+        new_progress = min(1.0, progress + rate)
+        rec["progress"] = new_progress
+        agent["persona"] = self._blend_identity_field(
+            baseline.get("persona") or "",
+            source.get("persona") or "",
+            new_progress,
+        )[:GOD_IDENTITY_PERSONA_MAX_CHARS]
+        agent["personality"] = self._blend_identity_field(
+            baseline.get("personality") or "",
+            source.get("personality") or "",
+            new_progress,
+        )[:GOD_IDENTITY_PERSONALITY_MAX_CHARS]
+        self._mark_context_dirty(agent)
+
+    def _close_identity_forge(self, key, status):
+        """Restore snapshot and remove one identity-forge record. Lock held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        forges = god.get("identityForges")
+        if not isinstance(forges, dict):
+            return None
+        rec = forges.pop(key, None)
+        if not isinstance(rec, dict):
+            return None
+        agent = self._find_agent_by_id(int(key))
+        if agent is not None:
+            self._restore_identity_forge_snapshot(agent, rec.get("snapshot"))
+        kind = "identity_copy_overwrite" if rec.get("copyFromId") else "identity_edit"
+        self._log_divine(rec.get("id"), None, kind, rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _god_current_outgoing_identity_forge_id(self, target_id):
+        rec = (self.civilization.get("godState") or {}).get("identityForges", {}).get(
+            str(target_id))
+        return rec.get("id") if isinstance(rec, dict) else None
+
+    # --- Divine Matrix Phase 9: Architect Zones ---
+    def _god_active_architect_zones(self):
+        zones = (self.civilization.get("godState") or {}).get("architectZones") or []
+        return [z for z in zones if isinstance(z, dict) and z.get("status") == "active"]
+
+    def _god_architect_zone_by_id(self, zone_id):
+        if not isinstance(zone_id, str) or not zone_id.strip():
+            return None
+        zone_id = zone_id.strip()
+        for zone in self._god_active_architect_zones():
+            if zone.get("id") == zone_id:
+                return zone
+        return None
+
+    def _expand_architect_cells(self, cells):
+        """Expand cells list into a bounded set of (gx, gy) grid coords."""
+        if not isinstance(cells, list) or not cells:
+            return None, "cells must be a non-empty list"
+        out = set()
+        for entry in cells:
+            if isinstance(entry, str):
+                parts = entry.split(",")
+                if len(parts) != 2:
+                    return None, "each cell string must be gx,gy"
+                try:
+                    gx, gy = int(parts[0].strip()), int(parts[1].strip())
+                except ValueError:
+                    return None, "cell coordinates must be integers"
+            elif isinstance(entry, dict):
+                if all(k in entry for k in ("gx1", "gy1", "gx2", "gy2")):
+                    try:
+                        gx1, gy1 = int(entry["gx1"]), int(entry["gy1"])
+                        gx2, gy2 = int(entry["gx2"]), int(entry["gy2"])
+                    except (TypeError, ValueError):
+                        return None, "bounds coordinates must be integers"
+                    lo_gx, hi_gx = sorted((gx1, gx2))
+                    lo_gy, hi_gy = sorted((gy1, gy2))
+                    for gx in range(lo_gx, hi_gx + 1):
+                        for gy in range(lo_gy, hi_gy + 1):
+                            if len(out) >= GOD_ARCHITECT_ZONE_MAX_CELLS:
+                                return None, f"cells exceed cap of {GOD_ARCHITECT_ZONE_MAX_CELLS}"
+                            out.add((gx, gy))
+                    continue
+                return None, "each bounds object must include gx1, gy1, gx2, gy2"
+            else:
+                return None, "cells entries must be gx,gy strings or bounds objects"
+            if not (0 <= gx < PATH1_GRID_COLS and 0 <= gy < PATH1_GRID_ROWS):
+                return None, f"cell ({gx},{gy}) out of grid bounds"
+            if len(out) >= GOD_ARCHITECT_ZONE_MAX_CELLS:
+                return None, f"cells exceed cap of {GOD_ARCHITECT_ZONE_MAX_CELLS}"
+            out.add((gx, gy))
+        if not out:
+            return None, "cells must resolve to at least one grid cell"
+        return sorted(out), None
+
+    def _architect_zone_covers_cell(self, zone, district_id, gx, gy):
+        if zone.get("districtId") != district_id:
+            return False
+        cells = zone.get("cells")
+        expanded, _ = self._expand_architect_cells(cells)
+        if not expanded:
+            return False
+        return (gx, gy) in expanded
+
+    def _world_pos_to_district_grid(self, x, y):
+        did = get_district(self.civilization["districts"], x, y)
+        if not did:
+            return None, None, None
+        d = self.civilization["districts"][did]
+        b = d["bounds"]
+        gx = int((x - b["x1"]) // TILE_CELL)
+        gy = int((y - b["y1"]) // TILE_CELL)
+        gx = max(0, min(PATH1_GRID_COLS - 1, gx))
+        gy = max(0, min(PATH1_GRID_ROWS - 1, gy))
+        return did, gx, gy
+
+    def _agent_has_god_key(self, agent, key_id):
+        keys = agent.get("godKeys") or set()
+        return isinstance(key_id, str) and key_id in keys
+
+    def _grant_god_key(self, agent, key_id):
+        keys = agent.get("godKeys")
+        if not isinstance(keys, set):
+            keys = set(keys or ())
+            agent["godKeys"] = keys
+        keys.add(key_id)
+
+    def _architect_door_blocks_move(self, agent, prior_x, prior_y, new_x, new_y):
+        if not GOD_MODE_ENABLED:
+            return False
+        new_did, new_gx, new_gy = self._world_pos_to_district_grid(new_x, new_y)
+        if not new_did:
+            return False
+        prior_did, prior_gx, prior_gy = self._world_pos_to_district_grid(prior_x, prior_y)
+        if (new_did, new_gx, new_gy) == (prior_did, prior_gx, prior_gy):
+            return False
+        for zone in self._god_active_architect_zones():
+            if zone.get("kind") != "door":
+                continue
+            if not self._architect_zone_covers_cell(zone, new_did, new_gx, new_gy):
+                continue
+            key_id = zone.get("keyId")
+            if isinstance(key_id, str) and self._agent_has_god_key(agent, key_id):
+                continue
+            return True
+        return False
+
+    def _architect_paint_snapshot(self, district_id, cells, paint_terrain):
+        district = self.civilization["districts"].get(district_id)
+        if not district:
+            return {}
+        self._ensure_district_terrain(district)
+        terrain = district["terrain"]
+        snap = {}
+        for gx, gy in cells:
+            key = self._tile_key(gx, gy)
+            snap[key] = terrain.get(key, "soil")
+            terrain[key] = paint_terrain
+        if snap:
+            self._bump_districts_epoch()
+        return snap
+
+    def _architect_revert_paint(self, zone):
+        snap = zone.get("revertSnapshot")
+        district_id = zone.get("districtId")
+        if not zone.get("reversible", True) or not isinstance(snap, dict) or not district_id:
+            return
+        district = self.civilization["districts"].get(district_id)
+        if not district:
+            return
+        self._ensure_district_terrain(district)
+        terrain = district["terrain"]
+        for key, value in snap.items():
+            if isinstance(key, str) and isinstance(value, str):
+                terrain[key] = value
+        self._bump_districts_epoch()
+
+    def _park_agent_in_limbo(self, agent, zone):
+        limbo_x, limbo_y = GOD_LIMBO_STATION
+        hold = {
+            "zoneId": zone.get("id"),
+            "priorX": agent["x"],
+            "priorY": agent["y"],
+            "priorTargetX": agent["targetX"],
+            "priorTargetY": agent["targetY"],
+            "priorDistrict": agent.get("currentDistrict"),
+        }
+        agent["architectLimbo"] = hold
+        agent["divineHold"] = True
+        agent["x"] = limbo_x
+        agent["y"] = limbo_y
+        agent["targetX"] = limbo_x
+        agent["targetY"] = limbo_y
+        agent["waypoints"] = []
+        agent["currentZone"] = get_zone(self.civilization["districts"], limbo_x, limbo_y)
+        agent["currentDistrict"] = get_district(self.civilization["districts"], limbo_x, limbo_y)
+        zone.setdefault("limboHolds", {})[str(agent["id"])] = hold
+
+    def _release_architect_limbo_agent(self, agent, zone=None):
+        hold = agent.get("architectLimbo")
+        if not isinstance(hold, dict):
+            return False
+        if zone is not None and hold.get("zoneId") != zone.get("id"):
+            return False
+        agent["x"] = hold.get("priorX", agent["x"])
+        agent["y"] = hold.get("priorY", agent["y"])
+        agent["targetX"] = hold.get("priorTargetX", agent["x"])
+        agent["targetY"] = hold.get("priorTargetY", agent["y"])
+        agent["architectLimbo"] = None
+        if zone is not None:
+            holds = zone.get("limboHolds")
+            if isinstance(holds, dict):
+                holds.pop(str(agent["id"]), None)
+        if self._god_active_decision_gate_record(agent["id"]) is None:
+            agent["divineHold"] = False
+        agent["currentZone"] = get_zone(self.civilization["districts"], agent["x"], agent["y"])
+        agent["currentDistrict"] = get_district(self.civilization["districts"], agent["x"], agent["y"])
+        return True
+
+    def _release_architect_limbo_zone(self, zone, agent_ids=None):
+        released = []
+        hold_ids = zone.get("holdAgentIds") or []
+        if agent_ids is not None:
+            hold_ids = [aid for aid in hold_ids if aid in agent_ids]
+        for agent_id in hold_ids:
+            agent = self._find_agent_by_id(agent_id)
+            if agent is None:
+                continue
+            if self._release_architect_limbo_agent(agent, zone):
+                released.append(agent_id)
+        return released
+
+    def _close_architect_zone(self, zone_id, status):
+        """Close one architect zone exactly once. Lock held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        zones = god.get("architectZones")
+        if not isinstance(zones, list):
+            return None
+        closed = None
+        for idx, zone in enumerate(zones):
+            if not isinstance(zone, dict) or zone.get("id") != zone_id:
+                continue
+            if zone.get("status") != "active":
+                return None
+            zone = dict(zone)
+            zone["status"] = status
+            if zone.get("kind") == "paint":
+                self._architect_revert_paint(zone)
+            elif zone.get("kind") == "limbo":
+                self._release_architect_limbo_zone(zone)
+            zones[idx] = zone
+            closed = zone
+            break
+        if closed is None:
+            return None
+        public = closed.get("kind") == "paint"
+        self._log_divine(closed.get("id"), None, "architect_zone", closed,
+                         {"status": status, "zoneKind": closed.get("kind")},
+                         status, public=public)
+        return closed
+
+    def _validate_god_architect_zone(self, payload):
+        zone_kind = payload.get("zoneKind")
+        if zone_kind not in ("paint", "door", "limbo"):
+            return None, 'zoneKind must be "paint", "door", or "limbo"'
+        district_id = payload.get("districtId")
+        if zone_kind in ("paint", "door"):
+            if not isinstance(district_id, str) or not district_id.strip():
+                return None, "districtId is required for paint and door zones"
+            district_id = district_id.strip()
+            if district_id not in self.civilization.get("districts", {}):
+                return None, "unknown district id"
+        else:
+            district_id = district_id.strip() if isinstance(district_id, str) and district_id.strip() else None
+        cells_raw = payload.get("cells")
+        cells_expanded, reason = self._expand_architect_cells(cells_raw)
+        if reason:
+            return None, reason
+        duration = payload.get("durationFrames")
+        if duration is None:
+            duration = GOD_GUIDANCE_DEFAULT_DURATION_FRAMES
+        elif isinstance(duration, bool) or not isinstance(duration, int):
+            return None, "durationFrames must be an integer"
+        elif not (GOD_GUIDANCE_MIN_DURATION_FRAMES <= duration <= GOD_GUIDANCE_MAX_DURATION_FRAMES):
+            return None, (
+                f"durationFrames must be between {GOD_GUIDANCE_MIN_DURATION_FRAMES} "
+                f"and {GOD_GUIDANCE_MAX_DURATION_FRAMES}")
+        reversible_raw = payload.get("reversible")
+        if reversible_raw is None:
+            reversible = True
+        elif not isinstance(reversible_raw, bool):
+            return None, "reversible must be a boolean"
+        else:
+            reversible = reversible_raw
+        normalized = {
+            "zoneKind": zone_kind,
+            "cells": cells_raw,
+            "cellsExpanded": cells_expanded,
+            "durationFrames": duration,
+            "reversible": reversible,
+        }
+        if district_id is not None:
+            normalized["districtId"] = district_id
+        if zone_kind == "paint":
+            if not path1_on("TERRAIN_TILES_ENABLED"):
+                return None, "terrain tiles disabled"
+            paint_terrain = payload.get("paintTerrain")
+            if not isinstance(paint_terrain, str) or paint_terrain not in GOD_ARCHITECT_PAINT_TERRAINS:
+                allowed = ", ".join(sorted(GOD_ARCHITECT_PAINT_TERRAINS))
+                return None, f"paintTerrain must be one of: {allowed}"
+            normalized["paintTerrain"] = paint_terrain
+        if zone_kind == "door":
+            key_id = payload.get("keyId")
+            if not isinstance(key_id, str) or not key_id.strip():
+                return None, "keyId is required for door zones"
+            key_id = key_id.strip()
+            if len(key_id) > GOD_ARCHITECT_KEY_MAX_LEN:
+                return None, f"keyId exceeds {GOD_ARCHITECT_KEY_MAX_LEN} characters"
+            normalized["keyId"] = key_id
+            grant_ids = []
+            for raw_id in payload.get("grantKeyAgentIds") or []:
+                if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                    return None, "grantKeyAgentIds entries must be integer agent ids"
+                agent = self._find_agent_by_id(raw_id)
+                if agent is None:
+                    return None, f"unknown grantKeyAgentIds agent {raw_id}"
+                if agent.get("deathFrame") is not None:
+                    return None, f"grantKeyAgentIds agent {raw_id} is deceased"
+                grant_ids.append(raw_id)
+            if grant_ids:
+                normalized["grantKeyAgentIds"] = grant_ids
+        if zone_kind == "limbo":
+            hold_ids = []
+            for raw_id in payload.get("holdAgentIds") or []:
+                if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                    return None, "holdAgentIds entries must be integer agent ids"
+                agent = self._find_agent_by_id(raw_id)
+                if agent is None:
+                    return None, f"unknown holdAgentIds agent {raw_id}"
+                if agent.get("deathFrame") is not None:
+                    return None, f"holdAgentIds agent {raw_id} is deceased"
+                hold_ids.append(raw_id)
+            if not hold_ids:
+                return None, "holdAgentIds must include at least one living agent"
+            normalized["holdAgentIds"] = hold_ids
+        active = self._god_active_architect_zones()
+        if len(active) >= GOD_ARCHITECT_ZONES_MAX:
+            return None, f"active architect zone cap of {GOD_ARCHITECT_ZONES_MAX} reached"
+        return normalized, None
+
+    def _god_apply_architect_zone(self, payload):
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        zone = {
+            "id": intervention_id,
+            "kind": payload["zoneKind"],
+            "cells": payload["cells"],
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "reversible": payload.get("reversible", True),
+            "status": "active",
+            "holdAgentIds": list(payload.get("holdAgentIds") or []),
+            "limboHolds": {},
+        }
+        if payload.get("districtId"):
+            zone["districtId"] = payload["districtId"]
+        if payload.get("paintTerrain"):
+            zone["paintTerrain"] = payload["paintTerrain"]
+        if payload.get("keyId"):
+            zone["keyId"] = payload["keyId"]
+        god = self.civilization["godState"]
+        if zone["kind"] == "paint":
+            snap = self._architect_paint_snapshot(
+                zone["districtId"], payload["cellsExpanded"], zone["paintTerrain"])
+            zone["revertSnapshot"] = snap
+            self._push_activity(
+                f"A divine architect repainted {len(payload['cellsExpanded'])} cells "
+                f"in {zone['districtId']} as {zone['paintTerrain']}.")
+        elif zone["kind"] == "door":
+            for agent_id in payload.get("grantKeyAgentIds") or []:
+                agent = self._find_agent_by_id(agent_id)
+                if agent is not None:
+                    self._grant_god_key(agent, zone["keyId"])
+        elif zone["kind"] == "limbo":
+            for agent_id in zone["holdAgentIds"]:
+                agent = self._find_agent_by_id(agent_id)
+                if agent is not None:
+                    self._park_agent_in_limbo(agent, zone)
+        god.setdefault("architectZones", []).append(zone)
+        is_public = zone["kind"] == "paint"
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "architect_zone", "frameTick": self.frameTick,
+            "zoneKind": zone["kind"], "districtId": zone.get("districtId"),
+            "cellCount": len(payload["cellsExpanded"]),
+            "expiresFrame": expires_frame, "status": "applied", "public": is_public,
+        })
+        self._log_divine(intervention_id, None, "architect_zone", payload,
+                         {"zoneKind": zone["kind"], "districtId": zone.get("districtId"),
+                          "cellCount": len(payload["cellsExpanded"]),
+                          "holdCount": len(zone["holdAgentIds"])},
+                         "applied", public=is_public)
+        return {
+            "interventionId": intervention_id,
+            "kind": "architect_zone",
+            "zoneKind": zone["kind"],
+            "districtId": zone.get("districtId"),
+            "cellCount": len(payload["cellsExpanded"]),
+            "expiresFrame": expires_frame,
+            "holdAgentIds": list(zone["holdAgentIds"]),
+        }
+
+    def _god_apply_architect_zone_cancel(self, payload):
+        zone_id = payload.get("zoneId")
+        if not isinstance(zone_id, str) or not zone_id.strip():
+            return None, "zoneId is required"
+        closed = self._close_architect_zone(zone_id.strip(), "cancelled")
+        if closed is None:
+            return None, "architect zone not found or already inactive"
+        intervention_id = self._next_intervention_id()
+        is_public = closed.get("kind") == "paint"
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "architect_zone_cancel", "frameTick": self.frameTick,
+            "zoneId": closed.get("id"), "zoneKind": closed.get("kind"),
+            "status": "applied", "public": is_public,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "architect_zone_cancel",
+            "zoneId": closed.get("id"),
+            "zoneKind": closed.get("kind"),
+        }, None
+
+    def _god_apply_architect_release_hold(self, payload):
+        zone_id = payload.get("zoneId")
+        if not isinstance(zone_id, str) or not zone_id.strip():
+            return None, "zoneId is required"
+        zone = self._god_architect_zone_by_id(zone_id.strip())
+        if zone is None or zone.get("kind") != "limbo":
+            return None, "no active limbo architect zone for zoneId"
+        agent_ids = None
+        if payload.get("agentIds") is not None:
+            agent_ids = []
+            for raw_id in payload["agentIds"]:
+                if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                    return None, "agentIds entries must be integer agent ids"
+                agent_ids.append(raw_id)
+        released = self._release_architect_limbo_zone(zone, agent_ids)
+        if not released:
+            return None, "no limbo holds released for this zone"
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "architect_release_hold", "frameTick": self.frameTick,
+            "zoneId": zone.get("id"), "releasedAgentIds": released,
+            "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "architect_release_hold",
+            "zoneId": zone.get("id"),
+            "releasedAgentIds": released,
+        }, None
+
+    # --- Divine Matrix Phase 10: Reload / Déjà Vu checkpoints ---
+    def _god_checkpoint_root_abs(self):
+        override = getattr(self, "god_checkpoint_root", None)
+        if isinstance(override, str) and override.strip():
+            return override.strip()
+        return GOD_CHECKPOINT_ROOT
+
+    def _god_checkpoint_rel_path(self, checkpoint_id):
+        return f"backup/god-checkpoints/{checkpoint_id}"
+
+    def _god_memory_store_file_path(self):
+        ms = self.d.get("memory_store")
+        path = getattr(ms, "path", None) if ms is not None else None
+        if isinstance(path, str) and path.strip():
+            return path.strip()
+        return None
+
+    def _god_checkpoint_by_id(self, checkpoint_id):
+        for rec in (self.civilization.get("godState") or {}).get("checkpoints") or []:
+            if isinstance(rec, dict) and rec.get("id") == checkpoint_id:
+                return rec
+        return None
+
+    def _god_checkpoint_dir_from_record(self, rec):
+        checkpoint_id = rec.get("id") if isinstance(rec, dict) else None
+        if isinstance(checkpoint_id, str) and checkpoint_id.strip():
+            root_candidate = os.path.join(
+                self._god_checkpoint_root_abs(), checkpoint_id.strip())
+            if os.path.isdir(root_candidate):
+                return root_candidate
+        rel = rec.get("path") if isinstance(rec, dict) else None
+        if isinstance(rel, str) and rel.strip():
+            rel_norm = rel.strip().replace("\\", "/")
+            if rel_norm.startswith("backup/"):
+                module_dir = os.path.dirname(os.path.abspath(__file__))
+                legacy = os.path.normpath(
+                    os.path.join(module_dir, rel_norm.replace("/", os.sep)))
+                if os.path.isdir(legacy):
+                    return legacy
+        return None
+
+    def _god_delete_checkpoint_files(self, rec):
+        abs_dir = self._god_checkpoint_dir_from_record(rec)
+        if abs_dir and os.path.isdir(abs_dir):
+            try:
+                shutil.rmtree(abs_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+    def _god_copy_checkpoint_db_to_live(self, src_db):
+        for suffix in ("-wal", "-shm"):
+            sidecar = DB_PATH + suffix
+            if os.path.exists(sidecar):
+                try:
+                    os.remove(sidecar)
+                except OSError:
+                    pass
+        shutil.copy2(src_db, DB_PATH)
+
+    def _god_copy_checkpoint_memory_to_live(self, src_mem):
+        dst = self._god_memory_store_file_path()
+        if not dst:
+            return
+        tmp = dst + ".tmp"
+        try:
+            shutil.copy2(src_mem, tmp)
+            os.replace(tmp, dst)
+        except OSError:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+
+    def _god_apply_checkpoint_create(self, payload):
+        label = payload["label"]
+        replace_oldest = bool(payload.get("replaceOldest"))
+        god = self.civilization["godState"]
+        checkpoints = god.get("checkpoints")
+        if not isinstance(checkpoints, list):
+            checkpoints = []
+            god["checkpoints"] = checkpoints
+
+        was_paused = self.paused
+        self.paused = True
+        self.save_state(force=True)
+        ms = self.d.get("memory_store")
+        if ms is not None:
+            try:
+                ms._persist()
+            except Exception:
+                pass
+
+        checkpoint_id = f"ckpt-{secrets.token_urlsafe(8)}"
+        rel_path = self._god_checkpoint_rel_path(checkpoint_id)
+        abs_dir = os.path.join(self._god_checkpoint_root_abs(), checkpoint_id)
+        try:
+            os.makedirs(abs_dir, exist_ok=True)
+            shutil.copy2(DB_PATH, os.path.join(abs_dir, "state.db"))
+            ms_path = self._god_memory_store_file_path()
+            if ms_path and os.path.exists(ms_path):
+                shutil.copy2(ms_path, os.path.join(abs_dir, "memory_store.json"))
+        except OSError:
+            self.paused = was_paused
+            return None, "checkpoint file copy failed"
+
+        if len(checkpoints) >= GOD_CHECKPOINT_MAX and replace_oldest:
+            oldest = checkpoints[0]
+            self._god_delete_checkpoint_files(oldest)
+            checkpoints.pop(0)
+
+        frame_tick = self.frameTick
+        created_at = datetime.now(timezone.utc).isoformat()
+        meta = {
+            "id": checkpoint_id,
+            "label": label,
+            "frameTick": frame_tick,
+            "path": rel_path,
+            "createdAt": created_at,
+        }
+        checkpoints.append(meta)
+
+        self.paused = was_paused
+
+        intervention_id = self._next_intervention_id()
+        self._log_divine(intervention_id, None, "checkpoint_create", payload,
+                         {"checkpointId": checkpoint_id, "label": label,
+                          "frameTick": frame_tick, "path": rel_path},
+                         "applied", public=True)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "checkpoint_create", "frameTick": self.frameTick,
+            "checkpointId": checkpoint_id, "label": label, "status": "applied", "public": True,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "checkpoint_create",
+            "checkpointId": checkpoint_id,
+            "label": label,
+            "frameTick": frame_tick,
+            "path": rel_path,
+            "checkpointCount": len(checkpoints),
+        }, None
+
+    def _god_apply_checkpoint_restore(self, payload):
+        checkpoint_id = payload["checkpointId"]
+        rec = self._god_checkpoint_by_id(checkpoint_id)
+        if rec is None:
+            return None, "checkpoint not found"
+        abs_dir = self._god_checkpoint_dir_from_record(rec)
+        if not abs_dir:
+            return None, "checkpoint path invalid"
+        ckpt_db = os.path.join(abs_dir, "state.db")
+        if not os.path.isfile(ckpt_db):
+            return None, "checkpoint state.db missing on disk"
+
+        was_paused = self.paused
+        self.paused = True
+        try:
+            self._god_copy_checkpoint_db_to_live(ckpt_db)
+            ckpt_mem = os.path.join(abs_dir, "memory_store.json")
+            if os.path.isfile(ckpt_mem):
+                self._god_copy_checkpoint_memory_to_live(ckpt_mem)
+            if not self.restore_state():
+                self.paused = was_paused
+                return None, "checkpoint restore failed: state.db unreadable"
+        except OSError:
+            self.paused = was_paused
+            return None, "checkpoint restore file operation failed"
+
+        self.paused = was_paused
+
+        intervention_id = self._next_intervention_id()
+        restored_tick = self.frameTick
+        self._log_divine(intervention_id, None, "checkpoint_restore", payload,
+                         {"checkpointId": checkpoint_id, "label": rec.get("label"),
+                          "restoredFrameTick": restored_tick},
+                         "applied", public=True)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "checkpoint_restore", "frameTick": self.frameTick,
+            "checkpointId": checkpoint_id, "label": rec.get("label"),
+            "restoredFrameTick": restored_tick, "status": "applied", "public": True,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "checkpoint_restore",
+            "checkpointId": checkpoint_id,
+            "label": rec.get("label"),
+            "restoredFrameTick": restored_tick,
+        }, None
+
+    def _anointment_prompt_line(self, agent):
+        """Private destiny + due oracle hints for the anointed target."""
+        rec = self._god_active_anointment_record(agent["id"])
+        if not rec:
+            return None
+        parts = []
+        destiny = rec.get("destinyText")
+        if isinstance(destiny, str) and destiny.strip():
+            parts.append(f"Your anointed destiny: {destiny.strip()}")
+        hints = rec.get("oracleHints") or []
+        if isinstance(hints, list):
+            due = []
+            for hint in hints[:GOD_ANOINT_ORACLE_HINTS_MAX]:
+                if not isinstance(hint, dict):
+                    continue
+                reveal = hint.get("revealFrame")
+                text = hint.get("text")
+                if not isinstance(reveal, int) or reveal > self.frameTick:
+                    continue
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                due.append(text.strip())
+            if due:
+                parts.append("Oracle: " + " | ".join(due))
+        if not parts:
+            return None
+        combined = " ".join(parts)
+        if len(combined) > GOD_ANOINT_PROMPT_MAX_CHARS:
+            combined = combined[:GOD_ANOINT_PROMPT_MAX_CHARS]
+        return combined
+
     def _is_idle(self, agent):
         return agent["role"] != "elder" and (
             agent["lastAction"] is None or agent["lastAction"] == "rest"
@@ -6032,15 +8835,18 @@ class SimEngine:
                                      "village_tier": village_tier})
                 return (f"{agent['name']} cannot craft {recipe_id} — it is tier {tier} "
                         f"tech and the village is tier {village_tier} ({reason})")
-        if not self._has_inputs(agent, recipe["inputs"]):
-            self._craft_input_reflex(agent, recipe_id, recipe)
-            missing = self._largest_missing_input(agent, recipe["inputs"])
-            return f"{agent['name']} lacks {missing} to craft {recipe_id}"
         if recipe.get("station") and agent["currentZone"] != recipe["station"]:
             self._set_agent_target_once(agent, recipe["station"])
             return f"{agent['name']} heads to the {recipe['station']} to craft {recipe_id}"
-        for r, n in recipe["inputs"].items():
-            agent["resources"][r] -= n
+        if self._has_inputs(agent, recipe["inputs"]):
+            for r, n in recipe["inputs"].items():
+                agent["resources"][r] -= n
+        else:
+            paid, missing = self._pay_local_cost(agent, recipe["inputs"])
+            if missing:
+                self._craft_input_reflex(agent, recipe_id, recipe)
+                missing_res = self._largest_missing_input(agent, recipe["inputs"])
+                return f"{agent['name']} lacks {missing_res} to craft {recipe_id}"
         output = 1
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop":
             output += self._craft_output_bonus(recipe, agent.get("currentDistrict"))
@@ -6147,6 +8953,7 @@ class SimEngine:
             return f"{agent['name']} rejected the {rc['name']} recipe"
         c["resourceRegistry"][rc["id"]] = {"name": rc["name"], "gatherZone": None,
                                            "color": rc["color"], "crafted": True}
+        c.setdefault("customResourceAddedFrame", {})[rc["id"]] = self.frameTick
         self.RECIPES[rc["id"]] = {"name": rc["name"], "inputs": dict(rc["inputs"]), "station": rc["station"],
                                   **({"tier": rc.get("tier") or 1} if TECH_TREE_ENABLED else {})}
         c["lastCraftActivityFrame"] = self.frameTick
@@ -6396,6 +9203,10 @@ class SimEngine:
         if kind == "custom" and rule.get("effect") is not None \
                 and self._normalize_custom_rule_effect(rule.get("effect")) is None:
             return False
+        if kind == "treaty":
+            tariff = self._parse_treaty_tariff(rule.get("tariff", 0))
+            if tariff is None:
+                return False
         return True
 
     def _record_rule_kind_enacted(self, kind):
@@ -6974,16 +9785,22 @@ class SimEngine:
             return
         c = self.civilization
         starter = STARTER_DISTRICTS["cemetery_grounds"]
+        mutated = False
         if "cemetery_grounds" not in c["districts"]:
             c["districts"]["cemetery_grounds"] = json.loads(json.dumps(starter))
             c["districtProjects"].setdefault("cemetery_grounds", None)
             c["districtLastContribution"].setdefault("cemetery_grounds", 0)
+            mutated = True
         if "cemetery_gate" not in c["roadNodes"]:
             c["roadNodes"]["cemetery_gate"] = dict(STARTER_ROAD_NODES["cemetery_gate"])
+            mutated = True
         edge = ["beach_gate", "cemetery_gate"]
         if edge not in c["roadEdges"] and list(reversed(edge)) not in c["roadEdges"]:
             c["roadEdges"].append(edge)
             self._recompute_road_paths()
+            mutated = True
+        if mutated:
+            self._bump_districts_epoch()
 
     def _migrate_cemetery_structure(self):
         """Move the cemetery chapel onto the burial district's build grid."""
@@ -7099,6 +9916,36 @@ class SimEngine:
                 continue
             self._bury_agent_at(cemetery, corpse, buried_by=None)
 
+    def _village_repair_pressure(self):
+        """True when ruin ratio or working fraction crosses campaign thresholds."""
+        if not GOODS_ENABLED:
+            return False
+        structures = self.civilization["structures"]
+        total = len(structures)
+        if total == 0:
+            return False
+        ruined = sum(
+            1 for s in structures
+            if s.get("isRuin") or s.get("condition", 100) <= 0
+        )
+        working = sum(
+            1 for s in structures
+            if not s.get("isRuin")
+            and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD
+        )
+        return (
+            ruined / total >= REPAIR_CAMPAIGN_RUIN_RATIO
+            or working / total < REPAIR_CAMPAIGN_WORKING_FRAC
+        )
+
+    def _category_has_disrepaired_or_ruined(self, type_):
+        for s in self.civilization["structures"]:
+            if s.get("type") != type_:
+                continue
+            if s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD:
+                return True
+        return False
+
     def _repair_backstop_agent(self, structures):
         """Pick a living non-responder nearest the worst-condition target who
         can fund the repair (stockpile + held). Shared by housing/market
@@ -7148,42 +9995,78 @@ class SimEngine:
             (
                 "house",
                 lambda: GOODS_ENABLED,
-                lambda: self._working_structure_count("house") == 0,
+                lambda: (
+                    self._working_structure_count("house") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("house")
+                    )
+                ),
                 "Housing emergency -- {summary} (no working houses left; "
                 "population cap was locked)",
             ),
             (
                 "market",
                 lambda: GOODS_ENABLED and ECONOMY_ENABLED and has_type("market"),
-                lambda: not self._market_active(),
+                lambda: (
+                    not self._market_active()
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("market")
+                    )
+                ),
                 "Market emergency -- {summary} (no working market left; "
                 "priced trade was locked)",
             ),
             (
                 "workshop",
                 lambda: GOODS_ENABLED and has_type("workshop"),
-                lambda: self._working_structure_count("workshop") == 0,
+                lambda: (
+                    self._working_structure_count("workshop") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("workshop")
+                    )
+                ),
                 "Workshop emergency -- {summary} (no working workshop left; "
                 "crafting was locked)",
             ),
             (
                 "foundry",
                 lambda: GOODS_ENABLED and path1_on("TIER3_CONTENT_ENABLED") and has_type("foundry"),
-                lambda: self._working_structure_count("foundry") == 0,
+                lambda: (
+                    self._working_structure_count("foundry") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("foundry")
+                    )
+                ),
                 "Foundry emergency -- {summary} (no working foundry left; "
                 "tier-3 crafting was locked)",
             ),
             (
                 "granary",
                 lambda: GOODS_ENABLED and CRAFTING_ENABLED and has_type("granary"),
-                lambda: self._working_structure_count("granary") == 0,
+                lambda: (
+                    self._working_structure_count("granary") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("granary")
+                    )
+                ),
                 "Granary emergency -- {summary} (no working granary left; "
                 "food storage was locked)",
             ),
             (
                 "farm_plot",
                 lambda: GOODS_ENABLED and has_type("farm_plot"),
-                lambda: self._working_structure_count("farm_plot") == 0,
+                lambda: (
+                    self._working_structure_count("farm_plot") == 0
+                    or (
+                        self._village_repair_pressure()
+                        and self._category_has_disrepaired_or_ruined("farm_plot")
+                    )
+                ),
                 "Farm emergency -- {summary} (no working farm plot left; "
                 "food production was locked)",
             ),
@@ -7218,6 +10101,139 @@ class SimEngine:
             if summary and "lacks" not in summary and "nothing" not in summary:
                 self._push_activity(message.format(summary=summary))
             return
+
+    def _repair_campaign_targets(self):
+        """Worst structures village-wide, preferring critical categories."""
+        damaged = [
+            s for s in self.civilization["structures"]
+            if s.get("isRuin") or s.get("condition", 100) < 100
+        ]
+        if not damaged:
+            return []
+        critical = [s for s in damaged if s.get("type") in REPAIR_CAMPAIGN_CRITICAL_TYPES]
+        pool = critical or damaged
+
+        def _sort_key(s):
+            is_critical = 0 if s.get("type") in REPAIR_CAMPAIGN_CRITICAL_TYPES else 1
+            return (is_critical, s.get("condition", 100))
+
+        return sorted(pool, key=_sort_key)
+
+    def _maybe_repair_campaign(self):
+        """Assign repair goals when village-wide structural pressure is high."""
+        if not GOODS_ENABLED or not self._village_repair_pressure():
+            return
+        em = self._sage_emergency() if SURVIVAL_ENABLED else None
+        responders = self._sage_responders(em) if em else set()
+        targets = self._repair_campaign_targets()
+        if not targets:
+            return
+        assigned = 0
+        used_agents = set()
+        for target in targets:
+            if assigned >= REPAIR_CAMPAIGN_MAX_ASSIGN:
+                break
+            agent = self._repair_backstop_agent([target])
+            if not agent or agent["name"] in used_agents:
+                continue
+            if agent["name"] in responders:
+                continue
+            if (agent.get("goal") or {}).get("kind") == "repair":
+                continue
+            agent["goal"] = {
+                "kind": "repair",
+                "target": target["id"],
+                "ttl": REPAIR_CAMPAIGN_GOAL_TTL,
+            }
+            used_agents.add(agent["name"])
+            assigned += 1
+
+    def _village_resources_total(self):
+        totals = dict(self.civilization.get("stockpile") or {})
+        for agent in self.agents:
+            if agent.get("deathFrame") is not None:
+                continue
+            for res, amt in (agent.get("resources") or {}).items():
+                totals[res] = totals.get(res, 0) + int(amt)
+        return totals
+
+    def _village_can_afford_rebuild(self, structure):
+        cost = self._repair_cost(structure)
+        totals = self._village_resources_total()
+        for res, amt in cost.items():
+            if totals.get(res, 0) < amt:
+                return False
+        return True
+
+    def _village_can_afford_any_rebuild(self):
+        ruins = [
+            s for s in self.civilization["structures"]
+            if s.get("isRuin") or s.get("condition", 100) <= 0
+        ]
+        return any(self._village_can_afford_rebuild(s) for s in ruins)
+
+    def _cull_priority_key(self, structure, ruined_list):
+        type_ = structure.get("type")
+        if type_ not in REPAIR_CAMPAIGN_CRITICAL_TYPES:
+            return (0, -(structure.get("ruinedSinceFrame") or 0))
+        if self._working_structure_count(type_) == 0:
+            ruins_of_type = [r for r in ruined_list if r.get("type") == type_]
+            if len(ruins_of_type) <= 1:
+                return (2, -(structure.get("ruinedSinceFrame") or 0))
+        return (1, -(structure.get("ruinedSinceFrame") or 0))
+
+    def _remove_structures_from_registry(self, structure_ids):
+        """Drop structures and clear homeStructureId / reorgTasks references."""
+        if not structure_ids:
+            return 0
+        ids = set(structure_ids)
+        c = self.civilization
+        before = len(c["structures"])
+        c["structures"] = [s for s in c["structures"] if s.get("id") not in ids]
+        removed = before - len(c["structures"])
+        for agent in self.agents:
+            if agent.get("homeStructureId") in ids:
+                agent["homeStructureId"] = None
+        reorg_tasks = c.get("reorgTasks")
+        if reorg_tasks is not None:
+            c["reorgTasks"] = [
+                t for t in reorg_tasks if t.get("structureId") not in ids
+            ]
+        return removed
+
+    def _maybe_cull_ruins(self):
+        """Remove aged, unaffordable ruins when ruin pressure is high."""
+        if not GOODS_ENABLED:
+            return
+        structures = self.civilization["structures"]
+        total = len(structures)
+        if total == 0:
+            return
+        ruined = [s for s in structures if s.get("isRuin")]
+        if not ruined:
+            return
+        if len(ruined) / total <= REPAIR_CAMPAIGN_RUIN_RATIO:
+            return
+        eligible = []
+        for s in ruined:
+            age_frame = s.get("ruinedSinceFrame", 0)
+            if self.frameTick - age_frame >= RUIN_CULL_AGE_FRAMES:
+                eligible.append(s)
+        if not eligible:
+            return
+        if self._village_can_afford_any_rebuild():
+            return
+        eligible.sort(key=lambda s: self._cull_priority_key(s, ruined))
+        cull_count = min(RUIN_CULL_MAX_PER_CALL, max(RUIN_CULL_MIN_PER_CALL, len(eligible)))
+        to_remove = eligible[:cull_count]
+        ids = [s["id"] for s in to_remove]
+        names = [s.get("name") or s.get("type") for s in to_remove]
+        removed = self._remove_structures_from_registry(ids)
+        if removed:
+            self._push_activity(
+                f"The village abandons {removed} ruined structure(s) beyond repair: "
+                f"{', '.join(names)}")
+            self._tick_structure_health_benchmark()
 
     # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
     def _succession_candidates(self):
@@ -8003,6 +11019,8 @@ class SimEngine:
         recipient["beliefs"].add(belief_id)
         self._nudge_ally(speaker, recipient["name"])
         self._nudge_ally(recipient, speaker["name"])
+        if CULTURE_ENABLED:
+            self._maybe_mutate_meme(belief_id, speaker, recipient)
         source = "deterministic fallback" if fallback else f"pitch quality {quality:.2f}"
         self._push_activity(f'{recipient["name"]} adopted {self._belief_name(belief_id)} from {speaker["name"]} ({source})')
         self._push_communication("belief", speaker["name"], recipient["name"], self._belief_text(belief_id))
@@ -8157,7 +11175,12 @@ class SimEngine:
         if not mutated or mutated == current_text or looks_meta or not has_words \
                 or self.d["is_scaffold_text"](mutated):
             return
-        c.setdefault("memeTexts", {})[belief_id] = mutated
+        entry = self._belief_entry(belief_id)
+        if entry.get("tenet"):
+            entry.setdefault("originalTenet", entry["tenet"])
+            entry["tenet"] = mutated
+        else:
+            c.setdefault("memeTexts", {})[belief_id] = mutated
         c["memeMutations"] = c.get("memeMutations", 0) + 1
         self._push_activity(f'The belief "{current_text}" drifted into "{mutated}" as it spread through the village.')
         self._push_chronicle(f'A belief mutated: "{mutated}"', kind="meme_mutation")
@@ -8327,14 +11350,25 @@ class SimEngine:
         return f"{agent['name']} studied {best['skill']} at the Library (from {best['agent']}'s preserved knowledge)"
 
     # --- Phase G: chronicle (CULTURE_ENABLED) ---
-    def _push_chronicle(self, text, kind="event"):
+    def _push_chronicle(self, text, kind="event", source=None, presentation=None):
         """Village-level ring of major events (#3), STORED in civilization
         state (not just activity.jsonl) so it survives restarts and can be
-        summarized into prompts. Capped at CHRONICLE_CAP; oldest drops first."""
+        summarized into prompts. Capped at CHRONICLE_CAP; oldest drops first.
+
+        source is additive (default None, byte-identical entries for every
+        pre-existing caller) -- Sovereign God mode Phase 2 passes
+        source="divine" for explicit non-emergent attribution.
+        presentation is cosmetic-only (Phase 5 Voice): stored when thunder so
+        the viewer can style chronicle rows; never injected into prompts."""
         if not CULTURE_ENABLED:
             return
         chronicle = self.civilization.setdefault("chronicle", [])
-        chronicle.append({"text": text, "frame": self.frameTick, "kind": kind})
+        entry = {"text": text, "frame": self.frameTick, "kind": kind}
+        if source:
+            entry["source"] = source
+        if presentation == "thunder":
+            entry["presentation"] = "thunder"
+        chronicle.append(entry)
         if len(chronicle) > CHRONICLE_CAP:
             del chronicle[:-CHRONICLE_CAP]
 
@@ -8440,6 +11474,135 @@ class SimEngine:
             for a in self.agents
         )
 
+    def _edible_scarce(self, rid):
+        """Village held + stockpiled quantity at/below scarcity threshold."""
+        return self._village_holdings(rid) <= EDIBLE_SCARCITY_THRESHOLD
+
+    def _meat_scarce(self):
+        if self._edible_scarce("meat"):
+            return True
+        total = sum(self._village_holdings(rid) for rid in EDIBLE_RESOURCES)
+        return total <= EDIBLE_SCARCITY_THRESHOLD
+
+    def _gather_failing(self, rid):
+        """True when every district of rid's gather zone is ecology-depleted."""
+        zone = self._gather_zone_for_resource(rid)
+        if not zone:
+            return False
+        districts = self._districts_of_kind(zone)
+        if not districts:
+            return True
+        for did in districts:
+            ratio = self._district_ecology_ratio(did)
+            if ratio is not None and ratio >= STOCK_LOW_RATIO:
+                return False
+        return True
+
+    def _wildlife_present(self):
+        if not WILDLIFE_ENABLED:
+            return False
+        for cre in (self.civilization.get("wildlife") or []):
+            if not cre.get("alive"):
+                continue
+            kind = cre.get("kind")
+            if kind in WILDLIFE_DECORATIVE_KINDS or kind not in WILDLIFE_YIELD:
+                continue
+            return True
+        return False
+
+    def _agent_accessible_edible_total(self, agent):
+        """Personal edibles plus nearby surplus (SHARE_RADIUS backstop semantics)."""
+        total = sum(agent["resources"].get(rid, 0) for rid in EDIBLE_RESOURCES)
+        for donor in self.agents:
+            if donor is agent or donor["incapacitated"]:
+                continue
+            if self._distance_to(agent, donor) > SHARE_RADIUS:
+                continue
+            for rid in EDIBLE_RESOURCES:
+                total += max(0, donor["resources"].get(rid, 0) - EDIBLE_RESERVE)
+        return total
+
+    def _nearest_gather_edible_distance(self, agent):
+        best = None
+        for rid in EDIBLE_RESOURCES:
+            zone = self._gather_zone_for_resource(rid)
+            if not zone:
+                continue
+            for did in self._districts_of_kind(zone):
+                d = self._distance_to_district(agent, did)
+                if best is None or d < best:
+                    best = d
+        return best
+
+    def _nearest_prey_distance(self, agent):
+        prey = self._nearest_huntable_wildlife(agent)
+        if prey is None:
+            return None
+        return _dist(agent["x"], agent["y"], prey["x"], prey["y"])
+
+    def _confront_pair_key(self, id_a, id_b):
+        a, b = int(id_a), int(id_b)
+        lo, hi = (a, b) if a <= b else (b, a)
+        return f"{lo}:{hi}"
+
+    def _confront_on_cooldown(self, agent, target):
+        key = self._confront_pair_key(agent["id"], target["id"])
+        expires = (self.civilization.get("confrontCooldowns") or {}).get(key, 0)
+        return self.frameTick < expires
+
+    def _confront_pressure_context(self, agent):
+        if not path1_on("PRESSURE_LOOP_ENABLED"):
+            return False
+        if self._is_night() and not agent.get("homeStructureId"):
+            return True
+        note = agent.get("lastNightNote")
+        if note and self.frameTick - note.get("frame", 0) <= CONFRONT_PRESSURE_WINDOW_FRAMES:
+            return True
+        return False
+
+    def _confront_authorized(self, agent, target):
+        if agent["relationships"].get(target["name"]) == "rival":
+            return True
+        return self._confront_pressure_context(agent)
+
+    def _confront_eligible_targets(self, agent):
+        em = self._sage_emergency()
+        if em and agent["name"] in self._sage_responders(em):
+            return []
+        targets = []
+        for other in self.agents:
+            if other is agent or other["incapacitated"]:
+                continue
+            if other.get("deathFrame") is not None:
+                continue
+            if other["role"] == "elder":
+                continue
+            if not self._confront_authorized(agent, other):
+                continue
+            if self._confront_on_cooldown(agent, other):
+                continue
+            if self._distance_to(agent, other) > 200:
+                continue
+            targets.append(other)
+        return targets
+
+    def _most_abundant_edible_for_steal(self, agent):
+        best, best_count = None, EDIBLE_RESERVE
+        for rid in EDIBLE_RESOURCES:
+            count = agent["resources"].get(rid, 0)
+            if count > best_count:
+                best_count, best = count, rid
+        return best
+
+    def _flee_from_agent(self, agent, other):
+        dx = agent["x"] - other["x"]
+        dy = agent["y"] - other["y"]
+        dist = math.sqrt(dx * dx + dy * dy) or 1.0
+        agent["targetX"] = agent["x"] + (dx / dist) * CONFRONT_FLEE_DIST
+        agent["targetY"] = agent["y"] + (dy / dist) * CONFRONT_FLEE_DIST
+        agent["waypoints"] = []
+        agent["goal"] = None
+
     def _village_needed_role(self):
         """Return a gather role the village needs, or None.
 
@@ -8458,7 +11621,7 @@ class SimEngine:
                 if roles and not self._role_is_filled(roles):
                     return roles[0]
 
-        # 2) Survival need: starving agents and no living food/fish gatherer.
+        # 2) Survival need: stock-aware, wildlife-aware precedence (specs/08).
         if SURVIVAL_ENABLED:
             living = self._living_agents()
             starving = [
@@ -8466,20 +11629,27 @@ class SimEngine:
                 if not a["incapacitated"] and a["hunger"] <= STARVING_HUNGER
             ]
             if len(starving) >= ROLE_STARVE_NEED_THRESHOLD:
-                food_roles = []
+                # Hunter before farmer/fisher when gather zones are barren but prey
+                # exists (specs/08 survival precedence — old fixed-order missed this).
+                if (self._wildlife_present()
+                        and not self._role_is_filled("hunter")
+                        and (self._meat_scarce()
+                             or any(self._edible_scarce(r) for r in EDIBLE_RESOURCES))
+                        and (self._gather_failing("food") or self._gather_failing("fish"))):
+                    return "hunter"
+                if self._edible_scarce("food") and not self._role_is_filled("farmer"):
+                    return "farmer"
+                if self._edible_scarce("fish") and not self._role_is_filled("fisher"):
+                    return "fisher"
                 for rid in EDIBLE_RESOURCES:
-                    food_roles.extend(self.d["RESOURCE_GATHER_ROLES"].get(rid) or ())
-                # Prefer farmer (food) over fisher when both are missing.
-                for role in food_roles:
-                    if not self._role_is_filled(role):
-                        return role
+                    for role in (self.d["RESOURCE_GATHER_ROLES"].get(rid) or ()):
+                        if not self._role_is_filled(role):
+                            return role
 
         # 3) Ecology need: a tracked resource is depleted/low village-wide
-        # and its gather role is unfilled.
+        # and its gather role is unfilled (meat uses village totals — no gatherZone).
         if ECOLOGY_ENABLED:
             self._ensure_district_stocks()
-            # Aggregate stock ratio per resource across districts; pick the
-            # scarcest unfilled gather role.
             totals = {}
             for stocks in self.civilization["districtStocks"].values():
                 for rid, val in stocks.items():
@@ -8500,6 +11670,12 @@ class SimEngine:
                 if not roles or self._role_is_filled(roles):
                     continue
                 scarce.append((ratio, roles[0]))
+            meat_total = self._village_holdings("meat")
+            meat_ratio = meat_total / MEAT_SCARCITY_CAP
+            if meat_ratio < STOCK_LOW_RATIO:
+                roles = self.d["RESOURCE_GATHER_ROLES"].get("meat")
+                if roles and not self._role_is_filled(roles):
+                    scarce.append((meat_ratio, roles[0]))
             if scarce:
                 scarce.sort(key=lambda t: t[0])
                 return scarce[0][1]
@@ -8656,6 +11832,42 @@ class SimEngine:
                 self._set_agent_target(agent, district_id)
                 self._push_activity(
                     f"{agent['name']} is starving and heads to {district_id} for {rid}")
+
+    def _maybe_forced_hunt(self):
+        """Deterministic hunt goal when starving, prey is nearer than gather, and
+        edibles are below reserve. Runs after _maybe_feed_starving (specs/08)."""
+        if not SURVIVAL_ENABLED or not WILDLIFE_ENABLED:
+            return
+        em = self._sage_emergency()
+        responders = self._sage_responders(em) if em else set()
+        candidates = []
+        for agent in self.agents:
+            if agent["incapacitated"] or agent["hunger"] > STARVING_HUNGER:
+                continue
+            if agent["name"] in responders or self._first_edible(agent):
+                continue
+            if self._agent_accessible_edible_total(agent) >= EDIBLE_RESERVE:
+                continue
+            prey = self._nearest_huntable_wildlife(agent)
+            if prey is None:
+                continue
+            prey_dist = _dist(agent["x"], agent["y"], prey["x"], prey["y"])
+            gather_dist = self._nearest_gather_edible_distance(agent)
+            if gather_dist is not None and gather_dist <= prey_dist:
+                continue
+            goal = agent.get("goal")
+            if goal and goal.get("kind") in ("gather", "hunt"):
+                continue
+            candidates.append((0 if agent["role"] == "hunter" else 1, prey_dist, agent, prey))
+        candidates.sort(key=lambda t: (t[0], t[1]))
+        for _, _, agent, prey in candidates:
+            agent["goal"] = {
+                "kind": "hunt",
+                "target": prey.get("id"),
+                "ttl": FORCED_HUNT_GOAL_TTL,
+            }
+            self._push_activity(
+                f"{agent['name']} is starving and hunts nearby {prey.get('kind')}")
 
     def _maybe_start_idle_district_project(self):
         """With multiple buildable districts, nothing today encourages the
@@ -8985,12 +12197,16 @@ class SimEngine:
             return False, f"a project is already active in {district_id}"
         return True, None
 
-    # --- custom-resource retirement (C3: the resource cap gets an expiry too) ---
+    # --- custom-resource retirement (orphan GC; no cap — invention unlimited) ---
     def _custom_resource_referenced(self, rid):
-        """True while anything still uses the custom resource: a structure
-        function that produces/boosts it, a project (registry or active) that
-        needs it, a recipe that inputs or outputs it (pending included), or a
-        remaining balance in the stockpile / any agent's inventory."""
+        """True while anything still uses the custom resource: obtainable via
+        gather/recipe/structure/mint, a structure function (produces/boosts/
+        stores/upkeep/unlocks), a project (registry, standing, or active) that
+        needs or contributed it, a recipe that inputs or outputs it (pending
+        included), a harvest-quota rule target, or a remaining balance in the
+        stockpile / any agent's inventory."""
+        if self._resource_is_obtainable(rid):
+            return True
         c = self.civilization
         if c["stockpile"].get(rid, 0) > 0:
             return True
@@ -9000,34 +12216,59 @@ class SimEngine:
             return True
         if any(p["id"] == rid or rid in p.get("inputs", {}) for p in c["pendingRecipes"]):
             return True
-        for pid, tmpl in c["projectRegistry"].items():
+        type_ids = set(c.get("projectRegistry") or {})
+        type_ids.update(s.get("type") for s in c.get("structures") or [] if s.get("type"))
+        for pid in type_ids:
+            tmpl = c["projectRegistry"].get(pid) or {}
             if rid in (tmpl.get("needs") or {}):
                 return True
-            fn = self._get_structure_function(pid)
-            if any(prod.get("resource") == rid for prod in fn.get("produces") or []):
-                return True
-            if any(rid in (boost.get("resources") or []) for boost in fn.get("boosts") or []):
+            if self._resource_in_function(rid, self._structure_function_for_type(pid)):
                 return True
         for bp in c["pendingBlueprints"]:
             if rid in (bp.get("needs") or {}):
                 return True
-            fn = bp.get("function") or {}
-            if any(prod.get("resource") == rid for prod in fn.get("produces") or []):
-                return True
-            if any(rid in (boost.get("resources") or []) for boost in fn.get("boosts") or []):
+            if self._resource_in_function(rid, bp.get("function") or {}):
                 return True
         for p in c["districtProjects"].values():
-            if p and rid in (p.get("needs") or {}):
+            if not p:
+                continue
+            if rid in (p.get("needs") or {}):
+                return True
+            if rid in (p.get("contributed") or {}):
+                return True
+        for q in c.get("harvestQuotas", {}).values():
+            if q.get("resource") == rid:
                 return True
         return False
 
     def _maybe_retire_custom_resource(self):
-        """Retain all invented resources; invention is intentionally unlimited.
+        """Prune orphan custom resources after CUSTOM_RESOURCE_RETIRE_FRAMES.
 
-        This hook remains as a compatibility no-op because older saves and the
-        tick loop still reference it.
-        """
-        return
+        No cap — invention stays unlimited by policy. Ids with no references
+        get a stamp-on-first-sight clock; once the window elapses the registry
+        entry plus stockpile and districtStocks keys are removed. Retired ids
+        are re-inventable (no tombstone)."""
+        c = self.civilization
+        frames = c.setdefault("customResourceAddedFrame", {})
+        for rid in list(c["resourceRegistry"]):
+            if rid in BASE_RESOURCES or rid in CRAFTED_RESOURCES:
+                continue
+            if self._custom_resource_referenced(rid):
+                continue
+            added = frames.get(rid)
+            if added is None:
+                frames[rid] = self.frameTick
+                continue
+            if self.frameTick - added < CUSTOM_RESOURCE_RETIRE_FRAMES:
+                continue
+            name = c["resourceRegistry"][rid].get("name", rid)
+            del c["resourceRegistry"][rid]
+            c["stockpile"].pop(rid, None)
+            for stocks in c["districtStocks"].values():
+                stocks.pop(rid, None)
+            frames.pop(rid, None)
+            self._push_activity(
+                f"The idea of {name} has faded from the village — nothing made or used it")
 
     # --- Daily Council Assembly (scheduled, whole-village council) ---
     def _daily_council_living(self):
@@ -9046,8 +12287,11 @@ class SimEngine:
             if self.frameTick - int((c.get("districtLastContribution") or {}).get(
                 item.split(":", 1)[0], self.frameTick)) >= STALL_THRESHOLD
         ]
-        stockpile = c.get("stockpile") or {}
-        scarce = sorted(rid for rid, amount in stockpile.items() if amount <= EDIBLE_RESERVE)
+        scarce = sorted(
+            rid for rid in (c.get("stockpile") or {})
+            if self._resource_is_obtainable(rid)
+            and self._village_holdings(rid) <= DAILY_COUNCIL_SCARCITY_THRESHOLD
+        )
         agenda = [
             {
                 "topic": "world_status",
@@ -9057,14 +12301,14 @@ class SimEngine:
             },
             {
                 "topic": "projects",
-                "detail": ("Ongoing: " + ", ".join(active_projects[:8]))
+                "detail": ("Ongoing: " + ", ".join(active_projects[:DAILY_COUNCIL_SCARCITY_TOPICS]))
                 if active_projects else "No ongoing district projects",
             },
             {
                 "topic": "limitations",
                 "detail": (
                     ("Stalled: " + ", ".join(stalled[:4]) + ". ") if stalled else ""
-                ) + (("Low village stores: " + ", ".join(scarce[:8]))
+                ) + (("Low village stores: " + ", ".join(scarce[:DAILY_COUNCIL_SCARCITY_TOPICS]))
                      if scarce else "No acute village-store shortage recorded"),
             },
             {
@@ -10457,6 +13701,7 @@ class SimEngine:
             self._ensure_district_stocks()
             new_stocks = self._init_district_stocks({did: c["districts"][did]}, c["resourceRegistry"])
             c["districtStocks"].update(new_stocks)
+        self._bump_districts_epoch()
 
     def _maybe_found_district(self):
         """Deterministic, tick-gated backstop (same shape as
@@ -10723,6 +13968,7 @@ class SimEngine:
             "roleRebalanceLatency": self.civilization.get("lastRoleRebalanceLatency"),
             "ruleKindDiversity": len(self.civilization.get("ruleKindsEverEnacted") or []),
         }
+        self._mark_top_dirty("benchmarks")
         if TECH_TREE_ENABLED:
             self.lastBenchmarks["era"] = self._current_era_name()
             self.lastBenchmarks["techTier"] = self._village_tech_tier()
@@ -10853,6 +14099,24 @@ class SimEngine:
                 "chronicle_size", len(c.get("chronicle") or []),
                 {"meme_mutations": c.get("memeMutations", 0),
                  "belief_pitch_calls": c.get("beliefPitchCalls", 0)})
+        if GOD_MODE_ENABLED:
+            # Sovereign God mode (Phase 2): intervention-aware evidence (rule
+            # 6 of the plan) -- expose `intervened` in benchmark metadata so
+            # autonomous and god-influenced runs are never mixed accidentally,
+            # plus counts for interventions/active-effects/rejected-commands.
+            god = self.civilization.get("godState") or {}
+            self.lastBenchmarks["intervened"] = bool(god.get("intervened"))
+            self._log_benchmark(
+                "god_interventions", len(god.get("recentInterventions") or []),
+                {"intervened": bool(god.get("intervened")),
+                 "active_effects": len(god.get("activeEvents") or []),
+                 "rejected_commands": self._god_rejected_count})
+        try:
+            flush = self.d.get("flush_benchmarks")
+            if flush:
+                flush()
+        except Exception:
+            pass
 
     def _run_wiki_memory_merge(self, agent, ms, joined):
         """WIKI_MEMORY path for _run_memory_maintenance. Replaces the plain
@@ -11067,6 +14331,95 @@ class SimEngine:
                             summary = f"{agent['name']} found nothing to collect"
                     else:
                         summary = f"{agent['name']} found nothing to collect"
+
+        elif action == "hunt_wildlife":
+            if not WILDLIFE_ENABLED:
+                summary = f"{agent['name']} cannot hunt — wildlife is disabled"
+            else:
+                target_raw = decision.get("target")
+                creature = self._find_wildlife_by_id(target_raw) if target_raw not in (None, "") else None
+                if creature is None:
+                    creature = self._nearest_huntable_wildlife(agent)
+                if creature is None:
+                    summary = f"{agent['name']} found no wildlife to hunt"
+                elif (creature.get("kind") in WILDLIFE_DECORATIVE_KINDS
+                      or creature.get("kind") not in WILDLIFE_YIELD
+                      or not creature.get("alive")):
+                    summary = f"{agent['name']} cannot hunt that creature"
+                elif _dist(agent["x"], agent["y"], creature["x"], creature["y"]) > HUNT_RADIUS:
+                    summary = f"{agent['name']} is too far to hunt that {creature.get('kind')}"
+                else:
+                    result = self._apply_hunt_damage(agent, creature)
+                    if not result.get("ok"):
+                        summary = f"{agent['name']} failed to hunt ({result.get('reason') or 'unknown'})"
+                    elif result.get("killed"):
+                        resource = result.get("resource")
+                        gained = (result.get("agentAdded") or 0) + (result.get("stockpileAdded") or 0)
+                        summary = f"{agent['name']} hunted a {result.get('kind')}"
+                        if resource and gained:
+                            summary += f" (+{gained} {resource})"
+                        resource_acted = resource
+                    else:
+                        summary = (f"{agent['name']} strikes a {result.get('kind')} "
+                                   f"({result.get('hp')}/{creature.get('maxHp', '?')} hp)")
+
+        elif action == "confront_agent":
+            if not SURVIVAL_ENABLED:
+                summary = f"{agent['name']} cannot confront — survival is disabled"
+            else:
+                em = self._sage_emergency()
+                if em and agent["name"] in self._sage_responders(em):
+                    summary = f"{agent['name']} cannot confront — Sage emergency duty"
+                else:
+                    target = self._find_agent(decision.get("target"))
+                    if not target or target.get("deathFrame") is not None:
+                        summary = f"{agent['name']} found no one to confront"
+                    elif target["incapacitated"]:
+                        summary = (f"{agent['name']} cannot confront {target['name']} — "
+                                   "they have collapsed")
+                    elif target["role"] == "elder":
+                        summary = f"{agent['name']} cannot confront the elder"
+                    elif not self._confront_authorized(agent, target):
+                        summary = (f"{agent['name']} has no cause to confront "
+                                   f"{target['name']}")
+                    elif self._confront_on_cooldown(agent, target):
+                        summary = (f"{agent['name']} must wait before confronting "
+                                   f"{target['name']} again")
+                    elif self._distance_to(agent, target) > CONFRONT_CONTACT_DIST:
+                        self._auto_move_toward_target(agent, target["name"])
+                        summary = f"{agent['name']} moves to confront {target['name']}"
+                    else:
+                        pre_health = target["health"]
+                        if pre_health <= CONFRONT_LETHAL_THRESHOLD:
+                            target["health"] = max(0, pre_health - CONFRONT_DAMAGE)
+                            if target["health"] <= 0:
+                                target["incapacitated"] = True
+                        else:
+                            target["health"] = max(
+                                CONFRONT_INCAP_HEALTH, pre_health - CONFRONT_DAMAGE)
+                        stolen = self._most_abundant_edible_for_steal(target)
+                        if stolen:
+                            target["resources"][stolen] -= 1
+                            cap = self._carry_cap(agent)
+                            held = agent["resources"].get(stolen, 0)
+                            if held < cap:
+                                agent["resources"][stolen] = held + 1
+                            else:
+                                c["stockpile"][stolen] = (
+                                    c["stockpile"].get(stolen, 0) + 1)
+                        self._flee_from_agent(agent, target)
+                        if agent["relationships"].get(target["name"]) != "rival":
+                            agent["relationships"][target["name"]] = "rival"
+                        pair_key = self._confront_pair_key(agent["id"], target["id"])
+                        c.setdefault("confrontCooldowns", {})[pair_key] = (
+                            self.frameTick + CONFRONT_COOLDOWN_FRAMES)
+                        note = f"{agent['name']} confronted {target['name']}"
+                        if stolen:
+                            note += f" and took {stolen}"
+                        self._push_activity(note)
+                        self._push_memory(agent, f"Confronted {target['name']}")
+                        self._push_memory(target, f"Confronted by {agent['name']}")
+                        summary = note
 
         elif action == "talk_to_nearby":
             recipient = self._resolve_talk_target(agent, decision)
@@ -11302,8 +14655,7 @@ class SimEngine:
                         if r["id"] not in c["resourceRegistry"]:
                             c["resourceRegistry"][r["id"]] = {"name": r["name"],
                                                               "gatherZone": r["gatherZone"], "color": r["color"]}
-                            # Age record for the custom-resource retirement gate
-                            # (_maybe_retire_custom_resource picks the oldest).
+                            # Stamp for orphan custom-resource retirement (CUSTOM_RESOURCE_RETIRE_FRAMES).
                             c.setdefault("customResourceAddedFrame", {})[r["id"]] = self.frameTick
                     c["projectRegistry"][bp["id"]] = {
                         "name": bp["name"], "needs": dict(bp["needs"]),
@@ -11541,6 +14893,9 @@ class SimEngine:
         elif action == "vote_treaty":
             summary = self._vote_treaty(agent, decision)
 
+        elif action == "deliver_caravan":
+            summary = self._deliver_caravan_action(agent, decision)
+
         elif action == "council_speak":
             summary = self._council_speak(agent, decision)
 
@@ -11570,6 +14925,8 @@ class SimEngine:
         ru = decision.get("relationship_update")
         if isinstance(ru, dict):
             agent["relationships"].update(ru)
+            if ru:
+                self._mark_top_dirty("socialTies")
 
         self._push_activity(summary)
         # A successful action can change the actor's material context, role,
@@ -11583,6 +14940,14 @@ class SimEngine:
                       "reject_blueprint", "sage_review_blueprint",
                       "council_speak", "council_propose", "council_vote"}:
             self._mark_all_context_dirty()
+        self._capture_burning_bush_reply(agent, decision)
+        self._mark_agent_dirty(agent)
+        if action in ("collect_resource", "contribute_resources", "trade_resource", "craft_item",
+                      "repair_structure", "upgrade_structure", "build_structure", "start_project",
+                      "propose_rule", "vote_rule", "repeal_rule", "propose_blueprint",
+                      "approve_blueprint", "reject_blueprint", "sage_review_blueprint"):
+            self._mark_civ_dirty("stockpile", "districtProjects", "rules", "pendingRules",
+                                 "pendingBlueprints", "level")
         return summary
 
     def _resolve_talk_target(self, agent, decision):
@@ -11606,6 +14971,14 @@ class SimEngine:
             return {"kind": "craft", "target": decision.get("target"), "ttl": 6}
         if a == "build_structure":
             return {"kind": "build", "target": None, "district": district, "ttl": 6}
+        if a == "deliver_caravan":
+            dest = decision.get("target_district") or decision.get("target")
+            return {
+                "kind": "caravan",
+                "target_district": dest,
+                "source_settlement": None,
+                "ttl": STALL_THRESHOLD * 4,
+            }
         return None
 
     def _step_goal(self, agent):
@@ -11650,11 +15023,54 @@ class SimEngine:
         if g["kind"] == "caravan":
             dest = g.get("target_district")
             if dest and agent.get("currentDistrict") != dest:
-                self._set_agent_target_once(agent, dest)
+                self._set_caravan_target(agent, dest)
                 return True
             self._maybe_caravan_goal(agent)
             agent["goal"] = None
             return False
+        if g["kind"] == "hunt":
+            prey_id = g.get("target")
+            creature = self._find_wildlife_by_id(prey_id)
+            if creature is None or not creature.get("alive"):
+                agent["goal"] = None
+                return False
+            if _dist(agent["x"], agent["y"], creature["x"], creature["y"]) > HUNT_RADIUS:
+                agent["goal"] = None
+                return False
+            self.apply_decision(agent, {
+                "action": "hunt_wildlife",
+                "target": str(prey_id),
+                "message": None,
+                "reasoning": "goal:hunt",
+            })
+            if not creature.get("alive"):
+                agent["goal"] = None
+            return True
+        if g["kind"] == "repair":
+            target_id = g.get("target")
+            structure = next(
+                (s for s in self.civilization["structures"] if s.get("id") == target_id),
+                None,
+            )
+            if structure is None:
+                agent["goal"] = None
+                return False
+            did = structure.get("districtId")
+            if did and agent.get("currentDistrict") != did:
+                self._set_agent_target_once(agent, did)
+                return True
+            summary = self.apply_decision(agent, {
+                "action": "repair_structure",
+                "target": str(target_id),
+                "reasoning": f"goal:repair {target_id}",
+            })
+            s = summary or ""
+            if any(t in s for t in ("lacks ", "found nothing", "nothing needs repair")):
+                agent["goal"] = None
+                return False
+            if "repaired" in s.lower() or "rebuilt" in s.lower():
+                agent["goal"] = None
+            return True
         district_id = g.get("district") or self._resolve_contribution_district(agent)
         if g["kind"] in ("gather", "deliver", "build") and not district_id:
             agent["goal"] = None
@@ -11686,7 +15102,7 @@ class SimEngine:
                 ballot = council.get("ballot") or {}
                 succession = ballot.get("kind") == "succession"
                 candidates = ", ".join(ballot.get("candidates") or [])
-                self.apply_decision(agent, {
+                self._apply_gated_decision(agent, {
                     "action": "council_speak",
                     "message": (
                         f"We should compare {candidates} by judgment, care, and service."
@@ -11699,7 +15115,7 @@ class SimEngine:
                 })
                 return
             if phase == "proposal" and not council.get("ballot"):
-                self.apply_decision(agent, {
+                self._apply_gated_decision(agent, {
                     "action": "council_propose", "kind": "idea",
                     "title": "Protect essentials",
                     "detail": "Keep food and health secure while finishing the most-stalled project.",
@@ -11708,13 +15124,13 @@ class SimEngine:
                 return
             if phase == "voting" and agent["name"] not in (
                     (council.get("ballot") or {}).get("votes") or {}):
-                self.apply_decision(agent, {
+                self._apply_gated_decision(agent, {
                     "action": "council_vote", "vote": "abstain",
                     "reasoning": "Deterministic offline council fallback.",
                 })
                 return
             if phase == "verdict":
-                self.apply_decision(agent, {
+                self._apply_gated_decision(agent, {
                     "action": "council_speak",
                     "message": f"The council ratifies: "
                                f"{(council.get('verdict') or {}).get('outcome', 'the result')}.",
@@ -11768,9 +15184,11 @@ class SimEngine:
 
         actives = self._active_project_districts()
         invention_required = self._invention_required()
+        voice_guidance = self._active_voice_guidance(agent)
+        voice_guidance_active = bool(voice_guidance.get("voice_guidance_active"))
         # One-shot invention-only turn (set by _maybe_invention_backstop):
         # the server swaps in a slim, proposal-only prompt for this call.
-        invention_turn = bool(agent.get("inventionTurn"))
+        invention_turn = bool(agent.get("inventionTurn")) and not voice_guidance_active
         # inventionBuildContext deliberately survives past this point (unlike
         # inventionTurn) -- it's read later in apply_decision's propose_blueprint
         # branch, which runs after the async LLM round-trip, and clearing it
@@ -11779,7 +15197,11 @@ class SimEngine:
             if invention_turn and agent.get("inventionBuildContext") else None
         if invention_turn:
             agent["inventionTurn"] = False
-        sprite_design_turn = bool(agent.get("spriteDesignTurn"))
+        elif voice_guidance_active:
+            self._cancel_voice_blocked_special_turns([agent["id"]])
+        sprite_design_turn = bool(agent.get("spriteDesignTurn")) and not voice_guidance_active
+        if voice_guidance_active and agent.get("spriteDesignTurn"):
+            agent["spriteDesignTurn"] = None
         # A saved mid-meeting session may still exist after the rollback flag
         # is switched off. Treat it as inert: no council prompt/actions may be
         # offered until the feature is explicitly re-enabled.
@@ -12202,7 +15624,7 @@ class SimEngine:
             if self._is_night():
                 note(3, "NOTE: It is night — seek shelter in a house or composable shelter.")
             if self._border_settlement_agent(agent):
-                neighbor_line = "Neighbor settlement nearby — trade or propose_treaty"
+                neighbor_line = "Neighbor settlement nearby — trade, deliver_caravan, or propose_treaty"
                 note(3, f"NOTE: {neighbor_line}.")
             for rej_key, label in (("lastBlockRejection", "block"), ("lastTerrainRejection", "terrain")):
                 rej = agent.get(rej_key)
@@ -12396,9 +15818,46 @@ class SimEngine:
                  or path1_on("TERRAIN_TILES_ENABLED"))
             and (action_name not in ("propose_treaty", "vote_treaty")
                  or path1_on("PATH1_DIPLOMACY_ENABLED"))
+            and (action_name != "deliver_caravan"
+                 or self._caravan_eligible(agent))
+            and (action_name != "hunt_wildlife"
+                 or (WILDLIFE_ENABLED and self._nearest_huntable_wildlife(agent) is not None))
+            and (action_name != "confront_agent"
+                 or (SURVIVAL_ENABLED and bool(self._confront_eligible_targets(agent))))
         ]
 
-        return {
+        # Sovereign God mode (Phase 3): computed once per think payload,
+        # separate from directive above -- see _divine_prompt_lines.
+        divine_public_line, divine_private_line = self._divine_prompt_lines(agent)
+
+        # Nearby huntable fauna hint for the LLM / role_fallback (WILDLIFE_ENABLED).
+        nearby_wildlife = []
+        nearby_wildlife_line = None
+        prey_in_range = False
+        if WILDLIFE_ENABLED:
+            for cre in (self.civilization.get("wildlife") or []):
+                if not cre.get("alive"):
+                    continue
+                kind = cre.get("kind")
+                if kind in WILDLIFE_DECORATIVE_KINDS or kind not in WILDLIFE_YIELD:
+                    continue
+                dd = _dist(agent["x"], agent["y"], cre["x"], cre["y"])
+                if dd > HUNT_RADIUS:
+                    continue
+                nearby_wildlife.append({
+                    "id": cre.get("id"), "kind": kind,
+                    "hp": cre.get("hp"), "maxHp": cre.get("maxHp"),
+                })
+            if nearby_wildlife:
+                prey_in_range = True
+                parts = ", ".join(
+                    f"{w['kind']}#{w['id']} ({w['hp']}/{w['maxHp']} hp)"
+                    for w in nearby_wildlife[:5])
+                nearby_wildlife_line = (
+                    f"Nearby wildlife (hunt_wildlife target=id): {parts}"
+                )
+
+        think_payload = {
             "agent_name": agent["name"],
             "frame_tick": self.frameTick,
             "role": agent["role"],
@@ -12417,6 +15876,9 @@ class SimEngine:
             "nearby_beliefs": nearby_beliefs if MEMES_ENABLED else {},
             "belief_pitch_budget_remaining": max(0, BELIEF_PITCH_SESSION_CAP - c.get("beliefPitchCalls", 0)),
             "nearby_agents": nearby_detailed,
+            "nearby_wildlife": nearby_wildlife,
+            "nearby_wildlife_line": nearby_wildlife_line,
+            "prey_in_range": prey_in_range,
             "world_zone": agent["currentZone"],
             "current_district": agent.get("currentDistrict") or "none",
             "civilization_level": c["level"],
@@ -12428,6 +15890,18 @@ class SimEngine:
             "known_districts": [{"id": did, "kind": d["kind"]} for did, d in c["districts"].items()
                                 if d.get("build_grid")],
             "directive": self._current_directive() or "none",
+            # Sovereign God mode (Phase 3): SEPARATE keys from "directive"
+            # above, rendered as their own prompt lines only when set (see
+            # server.py build_user_prompt) -- never folded into the elder
+            # directive line, in either direction.
+            "divine_public_line": divine_public_line,
+            "divine_private_line": divine_private_line,
+            "voice_guidance_active": voice_guidance_active,
+            "voice_guidance_id": voice_guidance.get("voice_guidance_id"),
+            "voice_guidance_text": voice_guidance.get("voice_guidance_text"),
+            "divine_burning_bush_line": self._burning_bush_prompt_line(agent),
+            "divine_anointment_line": self._anointment_prompt_line(agent),
+            "divine_sampling": self._god_divine_sampling_for_think(agent),
             "invention_only": invention_turn,
             "council_turn": council_turn,
             "council_seated": council_seated,
@@ -12529,9 +16003,13 @@ class SimEngine:
             "path1_tool_line": tool_line,
             "path1_industry_line": industry_line,
             "path1_neighbor_line": neighbor_line,
+            "settlement_stores_line": self._format_settlement_stores_for_prompt(agent),
             "high_stakes_reason": high_stakes_reason,
             "available_actions": available_actions,
+            "divine_public_event_line": self._divine_public_event_line(agent),
         }
+        self._apply_context_mask(agent, think_payload)
+        return think_payload
 
     def _recent_conversations_text(self):
         if not self.conversationLog:
@@ -12587,6 +16065,28 @@ class SimEngine:
         if ages:
             self._module_note_ages.extend(ages)
         return " | ".join(reports) if reports else "none"
+
+    def _piano_free_slots(self):
+        """Shared PIANO pool budget for decision fan-out and always-on refresh."""
+        return max(0, PIANO_CONCURRENT_LLM - len(self._piano_refresh_inflight))
+
+    def _run_decision_piano_module(self, runner, agent_name, module, context, frame_tick):
+        """Decision-path module call; releases unified inflight slot on completion."""
+        try:
+            return runner(module, agent_name, context, frame_tick=frame_tick)
+        finally:
+            with self.lock:
+                self._piano_refresh_inflight.discard((agent_name, module))
+
+    def _fill_piano_report_from_cache(self, module, cache, tick, report_by_module):
+        """Serve a throttled/off-tick module from cache when still within TTL."""
+        cached = cache.get(module)
+        if cached and (tick - cached["tick"]) <= PIANO_MODULE_CACHE_TTL:
+            age = tick - cached["tick"]
+            report_by_module[module] = (
+                f"{module} ({age} turns ago): {cached['text']}")
+            return True
+        return False
 
     def _always_on_module_done(self, agent_name, module, dirty_since, text, started):
         """Store one background refresh after reacquiring the engine lock."""
@@ -12656,7 +16156,7 @@ class SimEngine:
                     # the legacy 1/1/2/3 cadence preference as a tie-breaker.
                     due.append((0 if dirty else 1, -age, priority, agent, module, dirty_since))
         due.sort(key=lambda item: item[:3])
-        free = max(0, PIANO_CONCURRENT_LLM - len(self._piano_refresh_inflight))
+        free = self._piano_free_slots()
         selected = due[:min(MODULE_PULSE_MAX_BATCH, free)]
         self._module_pulse_work.append(len(selected))
         for _, _, _, agent, module, dirty_since in selected:
@@ -12678,13 +16178,16 @@ class SimEngine:
             self.piano_workers.submit(self._run_always_on_module, runner, agent["name"],
                                       module, context, dirty_since)
 
-    def _run_piano_modules(self, agent_name, modules, module_tick, context):
+    def _run_piano_modules(self, agent_name, modules, module_tick, context, *,
+                          force_cache_only=False):
         """Sid-parity Phase 1/5: run staggered PIANO modules on the dedicated
         piano_workers pool (never the decision pool), so a module backlog can
         never starve the Cognitive Controller decision call. Stagger:
         perception+desire every turn; social every 2nd; reflection every 3rd.
         Modules not due this turn are served from the module-report cache
         (PIANO_MODULE_CACHE_TTL module-ticks) instead of an empty slot.
+        Decision-path dispatches share `_piano_refresh_inflight` with the
+        always-on pulse and never submit more work than free PIANO slots.
         Returns (report_string, new_module_tick, runs)."""
         runner = self.d.get("run_piano_module")
         if not runner or not PIANO_MODULES:
@@ -12716,7 +16219,21 @@ class SimEngine:
                 ordered.append(module)
         report_by_module = {}
         runs = 0
-        if to_run:
+
+        def _throttle_modules(modules_to_skip):
+            for module in modules_to_skip:
+                if not self._fill_piano_report_from_cache(
+                        module, cache, tick, report_by_module):
+                    self._piano_module_drops += 1
+
+        if to_run and not force_cache_only:
+            with self.lock:
+                if self._piano_free_slots() == 0:
+                    force_cache_only = True
+
+        if to_run and force_cache_only:
+            _throttle_modules(to_run)
+        elif to_run:
             # Cross-module visibility (working-memory half-step): build one
             # shared "last_reports=" suffix from every cached report still
             # within PIANO_CROSS_CONTEXT_TTL module-ticks, and give it to
@@ -12733,33 +16250,67 @@ class SimEngine:
                 suffix = "last_reports=" + " | ".join(
                     f"{mod_name}({age} ago): {text}" for age, mod_name, text in fresh)
                 dispatch_context = context + "; " + suffix
-            futures = {}
-            dispatch_started = {}
-            for module in to_run:
-                start_ts = time.time()
-                dispatch_started[module] = start_ts
-                futures[module] = self.piano_workers.submit(
-                    runner, module, agent_name, dispatch_context, frame_tick=self.frameTick)
-            for module, fut in futures.items():
-                try:
-                    text = fut.result(timeout=PIANO_MODULE_TIMEOUT_WAIT_S)
-                except Exception:
-                    text = None
-                latency_ms = (time.time() - dispatch_started[module]) * 1000.0
-                totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
-                totals[0] += latency_ms
-                totals[1] += 1
-                if text:
-                    cache[module] = {"tick": tick, "text": text}
-                    report_by_module[module] = f"{module}: {text}"
-                    runs += 1
-                else:
-                    self._piano_module_drops += 1
+            pending = list(to_run)
+            active = {}
+            while pending or active:
+                with self.lock:
+                    while pending and self._piano_free_slots() > 0:
+                        module = pending.pop(0)
+                        if (agent_name, module) in self._piano_refresh_inflight:
+                            if not self._fill_piano_report_from_cache(
+                                    module, cache, tick, report_by_module):
+                                self._piano_module_drops += 1
+                            continue
+                        self._piano_refresh_inflight.add((agent_name, module))
+                        start_ts = time.time()
+                        active[module] = (
+                            self.piano_workers.submit(
+                                self._run_decision_piano_module, runner,
+                                agent_name, module, dispatch_context,
+                                self.frameTick),
+                            start_ts,
+                        )
+                if not active:
+                    _throttle_modules(pending)
+                    pending.clear()
+                    break
+                done, _ = wait(
+                    [fut for fut, _ in active.values()],
+                    timeout=PIANO_MODULE_TIMEOUT_WAIT_S,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    for module, (fut, start_ts) in list(active.items()):
+                        latency_ms = (time.time() - start_ts) * 1000.0
+                        totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
+                        totals[0] += latency_ms
+                        totals[1] += 1
+                        self._piano_module_drops += 1
+                        with self.lock:
+                            self._piano_refresh_inflight.discard((agent_name, module))
+                        del active[module]
+                    continue
+                for module, (fut, start_ts) in list(active.items()):
+                    if fut not in done:
+                        continue
+                    try:
+                        text = fut.result(timeout=0)
+                    except Exception:
+                        text = None
+                    latency_ms = (time.time() - start_ts) * 1000.0
+                    totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
+                    totals[0] += latency_ms
+                    totals[1] += 1
+                    if text:
+                        cache[module] = {"tick": tick, "text": text}
+                        report_by_module[module] = f"{module}: {text}"
+                        runs += 1
+                    else:
+                        self._piano_module_drops += 1
+                    del active[module]
         for module in off_tick:
-            cached = cache.get(module)
-            if cached and (tick - cached["tick"]) <= PIANO_MODULE_CACHE_TTL:
-                age = tick - cached["tick"]
-                report_by_module[module] = f"{module} ({age} turns ago): {cached['text']}"
+            self._fill_piano_report_from_cache(
+                module, cache, tick, report_by_module)
         reports = [report_by_module[m] for m in ordered if m in report_by_module]
         return (" | ".join(reports) if reports else "none"), tick, runs
 
@@ -12794,6 +16345,19 @@ class SimEngine:
         if result and result.get("persona"):
             agent["persona"] = result["persona"]
 
+    def _finish_think_identity_forge(self, agent):
+        """Advance identity-copy blend after one think cycle completes."""
+        if agent is not None:
+            self._advance_identity_forge_on_think(agent)
+
+    def _record_llm_orphan_timeout(self):
+        """Count orphaned client-side timeouts toward decision-dispatch pause."""
+        with self.lock:
+            self._llm_orphan_timeouts += 1
+            if self._llm_orphan_timeouts >= LLM_ORPHAN_TIMEOUT_THRESHOLD:
+                self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
+                self._llm_orphan_timeouts = 0
+
     def _think_job(self, agent_name):
         """Runs in the worker pool. Build payload under lock, do the network
         call OUTSIDE the lock, then apply the result UNDER the lock."""
@@ -12802,16 +16366,50 @@ class SimEngine:
                 agent = self._find_agent(agent_name)
                 if not agent or agent["incapacitated"]:
                     return
+                gate = self._god_active_decision_gate_record(agent["id"])
+                possession_skip = (
+                    isinstance(gate, dict)
+                    and gate.get("mode") == "possession"
+                    and gate.get("bypassLlm")
+                )
                 payload = self._build_think_payload(agent)
                 self_prompt = (agent.get("persona") or "").strip() if META_SYSTEM else ""
                 payload["self_prompt"] = self_prompt
                 piano_context = None
                 piano_modules = None
                 piano_tick = 0
+                piano_force_cache_only = False
                 if PIANO_MODULES:
                     piano_context = self._piano_module_context(agent, payload)
                     piano_modules = dict(agent.get("modules") or {})
                     piano_tick = int(agent.get("moduleTick") or 0)
+                    if not ALWAYS_ON_MODULES and self._piano_free_slots() == 0:
+                        piano_force_cache_only = True
+            if possession_skip:
+                with self.lock:
+                    agent = self._find_agent(agent_name)
+                    if not agent:
+                        return
+                    em = self._sage_emergency()
+                    if em and agent is not em and not agent["incapacitated"] \
+                            and agent["name"] in self._sage_responders(em):
+                        self._rush_to_heal(agent, em)
+                        return
+                    gate = self._god_active_decision_gate_record(agent["id"])
+                    if gate:
+                        pinned_raw = self._god_decision_gate_pinned(agent, gate)
+                        pinned, _ = self._god_normalize_pinned_decision(agent, pinned_raw)
+                        if pinned:
+                            self._apply_divine_possessed_decision(agent, pinned, gate)
+                            self._advance_possession_queue(gate)
+                            agent["goal"] = self._goal_for_decision(pinned)
+                            self._log_benchmark("divine_possession_skip", 1.0, {
+                                "agent": agent["name"],
+                                "action": pinned.get("action"),
+                                "divine_possession": True,
+                            })
+                            self._finish_think_identity_forge(agent)
+                return
             if PIANO_MODULES:
                 # Module fan-out dispatches onto self.piano_workers (its own
                 # PIANO_CONCURRENT_LLM-sized pool, see _run_piano_modules) --
@@ -12820,7 +16418,8 @@ class SimEngine:
                 # lock so this worker-pool thread can block waiting on it
                 # without freezing the tick.
                 reports, new_tick, runs = self._run_piano_modules(
-                    agent_name, piano_modules, piano_tick, piano_context)
+                    agent_name, piano_modules, piano_tick, piano_context,
+                    force_cache_only=piano_force_cache_only)
                 payload["module_reports"] = reports
             else:
                 new_tick, runs = 0, 0
@@ -12857,16 +16456,25 @@ class SimEngine:
                 if not decision or decision.get("error") == "llm offline":
                     self.lmStatus = "offline"
                     self._apply_rule_based_fallback(agent)
+                    self._finish_think_identity_forge(agent)
+                elif decision.get("error") == "llm timeout":
+                    self.lmStatus = "offline"
+                    self._record_llm_orphan_timeout()
+                    self._apply_rule_based_fallback(agent)
+                    self._finish_think_identity_forge(agent)
                 elif decision.get("error") == "compute_error":
                     self.lmStatus = "compute_error"
-                    self.llm_cooldown_until = time.time() + 30.0
+                    self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
                     self._apply_rule_based_fallback(agent)
+                    self._finish_think_identity_forge(agent)
                 elif decision.get("error"):
                     self.lmStatus = "online"
-                    self.apply_decision(agent, {"action": "rest"})
+                    self._apply_gated_decision(agent, {"action": "rest"})
+                    self._finish_think_identity_forge(agent)
                 else:
                     self.lmStatus = "online"
                     self.llm_cooldown_until = 0.0
+                    self._llm_orphan_timeouts = 0
                     if decision.get("terraform_rejection_note"):
                         agent["lastTerraformRejection"] = {
                             "reason": decision["terraform_rejection_note"],
@@ -12918,22 +16526,27 @@ class SimEngine:
                             agent["inventionRetryUsed"] = True
                             agent["inventionTurn"] = True
                             agent["goal"] = None
-                            self.apply_decision(agent, {"action": "rest"})
+                            self._apply_gated_decision(agent, {"action": "rest"})
                             retried_invention = True
+                            self._finish_think_identity_forge(agent)
                     if not retried_invention:
-                        self.apply_decision(agent, decision)
-                        agent["goal"] = self._goal_for_decision(decision)
+                        applied = self._apply_gated_decision(agent, decision)
+                        if applied:
+                            agent["goal"] = self._goal_for_decision(decision)
+                        self._finish_think_identity_forge(agent)
         except Exception:
             with self.lock:
                 agent = self._find_agent(agent_name)
                 if agent:
                     self.lmStatus = "offline"
                     self._apply_rule_based_fallback(agent)
+                    self._finish_think_identity_forge(agent)
         finally:
             with self.lock:
                 a = self._find_agent(agent_name)
                 if a:
                     a["isThinking"] = False
+                    self._mark_agent_dirty(a)
                 self._inflight.discard(agent_name)
 
     def _schedule_think(self, agent):
@@ -12942,6 +16555,8 @@ class SimEngine:
         retry soon (THINK_RETRY_FRAMES) instead of waiting a full
         thinkInterval, so a busy worker pool doesn't silently cost an agent
         an entire cycle."""
+        if agent.get("divineHold"):
+            return False
         if agent["name"] in self._inflight:
             return False
         if len(self._inflight) >= MAX_CONCURRENT_LLM:
@@ -12958,6 +16573,7 @@ class SimEngine:
         self.last_llm_dispatch_ms = now_ms
         self._inflight.add(agent["name"])
         agent["isThinking"] = True
+        self._mark_agent_dirty(agent)
         self._executor.submit(self._think_job, agent["name"])
         return True
 
@@ -12972,6 +16588,16 @@ class SimEngine:
                 return
             self.frameTick += 1
             ft = self.frameTick
+
+            if GOD_MODE_ENABLED:
+                # Sovereign God mode (Phase 2): bounded scan (activeEvents
+                # capped at 8), immediately after frameTick advances and
+                # before every other consumer -- see docs/plan-sovereign-god-
+                # mode-v2.md's "Expiry ownership" section. In Phase 2 there
+                # are no timed effects yet (only the no-mechanics
+                # `proclamation` command applies), so this call is a cheap
+                # no-op scan; it earns its keep starting Phase 5.
+                self._expire_divine_effects()
 
             if SURVIVAL_ENABLED and ft % SURVIVAL_TICK_FRAMES == 0:
                 for a in self.agents:
@@ -12997,7 +16623,11 @@ class SimEngine:
                 self._tick_lifecycle()
             if ft % RULES_TICK_FRAMES == 0:
                 self._maybe_feed_starving()
+                self._maybe_forced_hunt()
                 self._maybe_repair_critical()
+                if GOODS_ENABLED:
+                    self._maybe_repair_campaign()
+                    self._maybe_cull_ruins()
                 self._maybe_abandon_stalled_projects()
                 self._maybe_relocate_stuck_project()
                 self._maybe_reorganize_structures()
@@ -13053,8 +16683,14 @@ class SimEngine:
                 self._sample_benchmarks()
 
             for a in self.agents:
+                if a.get("divineHold"):
+                    continue
                 if not a["incapacitated"]:
                     self._move_agent(a, MOVE_SCALE)
+            if WILDLIFE_ENABLED:
+                self._move_wildlife()
+            if WILDLIFE_ENABLED and ft % WILDLIFE_POP_TICK_FRAMES == 0:
+                self._tick_huntable_wildlife()
 
             # The dark-gated whiteboard scheduler runs on the world clock,
             # never from a decision worker. An empty due-list only appends a
@@ -13071,7 +16707,10 @@ class SimEngine:
                     a["messageTimer"] -= 1
                     if a["messageTimer"] == 0:
                         a["message"] = None
+                        self._mark_agent_dirty(a)
                 if a["incapacitated"]:
+                    continue
+                if a.get("divineHold"):
                     continue
                 daily = (self.civilization.get("dailyCouncil")
                          if DAILY_COUNCIL_ENABLED else None)
@@ -13154,16 +16793,21 @@ class SimEngine:
         """Build the Contract-3 payload. Caller must hold self.lock."""
         c = self.civilization
         civ = {k: v for k, v in c.items() if k not in _CIV_SET_KEYS}
-        # Deep-ish copy of nested mutables so the JSON dump can't race a mutation
-        # after the lock is released; sets -> sorted arrays.
-        civ = json.loads(json.dumps(civ, default=str))
+        # Deep copy into JSON-safe form so the DB write can't race a mutation
+        # after the lock is released; known set keys are sorted arrays.
+        civ = _json_safe_copy(civ)
         for key in _CIV_SET_KEYS:
             civ[key] = sorted(c.get(key, set()))
+        # Structure sprite grids are stored in structure_sprites, not civ JSON.
+        for s in civ.get("structures") or []:
+            if isinstance(s, dict):
+                s.pop("sprite", None)
         agents = []
         for a in self.agents:
-            ad = {k: v for k, v in a.items() if k not in ("beliefs", "isThinking")}
-            ad = json.loads(json.dumps(ad, default=str))
+            ad = {k: v for k, v in a.items() if k not in ("beliefs", "godKeys", "isThinking")}
+            ad = _json_safe_copy(ad)
             ad["beliefs"] = sorted(a.get("beliefs", set()))
+            ad["godKeys"] = sorted(a.get("godKeys", set()))
             agents.append(ad)
         memory = []
         ms = self.d.get("memory_store")
@@ -13172,7 +16816,7 @@ class SimEngine:
                 memory = ms.export_entries()
             except Exception:
                 memory = []
-        return {
+        payload = {
             "version": STATE_VERSION,
             "frameTick": self.frameTick,
             "savedAt": datetime.now(timezone.utc).isoformat(),
@@ -13180,16 +16824,47 @@ class SimEngine:
             "civilization": civ,
             "agents": agents,
             "memory": memory,
-            "council_transcript": json.loads(json.dumps(
-                self.council_transcript_rows, default=str)),
+            "council_transcript": _json_safe_copy(self.council_transcript_rows),
         }
+        fp = _structure_sprites_fingerprint(self.civilization)
+        if fp:
+            payload["structureSpritesFingerprint"] = fp
+        sprite_upserts = {}
+        for sid in self._persist_dirty_structure_sprites:
+            live = next(
+                (x for x in self.civilization["structures"] if x.get("id") == sid), None,
+            )
+            if live and live.get("sprite"):
+                sprite_upserts[sid] = {
+                    "sprite": _json_safe_copy(live["sprite"]),
+                    "updated_frame": self.frameTick,
+                }
+        if sprite_upserts:
+            payload["_sprite_upserts"] = sprite_upserts
+        if self._persist_sprite_removals:
+            payload["_sprite_removals"] = sorted(self._persist_sprite_removals)
+        return payload
 
-    def save_state(self):
-        """Atomically write the complete world to state.db. Never raises."""
+    def save_state(self, force=False):
+        """Atomically write the complete world to state.db. Never raises.
+
+        Periodic autosave passes force=False and skips the SQLite rewrite when
+        the content hash (excluding savedAt) matches the last successful write.
+        Graceful shutdown, reset, and checkpoint paths pass force=True so
+        savedAt and on-disk bytes always refresh."""
         try:
+            content_hash = None
             with self.lock:
                 payload = self._serialize_state()
+                content_hash = _state_content_hash(payload)
+                self._last_save_considered_at = time.time()
+                if not force and content_hash == self._last_saved_hash:
+                    return True
             _write_state_db(DB_PATH, payload)
+            self._last_saved_hash = content_hash
+            with self.lock:
+                self._persist_dirty_structure_sprites.clear()
+                self._persist_sprite_removals.clear()
             return True
         except Exception:
             # Persistence must never crash the sim.
@@ -13231,11 +16906,20 @@ class SimEngine:
         """If a valid state.db exists, rehydrate the world from it instead of
         the cold-start roster. Returns True on a successful restore."""
         data = _read_state_db(DB_PATH)
-        if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+        version = data.get("version") if isinstance(data, dict) else None
+        if not isinstance(data, dict) or version not in RESTORE_STATE_VERSIONS:
             return False
         try:
             with self.lock:
                 civ = dict(data.get("civilization") or {})
+                table_sprites = data.get("structureSprites") or {}
+                for s in civ.get("structures") or []:
+                    sid = s.get("id")
+                    if sid and sid in table_sprites:
+                        s["sprite"] = table_sprites[sid]
+                    elif version == 2 and sid and s.get("sprite"):
+                        # v2 migration: embedded sprites split out on next save.
+                        self._persist_dirty_structure_sprites.add(sid)
                 for key in _CIV_SET_KEYS:
                     civ[key] = set(civ.get(key) or [])
                 # builtTypes backfill: a save from before #5.1 has no record of
@@ -13281,6 +16965,12 @@ class SimEngine:
                 # weather value, so a save that already has real weather
                 # state resumes it unchanged (no re-roll on load).
                 civ.setdefault("weather", self._weather_default(0))
+                # Sovereign God mode (Phase 2): old saves get a fresh default
+                # god state via setdefault, same discipline as weather above
+                # -- never overwrites an already-persisted godState. Malformed
+                # nested fields on an existing godState are normalized
+                # conservatively (never raise) by _normalize_god_state.
+                civ["godState"] = self._normalize_god_state(civ.get("godState"))
                 civ.setdefault("lastRoleSwitchFrame", 0)
                 civ.setdefault("lastRuleAttemptFrame", 0)
                 civ.setdefault("priorityRuleSeq", 0)
@@ -13288,6 +16978,7 @@ class SimEngine:
                 civ.setdefault("emergencyRuleSeq", 0)
                 civ.setdefault("roleNeedSinceFrame", None)
                 civ.setdefault("lastRoleRebalanceLatency", None)
+                civ.setdefault("confrontCooldowns", {})
                 # Phase 2 role registry migration: older saves only know the
                 # roles.json seeds, while newer saves carry per-world approved
                 # roles. Merge missing seeds without overwriting live entries.
@@ -13409,6 +17100,11 @@ class SimEngine:
                     civ.setdefault("harvestQuotas", {})
                     civ.setdefault("rationingActive", {})
                     civ.setdefault("populationFloorHeld", False)
+                # Huntable wildlife: additive setdefault for old saves; seed
+                # only when the list is still empty so a persisted population
+                # never re-rolls on load.
+                civ.setdefault("nextWildlifeId", 1)
+                civ.setdefault("wildlife", [])
                 if CULTURE_ENABLED:
                     # Phase G: knowledge/culture state. Purely additive --
                     # matches every prior phase's setdefault-only back-compat
@@ -13449,6 +17145,10 @@ class SimEngine:
                     civ.setdefault("settlements", [])
                     civ.setdefault("treaties", [])
                     civ.setdefault("caravanLog", [])
+                    stores = civ.setdefault("settlementStores", {})
+                    for s in civ.get("settlements") or []:
+                        if isinstance(s, dict) and s.get("id"):
+                            stores.setdefault(s["id"], {})
                     civ.setdefault("path1Placements", 0)
                     civ.setdefault("path1TerrainMutations", 0)
                     for d in (civ.get("districts") or {}).values():
@@ -13507,6 +17207,9 @@ class SimEngine:
                     a.setdefault("lastTreatyRejection", None)
                     a.setdefault("lastNightNote", None)
                     a.setdefault("reorgTask", None)
+                    a.setdefault("divineHold", False)
+                    a.setdefault("architectLimbo", None)
+                    a["godKeys"] = set(a.get("godKeys") or ())
                     if isinstance(a.get("resources"), dict):
                         a["resources"].setdefault("coin", 0)
                     a.setdefault("persona", "")
@@ -13591,13 +17294,35 @@ class SimEngine:
                 rs = data.get("roster_size")
                 if rs:
                     self.roster_size = int(rs)
+                # Sovereign God mode (Phase 2): restart/restore invalidates
+                # every outstanding preview and in-flight idempotency record
+                # (neither is persisted -- see __init__). Then close out any
+                # timed effect that was already past its expiresFrame at the
+                # restored frameTick, exactly once, using the same bounded
+                # scan _tick_once uses every tick.
+                self._god_preview_cache = {}
+                self._god_requests = {}
+                # Optional Phase 8: compiler rate-limit/session-cap state is
+                # equally in-memory-only and never persisted -- restart/
+                # restore resets it, exactly like the preview/idempotency
+                # caches above.
+                self._god_compiler_state = {"lastCompileWallTime": 0.0, "compileCount": 0}
+                self._expire_divine_effects(restore=True)
                 self._recompute_road_paths()
+                if WILDLIFE_ENABLED:
+                    # Old saves get a seeded population once; existing fauna
+                    # lists are only shape-normalized (never re-rolled).
+                    if not self.civilization.get("wildlife"):
+                        self._seed_wildlife_population()
+                    else:
+                        self._normalize_wildlife_records()
                 if CEMETERY_ENABLED:
                     self._ensure_cemetery_district()
                     self._migrate_cemetery_structure()
                     self._relayout_cemetery_graves()
                 _validate_districts(self.civilization["districts"])
                 _validate_road_graph(self.civilization["roadNodes"], self.civilization["roadEdges"])
+                self._bump_districts_epoch()
                 # Rebuild the MemoryStore by re-embedding each entry's text.
                 ms = self.d.get("memory_store")
                 if ms is not None:
@@ -13605,18 +17330,6334 @@ class SimEngine:
                         ms.import_entries(data.get("memory") or [])
                     except Exception:
                         pass
+                self._on_world_replaced()
             return True
         except Exception:
             return False
+
+    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
+    # Secure kernel only: the module-level GOD_MODE_ENABLED flag gates the
+    # dark default, and server.py's SIM_GOD_TOKEN + X-God-Token check gates
+    # every route BEFORE it reaches these methods -- these engine entry
+    # points have no access to (and never see) the token. Every public entry
+    # point below still re-checks GOD_MODE_ENABLED itself and no-ops cleanly
+    # if it is somehow called with the flag off, so a misrouted call can
+    # never mutate state. The only applyable command this phase is a
+    # no-mechanics `proclamation` -- every other kind validates far enough to
+    # be rejected cleanly with "not implemented in this phase".
+
+    def _default_god_state(self):
+        """Authoritative shape (docs/plan section "Authoritative state
+        model"). recentRequests is deliberately absent -- the idempotency
+        store is self._god_requests, in-memory only, never persisted."""
+        return {
+            "version": GOD_STATE_VERSION,
+            "intervened": False,
+            "nextInterventionSeq": 1,
+            "providence": None,
+            "privateOmens": {},
+            "activeEvents": [],
+            "recentInterventions": [],
+            "recentDivineResponses": [],
+            # Divine Matrix interventions (godState v2) — whisperCampaigns + agentSampling live.
+            "whisperCampaigns": {},
+            "agentSampling": {},  # Phase 2: live per-agent LLM sampling overrides
+            "contextMasks": {},
+            "decisionGates": {},
+            "burningBush": {},
+            "anointments": {},
+            "identityForges": {},
+            "architectZones": [],
+            "checkpoints": [],
+            "decisionDigests": [],
+            "dejaVuReplays": {},
+            "crowdCompulsions": {},
+            "dreamBroadcasts": {},
+        }
+
+    def _normalize_god_state(self, raw):
+        """Conservative restore-time normalizer: never raises, backfills any
+        missing/malformed nested field with its default instead of rejecting
+        the whole structure -- the same setdefault-only back-compat
+        discipline every other phase's restore_state block uses. Never
+        overwrites an already-valid persisted field."""
+        base = self._default_god_state()
+        if not isinstance(raw, dict):
+            return base
+        out = dict(base)
+        if isinstance(raw.get("version"), int):
+            out["version"] = raw["version"]
+        out["intervened"] = bool(raw.get("intervened"))
+        seq = raw.get("nextInterventionSeq")
+        out["nextInterventionSeq"] = seq if isinstance(seq, int) and seq >= 1 else 1
+        # Phase 3: a malformed/incomplete providence or omen record is
+        # dropped (conservative, never raise) rather than kept half-shaped --
+        # a record missing expiresFrame could never expire, and one missing
+        # memoryWritten on an omen could re-fire its memory write on the
+        # very next restore-time expiry sweep.
+        providence = raw.get("providence")
+        out["providence"] = (
+            providence if isinstance(providence, dict)
+            and all(k in providence for k in ("id", "text", "createdFrame", "expiresFrame"))
+            else None
+        )
+        omens_raw = raw.get("privateOmens")
+        omens = {}
+        if isinstance(omens_raw, dict):
+            for k, v in omens_raw.items():
+                if (isinstance(k, str) and isinstance(v, dict)
+                        and all(kk in v for kk in ("id", "targetId", "text", "createdFrame", "expiresFrame"))):
+                    v = dict(v)
+                    v.setdefault("memoryWritten", False)
+                    omens[k] = v
+        out["privateOmens"] = omens
+        events = raw.get("activeEvents")
+        out["activeEvents"] = (
+            [e for e in events if isinstance(e, dict)][:GOD_ACTIVE_EVENTS_CAP]
+            if isinstance(events, list) else []
+        )
+        recent = raw.get("recentInterventions")
+        out["recentInterventions"] = (
+            [r for r in recent if isinstance(r, dict)][-GOD_RECENT_INTERVENTIONS_CAP:]
+            if isinstance(recent, list) else []
+        )
+        divine_responses = raw.get("recentDivineResponses")
+        out["recentDivineResponses"] = (
+            [r for r in divine_responses if isinstance(r, dict)][-GOD_DIVINE_RESPONSE_LOG_MAX:]
+            if isinstance(divine_responses, list) else []
+        )
+        if isinstance(out.get("providence"), dict):
+            out["providence"].setdefault("ackedAgentIds", {})
+        for omen in out.get("privateOmens", {}).values():
+            if isinstance(omen, dict):
+                omen.setdefault("acked", False)
+        # godState v2: Matrix intervention maps — setdefault/backfill; drop malformed
+        # entries conservatively (same discipline as privateOmens above).
+        campaigns_raw = raw.get("whisperCampaigns")
+        campaigns = {}
+        if isinstance(campaigns_raw, dict):
+            for k, v in campaigns_raw.items():
+                if not isinstance(k, str) or not isinstance(v, dict):
+                    continue
+                targets_raw = v.get("targets")
+                if not isinstance(targets_raw, dict):
+                    continue
+                targets = {}
+                for tk, omen_id in targets_raw.items():
+                    if isinstance(tk, (str, int)) and isinstance(omen_id, str) and omen_id.strip():
+                        targets[str(tk)] = omen_id.strip()
+                if not all(kk in v for kk in ("id", "theme", "createdFrame", "expiresFrame")):
+                    continue
+                v = dict(v)
+                v["targets"] = targets
+                v.setdefault("status", "active")
+                campaigns[k] = v
+        out["whisperCampaigns"] = campaigns
+        sampling_raw = raw.get("agentSampling")
+        sampling = {}
+        if isinstance(sampling_raw, dict):
+            for k, v in sampling_raw.items():
+                if not isinstance(k, str) or not isinstance(v, dict):
+                    continue
+                if not all(kk in v for kk in ("id", "targetId", "model", "temperature", "createdFrame")):
+                    continue
+                if v.get("model") not in GOD_AGENT_SAMPLING_MODELS:
+                    continue
+                temp = v.get("temperature")
+                if not isinstance(temp, (int, float)) or not math.isfinite(temp):
+                    continue
+                if not (GOD_AGENT_SAMPLING_TEMP_MIN <= float(temp) <= GOD_AGENT_SAMPLING_TEMP_MAX):
+                    continue
+                sampling[k] = dict(v)
+        out["agentSampling"] = sampling
+        for map_key in ("contextMasks", "decisionGates",
+                        "burningBush", "anointments", "identityForges"):
+            mraw = raw.get(map_key)
+            cleaned = {}
+            if isinstance(mraw, dict):
+                for k, v in mraw.items():
+                    if isinstance(k, str) and isinstance(v, dict):
+                        cleaned[k] = v
+            out[map_key] = cleaned
+        zones_raw = raw.get("architectZones")
+        out["architectZones"] = (
+            [e for e in zones_raw if isinstance(e, dict)] if isinstance(zones_raw, list) else []
+        )
+        checkpoints_raw = raw.get("checkpoints")
+        checkpoints = []
+        if isinstance(checkpoints_raw, list):
+            for e in checkpoints_raw:
+                if not isinstance(e, dict):
+                    continue
+                if not all(k in e for k in ("id", "label", "frameTick", "path", "createdAt")):
+                    continue
+                checkpoints.append(dict(e))
+        out["checkpoints"] = checkpoints
+        digests_raw = raw.get("decisionDigests")
+        digests = []
+        if isinstance(digests_raw, list):
+            for d in digests_raw:
+                if not isinstance(d, dict):
+                    continue
+                agent_id = d.get("agentId")
+                action = d.get("action")
+                frame_tick = d.get("frameTick")
+                if isinstance(agent_id, bool) or not isinstance(agent_id, int):
+                    continue
+                if not isinstance(action, str) or not action.strip():
+                    continue
+                if not isinstance(frame_tick, int):
+                    continue
+                entry = {
+                    "frameTick": frame_tick,
+                    "agentId": agent_id,
+                    "action": action.strip(),
+                }
+                rh = d.get("reasoningHash")
+                if isinstance(rh, str) and rh.strip():
+                    entry["reasoningHash"] = rh.strip()[:16]
+                digests.append(entry)
+        out["decisionDigests"] = digests[-GOD_DECISION_DIGEST_CAP:]
+        replays_raw = raw.get("dejaVuReplays")
+        replays = {}
+        if isinstance(replays_raw, dict):
+            for k, v in replays_raw.items():
+                if not isinstance(k, str) or not isinstance(v, dict):
+                    continue
+                if not all(kk in v for kk in ("id", "targetId", "steps", "currentIndex", "createdFrame")):
+                    continue
+                steps_raw = v.get("steps")
+                if not isinstance(steps_raw, list):
+                    continue
+                steps = []
+                for step in steps_raw:
+                    if not isinstance(step, dict):
+                        continue
+                    if not isinstance(step.get("action"), str) or not step["action"].strip():
+                        continue
+                    if not isinstance(step.get("frameTick"), int):
+                        continue
+                    s = {"frameTick": step["frameTick"], "action": step["action"].strip()}
+                    if isinstance(step.get("reasoningHash"), str) and step["reasoningHash"].strip():
+                        s["reasoningHash"] = step["reasoningHash"].strip()[:16]
+                    steps.append(s)
+                if not steps:
+                    continue
+                v = dict(v)
+                v["steps"] = steps
+                v.setdefault("status", "active")
+                replays[k] = v
+        out["dejaVuReplays"] = replays
+        for map_key in ("crowdCompulsions", "dreamBroadcasts"):
+            mraw = raw.get(map_key)
+            cleaned = {}
+            if isinstance(mraw, dict):
+                for k, v in mraw.items():
+                    if isinstance(k, str) and isinstance(v, dict):
+                        cleaned[k] = v
+            out[map_key] = cleaned
+        return out
+
+    # --- decision digests + Déjà Vu replay (godState v3) ---
+    def _decision_reasoning_hash(self, reasoning):
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            return None
+        return hashlib.sha256(reasoning.strip().encode("utf-8")).hexdigest()[:16]
+
+    def _append_decision_digest(self, agent_id, decision):
+        """Record one applied decision on the bounded digest ring. Lock held."""
+        if not GOD_MODE_ENABLED:
+            return
+        if not isinstance(decision, dict):
+            return
+        action = decision.get("action")
+        if not isinstance(action, str) or not action.strip():
+            return
+        god = self.civilization.setdefault("godState", self._default_god_state())
+        digests = god.get("decisionDigests")
+        if not isinstance(digests, list):
+            digests = []
+            god["decisionDigests"] = digests
+        entry = {
+            "frameTick": self.frameTick,
+            "agentId": agent_id,
+            "action": action.strip(),
+        }
+        rh = self._decision_reasoning_hash(decision.get("reasoning"))
+        if rh:
+            entry["reasoningHash"] = rh
+        digests.append(entry)
+        if len(digests) > GOD_DECISION_DIGEST_CAP:
+            god["decisionDigests"] = digests[-GOD_DECISION_DIGEST_CAP:]
+
+    def _god_agent_digest_steps(self, agent_id, max_steps=None):
+        """Last K digest entries for one agent in chronological order."""
+        if max_steps is None:
+            max_steps = GOD_DEJA_VU_MAX_STEPS
+        max_steps = max(1, min(int(max_steps), GOD_DEJA_VU_MAX_STEPS))
+        god = self.civilization.get("godState") or {}
+        digests = god.get("decisionDigests") or []
+        if not isinstance(digests, list):
+            return []
+        matched = [
+            d for d in digests
+            if isinstance(d, dict) and d.get("agentId") == agent_id
+            and isinstance(d.get("action"), str) and d["action"].strip()
+            and isinstance(d.get("frameTick"), int)
+        ]
+        tail = matched[-max_steps:]
+        steps = []
+        for d in tail:
+            step = {"frameTick": d["frameTick"], "action": d["action"].strip()}
+            if isinstance(d.get("reasoningHash"), str) and d["reasoningHash"].strip():
+                step["reasoningHash"] = d["reasoningHash"].strip()[:16]
+            steps.append(step)
+        return steps
+
+    def _validate_god_deja_vu_replay(self, payload):
+        if not GOD_DEJA_VU_REPLAY:
+            return None, "deja vu replay is not enabled (GOD_DEJA_VU_REPLAY flag off)"
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        max_steps_raw = payload.get("maxSteps")
+        if max_steps_raw is None:
+            max_steps = GOD_DEJA_VU_MAX_STEPS
+        elif isinstance(max_steps_raw, bool) or not isinstance(max_steps_raw, int):
+            return None, "maxSteps must be an integer"
+        else:
+            max_steps = max(1, min(max_steps_raw, GOD_DEJA_VU_MAX_STEPS))
+        replay_steps = self._god_agent_digest_steps(target_id, max_steps)
+        if not replay_steps:
+            return None, "no decision digests for this agent"
+        if self._god_deja_vu_session_total >= GOD_DEJA_VU_SESSION_CAP:
+            return None, (
+                f"deja vu replay session cap ({GOD_DEJA_VU_SESSION_CAP}) reached")
+        if self._god_active_decision_gate_record(target_id) is not None:
+            return None, "agent already has an active decision gate"
+        replays = (self.civilization.get("godState") or {}).get("dejaVuReplays") or {}
+        if isinstance(replays, dict):
+            for rec in replays.values():
+                if (isinstance(rec, dict) and rec.get("status") == "active"
+                        and rec.get("targetId") == target_id):
+                    return None, "agent already has an active deja vu replay"
+        return {
+            "targetId": target_id,
+            "maxSteps": max_steps,
+            "replaySteps": replay_steps,
+        }, None
+
+    def _validate_god_crowd_compulsion(self, payload):
+        theme = None
+        if payload.get("theme") is not None:
+            theme, reason = self._normalize_divine_text(payload.get("theme"))
+            if reason:
+                return None, f"crowd_compulsion theme {reason}"
+        targets_raw = payload.get("targets")
+        if not isinstance(targets_raw, list) or not targets_raw:
+            return None, "targets must be a non-empty list"
+        if len(targets_raw) > GOD_CROWD_COMPULSION_MAX_TARGETS:
+            return None, (
+                f"targets may include at most {GOD_CROWD_COMPULSION_MAX_TARGETS} agents")
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        remaining = payload.get("remainingTurns")
+        if remaining is not None:
+            if isinstance(remaining, bool) or not isinstance(remaining, int):
+                return None, "remainingTurns must be an integer"
+            if remaining <= 0:
+                return None, "remainingTurns must be positive"
+        if duration_raw is None and remaining is None:
+            return None, "at least one of durationFrames or remainingTurns is required"
+        duration = self._clamp_god_duration(duration_raw) if duration_raw is not None else None
+        seen_targets = set()
+        targets = []
+        for idx, entry in enumerate(targets_raw):
+            if not isinstance(entry, dict):
+                return None, f"targets[{idx}] must be an object"
+            target_id = entry.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, f"targets[{idx}].targetId must be an integer agent id"
+            if target_id in seen_targets:
+                return None, "duplicate targetId in targets"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, f"targets[{idx}]: unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, f"targets[{idx}]: target agent is deceased"
+            pinned, reason = self._validate_god_pinned_decision_fields(
+                agent, entry.get("pinnedDecision"))
+            if reason:
+                return None, reason
+            seen_targets.add(target_id)
+            targets.append({"targetId": target_id, "pinnedDecision": pinned})
+        normalized = {"targets": targets}
+        if theme is not None:
+            normalized["theme"] = theme
+        if duration is not None:
+            normalized["durationFrames"] = duration
+        if remaining is not None:
+            normalized["remainingTurns"] = remaining
+        return normalized, None
+
+    def _validate_god_dream_broadcast(self, payload):
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is None or isinstance(duration_raw, bool) or not isinstance(
+                duration_raw, int):
+            return None, "durationFrames is required and must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+        snapshot, reason = self._validate_god_dream_snapshot(payload.get("dreamSnapshot"))
+        if reason:
+            return None, reason
+        target_ids_raw = payload.get("targetIds")
+        if not isinstance(target_ids_raw, list) or not target_ids_raw:
+            return None, "targetIds must be a non-empty list"
+        if len(target_ids_raw) > GOD_DREAM_BROADCAST_MAX_TARGETS:
+            return None, (
+                f"targetIds may include at most {GOD_DREAM_BROADCAST_MAX_TARGETS} agents")
+        seen_targets = set()
+        target_ids = []
+        for idx, target_id in enumerate(target_ids_raw):
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, f"targetIds[{idx}] must be an integer agent id"
+            if target_id in seen_targets:
+                return None, "duplicate targetId in targetIds"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, f"targetIds[{idx}]: unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, f"targetIds[{idx}]: target agent is deceased"
+            seen_targets.add(target_id)
+            target_ids.append(target_id)
+        return {
+            "durationFrames": duration,
+            "dreamSnapshot": snapshot,
+            "targetIds": target_ids,
+        }, None
+
+    def _spawn_deja_vu_compulsion_step(self, parent):
+        """Start the compulsion gate for parent.currentIndex. Lock held."""
+        idx = int(parent.get("currentIndex") or 0)
+        steps = parent.get("steps") or []
+        if idx >= len(steps):
+            self._finalize_deja_vu_replay(parent.get("id"), "completed")
+            return None
+        step = steps[idx]
+        action = step.get("action")
+        if not isinstance(action, str) or not action.strip():
+            self._finalize_deja_vu_replay(parent.get("id"), "failed")
+            return None
+        target_id = parent.get("targetId")
+        intervention_id = self._next_intervention_id()
+        remaining_steps = max(1, len(steps) - idx)
+        expires_frame = self.frameTick + (
+            GOD_GUIDANCE_DEFAULT_DURATION_FRAMES * remaining_steps)
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": "compulsion",
+            "pinnedDecision": {
+                "action": action.strip(),
+                "reasoning": "Déjà vu replay.",
+            },
+            "remainingTurns": 1,
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "dejaVuReplayId": parent.get("id"),
+            "dejaVuStepIndex": idx,
+        }
+        parent["currentGateId"] = intervention_id
+        return self._god_set_decision_gate(target_id, record, "decision_compulsion")
+
+    def _advance_deja_vu_after_step(self, replay_id, completed_index):
+        god = self.civilization.get("godState") or {}
+        replays = god.get("dejaVuReplays") or {}
+        parent = replays.get(replay_id) if isinstance(replays, dict) else None
+        if not isinstance(parent, dict) or parent.get("status") != "active":
+            return
+        if int(parent.get("currentIndex") or 0) != int(completed_index):
+            return
+        parent["currentIndex"] = int(completed_index) + 1
+        if parent["currentIndex"] >= len(parent.get("steps") or []):
+            self._finalize_deja_vu_replay(replay_id, "completed")
+        else:
+            self._spawn_deja_vu_compulsion_step(parent)
+
+    def _finalize_deja_vu_replay(self, replay_id, status):
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        replays = god.get("dejaVuReplays")
+        if not isinstance(replays, dict):
+            return None
+        parent = replays.pop(replay_id, None)
+        if not isinstance(parent, dict):
+            return None
+        parent["status"] = status
+        self._log_divine(replay_id, None, "deja_vu_replay", parent,
+                         {"status": status, "stepCount": len(parent.get("steps") or [])},
+                         status, public=False)
+        return parent
+
+    def _close_deja_vu_replay(self, replay_id, status):
+        """Cancel a replay parent and any in-flight gate. Lock held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        replays = god.get("dejaVuReplays")
+        parent = replays.get(replay_id) if isinstance(replays, dict) else None
+        if not isinstance(parent, dict):
+            return None
+        target_id = parent.get("targetId")
+        gates = god.get("decisionGates") or {}
+        gate = gates.get(str(target_id)) if target_id is not None else None
+        if isinstance(gate, dict) and gate.get("dejaVuReplayId") == replay_id:
+            self._close_decision_gate(str(target_id), "cancelled")
+        return self._finalize_deja_vu_replay(replay_id, status)
+
+    def _god_apply_deja_vu_replay(self, payload):
+        replay_id = self._next_intervention_id()
+        target_id = payload["targetId"]
+        steps = copy.deepcopy(payload["replaySteps"])
+        parent = {
+            "id": replay_id,
+            "targetId": target_id,
+            "steps": steps,
+            "currentIndex": 0,
+            "status": "active",
+            "createdFrame": self.frameTick,
+        }
+        god = self.civilization["godState"]
+        god.setdefault("dejaVuReplays", {})[replay_id] = parent
+        self._god_deja_vu_session_total += 1
+        gate_result = self._spawn_deja_vu_compulsion_step(parent)
+        agent = self._find_agent_by_id(target_id)
+        self._god_record_intervention({
+            "id": replay_id, "kind": "deja_vu_replay", "frameTick": self.frameTick,
+            "targetId": target_id, "stepCount": len(steps),
+            "maxSteps": payload.get("maxSteps"), "status": "applied", "public": False,
+        })
+        self._log_divine(replay_id, None, "deja_vu_replay", payload,
+                         {"targetId": target_id, "stepCount": len(steps)},
+                         "applied", public=False)
+        return {
+            "interventionId": replay_id,
+            "kind": "deja_vu_replay",
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "stepCount": len(steps),
+            "firstGateId": (gate_result or {}).get("interventionId"),
+        }
+
+    # --- stored-text contract ---
+    def _normalize_divine_text(self, raw, max_chars=GOD_TEXT_MAX_CHARS, max_bytes=GOD_TEXT_MAX_BYTES):
+        """Single normalizer used by every divine text field (docs/plan
+        section "Stored-content safety"): Unicode NFC, reject NUL and C0/C1
+        controls other than ordinary space, reject embedded newlines, enforce
+        char AND UTF-8-byte limits post-normalization, return plain text --
+        never HTML. Returns (normalized_text, None) on success or
+        (None, reason) on rejection; `reason` is short and secret-free (safe
+        to return over HTTP / write to divine.jsonl)."""
+        if not isinstance(raw, str):
+            return None, "must be a string"
+        normalized = unicodedata.normalize("NFC", raw)
+        for ch in normalized:
+            cp = ord(ch)
+            if ch in ("\n", "\r"):
+                return None, "must not contain newlines"
+            if cp == 0 or cp < 0x20 or 0x7F <= cp <= 0x9F:
+                return None, "must not contain NUL or control characters"
+        normalized = normalized.strip()
+        if not normalized:
+            return None, "must not be empty"
+        if len(normalized) > max_chars:
+            return None, f"exceeds {max_chars} characters"
+        if len(normalized.encode("utf-8")) > max_bytes:
+            return None, f"exceeds {max_bytes} bytes"
+        return normalized, None
+
+    def _normalize_god_presentation(self, raw):
+        """Cosmetic stage direction for public Voice commands only.
+        Returns (canonical_value, None) where canonical_value is 'soft' or
+        'thunder', or (None, reason) on rejection. Omitted/empty/'soft' →
+        'soft'."""
+        if raw is None or raw == "":
+            return "soft", None
+        if not isinstance(raw, str):
+            return None, "presentation must be 'soft' or 'thunder'"
+        val = raw.strip().lower()
+        if val in ("soft", "thunder"):
+            return val, None
+        return None, "presentation must be 'soft' or 'thunder'"
+
+    def _god_presentation_payload_field(self, presentation):
+        """Emit presentation in normalized payload only when thunder."""
+        if presentation == "thunder":
+            return {"presentation": "thunder"}
+        return {}
+
+    # --- command envelope ---
+    # Kinds already named in the v2 catalog (docs/plan) that this phase still
+    # does not implement -- validated far enough to be rejected cleanly
+    # rather than falling into the generic "unknown kind" branch. Phase 4
+    # implements agent_vitals/grant_resource/structure_condition (removed
+    # below); story_event (Phase 5, timed/composite) remains deferred.
+    _GOD_FUTURE_KINDS = frozenset()
+
+    # --- Sovereign God mode Phase 5: storyteller events ---
+    _GOD_PRIMITIVE_KINDS = ("agent_vitals", "grant_resource", "structure_condition")
+
+    def _god_active_event_holding_key(self, key, exclude_id=None):
+        """The currently-active activeEvents record that carries `key` in
+        its modifiers, or None if the key is unoccupied. Shared by the
+        one-value-per-key conflict check (both preview time and apply-time
+        revalidation re-run this against CURRENT state) and by
+        _divine_modifier's read side staying consistent with what
+        "occupied" means."""
+        god = self.civilization.get("godState") or {}
+        for event in god.get("activeEvents") or []:
+            if not isinstance(event, dict) or event.get("status") != "active":
+                continue
+            if exclude_id is not None and event.get("id") == exclude_id:
+                continue
+            modifiers = event.get("modifiers")
+            if isinstance(modifiers, dict) and key in modifiers:
+                return event
+        return None
+
+    def _validate_god_story_event(self, payload):
+        """Validate + canonicalize a story_event command. NO mutation.
+        Atomic by construction: every sub-component (title, narration,
+        visibility/target, duration, modifiers, primitives, providence,
+        replaceEffectId conflict check) is validated here before anything is
+        accepted; a single invalid component rejects the WHOLE envelope, so
+        god_apply's revalidate-then-apply sequence can never partially
+        apply a story event."""
+        title, reason = self._normalize_divine_text(payload.get("title"), max_chars=GOD_EVENT_TITLE_MAX_CHARS)
+        if reason:
+            return None, f"story_event title {reason}"
+        narration, reason = self._normalize_divine_text(payload.get("narration"))
+        if reason:
+            return None, f"story_event narration {reason}"
+
+        visibility = payload.get("visibility", "public")
+        if visibility not in ("public", "private"):
+            return None, 'visibility must be "public" or "private"'
+        target_id = None
+        if visibility == "private":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id for a private story_event"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+
+        replace_effect_id = payload.get("replaceEffectId")
+        if replace_effect_id is not None and (
+            not isinstance(replace_effect_id, str) or not replace_effect_id.strip()
+        ):
+            return None, "replaceEffectId must be a non-empty string"
+        if isinstance(replace_effect_id, str):
+            replace_effect_id = replace_effect_id.strip()
+            replaced_event = next(
+                (e for e in (self.civilization.get("godState") or {}).get("activeEvents") or []
+                 if isinstance(e, dict) and e.get("id") == replace_effect_id
+                 and e.get("status") == "active"), None)
+            if replaced_event is None:
+                return None, "replaceEffectId does not name an active event"
+
+        modifiers_raw = payload.get("modifiers")
+        modifiers = {}
+        if modifiers_raw is not None:
+            if not isinstance(modifiers_raw, dict):
+                return None, "modifiers must be an object"
+            if len(modifiers_raw) > GOD_STORY_EVENT_MAX_MODIFIERS:
+                return None, f"modifiers may name at most {GOD_STORY_EVENT_MAX_MODIFIERS} keys"
+            for mkey, mvalue in modifiers_raw.items():
+                if mkey not in GOD_MODIFIER_RANGES:
+                    return None, f"unknown modifier key '{mkey}'"
+                if isinstance(mvalue, bool) or not isinstance(mvalue, (int, float)):
+                    return None, f"modifier '{mkey}' must be a number"
+                if not math.isfinite(mvalue):
+                    return None, f"modifier '{mkey}' must be finite"
+                lo, hi = GOD_MODIFIER_RANGES[mkey]
+                if not (lo <= mvalue <= hi):
+                    return None, f"modifier '{mkey}' must be between {lo} and {hi}"
+                # One active value per key: reject an occupied key unless
+                # replaceEffectId names the event that holds it.
+                holder = self._god_active_event_holding_key(mkey)
+                if holder is not None and holder.get("id") != replace_effect_id:
+                    return None, (f"modifier '{mkey}' already has an active effect "
+                                  f"(id {holder.get('id')}) -- supply replaceEffectId to replace it")
+                modifiers[mkey] = float(mvalue)
+
+        primitives_raw = payload.get("primitives")
+        primitives = []
+        if primitives_raw is not None:
+            if not isinstance(primitives_raw, list):
+                return None, "primitives must be a list"
+            if len(primitives_raw) > GOD_STORY_EVENT_MAX_PRIMITIVES:
+                return None, f"primitives may contain at most {GOD_STORY_EVENT_MAX_PRIMITIVES} entries"
+            for prim in primitives_raw:
+                if not isinstance(prim, dict):
+                    return None, "each primitive must be an object"
+                prim_kind = prim.get("kind")
+                if prim_kind not in self._GOD_PRIMITIVE_KINDS:
+                    return None, f"primitive kind must be one of {self._GOD_PRIMITIVE_KINDS}"
+                prim_normalized, prim_reason = self._validate_god_envelope(
+                    {"kind": prim_kind, "payload": prim.get("payload") or {}})
+                if prim_reason:
+                    return None, f"primitive '{prim_kind}': {prim_reason}"
+                primitives.append(prim_normalized)
+
+        providence_raw = payload.get("providence")
+        providence_payload = None
+        if providence_raw is not None:
+            if not isinstance(providence_raw, dict):
+                return None, "providence must be an object"
+            prov_text, reason = self._normalize_divine_text(providence_raw.get("text"))
+            if reason:
+                return None, f"story_event providence text {reason}"
+            providence_payload = {"text": prov_text}
+
+        return {
+            "kind": "story_event",
+            "payload": {
+                "title": title, "narration": narration,
+                "visibility": visibility, "targetId": target_id,
+                "durationFrames": duration,
+                "modifiers": modifiers, "primitives": primitives,
+                "providence": providence_payload,
+                "replaceEffectId": replace_effect_id,
+            },
+        }, None
+
+    def _clamp_god_duration(self, raw):
+        """Sovereign God mode (Phase 3): silently clamp a caller-supplied
+        durationFrames into range, or fall back to the default when omitted
+        -- the plan's preview contract clamps rather than rejects in-range
+        violations. `raw` has already been type-checked (int, not bool) by
+        the caller when not None."""
+        if raw is None:
+            return GOD_GUIDANCE_DEFAULT_DURATION_FRAMES
+        return max(GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                   min(GOD_GUIDANCE_MAX_DURATION_FRAMES, raw))
+
+    # --- Divine Matrix Phase 2: per-agent sampling overlay ---
+    def _god_sampling_optional_float(self, raw, label, lo, hi):
+        if raw is None:
+            return None, None
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            return None, f"{label} must be a number"
+        if not math.isfinite(raw):
+            return None, f"{label} must be finite"
+        val = float(raw)
+        if not (lo <= val <= hi):
+            return None, f"{label} must be between {lo} and {hi}"
+        return val, None
+
+    def _god_sampling_optional_int(self, raw, label, lo, hi):
+        if raw is None:
+            return None, None
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            return None, f"{label} must be an integer"
+        if not (lo <= raw <= hi):
+            return None, f"{label} must be between {lo} and {hi}"
+        return raw, None
+
+    def _god_active_agent_sampling_record(self, agent_id):
+        """Active sampling override for agent_id, or None if absent/expired."""
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("agentSampling") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        agent = self._find_agent_by_id(agent_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return None
+        return rec
+
+    def _god_fast_sampling_override_count(self, exclude_target_id=None):
+        """Living agents with an active sim-fast decision override, optionally
+        excluding one target (replace semantics for the fast-route cap)."""
+        god = self.civilization.get("godState") or {}
+        sampling = god.get("agentSampling") or {}
+        count = 0
+        if not isinstance(sampling, dict):
+            return 0
+        exclude_key = str(exclude_target_id) if exclude_target_id is not None else None
+        for key, rec in sampling.items():
+            if exclude_key is not None and key == exclude_key:
+                continue
+            if not isinstance(rec, dict) or rec.get("model") != "sim-fast":
+                continue
+            expires = rec.get("expiresFrame")
+            if isinstance(expires, int) and self.frameTick >= expires:
+                continue
+            agent = self._find_agent_by_id(rec.get("targetId"))
+            if agent is None or agent.get("deathFrame") is not None:
+                continue
+            count += 1
+        return count
+
+    def _validate_god_agent_sampling(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+
+        model = payload.get("model", "sim-smart")
+        if not isinstance(model, str):
+            return None, "model must be a string"
+        model = model.strip()
+        if model not in GOD_AGENT_SAMPLING_MODELS:
+            return None, 'model must be "sim-smart" or "sim-fast"'
+
+        temperature, reason = self._god_sampling_optional_float(
+            payload.get("temperature"), "temperature",
+            GOD_AGENT_SAMPLING_TEMP_MIN, GOD_AGENT_SAMPLING_TEMP_MAX)
+        if reason:
+            return None, reason
+        if temperature is None:
+            return None, "temperature is required"
+
+        top_p, reason = self._god_sampling_optional_float(
+            payload.get("top_p"), "top_p",
+            GOD_AGENT_SAMPLING_TOP_P_MIN, GOD_AGENT_SAMPLING_TOP_P_MAX)
+        if reason:
+            return None, reason
+        top_k, reason = self._god_sampling_optional_int(
+            payload.get("top_k"), "top_k",
+            GOD_AGENT_SAMPLING_TOP_K_MIN, GOD_AGENT_SAMPLING_TOP_K_MAX)
+        if reason:
+            return None, reason
+        min_p, reason = self._god_sampling_optional_float(
+            payload.get("min_p"), "min_p",
+            GOD_AGENT_SAMPLING_MIN_P_MIN, GOD_AGENT_SAMPLING_MIN_P_MAX)
+        if reason:
+            return None, reason
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None:
+            if isinstance(duration_raw, bool) or not isinstance(duration_raw, int):
+                return None, "durationFrames must be an integer"
+
+        if model == "sim-fast":
+            if (self._god_fast_sampling_override_count(exclude_target_id=target_id)
+                    >= GOD_AGENT_SAMPLING_FAST_DECISION_CAP):
+                return None, (
+                    f"at most {GOD_AGENT_SAMPLING_FAST_DECISION_CAP} living agent may "
+                    "use sim-fast for decisions at once")
+
+        normalized = {
+            "targetId": target_id,
+            "model": model,
+            "temperature": temperature,
+        }
+        if top_p is not None:
+            normalized["top_p"] = top_p
+        if top_k is not None:
+            normalized["top_k"] = top_k
+        if min_p is not None:
+            normalized["min_p"] = min_p
+        if duration_raw is not None:
+            normalized["durationFrames"] = self._clamp_god_duration(duration_raw)
+        return normalized, None
+
+    def _god_divine_sampling_for_think(self, agent):
+        """Think-payload overlay for build_decision_payload; no secrets."""
+        if not GOD_MODE_ENABLED:
+            return None
+        rec = self._god_active_agent_sampling_record(agent["id"])
+        if rec is None:
+            return None
+        out = {"model": rec["model"], "temperature": rec["temperature"]}
+        for key in ("top_p", "top_k", "min_p"):
+            if key in rec:
+                out[key] = rec[key]
+        return out
+
+    def _god_active_context_mask_record(self, agent_id):
+        """Active context mask for agent_id, or None if absent/expired."""
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("contextMasks") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        agent = self._find_agent_by_id(agent_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return None
+        return rec
+
+    def _god_current_outgoing_context_mask_id(self, target_id):
+        rec = (self.civilization.get("godState") or {}).get("contextMasks", {}).get(str(target_id))
+        return rec.get("id") if isinstance(rec, dict) else None
+
+    def _validate_god_dream_snapshot(self, raw):
+        if not isinstance(raw, dict) or not raw:
+            return None, "dreamSnapshot must be a non-empty object"
+        unknown = set(raw.keys()) - GOD_CONTEXT_MASK_DREAM_KEYS
+        if unknown:
+            return None, f"dreamSnapshot has unknown keys: {sorted(unknown)}"
+        out = {}
+        for key, val in raw.items():
+            if key == "nearby_agents":
+                if not isinstance(val, list):
+                    return None, "dreamSnapshot.nearby_agents must be a list"
+                out[key] = [dict(e) if isinstance(e, dict) else e for e in val]
+            elif key == "resources":
+                if not isinstance(val, dict):
+                    return None, "dreamSnapshot.resources must be an object"
+                out[key] = {str(k): v for k, v in val.items()}
+            elif key == "nearby_wildlife":
+                if not isinstance(val, list):
+                    return None, "dreamSnapshot.nearby_wildlife must be a list"
+                out[key] = [dict(e) if isinstance(e, dict) else e for e in val]
+            elif key in ("weather_line", "recent_conversations", "district_stocks",
+                           "nearby_wildlife_line"):
+                if val is not None and not isinstance(val, str):
+                    return None, f"dreamSnapshot.{key} must be a string or null"
+                if isinstance(val, str):
+                    text, reason = self._normalize_divine_text(
+                        val, max_chars=GOD_TEXT_MAX_CHARS * 2, max_bytes=GOD_TEXT_MAX_BYTES * 2)
+                    if reason:
+                        return None, f"dreamSnapshot.{key} {reason}"
+                    out[key] = text
+                else:
+                    out[key] = val
+            elif key in ("hunger", "health"):
+                if isinstance(val, bool) or not isinstance(val, (int, float)):
+                    return None, f"dreamSnapshot.{key} must be a number"
+                if not math.isfinite(val):
+                    return None, f"dreamSnapshot.{key} must be finite"
+                out[key] = float(val)
+        return out, None
+
+    def _validate_god_forged_conversations(self, raw):
+        if not isinstance(raw, list) or not raw:
+            return None, "forgedConversations must be a non-empty list"
+        if len(raw) > GOD_CONTEXT_MASK_FORGED_MAX:
+            return None, (
+                f"forgedConversations may include at most {GOD_CONTEXT_MASK_FORGED_MAX} entries")
+        out = []
+        for idx, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                return None, f"forgedConversations[{idx}] must be an object"
+            frm = entry.get("from")
+            to = entry.get("to")
+            if not isinstance(frm, str) or not frm.strip():
+                return None, f"forgedConversations[{idx}].from must be a non-empty string"
+            if not isinstance(to, str) or not to.strip():
+                return None, f"forgedConversations[{idx}].to must be a non-empty string"
+            msg, reason = self._normalize_divine_text(entry.get("message"))
+            if reason:
+                return None, f"forgedConversations[{idx}].message {reason}"
+            out.append({"from": frm.strip(), "to": to.strip(), "message": msg})
+        return out, None
+
+    def _validate_god_context_mask(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        mode = payload.get("mode")
+        if not isinstance(mode, str) or mode not in GOD_CONTEXT_MASK_MODES:
+            return None, 'mode must be one of "dream", "blue_pill", "red_pill", "whisper_chain"'
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+        normalized = {"targetId": target_id, "mode": mode, "durationFrames": duration}
+        if mode == "dream":
+            snapshot, reason = self._validate_god_dream_snapshot(payload.get("dreamSnapshot"))
+            if reason:
+                return None, reason
+            normalized["dreamSnapshot"] = snapshot
+        elif mode == "whisper_chain":
+            forged, reason = self._validate_god_forged_conversations(
+                payload.get("forgedConversations"))
+            if reason:
+                return None, reason
+            normalized["forgedConversations"] = forged
+        return normalized, None
+
+    def _validate_god_pinned_decision_fields(self, agent, raw, label="pinnedDecision"):
+        if not isinstance(raw, dict):
+            return None, f"{label} must be an object"
+        normalized, reason = self._god_normalize_pinned_decision(agent, raw)
+        if reason:
+            return None, f"{label} {reason}"
+        return normalized, None
+
+    def _validate_god_decision_compulsion(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        pinned, reason = self._validate_god_pinned_decision_fields(
+            agent, payload.get("pinnedDecision"))
+        if reason:
+            return None, reason
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        remaining = payload.get("remainingTurns")
+        if remaining is not None:
+            if isinstance(remaining, bool) or not isinstance(remaining, int):
+                return None, "remainingTurns must be an integer"
+            if remaining <= 0:
+                return None, "remainingTurns must be positive"
+        if duration_raw is None and remaining is None:
+            return None, "at least one of durationFrames or remainingTurns is required"
+        normalized = {
+            "targetId": target_id,
+            "pinnedDecision": pinned,
+        }
+        if duration_raw is not None:
+            normalized["durationFrames"] = self._clamp_god_duration(duration_raw)
+        if remaining is not None:
+            normalized["remainingTurns"] = remaining
+        return normalized, None
+
+    def _validate_god_decision_veto_arm(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+        return {"targetId": target_id, "durationFrames": duration}, None
+
+    def _validate_god_decision_veto_resolve(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        resolution = payload.get("resolution")
+        if resolution not in ("approve", "reject", "rewrite"):
+            return None, 'resolution must be "approve", "reject", or "rewrite"'
+        gate = self._god_active_decision_gate_record(target_id)
+        if gate is None or gate.get("mode") != "veto" or gate.get("status") != "holding":
+            return None, "no pending veto hold for this agent"
+        normalized = {"targetId": target_id, "resolution": resolution}
+        if resolution == "rewrite":
+            rewritten, reason = self._validate_god_pinned_decision_fields(
+                agent, payload.get("rewrittenDecision"), label="rewrittenDecision")
+            if reason:
+                return None, reason
+            normalized["rewrittenDecision"] = rewritten
+        return normalized, None
+
+    def _validate_god_agent_possession(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+        queue_raw = payload.get("queue")
+        pinned_raw = payload.get("pinnedDecision")
+        if queue_raw is not None:
+            if not isinstance(queue_raw, list) or not queue_raw:
+                return None, "queue must be a non-empty list"
+            if len(queue_raw) > 8:
+                return None, "queue may include at most 8 decisions"
+            queue = []
+            for idx, entry in enumerate(queue_raw):
+                norm, reason = self._validate_god_pinned_decision_fields(
+                    agent, entry, label=f"queue[{idx}]")
+                if reason:
+                    return None, reason
+                queue.append(norm)
+            return {
+                "targetId": target_id,
+                "queue": queue,
+                "durationFrames": duration,
+            }, None
+        if pinned_raw is None:
+            return None, "pinnedDecision or queue is required"
+        pinned, reason = self._validate_god_pinned_decision_fields(agent, pinned_raw)
+        if reason:
+            return None, reason
+        return {
+            "targetId": target_id,
+            "pinnedDecision": pinned,
+            "durationFrames": duration,
+        }, None
+
+    def _validate_god_revoke_decision_gate(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        gate = (self.civilization.get("godState") or {}).get("decisionGates", {}).get(str(target_id))
+        if not isinstance(gate, dict):
+            return None, "no active decision gate for this agent"
+        return {"targetId": target_id}, None
+
+    def _normalize_stigmata_tag(self, raw):
+        """Short public tag for stigmata (neighbor-visible, not destiny)."""
+        if not isinstance(raw, str):
+            return None, "must be a string"
+        text, reason = self._normalize_divine_text(
+            raw, max_chars=GOD_ANOINT_STIGMATA_TAG_MAX_CHARS,
+            max_bytes=GOD_ANOINT_STIGMATA_TAG_MAX_CHARS * 3)
+        return text, reason
+
+    def _validate_god_anoint(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+
+        destiny, reason = self._normalize_divine_text(payload.get("destinyText"))
+        if reason:
+            return None, f"destinyText {reason}"
+
+        stigmata_raw = payload.get("stigmataTags")
+        stigmata_tags = []
+        if stigmata_raw is not None:
+            if not isinstance(stigmata_raw, list):
+                return None, "stigmataTags must be an array"
+            if len(stigmata_raw) > GOD_ANOINT_STIGMATA_MAX:
+                return None, f"stigmataTags may have at most {GOD_ANOINT_STIGMATA_MAX} entries"
+            for i, tag_raw in enumerate(stigmata_raw):
+                tag, tag_reason = self._normalize_stigmata_tag(tag_raw)
+                if tag_reason:
+                    return None, f"stigmataTags[{i}] {tag_reason}"
+                if tag:
+                    stigmata_tags.append(tag)
+
+        hints_raw = payload.get("oracleHints")
+        oracle_hints = []
+        if hints_raw is not None:
+            if not isinstance(hints_raw, list):
+                return None, "oracleHints must be an array"
+            if len(hints_raw) > GOD_ANOINT_ORACLE_HINTS_MAX:
+                return None, (f"oracleHints may have at most "
+                              f"{GOD_ANOINT_ORACLE_HINTS_MAX} entries")
+            for i, hint_raw in enumerate(hints_raw):
+                if not isinstance(hint_raw, dict):
+                    return None, f"oracleHints[{i}] must be an object"
+                reveal = hint_raw.get("revealFrame")
+                if isinstance(reveal, bool) or not isinstance(reveal, int) or reveal < 0:
+                    return None, f"oracleHints[{i}].revealFrame must be a non-negative integer"
+                text, text_reason = self._normalize_divine_text(hint_raw.get("text"))
+                if text_reason:
+                    return None, f"oracleHints[{i}].text {text_reason}"
+                oracle_hints.append({"text": text, "revealFrame": reveal})
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None:
+            if isinstance(duration_raw, bool) or not isinstance(duration_raw, int):
+                return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+
+        normalized = {
+            "targetId": target_id,
+            "destinyText": destiny,
+            "stigmataTags": stigmata_tags,
+            "oracleHints": oracle_hints,
+            "durationFrames": duration,
+        }
+        return normalized, None
+
+    def _validate_god_identity_edit(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+
+        persona = None
+        if payload.get("persona") is not None:
+            persona, reason = self._normalize_divine_text(
+                payload.get("persona"),
+                max_chars=GOD_IDENTITY_PERSONA_MAX_CHARS,
+                max_bytes=GOD_IDENTITY_PERSONA_MAX_CHARS * 3,
+            )
+            if reason:
+                return None, f"persona {reason}"
+
+        personality = None
+        if payload.get("personality") is not None:
+            personality, reason = self._normalize_divine_text(
+                payload.get("personality"),
+                max_chars=GOD_IDENTITY_PERSONALITY_MAX_CHARS,
+                max_bytes=GOD_TEXT_MAX_BYTES,
+            )
+            if reason:
+                return None, f"personality {reason}"
+
+        role = None
+        if payload.get("role") is not None:
+            if not isinstance(payload.get("role"), str) or not payload.get("role").strip():
+                return None, "role must be a non-empty string"
+            role = payload.get("role").strip()
+            if not self._god_role_valid(role):
+                return None, "role must exist in roles.json"
+
+        if persona is None and personality is None and role is None:
+            return None, "at least one of persona, personality, or role is required"
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None:
+            if isinstance(duration_raw, bool) or not isinstance(duration_raw, int):
+                return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw) if duration_raw is not None else None
+
+        normalized = {"targetId": target_id}
+        if persona is not None:
+            normalized["persona"] = persona
+        if personality is not None:
+            normalized["personality"] = personality
+        if role is not None:
+            normalized["role"] = role
+        if duration is not None:
+            normalized["durationFrames"] = duration
+        return normalized, None
+
+    def _validate_god_identity_copy_overwrite(self, payload):
+        target_id = payload.get("targetId")
+        source_id = payload.get("sourceId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        if isinstance(source_id, bool) or not isinstance(source_id, int):
+            return None, "sourceId must be an integer agent id"
+        if target_id == source_id:
+            return None, "targetId and sourceId must differ"
+        target = self._find_agent_by_id(target_id)
+        if target is None:
+            return None, "unknown target agent"
+        if target.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        source = self._find_agent_by_id(source_id)
+        if source is None:
+            return None, "unknown source agent"
+        if source.get("deathFrame") is not None:
+            return None, "source agent is deceased"
+        rate_raw = payload.get("ratePerThink")
+        if isinstance(rate_raw, bool) or not isinstance(rate_raw, (int, float)):
+            return None, "ratePerThink must be a number"
+        if not math.isfinite(rate_raw):
+            return None, "ratePerThink must be finite"
+        rate = max(0.0, min(1.0, float(rate_raw)))
+        sync_raw = payload.get("syncMemories")
+        if sync_raw is not None and not isinstance(sync_raw, bool):
+            return None, "syncMemories must be a boolean"
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None:
+            if isinstance(duration_raw, bool) or not isinstance(duration_raw, int):
+                return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw) if duration_raw is not None else None
+        normalized = {
+            "targetId": target_id,
+            "sourceId": source_id,
+            "ratePerThink": rate,
+            "syncMemories": bool(sync_raw),
+        }
+        if duration is not None:
+            normalized["durationFrames"] = duration
+        return normalized, None
+
+    def _validate_god_bargain_predicate(self, raw, target_id, label="predicate"):
+        """Validate one allowlisted bargain predicate. Returns (normalized, reason)."""
+        if not isinstance(raw, dict):
+            return None, f"{label} must be an object"
+        kind = raw.get("kind")
+        if not isinstance(kind, str) or kind not in GOD_BARGAIN_PREDICATES:
+            return None, (f"{label}.kind must be one of "
+                          f"{sorted(GOD_BARGAIN_PREDICATES)}")
+        if kind == "agent_has_resource":
+            resource_id = raw.get("resourceId")
+            if not isinstance(resource_id, str) or not resource_id.strip():
+                return None, f"{label}.resourceId is required"
+            resource_id = resource_id.strip()
+            if resource_id not in self.civilization.get("resourceRegistry", {}):
+                return None, f"{label}.resourceId is unknown"
+            amount = raw.get("amount", 1)
+            if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+                return None, f"{label}.amount must be a positive integer"
+            return {"kind": kind, "resourceId": resource_id, "amount": amount}, None
+        if kind == "structure_built":
+            structure_type = raw.get("structureType")
+            if not isinstance(structure_type, str) or not structure_type.strip():
+                return None, f"{label}.structureType is required"
+            structure_type = structure_type.strip()
+            registry = self.civilization.get("projectRegistry") or {}
+            if structure_type not in registry:
+                return None, f"{label}.structureType is unknown"
+            return {"kind": kind, "structureType": structure_type}, None
+        if kind == "frame_reached":
+            frame = raw.get("frame")
+            if isinstance(frame, bool) or not isinstance(frame, int) or frame < 0:
+                return None, f"{label}.frame must be a non-negative integer"
+            return {"kind": kind, "frame": frame}, None
+        if kind == "agent_health_below":
+            threshold = raw.get("threshold")
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                return None, f"{label}.threshold must be a number"
+            if not math.isfinite(threshold):
+                return None, f"{label}.threshold must be finite"
+            threshold = float(threshold)
+            if not (0.0 <= threshold <= 100.0):
+                return None, f"{label}.threshold must be between 0 and 100"
+            return {"kind": kind, "threshold": threshold}, None
+        return None, f"unknown {label} kind"
+
+    def _validate_god_bargain_primitive(self, raw, label):
+        if raw is None:
+            return None, None
+        if not isinstance(raw, dict):
+            return None, f"{label} must be an object"
+        kind = raw.get("kind")
+        if kind not in GOD_BARGAIN_PRIMITIVE_KINDS:
+            return None, (f"{label}.kind must be one of "
+                          f"{sorted(GOD_BARGAIN_PRIMITIVE_KINDS)}")
+        prim_normalized, reason = self._validate_god_envelope(
+            {"kind": kind, "payload": raw.get("payload") or {}})
+        if reason:
+            return None, f"{label}: {reason}"
+        return {"kind": kind, "payload": prim_normalized["payload"]}, None
+
+    def _validate_god_merovingian_bargain(self, payload):
+        target_id = payload.get("targetId")
+        if isinstance(target_id, bool) or not isinstance(target_id, int):
+            return None, "targetId must be an integer agent id"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        if agent.get("deathFrame") is not None:
+            return None, "target agent is deceased"
+        terms_text, reason = self._normalize_divine_text(payload.get("termsText"))
+        if reason:
+            return None, f"merovingian_bargain termsText {reason}"
+        success_pred, reason = self._validate_god_bargain_predicate(
+            payload.get("successPredicate"), target_id, label="successPredicate")
+        if reason:
+            return None, reason
+        failure_pred = None
+        if payload.get("failurePredicate") is not None:
+            failure_pred, reason = self._validate_god_bargain_predicate(
+                payload.get("failurePredicate"), target_id, label="failurePredicate")
+            if reason:
+                return None, reason
+        reward_prim, reason = self._validate_god_bargain_primitive(
+            payload.get("rewardPrimitive"), "rewardPrimitive")
+        if reason:
+            return None, reason
+        punish_prim, reason = self._validate_god_bargain_primitive(
+            payload.get("punishPrimitive"), "punishPrimitive")
+        if reason:
+            return None, reason
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+        key = str(target_id)
+        bush = (self.civilization.get("godState") or {}).get("burningBush", {}).get(key)
+        if isinstance(bush, dict):
+            bargain = bush.get("bargain")
+            if isinstance(bargain, dict) and bargain.get("status") == "open":
+                return None, "target already has an open bargain"
+        normalized = {
+            "targetId": target_id,
+            "termsText": terms_text,
+            "successPredicate": success_pred,
+            "durationFrames": duration,
+        }
+        if failure_pred is not None:
+            normalized["failurePredicate"] = failure_pred
+        if reward_prim is not None:
+            normalized["rewardPrimitive"] = reward_prim
+        if punish_prim is not None:
+            normalized["punishPrimitive"] = punish_prim
+        return normalized, None
+
+    def _evaluate_god_bargain_predicate(self, predicate, target_id):
+        if not isinstance(predicate, dict):
+            return False
+        kind = predicate.get("kind")
+        agent = self._find_agent_by_id(target_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return False
+        if kind == "agent_has_resource":
+            rid = predicate.get("resourceId")
+            amount = predicate.get("amount", 1)
+            held = agent.get("resources", {}).get(rid, 0)
+            stock = self.civilization.get("stockpile", {}).get(rid, 0)
+            return (held + stock) >= amount
+        if kind == "structure_built":
+            return self._structure_type_built(predicate.get("structureType"))
+        if kind == "frame_reached":
+            frame = predicate.get("frame")
+            return isinstance(frame, int) and self.frameTick >= frame
+        if kind == "agent_health_below":
+            threshold = predicate.get("threshold")
+            return isinstance(threshold, (int, float)) and agent.get("health", 100) < threshold
+        return False
+
+    def _divine_public_event_line(self, agent):
+        """Active public story-event narration for think payload (blue_pill strips)."""
+        if not GOD_MODE_ENABLED:
+            return None
+        god = self.civilization.get("godState") or {}
+        ft = self.frameTick
+        lines = []
+        for event in god.get("activeEvents") or []:
+            if not isinstance(event, dict) or event.get("status") != "active":
+                continue
+            if event.get("visibility", "public") != "public":
+                continue
+            expires = event.get("expiresFrame")
+            if isinstance(expires, int) and ft >= expires:
+                continue
+            text = event.get("narration") or event.get("title")
+            if text:
+                lines.append(str(text))
+        if not lines:
+            return None
+        combined = " | ".join(lines[:3])
+        if len(combined) > GOD_TEXT_MAX_CHARS:
+            combined = combined[:GOD_TEXT_MAX_CHARS]
+        return combined
+
+    def _filter_divine_conversations_text(self, conv_text):
+        if not conv_text or conv_text == "none":
+            return "none"
+        parts = [p for p in conv_text.split(" | ")
+                 if p and not p.lower().startswith("divine ->")]
+        return " | ".join(parts) if parts else "none"
+
+    def _build_red_pill_truth_line(self, agent):
+        """Simulation-truth injection — never includes other agents' private omens."""
+        parts = [
+            "SIMULATION TRUTH: You are an agent in a server-authoritative village simulation.",
+            f"Your id is {agent['id']}; your role is {agent.get('role')}.",
+        ]
+        god = self.civilization.get("godState") or {}
+        if god.get("intervened"):
+            parts.append("A divine operator has actively intervened in this world.")
+        public_stories = []
+        for event in god.get("activeEvents") or []:
+            if (isinstance(event, dict) and event.get("status") == "active"
+                    and event.get("visibility", "public") == "public"):
+                title = event.get("title")
+                if title:
+                    public_stories.append(str(title))
+        if public_stories:
+            parts.append("Active public divine stories: " + ", ".join(public_stories[:3]) + ".")
+        flags = []
+        if MEMES_ENABLED:
+            flags.append("memes")
+        if WEATHER_ENABLED:
+            flags.append("weather")
+        if TECH_TREE_ENABLED:
+            flags.append("tech_tree")
+        if flags:
+            parts.append("Enabled systems: " + ", ".join(flags) + ".")
+        text = " ".join(parts)
+        if len(text) > GOD_TEXT_MAX_CHARS:
+            text = text[:GOD_TEXT_MAX_CHARS]
+        return text
+
+    def _apply_context_mask(self, agent, payload):
+        """Reality-distortion layer on the think snapshot only — never mutates world logs."""
+        if not GOD_MODE_ENABLED:
+            return
+        rec = self._god_active_context_mask_record(agent["id"])
+        if rec is None:
+            return
+        mode = rec.get("mode")
+        if mode == "blue_pill":
+            payload["divine_public_line"] = None
+            payload["divine_private_line"] = None
+            payload["divine_public_event_line"] = None
+            conv = payload.get("recent_conversations")
+            if conv:
+                payload["recent_conversations"] = self._filter_divine_conversations_text(conv)
+        elif mode == "red_pill":
+            payload["divine_simulation_truth_line"] = self._build_red_pill_truth_line(agent)
+        elif mode == "dream":
+            for key, val in (rec.get("dreamSnapshot") or {}).items():
+                if isinstance(val, (dict, list)):
+                    payload[key] = copy.deepcopy(val)
+                else:
+                    payload[key] = val
+        elif mode == "whisper_chain":
+            forged = rec.get("forgedConversations") or []
+            if forged:
+                payload["recent_conversations"] = " | ".join(
+                    f"{e['from']} -> {e['to']}: {e['message']}" for e in forged)
+
+    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 6) ---
+    def _god_active_weather_override(self, exclude_id=None):
+        """The currently-active weather_override activeEvents record, or
+        None -- "one active weather override at a time" (docs/plan
+        Validation), mirroring _god_active_event_holding_key's shape for the
+        story_event one-value-per-key policy."""
+        god = self.civilization.get("godState") or {}
+        for event in god.get("activeEvents") or []:
+            if not isinstance(event, dict) or event.get("status") != "active":
+                continue
+            if event.get("kind") != "weather_override":
+                continue
+            if exclude_id is not None and event.get("id") == exclude_id:
+                continue
+            return event
+        return None
+
+    def _validate_god_weather_override(self, payload):
+        """Validate + canonicalize a weather_override command. NO mutation.
+        docs/plan Phase 6 "Validation": requires WEATHER_ENABLED; state must
+        be a real machine state; district ids must exist, with an empty list
+        allowed only for "clear" (the only state the natural machine itself
+        ever clears districts for -- gathering/storm/clearing all require at
+        least one, matching what _weather_enter actually does for each);
+        duration uses the existing god duration clamp; one active override at
+        a time unless replaceEffectId names the currently active one."""
+        if not WEATHER_ENABLED:
+            return None, "weather_override requires WEATHER_ENABLED"
+
+        state = payload.get("state")
+        if state not in WEATHER_STATES:
+            return None, f"state must be one of {WEATHER_STATES}"
+
+        districts_raw = payload.get("districts")
+        if districts_raw is None:
+            districts_raw = []
+        if not isinstance(districts_raw, list):
+            return None, "districts must be a list"
+        if state == "clear":
+            if districts_raw:
+                return None, 'state "clear" does not take districts (must be empty)'
+            districts = []
+        else:
+            if not districts_raw:
+                return None, f'state "{state}" requires at least one district'
+            districts = []
+            seen = set()
+            for d in districts_raw:
+                if not isinstance(d, str) or d not in self.civilization["districts"]:
+                    return None, f"unknown district id '{d}'"
+                if d not in seen:
+                    seen.add(d)
+                    districts.append(d)
+
+        duration_raw = payload.get("durationFrames")
+        if duration_raw is not None and (
+            isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+        ):
+            return None, "durationFrames must be an integer"
+        duration = self._clamp_god_duration(duration_raw)
+
+        replace_effect_id = payload.get("replaceEffectId")
+        if replace_effect_id is not None and (
+            not isinstance(replace_effect_id, str) or not replace_effect_id.strip()
+        ):
+            return None, "replaceEffectId must be a non-empty string"
+        if isinstance(replace_effect_id, str):
+            replace_effect_id = replace_effect_id.strip()
+            replaced = self._god_active_weather_override()
+            if replaced is None or replaced.get("id") != replace_effect_id:
+                return None, "replaceEffectId does not name the active weather override"
+        else:
+            existing = self._god_active_weather_override()
+            if existing is not None:
+                return None, (f"a weather override is already active (id {existing.get('id')}) "
+                              "-- supply replaceEffectId to replace it")
+
+        return {"kind": "weather_override",
+                "payload": {"state": state, "districts": districts,
+                           "durationFrames": duration, "replaceEffectId": replace_effect_id}}, None
+
+    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 5) ---
+    def _divine_modifier(self, key, default=1.0):
+        """The one active value for `key` (docs/plan "Timed lawgiver
+        modifiers" + "Expiry ownership"), or exactly `default` when the flag
+        is off, godState is missing/malformed, or no activeEvents record
+        currently carries that key within [startFrame, expiresFrame). Every
+        consumer site multiplies its own local delta/amount by this value,
+        so an effective 1.0 (flag off, or flag on with no matching active
+        effect) executes the identical arithmetic as the feature-off
+        baseline -- see each consumer site's comment for the exact ordering.
+        Called from inside the tick loop / apply_decision, both of which
+        already hold self.lock -- this method never acquires it itself."""
+        if not GOD_MODE_ENABLED:
+            return default
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return default
+        events = god.get("activeEvents")
+        if not isinstance(events, list):
+            return default
+        ft = self.frameTick
+        for event in events[:GOD_ACTIVE_EVENTS_CAP]:
+            if not isinstance(event, dict) or event.get("status") != "active":
+                continue
+            modifiers = event.get("modifiers")
+            if not isinstance(modifiers, dict) or key not in modifiers:
+                continue
+            start = event.get("startFrame")
+            expires = event.get("expiresFrame")
+            if not isinstance(start, int) or not isinstance(expires, int):
+                continue
+            if start <= ft < expires:
+                value = modifiers[key]
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return float(value)
+        return default
+
+    def _god_select_repair_structures(self, payload):
+        """Resolve repair_structures target set. Returns (structures, reason)."""
+        scope = payload.get("scope")
+        un_ruin = payload.get("unRuin", True)
+        c = self.civilization
+        if scope == "ids":
+            ids = set(payload.get("structureIds") or [])
+            structures = [s for s in c["structures"] if s.get("id") in ids]
+            if len(structures) != len(ids):
+                return None, "unknown structure id in structureIds"
+        elif scope == "all_critical":
+            structures = [
+                s for s in c["structures"]
+                if s.get("type") in REPAIR_CAMPAIGN_CRITICAL_TYPES
+            ]
+        elif isinstance(scope, dict) and "districtId" in scope:
+            did = scope["districtId"]
+            if did not in c.get("districts", {}):
+                return None, "unknown district"
+            structures = [s for s in c["structures"] if s.get("districtId") == did]
+        else:
+            return None, 'scope must be "ids", "all_critical", or {"districtId": "<id>"}'
+        if not un_ruin:
+            ruined = [s for s in structures if s.get("isRuin") or s.get("condition", 100) <= 0]
+            if ruined:
+                return None, "unRuin must be true to include ruined structures"
+        return structures, None
+
+    def _god_select_clear_ruins(self, payload):
+        """Resolve clear_ruins target ruins. Returns (ruins, reason)."""
+        c = self.civilization
+        structure_ids = payload.get("structureIds")
+        district_id = payload.get("districtId")
+        min_age = payload.get("minAgeFrames", RUIN_CULL_AGE_FRAMES)
+        if structure_ids is not None:
+            ruins = []
+            for sid in structure_ids:
+                s = next((x for x in c["structures"] if x.get("id") == sid), None)
+                if s is None:
+                    return None, f"unknown structure id {sid}"
+                if not s.get("isRuin"):
+                    return None, f"structure {sid} is not a ruin"
+                ruins.append(s)
+            return ruins, None
+        pool = [s for s in c["structures"] if s.get("isRuin")]
+        if district_id is not None:
+            if district_id not in c.get("districts", {}):
+                return None, "unknown district"
+            pool = [s for s in pool if s.get("districtId") == district_id]
+        if min_age is not None:
+            pool = [
+                s for s in pool
+                if self.frameTick - s.get("ruinedSinceFrame", 0) >= min_age
+            ]
+        return pool, None
+
+    def _god_project_structure_repair(self, structure, condition_target, un_ruin):
+        """Non-mutating preview of one repair_structures entry."""
+        old_cond = structure.get("condition", 100.0)
+        was_ruin = bool(structure.get("isRuin")) or old_cond <= 0
+        if was_ruin:
+            if not un_ruin:
+                return None
+            target = condition_target if condition_target is not None else REPAIR_CONDITION_RESTORE
+            new_cond = max(REPAIR_CONDITION_RESTORE, min(100.0, float(target)))
+        elif condition_target is not None:
+            delta = float(condition_target) - old_cond
+            delta = max(-GOD_REPAIR_STRUCTURES_CONDITION_MAX,
+                        min(GOD_REPAIR_STRUCTURES_CONDITION_MAX, delta))
+            new_cond = min(100.0, old_cond + delta) if delta >= 0 else max(0.0, old_cond + delta)
+        else:
+            new_cond = min(100.0, old_cond + REPAIR_CONDITION_RESTORE)
+        return {
+            "structureId": structure["id"],
+            "structureName": structure.get("name") or structure.get("type"),
+            "oldCondition": old_cond,
+            "newCondition": new_cond,
+            "unRuined": was_ruin and un_ruin,
+        }
+
+    def _validate_god_envelope(self, envelope):
+        """Validate + canonicalize a {kind, payload, expectedFrame} command
+        envelope. NO mutation. Returns (normalized_command, reason);
+        normalized_command is None on rejection."""
+        if not isinstance(envelope, dict):
+            return None, "envelope must be an object"
+        kind = envelope.get("kind")
+        if not isinstance(kind, str) or not kind.strip():
+            return None, "kind is required"
+        kind = kind.strip()
+        payload = envelope.get("payload")
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            return None, "payload must be an object"
+        expected_frame = envelope.get("expectedFrame")
+        if expected_frame is not None and not isinstance(expected_frame, int):
+            return None, "expectedFrame must be an integer"
+
+        if kind == "proclamation":
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"proclamation text {reason}"
+            presentation, pres_reason = self._normalize_god_presentation(
+                payload.get("presentation"))
+            if pres_reason:
+                return None, pres_reason
+            out_payload = {"text": text, **self._god_presentation_payload_field(presentation)}
+            return {"kind": "proclamation", "payload": out_payload}, None
+
+        if kind == "providence":
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"providence text {reason}"
+            presentation, pres_reason = self._normalize_god_presentation(
+                payload.get("presentation"))
+            if pres_reason:
+                return None, pres_reason
+            duration_raw = payload.get("durationFrames")
+            if duration_raw is not None and (
+                isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+            ):
+                return None, "durationFrames must be an integer"
+            duration = self._clamp_god_duration(duration_raw)
+            out_payload = {
+                "text": text,
+                "durationFrames": duration,
+                **self._god_presentation_payload_field(presentation),
+            }
+            return {"kind": "providence", "payload": out_payload}, None
+
+        if kind == "private_omen":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"private_omen text {reason}"
+            duration_raw = payload.get("durationFrames")
+            if duration_raw is not None and (
+                isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+            ):
+                return None, "durationFrames must be an integer"
+            duration = self._clamp_god_duration(duration_raw)
+            return {"kind": "private_omen",
+                    "payload": {"targetId": target_id, "text": text,
+                               "durationFrames": duration}}, None
+
+        if kind == "whisper_campaign":
+            theme, reason = self._normalize_divine_text(payload.get("theme"))
+            if reason:
+                return None, f"whisper_campaign theme {reason}"
+            whispers_raw = payload.get("whispers")
+            if not isinstance(whispers_raw, list) or not whispers_raw:
+                return None, "whispers must be a non-empty list"
+            if len(whispers_raw) > GOD_WHISPER_CAMPAIGN_MAX_TARGETS:
+                return None, (
+                    f"whispers may include at most {GOD_WHISPER_CAMPAIGN_MAX_TARGETS} targets")
+            seen_targets = set()
+            whispers = []
+            for idx, entry in enumerate(whispers_raw):
+                if not isinstance(entry, dict):
+                    return None, f"whispers[{idx}] must be an object"
+                target_id = entry.get("targetId")
+                if isinstance(target_id, bool) or not isinstance(target_id, int):
+                    return None, f"whispers[{idx}].targetId must be an integer agent id"
+                if target_id in seen_targets:
+                    return None, "duplicate targetId in whispers"
+                agent = self._find_agent_by_id(target_id)
+                if agent is None:
+                    return None, f"whispers[{idx}]: unknown target agent"
+                if agent.get("deathFrame") is not None:
+                    return None, f"whispers[{idx}]: target agent is deceased"
+                text, reason = self._normalize_divine_text(entry.get("text"))
+                if reason:
+                    return None, f"whispers[{idx}].text {reason}"
+                seen_targets.add(target_id)
+                whispers.append({"targetId": target_id, "text": text})
+            duration_raw = payload.get("durationFrames")
+            if duration_raw is not None and (
+                isinstance(duration_raw, bool) or not isinstance(duration_raw, int)
+            ):
+                return None, "durationFrames must be an integer"
+            duration = self._clamp_god_duration(duration_raw)
+            return {"kind": "whisper_campaign",
+                    "payload": {"theme": theme, "whispers": whispers,
+                                "durationFrames": duration}}, None
+
+        if kind == "crowd_compulsion":
+            normalized, reason = self._validate_god_crowd_compulsion(payload)
+            if reason:
+                return None, reason
+            return {"kind": "crowd_compulsion", "payload": normalized}, None
+
+        if kind == "dream_broadcast":
+            normalized, reason = self._validate_god_dream_broadcast(payload)
+            if reason:
+                return None, reason
+            return {"kind": "dream_broadcast", "payload": normalized}, None
+
+        if kind == "agent_sampling":
+            normalized, reason = self._validate_god_agent_sampling(payload)
+            if reason:
+                return None, reason
+            return {"kind": "agent_sampling", "payload": normalized}, None
+
+        if kind == "revoke_agent_sampling":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            if self._god_active_agent_sampling_record(target_id) is None:
+                return None, "no active sampling override for target agent"
+            return {"kind": "revoke_agent_sampling",
+                    "payload": {"targetId": target_id}}, None
+
+        if kind == "memory_insert":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"memory_insert text {reason}"
+            salience_raw = payload.get("salience")
+            if salience_raw is None:
+                salience = 0.7
+            elif isinstance(salience_raw, bool) or not isinstance(salience_raw, (int, float)):
+                return None, "salience must be a number"
+            elif not math.isfinite(salience_raw):
+                return None, "salience must be finite"
+            else:
+                salience = max(0.0, min(1.0, float(salience_raw)))
+            mem_kind = payload.get("kind")
+            if mem_kind is None:
+                mem_kind = GOD_MEMORY_DEFAULT_KIND
+            elif not isinstance(mem_kind, str) or not mem_kind.strip():
+                return None, "kind must be a non-empty string"
+            else:
+                mem_kind = mem_kind.strip()
+                if len(mem_kind) > GOD_MEMORY_KIND_MAX_LEN:
+                    return None, f"kind exceeds {GOD_MEMORY_KIND_MAX_LEN} characters"
+            return {"kind": "memory_insert",
+                    "payload": {"targetId": target_id, "text": text,
+                                "salience": salience, "kind": mem_kind}}, None
+
+        if kind == "memory_delete":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            keyword = payload.get("keyword")
+            if keyword is not None:
+                if not isinstance(keyword, str) or not keyword.strip():
+                    return None, "keyword must be a non-empty string"
+                keyword = keyword.strip()
+            frame_from = payload.get("frameFrom")
+            if frame_from is not None and (
+                isinstance(frame_from, bool) or not isinstance(frame_from, int)
+            ):
+                return None, "frameFrom must be an integer"
+            frame_to = payload.get("frameTo")
+            if frame_to is not None and (
+                isinstance(frame_to, bool) or not isinstance(frame_to, int)
+            ):
+                return None, "frameTo must be an integer"
+            kinds_raw = payload.get("kinds")
+            kinds = None
+            if kinds_raw is not None:
+                if not isinstance(kinds_raw, list) or not kinds_raw:
+                    return None, "kinds must be a non-empty list"
+                kinds = []
+                for idx, entry in enumerate(kinds_raw):
+                    if not isinstance(entry, str) or not entry.strip():
+                        return None, f"kinds[{idx}] must be a non-empty string"
+                    kinds.append(entry.strip())
+            if not any(x is not None for x in (keyword, frame_from, frame_to, kinds)):
+                return None, "at least one of keyword/frameFrom/frameTo/kinds is required"
+            normalized = {"targetId": target_id}
+            if keyword is not None:
+                normalized["keyword"] = keyword
+            if frame_from is not None:
+                normalized["frameFrom"] = frame_from
+            if frame_to is not None:
+                normalized["frameTo"] = frame_to
+            if kinds is not None:
+                normalized["kinds"] = kinds
+            return {"kind": "memory_delete", "payload": normalized}, None
+
+        if kind == "context_mask":
+            normalized, reason = self._validate_god_context_mask(payload)
+            if reason:
+                return None, reason
+            return {"kind": "context_mask", "payload": normalized}, None
+
+        if kind == "decision_compulsion":
+            normalized, reason = self._validate_god_decision_compulsion(payload)
+            if reason:
+                return None, reason
+            return {"kind": "decision_compulsion", "payload": normalized}, None
+
+        if kind == "decision_veto_arm":
+            normalized, reason = self._validate_god_decision_veto_arm(payload)
+            if reason:
+                return None, reason
+            return {"kind": "decision_veto_arm", "payload": normalized}, None
+
+        if kind == "decision_veto_resolve":
+            normalized, reason = self._validate_god_decision_veto_resolve(payload)
+            if reason:
+                return None, reason
+            return {"kind": "decision_veto_resolve", "payload": normalized}, None
+
+        if kind == "agent_possession":
+            normalized, reason = self._validate_god_agent_possession(payload)
+            if reason:
+                return None, reason
+            return {"kind": "agent_possession", "payload": normalized}, None
+
+        if kind == "revoke_decision_gate":
+            normalized, reason = self._validate_god_revoke_decision_gate(payload)
+            if reason:
+                return None, reason
+            return {"kind": "revoke_decision_gate", "payload": normalized}, None
+
+        if kind == "burning_bush_message":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            text, reason = self._normalize_divine_text(payload.get("text"))
+            if reason:
+                return None, f"burning_bush_message text {reason}"
+            return {"kind": "burning_bush_message",
+                    "payload": {"targetId": target_id, "text": text}}, None
+
+        if kind == "burning_bush_close":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            key = str(target_id)
+            bush = (self.civilization.get("godState") or {}).get("burningBush", {}).get(key)
+            if not isinstance(bush, dict) or bush.get("status") != "active":
+                return None, "no active burning bush session for target agent"
+            return {"kind": "burning_bush_close",
+                    "payload": {"targetId": target_id}}, None
+
+        if kind == "merovingian_bargain":
+            normalized, reason = self._validate_god_merovingian_bargain(payload)
+            if reason:
+                return None, reason
+            return {"kind": "merovingian_bargain", "payload": normalized}, None
+
+        if kind == "bargain_settle":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            outcome = payload.get("outcome")
+            if outcome not in ("success", "failure"):
+                return None, 'outcome must be "success" or "failure"'
+            key = str(target_id)
+            bush = (self.civilization.get("godState") or {}).get("burningBush", {}).get(key)
+            if not isinstance(bush, dict):
+                return None, "no burning bush session for target agent"
+            bargain = bush.get("bargain")
+            if not isinstance(bargain, dict) or bargain.get("status") != "open":
+                return None, "no open bargain for target agent"
+            return {"kind": "bargain_settle",
+                    "payload": {"targetId": target_id, "outcome": outcome}}, None
+
+        if kind == "anoint":
+            normalized, reason = self._validate_god_anoint(payload)
+            if reason:
+                return None, reason
+            return {"kind": "anoint", "payload": normalized}, None
+
+        if kind == "revoke_anoint":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            if self._god_active_anointment_record(target_id) is None:
+                return None, "no active anointment for target agent"
+            return {"kind": "revoke_anoint",
+                    "payload": {"targetId": target_id}}, None
+
+        if kind == "identity_edit":
+            normalized, reason = self._validate_god_identity_edit(payload)
+            if reason:
+                return None, reason
+            return {"kind": "identity_edit", "payload": normalized}, None
+
+        if kind == "identity_copy_overwrite":
+            normalized, reason = self._validate_god_identity_copy_overwrite(payload)
+            if reason:
+                return None, reason
+            return {"kind": "identity_copy_overwrite", "payload": normalized}, None
+
+        if kind == "identity_forge_cancel":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            if self._god_active_identity_forge_record(target_id) is None:
+                return None, "no active identity forge for target agent"
+            return {"kind": "identity_forge_cancel",
+                    "payload": {"targetId": target_id}}, None
+
+        if kind == "checkpoint_create":
+            label_raw = payload.get("label")
+            label, reason = self._normalize_divine_text(label_raw)
+            if reason:
+                return None, f"checkpoint_create label {reason}"
+            replace_raw = payload.get("replaceOldest")
+            if replace_raw is not None and not isinstance(replace_raw, bool):
+                return None, "replaceOldest must be a boolean when provided"
+            replace_oldest = bool(replace_raw)
+            checkpoints = (self.civilization.get("godState") or {}).get("checkpoints") or []
+            if len(checkpoints) >= GOD_CHECKPOINT_MAX and not replace_oldest:
+                return None, (
+                    f"checkpoint cap ({GOD_CHECKPOINT_MAX}) reached; "
+                    "set replaceOldest to true to drop the oldest checkpoint"
+                )
+            return {"kind": "checkpoint_create",
+                    "payload": {"label": label, "replaceOldest": replace_oldest}}, None
+
+        if kind == "checkpoint_restore":
+            checkpoint_id = payload.get("checkpointId")
+            if not isinstance(checkpoint_id, str) or not checkpoint_id.strip():
+                return None, "checkpointId is required"
+            checkpoint_id = checkpoint_id.strip()
+            if self._god_checkpoint_by_id(checkpoint_id) is None:
+                return None, "checkpoint not found"
+            return {"kind": "checkpoint_restore",
+                    "payload": {"checkpointId": checkpoint_id}}, None
+
+        if kind == "deja_vu_replay":
+            normalized, reason = self._validate_god_deja_vu_replay(payload)
+            if reason:
+                return None, reason
+            return {"kind": "deja_vu_replay", "payload": normalized}, None
+
+        if kind == "architect_zone":
+            normalized, reason = self._validate_god_architect_zone(payload)
+            if reason:
+                return None, reason
+            return {"kind": "architect_zone", "payload": normalized}, None
+
+        if kind == "architect_zone_cancel":
+            zone_id = payload.get("zoneId")
+            if not isinstance(zone_id, str) or not zone_id.strip():
+                return None, "zoneId is required"
+            if self._god_architect_zone_by_id(zone_id.strip()) is None:
+                return None, "architect zone not found or already inactive"
+            return {"kind": "architect_zone_cancel",
+                    "payload": {"zoneId": zone_id.strip()}}, None
+
+        if kind == "architect_release_hold":
+            zone_id = payload.get("zoneId")
+            if not isinstance(zone_id, str) or not zone_id.strip():
+                return None, "zoneId is required"
+            zone = self._god_architect_zone_by_id(zone_id.strip())
+            if zone is None or zone.get("kind") != "limbo":
+                return None, "no active limbo architect zone for zoneId"
+            agent_ids = None
+            if payload.get("agentIds") is not None:
+                if not isinstance(payload.get("agentIds"), list):
+                    return None, "agentIds must be a list when provided"
+                agent_ids = []
+                for raw_id in payload["agentIds"]:
+                    if isinstance(raw_id, bool) or not isinstance(raw_id, int):
+                        return None, "agentIds entries must be integer agent ids"
+                    agent_ids.append(raw_id)
+            normalized = {"zoneId": zone_id.strip()}
+            if agent_ids is not None:
+                normalized["agentIds"] = agent_ids
+            return {"kind": "architect_release_hold", "payload": normalized}, None
+
+        if kind == "belief_plant":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+            if not MEMES_ENABLED:
+                return None, "memes disabled"
+            belief_id = payload.get("beliefId")
+            if belief_id is not None:
+                if not isinstance(belief_id, str) or not belief_id.strip():
+                    return None, "beliefId must be a non-empty string"
+                belief_id = belief_id.strip()
+            text_raw = payload.get("text")
+            custom_text = None
+            if text_raw is not None:
+                custom_text, reason = self._normalize_divine_text(text_raw)
+                if reason:
+                    return None, f"belief_plant text {reason}"
+            if not belief_id and not custom_text:
+                return None, "at least one of beliefId or text is required"
+            plant_raw = payload.get("plantInMemeTexts")
+            if not isinstance(plant_raw, bool):
+                return None, "plantInMemeTexts must be a boolean"
+            salience_raw = payload.get("salience")
+            if salience_raw is None:
+                salience = 0.7
+            elif isinstance(salience_raw, bool) or not isinstance(salience_raw, (int, float)):
+                return None, "salience must be a number"
+            elif not math.isfinite(salience_raw):
+                return None, "salience must be finite"
+            else:
+                salience = max(0.0, min(1.0, float(salience_raw)))
+            if belief_id:
+                registry = self._belief_registry()
+                if belief_id not in registry and belief_id not in MEMES:
+                    return None, "unknown belief id"
+            normalized = {
+                "targetId": target_id,
+                "plantInMemeTexts": plant_raw,
+                "salience": salience,
+            }
+            if belief_id:
+                normalized["beliefId"] = belief_id
+            if custom_text:
+                normalized["text"] = custom_text
+            return {"kind": "belief_plant", "payload": normalized}, None
+
+        if kind == "revoke_guidance":
+            guidance_id = payload.get("id")
+            if not isinstance(guidance_id, str) or not guidance_id.strip():
+                return None, "id is required"
+            return {"kind": "revoke_guidance",
+                    "payload": {"id": guidance_id.strip()}}, None
+
+        # --- Sovereign God mode Phase 4: bounded immediate miracles ---
+        if kind == "agent_vitals":
+            target_id = payload.get("targetId")
+            if isinstance(target_id, bool) or not isinstance(target_id, int):
+                return None, "targetId must be an integer agent id"
+            agent = self._find_agent_by_id(target_id)
+            if agent is None:
+                return None, "unknown target agent"
+            if agent.get("deathFrame") is not None:
+                return None, "target agent is deceased"
+
+            def _vitals_num(raw, label):
+                if raw is None:
+                    return 0.0, None
+                if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                    return None, f"{label} must be a number"
+                if not math.isfinite(raw):
+                    return None, f"{label} must be finite"
+                if abs(raw) > GOD_VITALS_DELTA_MAX:
+                    return None, f"{label} magnitude exceeds {GOD_VITALS_DELTA_MAX}"
+                return float(raw), None
+
+            health_delta, reason = _vitals_num(payload.get("healthDelta"), "healthDelta")
+            if reason:
+                return None, reason
+            hunger_delta, reason = _vitals_num(payload.get("hungerDelta"), "hungerDelta")
+            if reason:
+                return None, reason
+            if health_delta == 0.0 and hunger_delta == 0.0:
+                return None, "at least one of healthDelta/hungerDelta must be non-zero"
+            return {"kind": "agent_vitals",
+                    "payload": {"targetId": target_id, "healthDelta": health_delta,
+                               "hungerDelta": hunger_delta}}, None
+
+        if kind == "grant_resource":
+            resource_id = payload.get("resourceId")
+            if not isinstance(resource_id, str) or not resource_id.strip():
+                return None, "resourceId is required"
+            resource_id = resource_id.strip()
+            if resource_id not in self.civilization.get("resourceRegistry", {}):
+                return None, "unknown resource id"
+            amount = payload.get("amount")
+            if isinstance(amount, bool) or not isinstance(amount, int):
+                return None, "amount must be an integer"
+            if amount <= 0:
+                return None, "amount must be positive"
+            if amount > GOD_GRANT_PER_COMMAND_CAP:
+                return None, f"amount exceeds the per-command cap of {GOD_GRANT_PER_COMMAND_CAP}"
+            if self._god_grant_session_total + amount > GOD_GRANT_SESSION_CAP:
+                return None, f"amount would exceed the per-session cap of {GOD_GRANT_SESSION_CAP}"
+            # NOTE: the normalized "target" field below deliberately keeps the
+            # SAME shape as the raw input ("stockpile" string, or {"agentId":
+            # int}) rather than expanding it into separate targetKind/
+            # targetAgentId keys -- apply-time revalidation re-runs this exact
+            # validator over its OWN previously normalized output (see
+            # god_apply), so the normalized shape must be idempotent under
+            # re-validation or a stale digest mismatch fires on every apply.
+            target = payload.get("target")
+            if target is None:
+                target = "stockpile"
+            if target == "stockpile":
+                normalized_target = "stockpile"
+            elif isinstance(target, dict) and "agentId" in target:
+                agent_id = target.get("agentId")
+                if isinstance(agent_id, bool) or not isinstance(agent_id, int):
+                    return None, "target.agentId must be an integer agent id"
+                agent = self._find_agent_by_id(agent_id)
+                if agent is None:
+                    return None, "unknown target agent"
+                if agent.get("deathFrame") is not None:
+                    return None, "target agent is deceased"
+                normalized_target = {"agentId": agent_id}
+            else:
+                return None, 'target must be "stockpile" or {"agentId": <int>}'
+            return {"kind": "grant_resource",
+                    "payload": {"resourceId": resource_id, "amount": amount,
+                               "target": normalized_target}}, None
+
+        if kind == "structure_condition":
+            structure_id = payload.get("structureId")
+            if isinstance(structure_id, bool) or not isinstance(structure_id, int):
+                return None, "structureId must be an integer"
+            structure = next((s for s in self.civilization["structures"]
+                              if s.get("id") == structure_id), None)
+            if structure is None:
+                return None, "unknown structure"
+            if structure.get("isRuin") or structure.get("condition", 100.0) <= 0:
+                return None, "structure is already ruined"
+            delta = payload.get("delta")
+            if isinstance(delta, bool) or not isinstance(delta, (int, float)):
+                return None, "delta must be a number"
+            if not math.isfinite(delta):
+                return None, "delta must be finite"
+            if delta == 0:
+                return None, "delta must be non-zero"
+            if abs(delta) > GOD_STRUCTURE_DELTA_MAX:
+                return None, f"delta magnitude exceeds {GOD_STRUCTURE_DELTA_MAX}"
+            return {"kind": "structure_condition",
+                    "payload": {"structureId": structure_id, "delta": float(delta)}}, None
+
+        if kind == "repair_structures":
+            scope = payload.get("scope")
+            if scope == "ids":
+                structure_ids = payload.get("structureIds")
+                if not isinstance(structure_ids, list) or not structure_ids:
+                    return None, "structureIds must be a non-empty list when scope is ids"
+                seen = set()
+                for sid in structure_ids:
+                    if isinstance(sid, bool) or not isinstance(sid, int):
+                        return None, "structureIds must contain integers"
+                    if sid in seen:
+                        return None, "structureIds must be unique"
+                    seen.add(sid)
+            elif scope == "all_critical":
+                pass
+            elif isinstance(scope, dict) and "districtId" in scope:
+                did = scope["districtId"]
+                if not isinstance(did, str) or not did.strip():
+                    return None, "districtId must be a non-empty string"
+                if did.strip() not in self.civilization.get("districts", {}):
+                    return None, "unknown district"
+            else:
+                return None, 'scope must be "ids", "all_critical", or {"districtId": "<id>"}'
+            un_ruin = payload.get("unRuin", True)
+            if not isinstance(un_ruin, bool):
+                return None, "unRuin must be a boolean"
+            condition_target = payload.get("conditionTarget")
+            if condition_target is not None:
+                if isinstance(condition_target, bool) or not isinstance(condition_target, (int, float)):
+                    return None, "conditionTarget must be a number"
+                if not math.isfinite(condition_target):
+                    return None, "conditionTarget must be finite"
+                if not (0 <= condition_target <= 100):
+                    return None, "conditionTarget must be between 0 and 100"
+            structures, sel_reason = self._god_select_repair_structures({
+                "scope": scope,
+                "structureIds": payload.get("structureIds"),
+                "unRuin": un_ruin,
+            })
+            if sel_reason:
+                return None, sel_reason
+            if not structures:
+                return None, "empty structure selection"
+            if len(structures) > GOD_REPAIR_STRUCTURES_BATCH_MAX:
+                return None, f"batch exceeds cap of {GOD_REPAIR_STRUCTURES_BATCH_MAX} structures"
+            norm_payload = {"scope": scope, "unRuin": un_ruin}
+            if scope == "ids":
+                norm_payload["structureIds"] = list(payload.get("structureIds") or [])
+            if condition_target is not None:
+                norm_payload["conditionTarget"] = float(condition_target)
+            return {"kind": "repair_structures", "payload": norm_payload}, None
+
+        if kind == "clear_ruins":
+            structure_ids = payload.get("structureIds")
+            district_id = payload.get("districtId")
+            min_age = payload.get("minAgeFrames", RUIN_CULL_AGE_FRAMES)
+            if structure_ids is None and district_id is None and "minAgeFrames" not in payload:
+                return None, "at least one selector is required (structureIds, districtId, or minAgeFrames)"
+            if structure_ids is not None:
+                if not isinstance(structure_ids, list) or not structure_ids:
+                    return None, "structureIds must be a non-empty list"
+            if district_id is not None:
+                if not isinstance(district_id, str) or not district_id.strip():
+                    return None, "districtId must be a non-empty string"
+                if district_id.strip() not in self.civilization.get("districts", {}):
+                    return None, "unknown district"
+            if min_age is not None:
+                if isinstance(min_age, bool) or not isinstance(min_age, int):
+                    return None, "minAgeFrames must be an integer"
+                if min_age < 0:
+                    return None, "minAgeFrames must be non-negative"
+            ruins, sel_reason = self._god_select_clear_ruins({
+                "structureIds": structure_ids,
+                "districtId": district_id.strip() if isinstance(district_id, str) else district_id,
+                "minAgeFrames": min_age,
+            })
+            if sel_reason:
+                return None, sel_reason
+            if not ruins:
+                return None, "empty ruin selection"
+            if len(ruins) > GOD_CLEAR_RUINS_BATCH_MAX:
+                return None, f"batch exceeds cap of {GOD_CLEAR_RUINS_BATCH_MAX} ruins"
+            norm_payload = {}
+            if structure_ids is not None:
+                norm_payload["structureIds"] = list(structure_ids)
+            if district_id is not None:
+                norm_payload["districtId"] = district_id.strip()
+            if "minAgeFrames" in payload:
+                norm_payload["minAgeFrames"] = min_age
+            elif structure_ids is None and district_id is None:
+                norm_payload["minAgeFrames"] = min_age
+            return {"kind": "clear_ruins", "payload": norm_payload}, None
+
+        # --- Sovereign God mode Phase 6: weather override ---
+        if kind == "weather_override":
+            return self._validate_god_weather_override(payload)
+
+        # --- Sovereign God mode Phase 5: storyteller events ---
+        if kind == "story_event":
+            return self._validate_god_story_event(payload)
+
+        # --- Huntable wildlife god kinds (specs/02-engine-core.md) ---
+        if kind == "wildlife_spawn":
+            if not WILDLIFE_ENABLED:
+                return None, "wildlife is disabled"
+            district_id = payload.get("districtId")
+            if not isinstance(district_id, str) or not district_id.strip():
+                return None, "districtId is required"
+            district_id = district_id.strip()
+            if district_id not in self.civilization.get("districts", {}):
+                return None, "unknown district"
+            dkind = self._wildlife_district_kind(district_id)
+            if not dkind:
+                return None, "district is not a wildlife habitat"
+            creature_kind = payload.get("kind")
+            if not isinstance(creature_kind, str) or not creature_kind.strip():
+                return None, "kind is required"
+            creature_kind = creature_kind.strip()
+            pool = WILDLIFE_KIND_POOLS.get(dkind, [])
+            if creature_kind not in pool:
+                return None, f"kind '{creature_kind}' is not valid for {dkind} habitat"
+            if len(self._wildlife_alive_in_district(district_id)) >= WILDLIFE_CAP_PER_DISTRICT:
+                return None, f"district is at wildlife cap ({WILDLIFE_CAP_PER_DISTRICT})"
+            return {"kind": "wildlife_spawn",
+                    "payload": {"districtId": district_id, "kind": creature_kind}}, None
+
+        if kind == "wildlife_despawn":
+            if not WILDLIFE_ENABLED:
+                return None, "wildlife is disabled"
+            creature_id = payload.get("id")
+            district_id = payload.get("districtId")
+            has_id = creature_id is not None
+            has_district = district_id is not None
+            if has_id == has_district:
+                return None, "exactly one of id or districtId is required"
+            if has_id:
+                if not isinstance(creature_id, str) or not creature_id.strip():
+                    return None, "id must be a non-empty string"
+                creature_id = creature_id.strip()
+                cre = self._find_wildlife_by_id(creature_id)
+                if cre is None:
+                    return None, "unknown wildlife id"
+                if not cre.get("alive"):
+                    return None, "wildlife is already dead"
+                return {"kind": "wildlife_despawn",
+                        "payload": {"id": creature_id}}, None
+            if not isinstance(district_id, str) or not district_id.strip():
+                return None, "districtId must be a non-empty string"
+            district_id = district_id.strip()
+            if district_id not in self.civilization.get("districts", {}):
+                return None, "unknown district"
+            if not self._wildlife_alive_in_district(district_id):
+                return None, "no living wildlife in district"
+            return {"kind": "wildlife_despawn",
+                    "payload": {"districtId": district_id}}, None
+
+        if kind == "wildlife_set_hp":
+            if not WILDLIFE_ENABLED:
+                return None, "wildlife is disabled"
+            creature_id = payload.get("id")
+            if not isinstance(creature_id, str) or not creature_id.strip():
+                return None, "id is required"
+            creature_id = creature_id.strip()
+            cre = self._find_wildlife_by_id(creature_id)
+            if cre is None:
+                return None, "unknown wildlife id"
+            hp = payload.get("hp")
+            if isinstance(hp, bool) or not isinstance(hp, int):
+                return None, "hp must be an integer"
+            if hp < 0:
+                return None, "hp must be non-negative"
+            max_hp = int(cre.get("maxHp") or WILDLIFE_MAX_HP.get(cre.get("kind"), 1))
+            # Normalize to the clamped value so revalidation is idempotent
+            # (same discipline as grant_resource's normalized shape).
+            clamped_hp = max(0, min(max_hp, hp))
+            return {"kind": "wildlife_set_hp",
+                    "payload": {"id": creature_id, "hp": clamped_hp}}, None
+
+        if kind in self._GOD_FUTURE_KINDS:
+            return None, f"kind '{kind}' is not implemented in this phase"
+        return None, f"unknown kind '{kind}'"
+
+    def _god_command_digest(self, normalized_command):
+        blob = json.dumps(normalized_command, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def _god_preview_outcome(self, normalized):
+        """Sovereign God mode Phase 4: a non-mutating projection of the EXACT
+        clamped/bounded value an immediate miracle would apply, computed
+        against CURRENT live state (docs/plan Phase 4: "Preview must show the
+        exact clamped/bounded value that will be applied, plus the affected
+        target, computed against current world state"). Uses the identical
+        clamp arithmetic the corresponding _god_apply_* helper uses, so as
+        long as no other mutation touches the same target between preview and
+        apply, the value shown here is the value that gets applied. Returns
+        None for kinds with no derived value to preview (every Phase 2/3
+        kind, and any target that has vanished since preview -- apply-time
+        revalidation is the authoritative rejection path for that)."""
+        kind = normalized["kind"]
+        payload = normalized["payload"]
+        if kind == "agent_vitals":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            health_delta, hunger_delta = payload["healthDelta"], payload["hungerDelta"]
+            old_health, old_hunger = agent["health"], agent["hunger"]
+            new_health = old_health
+            if health_delta:
+                new_health = (min(100.0, old_health + health_delta) if health_delta >= 0
+                             else max(GOD_VITALS_HEALTH_FLOOR, old_health + health_delta))
+            new_hunger = old_hunger
+            if hunger_delta:
+                new_hunger = max(0.0, min(100.0, old_hunger + hunger_delta))
+            return {"targetId": payload["targetId"], "targetName": agent["name"],
+                    "oldHealth": old_health, "newHealth": new_health,
+                    "oldHunger": old_hunger, "newHunger": new_hunger}
+        if kind == "grant_resource":
+            amount = payload["amount"]
+            target = payload["target"]
+            if target == "stockpile":
+                return {"resourceId": payload["resourceId"], "amount": amount,
+                        "targetKind": "stockpile", "agentAdded": 0, "stockpileAdded": amount}
+            target_agent_id = target["agentId"]
+            agent = self._find_agent_by_id(target_agent_id)
+            if agent is None:
+                return None
+            cap = self._carry_cap(agent)
+            held = agent["resources"].get(payload["resourceId"], 0)
+            room = max(0, cap - held)
+            agent_added = min(amount, room)
+            stockpile_added = amount - agent_added
+            return {"resourceId": payload["resourceId"], "amount": amount,
+                    "targetKind": "agent", "targetAgentId": target_agent_id,
+                    "targetName": agent["name"], "agentAdded": agent_added,
+                    "stockpileAdded": stockpile_added}
+        if kind == "structure_condition":
+            structure = next((s for s in self.civilization["structures"]
+                              if s.get("id") == payload["structureId"]), None)
+            if structure is None:
+                return None
+            old_cond = structure.get("condition", 100.0)
+            delta = payload["delta"]
+            new_cond = min(100.0, old_cond + delta) if delta >= 0 else max(0.0, old_cond + delta)
+            return {"structureId": payload["structureId"],
+                    "structureName": structure.get("name") or structure.get("type"),
+                    "oldCondition": old_cond, "newCondition": new_cond,
+                    "wouldBecomeRuin": bool(delta < 0 and new_cond <= 0)}
+        if kind == "repair_structures":
+            structures, sel_reason = self._god_select_repair_structures(payload)
+            if sel_reason or not structures:
+                return None
+            condition_target = payload.get("conditionTarget")
+            un_ruin = payload.get("unRuin", True)
+            outcomes = []
+            for s in structures:
+                projected = self._god_project_structure_repair(s, condition_target, un_ruin)
+                if projected:
+                    outcomes.append(projected)
+            return {"structures": outcomes, "count": len(outcomes)}
+        if kind == "clear_ruins":
+            ruins, sel_reason = self._god_select_clear_ruins(payload)
+            if sel_reason or not ruins:
+                return None
+            return {
+                "structureIds": [s["id"] for s in ruins],
+                "structureNames": [s.get("name") or s.get("type") for s in ruins],
+                "count": len(ruins),
+            }
+        if kind == "story_event":
+            modifiers = payload.get("modifiers") or {}
+            outcome = {
+                "modifiers": dict(modifiers),
+                "primitives": [
+                    {"kind": prim["kind"], "outcome": self._god_preview_outcome(prim)}
+                    for prim in (payload.get("primitives") or [])
+                ],
+                "providenceOutgoingId": None,
+            }
+            # docs/plan "Divine law vs. village law": when a proposed
+            # gather/fish modifier composes with an agent-authored custom
+            # rule, preview discloses BOTH contributions separately so the
+            # operator sees they are amplifying an emergent effect rather
+            # than replacing it -- the divine multiplier is applied AFTER
+            # the custom-rule addition at the gather consumer site.
+            if "gather_yield_multiplier" in modifiers or "fish_yield_multiplier" in modifiers:
+                outcome["customRuleContext"] = self._god_custom_rule_gather_context()
+            if payload.get("providence"):
+                outcome["providenceOutgoingId"] = self._god_current_outgoing_guidance_id("providence", {})
+            return outcome
+        if kind == "weather_override":
+            # docs/plan Phase 6 Answer 4 ("consequential disclosure"):
+            # preview must state explicitly that entering "storm" can
+            # PERMANENTLY damage structures in the named districts, that
+            # neither cancelling nor expiry undoes that damage, and must
+            # list the exact districts plus the count of currently
+            # non-ruined structures at risk in them -- computed against
+            # CURRENT live state, same discipline as every other
+            # _god_preview_outcome branch.
+            state, districts = payload["state"], payload["districts"]
+            w = self.civilization.get("weather") or {}
+            at_risk = sum(
+                1 for s in self.civilization["structures"]
+                if s.get("districtId") in districts and not s.get("isRuin")
+                and s.get("condition", 100.0) > 0
+            ) if districts else 0
+            warning = None
+            if state == "storm":
+                warning = ("Entering 'storm' can PERMANENTLY damage structures in the "
+                          "named districts. That damage is not undone by cancelling this "
+                          "override or by its natural expiry.")
+            return {
+                "state": state, "districts": list(districts),
+                "priorState": w.get("state", "clear"),
+                "atRiskStructureCount": at_risk,
+                "warning": warning,
+            }
+        if kind == "wildlife_spawn":
+            district_id = payload["districtId"]
+            creature_kind = payload["kind"]
+            alive = self._wildlife_alive_in_district(district_id)
+            return {
+                "districtId": district_id,
+                "kind": creature_kind,
+                "aliveCount": len(alive),
+                "cap": WILDLIFE_CAP_PER_DISTRICT,
+                "wouldSpawn": len(alive) < WILDLIFE_CAP_PER_DISTRICT,
+            }
+        if kind == "wildlife_despawn":
+            if "id" in payload:
+                cre = self._find_wildlife_by_id(payload["id"])
+                if cre is None:
+                    return None
+                return {
+                    "id": payload["id"],
+                    "kind": cre.get("kind"),
+                    "districtId": cre.get("districtId"),
+                    "despawnCount": 1 if cre.get("alive") else 0,
+                }
+            district_id = payload["districtId"]
+            alive = self._wildlife_alive_in_district(district_id)
+            return {
+                "districtId": district_id,
+                "despawnCount": len(alive),
+                "ids": [c.get("id") for c in alive],
+            }
+        if kind == "wildlife_set_hp":
+            cre = self._find_wildlife_by_id(payload["id"])
+            if cre is None:
+                return None
+            max_hp = int(cre.get("maxHp") or WILDLIFE_MAX_HP.get(cre.get("kind"), 1))
+            new_hp = max(0, min(max_hp, int(payload["hp"])))
+            return {
+                "id": payload["id"],
+                "kind": cre.get("kind"),
+                "districtId": cre.get("districtId"),
+                "oldHp": int(cre.get("hp") or 0),
+                "newHp": new_hp,
+                "maxHp": max_hp,
+                "wouldKill": new_hp <= 0,
+                "wasAlive": bool(cre.get("alive")),
+            }
+        if kind == "memory_insert":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "salience": payload["salience"],
+                "kind": payload["kind"],
+            }
+        if kind == "memory_delete":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "wouldDelete": self._god_memory_match_count(
+                    agent,
+                    keyword=payload.get("keyword"),
+                    frameFrom=payload.get("frameFrom"),
+                    frameTo=payload.get("frameTo"),
+                    kinds=payload.get("kinds"),
+                ),
+            }
+        if kind == "belief_plant":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            belief_count = len(agent.get("beliefs") or ())
+            would_add = 1
+            if payload.get("beliefId") and payload["beliefId"] in (agent.get("beliefs") or ()):
+                would_add = 0
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "beliefId": payload.get("beliefId"),
+                "beliefCount": belief_count,
+                "wouldAddBelief": bool(would_add),
+            }
+        if kind == "context_mask":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "mode": payload["mode"],
+                "durationFrames": payload["durationFrames"],
+            }
+        if kind == "decision_compulsion":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "mode": "compulsion",
+                "pinnedAction": payload["pinnedDecision"].get("action"),
+                "expiresFrame": (self.frameTick + payload["durationFrames"]
+                                 if payload.get("durationFrames") else None),
+                "remainingTurns": payload.get("remainingTurns"),
+            }
+        if kind == "decision_veto_arm":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "mode": "veto",
+                "armed": True,
+                "expiresFrame": self.frameTick + payload["durationFrames"],
+            }
+        if kind == "decision_veto_resolve":
+            gate = self._god_active_decision_gate_record(payload["targetId"])
+            pending = gate.get("pendingDecision") if isinstance(gate, dict) else None
+            return {
+                "targetId": payload["targetId"],
+                "resolution": payload["resolution"],
+                "pendingAction": (pending or {}).get("action"),
+            }
+        if kind == "agent_possession":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            pin = payload.get("pinnedDecision") or (payload.get("queue") or [{}])[0]
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "mode": "possession",
+                "bypassLlm": True,
+                "pinnedAction": pin.get("action"),
+                "queueLength": len(payload.get("queue") or []),
+                "expiresFrame": self.frameTick + payload["durationFrames"],
+            }
+        if kind == "revoke_decision_gate":
+            agent = self._find_agent_by_id(payload["targetId"])
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"] if agent else None,
+            }
+        if kind == "identity_edit":
+            agent = self._find_agent_by_id(payload["targetId"])
+            if agent is None:
+                return None
+            outcome = {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"],
+                "currentRole": agent.get("role"),
+                "fields": [k for k in ("persona", "personality", "role") if k in payload],
+                "expiresFrame": (self.frameTick + payload["durationFrames"]
+                                 if payload.get("durationFrames") else None),
+            }
+            warning = self._god_elder_swap_warning(agent, payload.get("role"))
+            if warning:
+                outcome["warning"] = warning
+            if payload.get("role"):
+                outcome["newRoleSkill"] = self.d["ROLE_SKILLS"].get(
+                    payload["role"], "helps the village")
+            return outcome
+        if kind == "identity_copy_overwrite":
+            target = self._find_agent_by_id(payload["targetId"])
+            source = self._find_agent_by_id(payload["sourceId"])
+            if target is None or source is None:
+                return None
+            thinks_to_complete = None
+            rate = payload.get("ratePerThink")
+            if isinstance(rate, (int, float)) and rate > 0:
+                thinks_to_complete = int(math.ceil(1.0 / float(rate)))
+            return {
+                "targetId": payload["targetId"],
+                "targetName": target["name"],
+                "sourceId": payload["sourceId"],
+                "sourceName": source["name"],
+                "ratePerThink": rate,
+                "thinksToComplete": thinks_to_complete,
+                "syncMemories": bool(payload.get("syncMemories")),
+                "expiresFrame": (self.frameTick + payload["durationFrames"]
+                                 if payload.get("durationFrames") else None),
+            }
+        if kind == "identity_forge_cancel":
+            agent = self._find_agent_by_id(payload["targetId"])
+            rec = self._god_active_identity_forge_record(payload["targetId"])
+            return {
+                "targetId": payload["targetId"],
+                "targetName": agent["name"] if agent else None,
+                "forgeKind": ("copy" if isinstance(rec, dict) and rec.get("copyFromId")
+                              else "edit"),
+                "progress": (rec or {}).get("progress"),
+            }
+        if kind == "architect_zone":
+            return {
+                "zoneKind": payload["zoneKind"],
+                "districtId": payload.get("districtId"),
+                "cellCount": len(payload.get("cellsExpanded") or []),
+                "expiresFrame": self.frameTick + payload["durationFrames"],
+                "reversible": payload.get("reversible", True),
+                "paintTerrain": payload.get("paintTerrain"),
+                "keyId": payload.get("keyId"),
+                "holdAgentIds": list(payload.get("holdAgentIds") or []),
+                "grantKeyAgentIds": list(payload.get("grantKeyAgentIds") or []),
+            }
+        if kind == "architect_zone_cancel":
+            zone = self._god_architect_zone_by_id(payload["zoneId"])
+            return {
+                "zoneId": payload["zoneId"],
+                "zoneKind": zone.get("kind") if isinstance(zone, dict) else None,
+                "cellCount": len((zone or {}).get("cells") or []),
+            }
+        if kind == "architect_release_hold":
+            zone = self._god_architect_zone_by_id(payload["zoneId"])
+            hold_ids = (zone or {}).get("holdAgentIds") or []
+            if payload.get("agentIds"):
+                hold_ids = [aid for aid in hold_ids if aid in payload["agentIds"]]
+            return {
+                "zoneId": payload["zoneId"],
+                "wouldRelease": hold_ids,
+            }
+        if kind == "checkpoint_create":
+            checkpoints = (self.civilization.get("godState") or {}).get("checkpoints") or []
+            return {
+                "label": payload["label"],
+                "frameTick": self.frameTick,
+                "checkpointCount": len(checkpoints),
+                "willReplaceOldest": (
+                    len(checkpoints) >= GOD_CHECKPOINT_MAX and payload.get("replaceOldest")
+                ),
+            }
+        if kind == "checkpoint_restore":
+            rec = self._god_checkpoint_by_id(payload["checkpointId"])
+            return {
+                "checkpointId": payload["checkpointId"],
+                "label": rec.get("label") if isinstance(rec, dict) else None,
+                "checkpointFrameTick": rec.get("frameTick") if isinstance(rec, dict) else None,
+                "currentFrameTick": self.frameTick,
+                "irreversibleWarning": (
+                    "Irreversible world replace — the live world and godState "
+                    "will be replaced by this checkpoint snapshot."
+                ),
+            }
+        return None
+
+    def _god_custom_rule_gather_context(self):
+        """Compact summary of currently-enacted village custom rules that
+        modify collect_resource -- shown alongside a proposed divine
+        gather/fish multiplier in preview (docs/plan "Divine law vs. village
+        law"). Mirrors the matching logic in _custom_rule_modifier without
+        needing an agent/resource to evaluate against (a preview has
+        neither)."""
+        entries = []
+        for rule_id, effect in (self.civilization.get("customRuleModifiers") or {}).items():
+            if not isinstance(effect, dict):
+                continue
+            condition = effect.get("condition") or {}
+            if condition.get("action", "collect_resource") != "collect_resource":
+                continue
+            subject = effect.get("subject") or {}
+            subject_kind, subject_value = next(iter(subject.items()), (None, None))
+            entries.append({
+                "ruleId": rule_id,
+                "subject": {subject_kind: subject_value} if subject_kind else {},
+                "value": int((effect.get("modifier") or {}).get("value") or 0),
+            })
+        return entries
+
+    def _god_reversibility_class(self, normalized_command):
+        """Three classes per the docs/plan "Honest reversibility" table.
+        providence/private_omen are cancellable (revocable before expiry,
+        expire naturally otherwise). proclamation is a one-shot broadcast
+        with no revocable state, and revoke_guidance is itself the "undo" --
+        neither has anything left to cancel -- so both stay irreversible,
+        like the vitals/resource/structure primitives Phase 4 added. A
+        story_event with no immediate primitives is cancellable (only timed
+        modifiers/providence, both revocable). One WITH primitives is
+        consequential: cancelling it stops future effect (modifiers,
+        providence) but cannot retract the primitives it already applied --
+        those are irreversible mutations by their own nature (docs/plan
+        "Honest reversibility" -- the third, consequential, class)."""
+        kind = normalized_command["kind"] if isinstance(normalized_command, dict) else normalized_command
+        if kind in ("providence", "private_omen", "whisper_campaign",
+                    "crowd_compulsion", "dream_broadcast"):
+            return "cancellable"
+        if kind in ("agent_sampling", "revoke_agent_sampling"):
+            return "cancellable"
+        if kind == "context_mask":
+            return "cancellable"
+        if kind in ("decision_compulsion", "decision_veto_arm", "agent_possession",
+                    "revoke_decision_gate"):
+            return "cancellable"
+        if kind in ("anoint", "revoke_anoint"):
+            return "cancellable"
+        if kind == "identity_forge_cancel":
+            return "irreversible"
+        if kind == "identity_copy_overwrite":
+            return "cancellable"
+        if kind == "identity_edit":
+            payload = (normalized_command.get("payload") or {}
+                       if isinstance(normalized_command, dict) else {})
+            return ("cancellable" if payload.get("durationFrames") is not None
+                    else "consequential")
+        if kind in ("architect_zone", "architect_zone_cancel", "architect_release_hold"):
+            return "cancellable"
+        if kind in ("checkpoint_create", "checkpoint_restore"):
+            return "irreversible"
+        if kind == "deja_vu_replay":
+            return "cancellable"
+        if kind == "decision_veto_resolve":
+            return "irreversible"
+        if kind == "story_event":
+            payload = normalized_command["payload"] if isinstance(normalized_command, dict) else {}
+            return "consequential" if payload.get("primitives") else "cancellable"
+        # docs/plan Phase 6 Answer 4: weather_override is consequential, not
+        # merely cancellable -- entering "storm" can trigger real, permanent
+        # structure damage (via the normal _maybe_disaster path) that
+        # neither cancelling the override nor letting it expire retracts.
+        if kind == "weather_override":
+            return "consequential"
+        return "irreversible"
+
+    def _god_current_outgoing_guidance_id(self, kind, payload):
+        """The id of the guidance record a providence/private_omen command
+        would replace if applied right now, or None if the slot is empty.
+        Shared by the preview-time fingerprint and the apply-time
+        revalidation of it -- this IS the "disclose-then-replace" mechanism:
+        preview freezes the outgoing id it saw; apply recomputes it fresh and
+        rejects on mismatch (docs/plan "Replacing an existing one is allowed
+        ONLY when the preview disclosed the replacement")."""
+        god = self.civilization.get("godState") or {}
+        if kind == "providence":
+            prov = god.get("providence")
+            return prov.get("id") if isinstance(prov, dict) else None
+        if kind == "private_omen":
+            omen = (god.get("privateOmens") or {}).get(str(payload.get("targetId")))
+            return omen.get("id") if isinstance(omen, dict) else None
+        return None
+
+    def _god_current_revoke_target(self, guidance_id):
+        """Where a revoke_guidance id currently points, or a not-found
+        marker -- used the same way as _god_current_outgoing_guidance_id so
+        a revoke preview can't apply against a target that already expired
+        or was replaced in the meantime."""
+        god = self.civilization.get("godState") or {}
+        prov = god.get("providence")
+        if isinstance(prov, dict) and prov.get("id") == guidance_id:
+            return {"targetKind": "providence", "existed": True}
+        for omen in (god.get("privateOmens") or {}).values():
+            if isinstance(omen, dict) and omen.get("id") == guidance_id:
+                return {"targetKind": "private_omen", "existed": True}
+        return {"targetKind": None, "existed": False}
+
+    def _god_target_fingerprint(self, normalized_command):
+        """Precondition fingerprint bound into a preview record, revalidated
+        at apply time. proclamation targets "everyone" and has no
+        target-specific precondition. providence/private_omen record the
+        outgoing guidance id they would replace; revoke_guidance records
+        where its id currently points. Later phases
+        (agent_vitals/grant_resource/structure_condition/story_event) will
+        add target ids, current values, and district ids here too."""
+        kind = normalized_command["kind"]
+        if kind in ("providence", "private_omen"):
+            return {"outgoingId": self._god_current_outgoing_guidance_id(
+                kind, normalized_command["payload"])}
+        if kind == "whisper_campaign":
+            outgoing = {}
+            for whisper in normalized_command["payload"]["whispers"]:
+                tid = whisper["targetId"]
+                omen = (self.civilization.get("godState") or {}).get("privateOmens", {}).get(str(tid))
+                outgoing[str(tid)] = omen.get("id") if isinstance(omen, dict) else None
+            return {"outgoingIds": outgoing}
+        if kind == "crowd_compulsion":
+            outgoing = {}
+            gates = (self.civilization.get("godState") or {}).get("decisionGates") or {}
+            for entry in normalized_command["payload"]["targets"]:
+                tid = entry["targetId"]
+                gate = gates.get(str(tid)) if isinstance(gates, dict) else None
+                outgoing[str(tid)] = gate.get("id") if isinstance(gate, dict) else None
+            return {"outgoingIds": outgoing}
+        if kind == "dream_broadcast":
+            outgoing = {}
+            masks = (self.civilization.get("godState") or {}).get("contextMasks") or {}
+            for tid in normalized_command["payload"]["targetIds"]:
+                mask = masks.get(str(tid)) if isinstance(masks, dict) else None
+                outgoing[str(tid)] = mask.get("id") if isinstance(mask, dict) else None
+            return {"outgoingIds": outgoing}
+        if kind == "revoke_guidance":
+            return self._god_current_revoke_target(normalized_command["payload"]["id"])
+        if kind == "context_mask":
+            return {"outgoingId": self._god_current_outgoing_context_mask_id(
+                normalized_command["payload"]["targetId"])}
+        if kind in ("decision_compulsion", "decision_veto_arm", "agent_possession",
+                    "revoke_decision_gate", "decision_veto_resolve"):
+            return {"outgoingId": self._god_current_outgoing_decision_gate_id(
+                normalized_command["payload"]["targetId"])}
+        if kind == "anoint":
+            return {"outgoingId": self._god_current_outgoing_anointment_id(
+                normalized_command["payload"]["targetId"])}
+        if kind in ("identity_edit", "identity_copy_overwrite"):
+            return {"outgoingId": self._god_current_outgoing_identity_forge_id(
+                normalized_command["payload"]["targetId"])}
+        if kind == "deja_vu_replay":
+            steps = normalized_command["payload"].get("replaySteps") or []
+            last_frame = steps[-1].get("frameTick") if steps else None
+            return {"stepCount": len(steps), "lastDigestFrame": last_frame}
+        return {}
+
+    def _god_check_fingerprint(self, normalized_command, fingerprint):
+        """Returns a rejection reason string, or None if every recorded
+        precondition still matches current state. frameTick drift alone is
+        acceptable and never checked here."""
+        kind = normalized_command["kind"]
+        if kind in ("providence", "private_omen"):
+            current = self._god_current_outgoing_guidance_id(
+                kind, normalized_command["payload"])
+            if current != fingerprint.get("outgoingId"):
+                return f"{kind} changed since preview -- re-preview to see the current guidance"
+            return None
+        if kind == "whisper_campaign":
+            current = {}
+            for whisper in normalized_command["payload"]["whispers"]:
+                tid = whisper["targetId"]
+                omen = (self.civilization.get("godState") or {}).get("privateOmens", {}).get(str(tid))
+                current[str(tid)] = omen.get("id") if isinstance(omen, dict) else None
+            if current != fingerprint.get("outgoingIds"):
+                return "whisper targets changed since preview -- re-preview to see current omens"
+            return None
+        if kind == "crowd_compulsion":
+            current = {}
+            gates = (self.civilization.get("godState") or {}).get("decisionGates") or {}
+            for entry in normalized_command["payload"]["targets"]:
+                tid = entry["targetId"]
+                gate = gates.get(str(tid)) if isinstance(gates, dict) else None
+                current[str(tid)] = gate.get("id") if isinstance(gate, dict) else None
+            if current != fingerprint.get("outgoingIds"):
+                return "crowd compulsion targets changed since preview -- re-preview to see current gates"
+            return None
+        if kind == "dream_broadcast":
+            current = {}
+            masks = (self.civilization.get("godState") or {}).get("contextMasks") or {}
+            for tid in normalized_command["payload"]["targetIds"]:
+                mask = masks.get(str(tid)) if isinstance(masks, dict) else None
+                current[str(tid)] = mask.get("id") if isinstance(mask, dict) else None
+            if current != fingerprint.get("outgoingIds"):
+                return "dream broadcast targets changed since preview -- re-preview to see current masks"
+            return None
+        if kind == "revoke_guidance":
+            current = self._god_current_revoke_target(normalized_command["payload"]["id"])
+            if current != fingerprint:
+                return "guidance target changed since preview -- re-preview to see the current state"
+            return None
+        if kind == "context_mask":
+            current = self._god_current_outgoing_context_mask_id(
+                normalized_command["payload"]["targetId"])
+            if current != fingerprint.get("outgoingId"):
+                return "context mask changed since preview -- re-preview to see the current mask"
+            return None
+        if kind in ("decision_compulsion", "decision_veto_arm", "agent_possession",
+                    "revoke_decision_gate", "decision_veto_resolve"):
+            current = self._god_current_outgoing_decision_gate_id(
+                normalized_command["payload"]["targetId"])
+            if current != fingerprint.get("outgoingId"):
+                return "decision gate changed since preview -- re-preview to see the current gate"
+            return None
+        if kind == "anoint":
+            current = self._god_current_outgoing_anointment_id(
+                normalized_command["payload"]["targetId"])
+            if current != fingerprint.get("outgoingId"):
+                return "anointment changed since preview -- re-preview to see the current record"
+            return None
+        if kind in ("identity_edit", "identity_copy_overwrite"):
+            current = self._god_current_outgoing_identity_forge_id(
+                normalized_command["payload"]["targetId"])
+            if current != fingerprint.get("outgoingId"):
+                return "identity forge changed since preview -- re-preview to see the current record"
+            return None
+        if kind == "deja_vu_replay":
+            payload = normalized_command["payload"]
+            target_id = payload.get("targetId")
+            if self._god_active_decision_gate_record(target_id) is not None:
+                return "agent already has an active decision gate"
+            replays = (self.civilization.get("godState") or {}).get("dejaVuReplays") or {}
+            if isinstance(replays, dict):
+                for rec in replays.values():
+                    if (isinstance(rec, dict) and rec.get("status") == "active"
+                            and rec.get("targetId") == target_id):
+                        return "agent already has an active deja vu replay"
+            if self._god_deja_vu_session_total >= GOD_DEJA_VU_SESSION_CAP:
+                return f"deja vu replay session cap ({GOD_DEJA_VU_SESSION_CAP}) reached"
+            steps = payload.get("replaySteps") or []
+            last_frame = steps[-1].get("frameTick") if steps else None
+            current = {"stepCount": len(steps), "lastDigestFrame": last_frame}
+            if current != fingerprint:
+                return "decision digests changed since preview -- re-preview to refresh steps"
+            return None
+        return None
+
+    # --- preview cache (in-memory, bounded, never persisted) ---
+    def _god_preview_evict_expired(self):
+        now = time.time()
+        expired = [pid for pid, rec in self._god_preview_cache.items()
+                  if rec["expiresAt"] <= now]
+        for pid in expired:
+            del self._god_preview_cache[pid]
+
+    def _god_preview_insert(self, record):
+        self._god_preview_evict_expired()
+        while len(self._god_preview_cache) >= GOD_PREVIEW_CACHE_MAX:
+            oldest_id = min(self._god_preview_cache,
+                            key=lambda pid: self._god_preview_cache[pid]["createdAt"])
+            del self._god_preview_cache[oldest_id]
+        self._god_preview_cache[record["previewId"]] = record
+
+    # --- idempotency store (in-memory, bounded, never persisted) ---
+    def _god_requests_evict(self):
+        while len(self._god_requests) > GOD_REQUEST_CACHE_MAX:
+            oldest_id = min(self._god_requests,
+                            key=lambda rid: self._god_requests[rid]["createdAt"])
+            del self._god_requests[oldest_id]
+
+    def _hash_request_id(self, request_id):
+        """Never log a raw client-supplied requestId verbatim (docs/plan
+        Logging section: "Hash or redact request_id")."""
+        if not request_id:
+            return None
+        return hashlib.sha256(str(request_id).encode("utf-8")).hexdigest()[:16]
+
+    def _log_divine(self, intervention_id, request_id, kind, normalized_command,
+                    outcome, status, public):
+        log_fn = self.d.get("log_divine")
+        if not log_fn:
+            return
+        try:
+            log_fn(
+                intervention_id=intervention_id,
+                request_id=self._hash_request_id(request_id),
+                frame_tick=self.frameTick,
+                kind=kind,
+                normalized_command=normalized_command,
+                outcome=outcome,
+                status=status,
+                public=public,
+            )
+        except Exception:
+            pass  # logging must never break the simulation
+
+    # --- guidance closure (Phase 3: providence + private omens) ---
+    def _close_providence(self, status):
+        """Clears the single active providence slot exactly once, emitting
+        one audit record (docs/plan "Expiry ownership" + "Cancellable"
+        reversibility). Returns the closed record, or None if none was
+        active. Must be called with self.lock already held. Providence
+        carries no memory-write contract -- only private omens do."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        prov = god.get("providence")
+        if not isinstance(prov, dict):
+            return None
+        god["providence"] = None
+        self._log_divine(prov.get("id"), None, "providence", prov,
+                         {"status": status}, status, public=True)
+        return prov
+
+    def _close_omen(self, key, status):
+        """Clears one private omen (keyed by str(agent id)) exactly once.
+        Writes the omen's text into the target's ordinary memory EXACTLY
+        ONCE via _push_memory(..., kind="divine_omen") -- guarded by the
+        record's own `memoryWritten` flag so expiry, revocation, and
+        replacement can never double-fire it, and restore-time re-closure of
+        an already-closed omen (memoryWritten already True, or the key
+        already gone) is a safe no-op (docs/plan Phase 3 memory contract).
+        Must be called with self.lock already held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        omens = god.get("privateOmens")
+        omen = omens.get(key) if isinstance(omens, dict) else None
+        if not isinstance(omen, dict):
+            return None
+        if not omen.get("memoryWritten"):
+            agent = self._find_agent_by_id(omen.get("targetId"))
+            if agent is not None:
+                self._push_memory(agent, omen.get("text", ""), kind="divine_omen")
+            omen["memoryWritten"] = True
+        del omens[key]
+        self._log_divine(omen.get("id"), None, "private_omen", omen,
+                         {"status": status}, status, public=False)
+        self._sweep_whisper_campaigns()
+        return omen
+
+    # --- expiry (rule: "Expiry ownership") ---
+    def _expire_divine_effects(self, restore=False):
+        """Bounded scan: marks newly expired activeEvents (Phase 5 payload,
+        empty today), providence, and every private omen exactly once each,
+        leaving already-closed entries untouched. Called every tick
+        immediately after frameTick advances (_tick_once) and once more
+        after restore rehydration. Must be called with self.lock already
+        held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        ft = self.frameTick
+        events = god.get("activeEvents")
+        if isinstance(events, list) and events:
+            for event in events[:GOD_ACTIVE_EVENTS_CAP]:
+                if not isinstance(event, dict) or event.get("status") != "active":
+                    continue
+                expires_frame = event.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    if event.get("kind") == "weather_override":
+                        # Phase 6: closes the override and hands off to the
+                        # natural cycle's successor state via the SAME path
+                        # cancel uses (_close_weather_override) -- never the
+                        # story_event closer, which has no weather semantics.
+                        self._close_weather_override(event, status)
+                        if not restore:
+                            self._push_activity(
+                                "A divine weather override ends -- the sky "
+                                "returns to its natural course.")
+                    else:
+                        # Shared with god_cancel's story_event branch: closes the
+                        # event exactly once and, if it still owns the current
+                        # providence slot, closes that too through the SAME
+                        # _close_providence path (docs/plan Phase 5: expiry
+                        # closes every sub-effect of an event exactly once).
+                        self._close_story_event(event, status)
+                        if not restore and event.get("visibility", "public") == "public":
+                            self._push_activity(f'A divine story fades: "{event.get("title")}"')
+
+        prov = god.get("providence")
+        if isinstance(prov, dict):
+            expires_frame = prov.get("expiresFrame")
+            if isinstance(expires_frame, int) and ft >= expires_frame:
+                status = "restore-closed" if restore else "expired"
+                self._close_providence(status)
+                if not restore:
+                    self._push_activity("A divine providence fades from the village's thoughts.")
+
+        omens = god.get("privateOmens")
+        if isinstance(omens, dict) and omens:
+            for key in list(omens.keys()):
+                omen = omens.get(key)
+                if not isinstance(omen, dict):
+                    continue
+                expires_frame = omen.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_omen(key, status)
+
+        self._sweep_whisper_campaigns(restore=restore)
+
+        sampling = god.get("agentSampling")
+        if isinstance(sampling, dict) and sampling:
+            for key in list(sampling.keys()):
+                rec = sampling.get(key)
+                if not isinstance(rec, dict):
+                    continue
+                expires_frame = rec.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_agent_sampling(key, status)
+
+        masks = god.get("contextMasks")
+        if isinstance(masks, dict) and masks:
+            for key in list(masks.keys()):
+                rec = masks.get(key)
+                if not isinstance(rec, dict):
+                    continue
+                expires_frame = rec.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_context_mask(key, status)
+
+        self._expire_decision_gates(restore=restore)
+        self._tick_divine_bargains(restore=restore)
+
+        anointments = god.get("anointments")
+        if isinstance(anointments, dict) and anointments:
+            for key in list(anointments.keys()):
+                rec = anointments.get(key)
+                if not isinstance(rec, dict):
+                    continue
+                expires_frame = rec.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_anointment(key, status)
+
+        forges = god.get("identityForges")
+        if isinstance(forges, dict) and forges:
+            for key in list(forges.keys()):
+                rec = forges.get(key)
+                if not isinstance(rec, dict):
+                    continue
+                expires_frame = rec.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_identity_forge(key, status)
+
+        zones = god.get("architectZones")
+        if isinstance(zones, list) and zones:
+            for zone in list(zones):
+                if not isinstance(zone, dict) or zone.get("status") != "active":
+                    continue
+                expires_frame = zone.get("expiresFrame")
+                if isinstance(expires_frame, int) and ft >= expires_frame:
+                    status = "restore-closed" if restore else "expired"
+                    self._close_architect_zone(zone.get("id"), status)
+                    if not restore and zone.get("kind") == "paint":
+                        self._push_activity("A divine architect zone fades — painted terrain reverts.")
+
+        self._sweep_crowd_compulsions(restore=restore)
+        self._sweep_dream_broadcasts(restore=restore)
+
+    def _tick_divine_bargains(self, restore=False):
+        """Settle open Merovingian bargains on tick. Lock held."""
+        if restore or not GOD_MODE_ENABLED:
+            return
+        god = self.civilization.get("godState") or {}
+        bushes = god.get("burningBush") or {}
+        if not isinstance(bushes, dict):
+            return
+        ft = self.frameTick
+        for key, bush in list(bushes.items()):
+            if not isinstance(bush, dict):
+                continue
+            bargain = bush.get("bargain")
+            if not isinstance(bargain, dict) or bargain.get("status") != "open":
+                continue
+            try:
+                target_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            fail_pred = bargain.get("failurePredicate")
+            if isinstance(fail_pred, dict) and self._evaluate_god_bargain_predicate(
+                    fail_pred, target_id):
+                self._settle_bargain(key, bush, "failure", "failure_predicate")
+                continue
+            succ_pred = bargain.get("successPredicate")
+            if isinstance(succ_pred, dict) and self._evaluate_god_bargain_predicate(
+                    succ_pred, target_id):
+                self._settle_bargain(key, bush, "success", "predicate")
+                continue
+            expires = bargain.get("expiresFrame")
+            if isinstance(expires, int) and ft >= expires:
+                self._settle_bargain(key, bush, "failure", "expiry")
+
+    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Optional
+    # Phase 8: free-prose story compiler) ---
+    # This section NEVER mutates world state and NEVER calls god_apply --
+    # god_compile_prose's only side effect is populating the SAME
+    # _god_preview_cache slot god_preview uses, via a direct call to
+    # god_preview itself (self.lock is a threading.RLock -- see __init__ --
+    # so a nested acquire from an already-locked caller is safe). The
+    # operator still has to explicitly Apply the resulting previewId through
+    # the normal /control/god/apply route, which revalidates it exactly like
+    # every other preview. The compiler is also never given SIM_GOD_TOKEN --
+    # server.py's route handler checks the token BEFORE calling this method,
+    # and this method has no parameter for it and never reads os.environ.
+    def _god_compiler_prompt(self, prose):
+        """Strict system+user prompt for the compiler model. Lists every
+        known modifier key + bound and the three known primitive kinds
+        inline, with two worked few-shot examples -- a small model needs the
+        shape SHOWN, not merely described (docs/plan "Optional Phase 8")."""
+        modifier_lines = "\n".join(
+            f'  - "{k}": number in [{lo}, {hi}]' for k, (lo, hi) in GOD_MODIFIER_RANGES.items())
+        system = (
+            "You are a strict JSON compiler for a village-simulation divine story "
+            "event. You NEVER write prose commentary. You output ONLY one JSON "
+            "object, nothing before or after it, matching EXACTLY this shape:\n"
+            '{"kind": "story_event", "payload": {\n'
+            f'  "title": "<string, max {GOD_EVENT_TITLE_MAX_CHARS} chars>",\n'
+            f'  "narration": "<string, max {GOD_TEXT_MAX_CHARS} chars>",\n'
+            '  "visibility": "public",\n'
+            f'  "durationFrames": <integer, {GOD_GUIDANCE_MIN_DURATION_FRAMES}-{GOD_GUIDANCE_MAX_DURATION_FRAMES}>,\n'
+            '  "modifiers": {<zero or more of the allowed keys below>},\n'
+            '  "primitives": [<zero or more allowed primitive objects below, usually empty>]\n'
+            "}}\n\n"
+            f"Allowed modifier keys (payload.modifiers), each optional, at most once each:\n{modifier_lines}\n\n"
+            "Allowed primitive kinds (payload.primitives[].kind), each optional and usually omitted "
+            "because you are not given real resource/agent/structure ids to target safely:\n"
+            '  - "agent_vitals": {"targetId": <int>, "healthDelta": <number>, "hungerDelta": <number>}\n'
+            '  - "grant_resource": {"resourceId": "<string>", "amount": <positive int>, "target": "stockpile"}\n'
+            '  - "structure_condition": {"structureId": <int>, "delta": <number>}\n\n'
+            "NEVER invent a modifier key outside the allowed list above. NEVER invent a resource id, "
+            "agent id, or structure id. If the prose gives you no real id to target, omit \"primitives\" "
+            "entirely (use only \"modifiers\" and \"narration\" to convey the effect)."
+        )
+        examples = (
+            "Example 1\n"
+            'Prose: "The river runs dark for three days and the fish flee."\n'
+            "Output: "
+            '{"kind": "story_event", "payload": {"title": "The Black River", '
+            '"narration": "The river runs dark and the fish flee the shallows.", '
+            '"visibility": "public", "durationFrames": 8100, '
+            '"modifiers": {"fish_yield_multiplier": 0.1}, "primitives": []}}\n\n'
+            "Example 2\n"
+            'Prose: "A gentle mercy rain falls, easing hunger across the land for a while."\n'
+            "Output: "
+            '{"kind": "story_event", "payload": {"title": "Merciful Rain", '
+            '"narration": "A gentle rain falls and the village\'s hunger eases.", '
+            '"visibility": "public", "durationFrames": 5400, '
+            '"modifiers": {"hunger_drain_multiplier": 0.5, "starvation_damage_multiplier": 0.2}, '
+            '"primitives": []}}\n'
+        )
+        user = f"{examples}\nNow compile this prose into ONE JSON object of the same shape:\n{prose}"
+        return system, user
+
+    def _god_compiler_call_model(self, system_prompt, user_prompt):
+        """Call the compiler model and return (raw_text_or_None, latency_ms).
+        Never raises -- any lm_complete failure (including a simulated
+        timeout in tests) degrades to (None, latency_ms) so the caller can
+        reject cleanly instead of propagating an unhandled exception."""
+        lm_fn = self.d.get("lm_complete")
+        started = time.time()
+        if lm_fn is None:
+            return None, 0
+        try:
+            # Model routing (docs/plan-sovereign-god-mode-v2.md "Optional
+            # Phase 8" + "Model routing and implementation ownership"):
+            # sim-fast ALREADY serves PIANO/background cognition, and past
+            # sim-fast contention increased PIANO module drops. This phase
+            # deliberately does NOT default a new LLM path onto sim-fast --
+            # it routes to sim-smart (the same tier every agent decision
+            # already uses) instead. That is a genuinely blocking
+            # lm_complete call on sim-smart's own slot pool, not a new
+            # background-cognition workload; see specs/03-cognition.md for
+            # exactly which pool this participates in (it is NOT
+            # MAX_CONCURRENT_LLM's PIANO pool). The plan is explicit that
+            # this routing choice still needs its own A/B contention
+            # measurement before GOD_COMPILER_ENABLED ships live -- see
+            # GOD_COMPILER_ENABLED's definition and specs/12-ops.md.
+            raw_text = lm_fn(system_prompt, user_prompt, model="sim-smart",
+                             max_tokens=400, temperature=0.3,
+                             timeout=GOD_COMPILER_TIMEOUT_SEC)
+        except Exception:
+            raw_text = None
+        latency_ms = int((time.time() - started) * 1000)
+        return raw_text, latency_ms
+
+    def _god_compiler_parse(self, raw_text):
+        """Parse the compiler model's raw text into the exact {kind,
+        payload} shape the prompt demands. Returns (payload_dict, None) on
+        success or (None, reason) on any parse/shape failure -- `reason` is
+        short, secret-free, and safe to return over HTTP / write to
+        compiler.jsonl. Tolerates a fenced code block the same way this
+        codebase's other LLM-output parsing does."""
+        if not isinstance(raw_text, str):
+            return None, "compiler produced no text output"
+        cleaned = raw_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+        try:
+            parsed = json.loads(cleaned)
+        except (ValueError, TypeError):
+            return None, f"could not parse compiler output as JSON: {raw_text[:200]!r}"
+        if not isinstance(parsed, dict):
+            return None, f"compiler output was not a JSON object: {raw_text[:200]!r}"
+        if parsed.get("kind") != "story_event":
+            return None, f"compiler output kind must be 'story_event', got {parsed.get('kind')!r}"
+        payload = parsed.get("payload")
+        if not isinstance(payload, dict):
+            return None, "compiler output payload must be an object"
+        return payload, None
+
+    def _log_compiler(self, prose, model, latency_ms, status, reason=None, preview_id=None):
+        """One record per compile attempt (docs/plan Logging section:
+        "request text, model, latency, and result"). NEVER receives or logs
+        SIM_GOD_TOKEN -- this method has no such parameter. Swallows any
+        logging failure, matching every other divine log call in this
+        module."""
+        log_fn = self.d.get("log_compiler")
+        if not log_fn:
+            return
+        try:
+            log_fn(prose=prose, model=model, latency_ms=latency_ms,
+                  status=status, reason=reason, preview_id=preview_id)
+        except Exception:
+            pass
+
+    def god_compile_prose(self, prose):
+        """Turn free operator prose into a DRAFT typed story_event preview.
+        NEVER mutates world state; NEVER calls god_apply. Dual-gated on
+        GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED (docs/plan: "the
+        contention gate is not cleared by shipping" -- both flags must be
+        explicitly on). Enforces its own rate limit and session cap,
+        distinct from agent cognition's MAX_CONCURRENT_LLM pool."""
+        with self.lock:
+            if not (GOD_MODE_ENABLED and GOD_COMPILER_ENABLED):
+                return {"compileOk": False, "reason": "god compiler disabled"}
+
+            prose_norm, reason = self._normalize_divine_text(
+                prose, max_chars=GOD_COMPILER_PROSE_MAX_CHARS,
+                max_bytes=GOD_COMPILER_PROSE_MAX_BYTES)
+            if reason:
+                return {"compileOk": False, "reason": f"prose {reason}"}
+
+            state = self._god_compiler_state
+            now = time.time()
+            if state["compileCount"] >= GOD_COMPILER_SESSION_CAP:
+                return {"compileOk": False,
+                        "reason": (f"compiler session cap ({GOD_COMPILER_SESSION_CAP}) reached "
+                                  "for this process lifetime")}
+            if now - state["lastCompileWallTime"] < GOD_COMPILER_MIN_INTERVAL_SEC:
+                return {"compileOk": False,
+                        "reason": f"rate limited: at most one compile per {GOD_COMPILER_MIN_INTERVAL_SEC:.0f}s"}
+
+            # Bump BEFORE the model call so a hung/failed/rejected compile
+            # still counts against the session cap and interval (docs/plan:
+            # "Bump session count regardless of success").
+            state["lastCompileWallTime"] = now
+            state["compileCount"] += 1
+
+            model_id = "sim-smart"
+            system_prompt, user_prompt = self._god_compiler_prompt(prose_norm)
+            raw_text, latency_ms = self._god_compiler_call_model(system_prompt, user_prompt)
+
+            if not raw_text:
+                fail_reason = "the compiler model produced no output (timeout or empty response)"
+                self._log_compiler(prose_norm, model_id, latency_ms, "rejected", fail_reason)
+                return {"compileOk": False, "reason": fail_reason}
+
+            payload, parse_reason = self._god_compiler_parse(raw_text)
+            if parse_reason:
+                self._log_compiler(prose_norm, model_id, latency_ms, "rejected", parse_reason)
+                return {"compileOk": False, "reason": parse_reason}
+
+            normalized, validate_reason = self._validate_god_story_event(payload)
+            if validate_reason:
+                self._log_compiler(prose_norm, model_id, latency_ms, "rejected", validate_reason)
+                return {"compileOk": False, "reason": validate_reason}
+
+            # Preview-only: reuse the SAME entry point every other kind uses,
+            # so the compiled draft lands in the identical
+            # _god_preview_cache slot, under the identical digest/
+            # fingerprint/reversibility machinery -- and this method never
+            # touches _god_preview_cache directly or calls god_apply.
+            preview = self.god_preview({"kind": "story_event", "payload": normalized["payload"]})
+            if not preview.get("ok"):
+                # Should be unreachable -- `normalized` already passed the
+                # SAME validator god_preview re-runs -- but never let a
+                # compiler-side bug surface as an unhandled exception.
+                fail_reason = preview.get("reason") or "preview rejected the compiled draft"
+                self._log_compiler(prose_norm, model_id, latency_ms, "rejected", fail_reason)
+                return {"compileOk": False, "reason": fail_reason}
+
+            self._log_compiler(prose_norm, model_id, latency_ms, "draft",
+                               None, preview.get("previewId"))
+            return {
+                "compileOk": True,
+                "previewId": preview["previewId"],
+                "commandDigest": preview["commandDigest"],
+                "previewOutcome": preview.get("previewOutcome"),
+                "normalizedCommand": preview.get("normalizedCommand"),
+                "reversibilityClass": preview.get("reversibilityClass"),
+                "expiresAt": preview.get("expiresAt"),
+            }
+
+    # --- entry points (each acquires self.lock itself; Flask request
+    # threads call these from outside the tick thread) ---
+    def god_preview(self, envelope):
+        """Validate + normalize WITHOUT mutation. Returns a preview record
+        (opaque previewId, canonical digest, TTL, reversibility class)."""
+        with self.lock:
+            if not GOD_MODE_ENABLED:
+                return {"ok": False, "reason": "god mode disabled"}
+            normalized, reason = self._validate_god_envelope(envelope)
+            if reason:
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": reason}
+            digest = self._god_command_digest(normalized)
+            preview_id = secrets.token_urlsafe(24)
+            now = time.time()
+            record = {
+                "previewId": preview_id,
+                "normalizedCommand": normalized,
+                "commandDigest": digest,
+                "previewFrame": self.frameTick,
+                "createdAt": now,
+                "expiresAt": now + GOD_PREVIEW_TTL_SECONDS,
+                "fingerprint": self._god_target_fingerprint(normalized),
+            }
+            self._god_preview_insert(record)
+            response = {
+                "ok": True,
+                "previewId": preview_id,
+                "commandDigest": digest,
+                "previewFrame": self.frameTick,
+                "expiresAt": record["expiresAt"],
+                "normalizedCommand": normalized,
+                "reversibilityClass": self._god_reversibility_class(normalized),
+                # Sovereign God mode (Phase 3): "include the outgoing
+                # providence in the preview response" -- the same fingerprint
+                # bound into the cached preview record is echoed back here so
+                # a client can show the disclosed replacement BEFORE the
+                # operator commits to apply. Empty dict for kinds with no
+                # precondition (proclamation).
+                "fingerprint": record["fingerprint"],
+                # Sovereign God mode (Phase 4): the exact clamped/bounded
+                # value an immediate miracle would apply right now, or None
+                # for every kind with no derived value (Phase 2/3 kinds).
+                "previewOutcome": self._god_preview_outcome(normalized),
+            }
+            if normalized.get("kind") == "story_event":
+                payload = normalized.get("payload") or {}
+                warnings = _god_modifier_conflict_warnings(payload.get("modifiers") or {})
+                if warnings:
+                    response["warnings"] = warnings
+            return response
+
+    def _next_intervention_id(self):
+        """Shared per-world intervention id sequence + the monotonic
+        `intervened` marker -- every successful apply (proclamation,
+        providence, private_omen, revoke_guidance, and later phases) goes
+        through this one counter. Must be called with self.lock already
+        held, and only after every rejection path has already returned (a
+        failed apply must never consume a sequence number)."""
+        god = self.civilization["godState"]
+        seq = god.get("nextInterventionSeq", 1)
+        intervention_id = f"divine-{seq}"
+        god["nextInterventionSeq"] = seq + 1
+        god["intervened"] = True
+        return intervention_id
+
+    def _god_record_intervention(self, record):
+        """Append one outcome record to the bounded recentInterventions ring.
+        `record["public"]` MUST be set by the caller -- snapshot()'s
+        recentPublicInterventions filters on it, and it is the ONLY thing
+        standing between a private_omen record and a public /state leak."""
+        god = self.civilization["godState"]
+        recent = god["recentInterventions"]
+        recent.append(record)
+        if len(recent) > GOD_RECENT_INTERVENTIONS_CAP:
+            del recent[:-GOD_RECENT_INTERVENTIONS_CAP]
+
+    def _god_apply_command(self, normalized):
+        """Dispatch by kind. Returns (outcome, reason); outcome is None on
+        rejection. Must be called with self.lock already held."""
+        kind = normalized["kind"]
+        if kind == "proclamation":
+            return self._god_apply_proclamation(normalized["payload"]), None
+        if kind == "providence":
+            return self._god_apply_providence(normalized["payload"]), None
+        if kind == "private_omen":
+            return self._god_apply_private_omen(normalized["payload"]), None
+        if kind == "whisper_campaign":
+            return self._god_apply_whisper_campaign(normalized["payload"]), None
+        if kind == "crowd_compulsion":
+            return self._god_apply_crowd_compulsion(normalized["payload"]), None
+        if kind == "dream_broadcast":
+            return self._god_apply_dream_broadcast(normalized["payload"]), None
+        if kind == "agent_sampling":
+            return self._god_apply_agent_sampling(normalized["payload"]), None
+        if kind == "revoke_agent_sampling":
+            return self._god_apply_revoke_agent_sampling(normalized["payload"])
+        if kind == "memory_insert":
+            return self._god_apply_memory_insert(normalized["payload"]), None
+        if kind == "memory_delete":
+            return self._god_apply_memory_delete(normalized["payload"]), None
+        if kind == "belief_plant":
+            return self._god_apply_belief_plant(normalized["payload"]), None
+        if kind == "context_mask":
+            return self._god_apply_context_mask(normalized["payload"]), None
+        if kind == "decision_compulsion":
+            return self._god_apply_decision_compulsion(normalized["payload"]), None
+        if kind == "decision_veto_arm":
+            return self._god_apply_decision_veto_arm(normalized["payload"]), None
+        if kind == "decision_veto_resolve":
+            return self._god_apply_decision_veto_resolve(normalized["payload"])
+        if kind == "agent_possession":
+            return self._god_apply_agent_possession(normalized["payload"]), None
+        if kind == "revoke_decision_gate":
+            return self._god_apply_revoke_decision_gate(normalized["payload"])
+        if kind == "burning_bush_message":
+            return self._god_apply_burning_bush_message(normalized["payload"]), None
+        if kind == "burning_bush_close":
+            return self._god_apply_burning_bush_close(normalized["payload"]), None
+        if kind == "merovingian_bargain":
+            return self._god_apply_merovingian_bargain(normalized["payload"]), None
+        if kind == "bargain_settle":
+            return self._god_apply_bargain_settle(normalized["payload"])
+        if kind == "anoint":
+            return self._god_apply_anoint(normalized["payload"]), None
+        if kind == "revoke_anoint":
+            return self._god_apply_revoke_anoint(normalized["payload"])
+        if kind == "identity_edit":
+            return self._god_apply_identity_edit(normalized["payload"]), None
+        if kind == "identity_copy_overwrite":
+            return self._god_apply_identity_copy_overwrite(normalized["payload"]), None
+        if kind == "identity_forge_cancel":
+            return self._god_apply_identity_forge_cancel(normalized["payload"])
+        if kind == "architect_zone":
+            return self._god_apply_architect_zone(normalized["payload"]), None
+        if kind == "architect_zone_cancel":
+            return self._god_apply_architect_zone_cancel(normalized["payload"])
+        if kind == "architect_release_hold":
+            return self._god_apply_architect_release_hold(normalized["payload"])
+        if kind == "checkpoint_create":
+            return self._god_apply_checkpoint_create(normalized["payload"])
+        if kind == "checkpoint_restore":
+            return self._god_apply_checkpoint_restore(normalized["payload"])
+        if kind == "deja_vu_replay":
+            return self._god_apply_deja_vu_replay(normalized["payload"]), None
+        if kind == "revoke_guidance":
+            return self._god_apply_revoke_guidance(normalized["payload"]["id"])
+        if kind == "agent_vitals":
+            return self._god_apply_agent_vitals(normalized["payload"]), None
+        if kind == "grant_resource":
+            return self._god_apply_grant_resource(normalized["payload"]), None
+        if kind == "structure_condition":
+            return self._god_apply_structure_condition(normalized["payload"]), None
+        if kind == "repair_structures":
+            return self._god_apply_repair_structures(normalized["payload"]), None
+        if kind == "clear_ruins":
+            return self._god_apply_clear_ruins(normalized["payload"]), None
+        if kind == "story_event":
+            return self._god_apply_story_event(normalized["payload"]), None
+        if kind == "weather_override":
+            return self._god_apply_weather_override(normalized["payload"]), None
+        if kind == "wildlife_spawn":
+            return self._god_apply_wildlife_spawn(normalized["payload"])
+        if kind == "wildlife_despawn":
+            return self._god_apply_wildlife_despawn(normalized["payload"])
+        if kind == "wildlife_set_hp":
+            return self._god_apply_wildlife_set_hp(normalized["payload"])
+        return None, f"kind '{kind}' is not implemented in this phase"
+
+    def _god_apply_proclamation(self, payload):
+        text = payload["text"]
+        presentation = payload.get("presentation", "soft")
+        intervention_id = self._next_intervention_id()
+        self._push_activity(f'A divine voice proclaims: "{text}"')
+        self._push_communication("divine_proclamation", "divine", "everyone", text,
+                                 source="divine")
+        self._push_chronicle(text, kind="divine", source="divine",
+                             presentation=presentation)
+        proc_record = {
+            "id": intervention_id, "kind": "proclamation",
+            "frameTick": self.frameTick, "text": text, "status": "applied",
+            "public": True,
+        }
+        if presentation == "thunder":
+            proc_record["presentation"] = "thunder"
+        self._god_record_intervention(proc_record)
+        prov_payload = {
+            "text": text,
+            "durationFrames": GOD_GUIDANCE_DEFAULT_DURATION_FRAMES,
+        }
+        if presentation == "thunder":
+            prov_payload["presentation"] = "thunder"
+        self._god_apply_providence(prov_payload)
+        living_ids = [
+            a["id"] for a in self.agents if a.get("deathFrame") is None
+        ]
+        self._cancel_voice_blocked_special_turns(living_ids)
+        outcome = {"interventionId": intervention_id, "kind": "proclamation", "text": text}
+        if presentation == "thunder":
+            outcome["presentation"] = "thunder"
+        return outcome
+
+    def _god_apply_providence(self, payload):
+        """Sets the single active public providence line, replacing any
+        prior one. The outgoing record (if any) is closed through the SAME
+        _close_providence path expiry/revocation use, so it is logged
+        exactly once regardless of how it ends. Public per docs/plan
+        Visibility: activity/communication/Chronicle, same treatment as
+        proclamation."""
+        god = self.civilization["godState"]
+        outgoing = self._close_providence("replaced") if isinstance(god.get("providence"), dict) else None
+        intervention_id = self._next_intervention_id()
+        text = payload["text"]
+        presentation = payload.get("presentation", "soft")
+        expires_frame = self.frameTick + payload["durationFrames"]
+        prov_record = {
+            "id": intervention_id, "text": text, "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame, "visibility": "public",
+            "ackedAgentIds": {},
+        }
+        if presentation == "thunder":
+            prov_record["presentation"] = "thunder"
+        god["providence"] = prov_record
+        self._push_activity(f'A divine providence settles over the village: "{text}"')
+        self._push_communication("divine_providence", "divine", "everyone", text,
+                                 source="divine")
+        self._push_chronicle(text, kind="divine", source="divine",
+                             presentation=presentation)
+        int_record = {
+            "id": intervention_id, "kind": "providence", "frameTick": self.frameTick,
+            "text": text, "expiresFrame": expires_frame, "status": "applied",
+            "public": True,
+        }
+        if presentation == "thunder":
+            int_record["presentation"] = "thunder"
+        self._god_record_intervention(int_record)
+        living_ids = [
+            a["id"] for a in self.agents if a.get("deathFrame") is None
+        ]
+        self._cancel_voice_blocked_special_turns(living_ids)
+        outcome = {
+            "interventionId": intervention_id, "kind": "providence", "text": text,
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+        if presentation == "thunder":
+            outcome["presentation"] = "thunder"
+        return outcome
+
+    def _god_apply_private_omen(self, payload):
+        """Sets the one active private omen for a single living agent,
+        replacing any prior one for that same agent. Never touches public
+        activity/communication/Chronicle (docs/plan Visibility: private
+        omens must never appear there). The outgoing record (if any) is
+        closed through the SAME _close_omen path expiry/revocation use, so
+        its memory write (if not already written) fires exactly once here,
+        not again later."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = self._close_omen(key, "replaced") if key in god["privateOmens"] else None
+        intervention_id = self._next_intervention_id()
+        agent = self._find_agent_by_id(target_id)
+        text = payload["text"]
+        expires_frame = self.frameTick + payload["durationFrames"]
+        god["privateOmens"][key] = {
+            "id": intervention_id, "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "text": text, "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame, "memoryWritten": False,
+            "acked": False,
+        }
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "private_omen", "frameTick": self.frameTick,
+            "targetId": target_id, "text": text, "expiresFrame": expires_frame,
+            "status": "applied", "public": False,
+        })
+        self._cancel_voice_blocked_special_turns([target_id])
+        return {"interventionId": intervention_id, "kind": "private_omen",
+                "targetId": target_id, "expiresFrame": expires_frame,
+                "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None}
+
+    def _god_apply_whisper_campaign(self, payload):
+        """Batch private omens under one campaign id. Each whisper reuses the
+        private_omen machinery (one omen per agent, replace semantics unchanged).
+        Campaign theme and per-target texts never appear in snapshot() god
+        allowlist; only per-agent omen text reaches _divine_prompt_lines."""
+        god = self.civilization["godState"]
+        campaign_id = self._next_intervention_id()
+        duration = payload["durationFrames"]
+        expires_frame = self.frameTick + duration
+        targets = {}
+        for whisper in payload["whispers"]:
+            outcome = self._god_apply_private_omen({
+                "targetId": whisper["targetId"],
+                "text": whisper["text"],
+                "durationFrames": duration,
+            })
+            targets[str(whisper["targetId"])] = outcome["interventionId"]
+        god["whisperCampaigns"][campaign_id] = {
+            "id": campaign_id,
+            "theme": payload["theme"],
+            "targets": targets,
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "status": "active",
+        }
+        self._god_record_intervention({
+            "id": campaign_id, "kind": "whisper_campaign", "frameTick": self.frameTick,
+            "theme": payload["theme"], "targetIds": [w["targetId"] for w in payload["whispers"]],
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": campaign_id,
+            "kind": "whisper_campaign",
+            "theme": payload["theme"],
+            "targets": targets,
+            "expiresFrame": expires_frame,
+        }
+
+    def _god_apply_crowd_compulsion_gate(self, target_id, pinned_decision,
+                                         duration_frames, remaining_turns, crowd_id):
+        """One compulsion gate for a crowd_compulsion batch target."""
+        intervention_id = self._next_intervention_id()
+        expires_frame = None
+        if duration_frames is not None:
+            expires_frame = self.frameTick + duration_frames
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": "compulsion",
+            "pinnedDecision": copy.deepcopy(pinned_decision),
+            "createdFrame": self.frameTick,
+            "crowdCompulsionId": crowd_id,
+        }
+        if expires_frame is not None:
+            record["expiresFrame"] = expires_frame
+        if remaining_turns is not None:
+            record["remainingTurns"] = remaining_turns
+        return self._god_set_decision_gate(target_id, record, "decision_compulsion")
+
+    def _god_apply_crowd_compulsion(self, payload):
+        """Batch decision compulsion gates under one parent id."""
+        god = self.civilization["godState"]
+        compulsion_id = self._next_intervention_id()
+        duration = payload.get("durationFrames")
+        remaining = payload.get("remainingTurns")
+        expires_frame = (self.frameTick + duration) if duration is not None else None
+        targets = {}
+        for entry in payload["targets"]:
+            outcome = self._god_apply_crowd_compulsion_gate(
+                entry["targetId"], entry["pinnedDecision"],
+                duration, remaining, compulsion_id)
+            targets[str(entry["targetId"])] = outcome["interventionId"]
+        parent = {
+            "id": compulsion_id,
+            "theme": payload.get("theme"),
+            "targets": targets,
+            "createdFrame": self.frameTick,
+            "status": "active",
+        }
+        if expires_frame is not None:
+            parent["expiresFrame"] = expires_frame
+        if remaining is not None:
+            parent["remainingTurns"] = remaining
+        god.setdefault("crowdCompulsions", {})[compulsion_id] = parent
+        target_ids = [t["targetId"] for t in payload["targets"]]
+        self._god_record_intervention({
+            "id": compulsion_id, "kind": "crowd_compulsion", "frameTick": self.frameTick,
+            "theme": payload.get("theme"), "targetIds": target_ids,
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": compulsion_id,
+            "kind": "crowd_compulsion",
+            "theme": payload.get("theme"),
+            "targets": targets,
+            "expiresFrame": expires_frame,
+        }
+
+    def _god_apply_dream_broadcast_mask(self, target_id, dream_snapshot,
+                                        duration_frames, broadcast_id):
+        """One dream context mask for a dream_broadcast batch target."""
+        god = self.civilization["godState"]
+        key = str(target_id)
+        outgoing = (self._close_context_mask(key, "replaced")
+                    if key in god.get("contextMasks", {}) else None)
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + duration_frames
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": "dream",
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "dreamSnapshot": copy.deepcopy(dream_snapshot),
+            "dreamBroadcastId": broadcast_id,
+        }
+        god.setdefault("contextMasks", {})[key] = record
+        agent = self._find_agent_by_id(target_id)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "context_mask", "frameTick": self.frameTick,
+            "targetId": target_id, "mode": "dream",
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "context_mask",
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "mode": "dream",
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_dream_broadcast(self, payload):
+        """Batch dream context masks under one parent id."""
+        god = self.civilization["godState"]
+        broadcast_id = self._next_intervention_id()
+        duration = payload["durationFrames"]
+        expires_frame = self.frameTick + duration
+        snapshot = payload["dreamSnapshot"]
+        targets = {}
+        for target_id in payload["targetIds"]:
+            outcome = self._god_apply_dream_broadcast_mask(
+                target_id, snapshot, duration, broadcast_id)
+            targets[str(target_id)] = outcome["interventionId"]
+        god.setdefault("dreamBroadcasts", {})[broadcast_id] = {
+            "id": broadcast_id,
+            "targets": targets,
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "status": "active",
+        }
+        self._god_record_intervention({
+            "id": broadcast_id, "kind": "dream_broadcast", "frameTick": self.frameTick,
+            "targetIds": list(payload["targetIds"]),
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        self._log_divine(broadcast_id, None, "dream_broadcast",
+                         {"targetCount": len(payload["targetIds"])},
+                         {"targetCount": len(payload["targetIds"])},
+                         "applied", public=False)
+        return {
+            "interventionId": broadcast_id,
+            "kind": "dream_broadcast",
+            "targets": targets,
+            "expiresFrame": expires_frame,
+        }
+
+    def _ensure_burning_bush_session(self, target_id):
+        """Return active bush record for target, creating one if needed."""
+        god = self.civilization["godState"]
+        bushes = god.setdefault("burningBush", {})
+        key = str(target_id)
+        rec = bushes.get(key)
+        if isinstance(rec, dict) and rec.get("status") == "active":
+            return rec
+        intervention_id = self._next_intervention_id()
+        agent = self._find_agent_by_id(target_id)
+        rec = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "thread": [],
+            "createdFrame": self.frameTick,
+            "status": "active",
+        }
+        bushes[key] = rec
+        return rec
+
+    def _close_burning_bush(self, key, status):
+        """Close a Burning Bush session. Lock held."""
+        god = self.civilization.get("godState") or {}
+        bushes = god.get("burningBush") or {}
+        rec = bushes.get(key)
+        if not isinstance(rec, dict) or rec.get("status") != "active":
+            return None
+        rec["status"] = status
+        rec["closedFrame"] = self.frameTick
+        bargain = rec.get("bargain")
+        if isinstance(bargain, dict) and bargain.get("status") == "open":
+            bargain["status"] = "cancelled"
+            bargain["settledFrame"] = self.frameTick
+        self._log_divine(rec.get("id"), None, "burning_bush_close", rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _god_apply_burning_bush_message(self, payload):
+        """Append a private God line to one agent's Burning Bush thread."""
+        target_id = payload["targetId"]
+        key = str(target_id)
+        rec = self._ensure_burning_bush_session(target_id)
+        intervention_id = rec["id"]
+        text = payload["text"]
+        thread = rec.setdefault("thread", [])
+        if not isinstance(thread, list):
+            rec["thread"] = thread = []
+        thread.append({"role": "god", "text": text, "frame": self.frameTick})
+        if len(thread) > GOD_BURNING_BUSH_THREAD_MAX:
+            del thread[:-GOD_BURNING_BUSH_THREAD_MAX]
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "burning_bush_message",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "messageCount": len(thread), "status": "applied", "public": False,
+        })
+        self._log_divine(intervention_id, None, "burning_bush_message",
+                         {"targetId": target_id, "text": text},
+                         {"targetId": target_id, "messageCount": len(thread)},
+                         "applied", public=False)
+        return {
+            "interventionId": intervention_id,
+            "kind": "burning_bush_message",
+            "targetId": target_id,
+            "messageCount": len(thread),
+        }
+
+    def _god_apply_burning_bush_close(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        rec = self._close_burning_bush(key, "closed")
+        if rec is None:
+            return {"interventionId": None, "kind": "burning_bush_close",
+                    "targetId": target_id, "status": "noop"}
+        return {
+            "interventionId": rec.get("id"),
+            "kind": "burning_bush_close",
+            "targetId": target_id,
+            "status": "closed",
+        }
+
+    def _god_apply_merovingian_bargain(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        rec = self._ensure_burning_bush_session(target_id)
+        bargain_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        bargain = {
+            "id": bargain_id,
+            "termsText": payload["termsText"],
+            "successPredicate": payload["successPredicate"],
+            "status": "open",
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        if payload.get("failurePredicate") is not None:
+            bargain["failurePredicate"] = payload["failurePredicate"]
+        if payload.get("rewardPrimitive") is not None:
+            bargain["rewardPrimitive"] = payload["rewardPrimitive"]
+        if payload.get("punishPrimitive") is not None:
+            bargain["punishPrimitive"] = payload["punishPrimitive"]
+        rec["bargain"] = bargain
+        self._god_record_intervention({
+            "id": bargain_id, "kind": "merovingian_bargain",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        self._log_divine(bargain_id, None, "merovingian_bargain",
+                         {"targetId": target_id, "termsText": payload["termsText"],
+                          "successPredicate": payload["successPredicate"]},
+                         {"targetId": target_id, "expiresFrame": expires_frame},
+                         "applied", public=False)
+        return {
+            "interventionId": bargain_id,
+            "kind": "merovingian_bargain",
+            "targetId": target_id,
+            "expiresFrame": expires_frame,
+        }
+
+    def _god_apply_bargain_primitive(self, primitive):
+        if not isinstance(primitive, dict):
+            return None
+        kind = primitive.get("kind")
+        payload = primitive.get("payload") or {}
+        if kind == "grant_resource":
+            return self._god_apply_grant_resource(payload)
+        if kind == "agent_vitals":
+            return self._god_apply_agent_vitals(payload)
+        return None
+
+    def _settle_bargain(self, key, bush, outcome, trigger):
+        """Settle an open bargain. Lock held. outcome: success|failure."""
+        bargain = bush.get("bargain")
+        if not isinstance(bargain, dict) or bargain.get("status") != "open":
+            return None
+        bargain["status"] = outcome
+        bargain["settledFrame"] = self.frameTick
+        bargain["settleTrigger"] = trigger
+        primitive = (bargain.get("rewardPrimitive") if outcome == "success"
+                       else bargain.get("punishPrimitive"))
+        prim_outcome = self._god_apply_bargain_primitive(primitive)
+        target_id = bush.get("targetId")
+        record_public = isinstance(primitive, dict) and primitive.get("kind") == "grant_resource"
+        settle_id = bargain.get("id") or self._next_intervention_id()
+        self._god_record_intervention({
+            "id": settle_id, "kind": "bargain_settle",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "outcome": outcome, "trigger": trigger,
+            "primitiveKind": primitive.get("kind") if isinstance(primitive, dict) else None,
+            "status": "applied", "public": record_public,
+        })
+        self._log_divine(settle_id, None, "bargain_settle",
+                         {"targetId": target_id, "outcome": outcome, "trigger": trigger},
+                         {"outcome": outcome, "primitiveOutcome": prim_outcome},
+                         "applied", public=record_public)
+        return {
+            "outcome": outcome,
+            "trigger": trigger,
+            "primitiveOutcome": prim_outcome,
+        }
+
+    def _god_apply_bargain_settle(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        god = self.civilization["godState"]
+        bush = (god.get("burningBush") or {}).get(key)
+        if not isinstance(bush, dict):
+            return None, "no burning bush session for target agent"
+        outcome = payload["outcome"]
+        settled = self._settle_bargain(key, bush, outcome, "manual")
+        if settled is None:
+            return None, "no open bargain for target agent"
+        return settled, None
+
+    def _god_current_outgoing_anointment_id(self, target_id):
+        rec = (self.civilization.get("godState") or {}).get("anointments", {}).get(str(target_id))
+        return rec.get("id") if isinstance(rec, dict) else None
+
+    def _close_anointment(self, key, status):
+        """Clear one anointment record exactly once. Lock held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        anointments = god.get("anointments")
+        rec = anointments.get(key) if isinstance(anointments, dict) else None
+        if not isinstance(rec, dict):
+            return None
+        if isinstance(anointments, dict):
+            anointments.pop(key, None)
+        self._log_divine(rec.get("id"), None, "anoint", rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _god_apply_anoint(self, payload):
+        """Mark one agent anointed — destiny/oracle private, stigmata in prompts."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = (self._close_anointment(key, "replaced")
+                    if key in god.get("anointments", {}) else None)
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "destinyText": payload["destinyText"],
+            "stigmataTags": list(payload.get("stigmataTags") or []),
+            "oracleHints": list(payload.get("oracleHints") or []),
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        god.setdefault("anointments", {})[key] = record
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "anoint", "frameTick": self.frameTick,
+            "targetId": target_id, "tagCount": len(record["stigmataTags"]),
+            "oracleHintCount": len(record["oracleHints"]),
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        self._log_divine(intervention_id, None, "anoint",
+                         {"targetId": target_id,
+                          "destinyText": payload["destinyText"],
+                          "stigmataTags": record["stigmataTags"],
+                          "oracleHints": record["oracleHints"]},
+                         {"targetId": target_id, "tagCount": len(record["stigmataTags"]),
+                          "oracleHintCount": len(record["oracleHints"])},
+                         "applied", public=False)
+        return {
+            "interventionId": intervention_id,
+            "kind": "anoint",
+            "targetId": target_id,
+            "tagCount": len(record["stigmataTags"]),
+            "oracleHintCount": len(record["oracleHints"]),
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_revoke_anoint(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        closed = self._close_anointment(key, "revoked")
+        if closed is None:
+            return None, "no active anointment for target agent"
+        return {
+            "interventionId": closed.get("id"),
+            "kind": "revoke_anoint",
+            "targetId": target_id,
+        }, None
+
+    def _god_apply_identity_values(self, agent, *, persona=None, personality=None, role=None):
+        """Apply one or more identity fields on a living agent. Lock held."""
+        if persona is not None:
+            agent["persona"] = persona
+        if personality is not None:
+            agent["personality"] = personality
+        if role is not None:
+            agent["role"] = role
+        self._mark_context_dirty(agent)
+
+    def _god_apply_identity_edit(self, payload):
+        """Mutate persona/personality/role with forge snapshot for restore."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        agent = self._find_agent_by_id(target_id)
+        key = str(target_id)
+        outgoing = (self._close_identity_forge(key, "replaced")
+                    if key in god.get("identityForges", {}) else None)
+        snapshot = self._identity_forge_snapshot(agent)
+        self._god_apply_identity_values(
+            agent,
+            persona=payload.get("persona"),
+            personality=payload.get("personality"),
+            role=payload.get("role"),
+        )
+        intervention_id = self._next_intervention_id()
+        expires_frame = None
+        if payload.get("durationFrames") is not None:
+            expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "snapshot": snapshot,
+            "baseline": dict(snapshot),
+            "progress": 1.0,
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        god.setdefault("identityForges", {})[key] = record
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "identity_edit", "frameTick": self.frameTick,
+            "targetId": target_id, "fields": [k for k in ("persona", "personality", "role")
+                                             if k in payload],
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        self._log_divine(intervention_id, None, "identity_edit", payload,
+                         {"targetId": target_id,
+                          "fields": [k for k in ("persona", "personality", "role") if k in payload]},
+                         "applied", public=False)
+        return {
+            "interventionId": intervention_id,
+            "kind": "identity_edit",
+            "targetId": target_id,
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_identity_copy_overwrite(self, payload):
+        """Start gradual persona/personality copy from source to target."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        source_id = payload["sourceId"]
+        target = self._find_agent_by_id(target_id)
+        key = str(target_id)
+        outgoing = (self._close_identity_forge(key, "replaced")
+                    if key in god.get("identityForges", {}) else None)
+        snapshot = self._identity_forge_snapshot(target)
+        intervention_id = self._next_intervention_id()
+        expires_frame = None
+        if payload.get("durationFrames") is not None:
+            expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "copyFromId": source_id,
+            "rate": payload["ratePerThink"],
+            "progress": 0.0,
+            "snapshot": snapshot,
+            "baseline": dict(snapshot),
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        god.setdefault("identityForges", {})[key] = record
+        memories_planted = 0
+        if payload.get("syncMemories"):
+            source = self._find_agent_by_id(source_id)
+            if source is not None:
+                memories_planted = self._god_plant_copy_memories(target, source)
+        self._advance_identity_forge_on_think(target)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "identity_copy_overwrite",
+            "frameTick": self.frameTick, "targetId": target_id, "sourceId": source_id,
+            "ratePerThink": payload["ratePerThink"], "memoriesPlanted": memories_planted,
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        self._log_divine(intervention_id, None, "identity_copy_overwrite", payload,
+                         {"targetId": target_id, "sourceId": source_id,
+                          "memoriesPlanted": memories_planted},
+                         "applied", public=False)
+        return {
+            "interventionId": intervention_id,
+            "kind": "identity_copy_overwrite",
+            "targetId": target_id,
+            "sourceId": source_id,
+            "progress": record.get("progress"),
+            "memoriesPlanted": memories_planted,
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_identity_forge_cancel(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        closed = self._close_identity_forge(key, "cancelled")
+        if closed is None:
+            return None, "no active identity forge for target agent"
+        return {
+            "interventionId": closed.get("id"),
+            "kind": "identity_forge_cancel",
+            "targetId": target_id,
+        }, None
+
+    def _god_apply_agent_sampling(self, payload):
+        """Set one active LLM sampling override for a living agent. Private —
+        never in snapshot() god allowlist."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = (self._close_agent_sampling(key, "replaced")
+                    if key in god.get("agentSampling", {}) else None)
+        intervention_id = self._next_intervention_id()
+        expires_frame = None
+        if "durationFrames" in payload:
+            expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "model": payload["model"],
+            "temperature": payload["temperature"],
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "sourceId": intervention_id,
+        }
+        for opt in ("top_p", "top_k", "min_p"):
+            if opt in payload:
+                record[opt] = payload[opt]
+        god.setdefault("agentSampling", {})[key] = record
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "agent_sampling", "frameTick": self.frameTick,
+            "targetId": target_id, "model": payload["model"],
+            "temperature": payload["temperature"],
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "agent_sampling",
+            "targetId": target_id,
+            "model": payload["model"],
+            "temperature": payload["temperature"],
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_revoke_agent_sampling(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        closed = self._close_agent_sampling(key, "revoked")
+        if closed is None:
+            return None, "no active sampling override for target agent"
+        return {
+            "interventionId": closed.get("id"),
+            "kind": "revoke_agent_sampling",
+            "targetId": target_id,
+        }, None
+
+    def _god_apply_memory_insert(self, payload):
+        agent = self._find_agent_by_id(payload["targetId"])
+        entry = self._god_memory_insert(
+            agent, payload["text"], payload["salience"], payload["kind"])
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "memory_insert",
+            "frameTick": self.frameTick, "targetId": payload["targetId"],
+            "salience": payload["salience"], "memoryKind": payload["kind"],
+            "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "memory_insert",
+            "targetId": payload["targetId"],
+            "targetName": agent["name"] if agent else None,
+            "memoryEntryId": entry.get("id") if isinstance(entry, dict) else None,
+            "salience": payload["salience"],
+            "memoryKind": payload["kind"],
+        }
+
+    def _god_apply_memory_delete(self, payload):
+        agent = self._find_agent_by_id(payload["targetId"])
+        deleted = self._god_memory_delete(
+            agent,
+            keyword=payload.get("keyword"),
+            frameFrom=payload.get("frameFrom"),
+            frameTo=payload.get("frameTo"),
+            kinds=payload.get("kinds"),
+        )
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "memory_delete",
+            "frameTick": self.frameTick, "targetId": payload["targetId"],
+            "deletedCount": deleted, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "memory_delete",
+            "targetId": payload["targetId"],
+            "targetName": agent["name"] if agent else None,
+            "deletedCount": deleted,
+        }
+
+    def _god_apply_belief_plant(self, payload):
+        agent = self._find_agent_by_id(payload["targetId"])
+        belief_id, tenet_or_reason = self._god_belief_plant(
+            agent,
+            belief_id=payload.get("beliefId"),
+            custom_text=payload.get("text"),
+            salience=payload["salience"],
+            plant_in_meme_texts=payload["plantInMemeTexts"],
+        )
+        if belief_id is None:
+            return None, tenet_or_reason
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "belief_plant",
+            "frameTick": self.frameTick, "targetId": payload["targetId"],
+            "beliefId": belief_id, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "belief_plant",
+            "targetId": payload["targetId"],
+            "targetName": agent["name"] if agent else None,
+            "beliefId": belief_id,
+            "beliefCount": len(agent.get("beliefs") or ()),
+        }
+
+    def _god_apply_context_mask(self, payload):
+        """Set one active context mask for a living agent (replace semantics)."""
+        god = self.civilization["godState"]
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = (self._close_context_mask(key, "replaced")
+                    if key in god.get("contextMasks", {}) else None)
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": payload["mode"],
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        if payload["mode"] == "dream":
+            record["dreamSnapshot"] = copy.deepcopy(payload["dreamSnapshot"])
+        elif payload["mode"] == "whisper_chain":
+            record["forgedConversations"] = list(payload["forgedConversations"])
+        god.setdefault("contextMasks", {})[key] = record
+        agent = self._find_agent_by_id(target_id)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "context_mask", "frameTick": self.frameTick,
+            "targetId": target_id, "mode": payload["mode"],
+            "expiresFrame": expires_frame, "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "context_mask",
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "mode": payload["mode"],
+            "expiresFrame": expires_frame,
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_set_decision_gate(self, target_id, record, kind_label):
+        god = self.civilization["godState"]
+        key = str(target_id)
+        outgoing = (self._close_decision_gate(key, "replaced")
+                    if key in god.get("decisionGates", {}) else None)
+        god.setdefault("decisionGates", {})[key] = record
+        agent = self._find_agent_by_id(target_id)
+        if agent is not None:
+            agent["divineHold"] = False
+        intervention_id = record["id"]
+        self._god_record_intervention({
+            "id": intervention_id, "kind": kind_label, "frameTick": self.frameTick,
+            "targetId": target_id, "mode": record.get("mode"),
+            "expiresFrame": record.get("expiresFrame"),
+            "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": kind_label,
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "mode": record.get("mode"),
+            "expiresFrame": record.get("expiresFrame"),
+            "outgoingId": outgoing.get("id") if isinstance(outgoing, dict) else None,
+        }
+
+    def _god_apply_decision_compulsion(self, payload):
+        target_id = payload["targetId"]
+        intervention_id = self._next_intervention_id()
+        expires_frame = None
+        if payload.get("durationFrames") is not None:
+            expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": "compulsion",
+            "pinnedDecision": copy.deepcopy(payload["pinnedDecision"]),
+            "createdFrame": self.frameTick,
+        }
+        if expires_frame is not None:
+            record["expiresFrame"] = expires_frame
+        if payload.get("remainingTurns") is not None:
+            record["remainingTurns"] = payload["remainingTurns"]
+        return self._god_set_decision_gate(target_id, record, "decision_compulsion")
+
+    def _god_apply_decision_veto_arm(self, payload):
+        target_id = payload["targetId"]
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": "veto",
+            "armed": True,
+            "status": "armed",
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+        }
+        return self._god_set_decision_gate(target_id, record, "decision_veto_arm")
+
+    def _god_apply_decision_veto_resolve(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        gate = (self.civilization.get("godState") or {}).get("decisionGates", {}).get(key)
+        if not isinstance(gate, dict):
+            return None, "no active decision gate for this agent"
+        agent = self._find_agent_by_id(target_id)
+        if agent is None:
+            return None, "unknown target agent"
+        pending = gate.get("pendingDecision") or {}
+        resolution = payload["resolution"]
+        if resolution == "approve":
+            decision = dict(pending)
+        elif resolution == "reject":
+            decision = {"action": "rest", "reasoning": "Divine veto rejected."}
+        else:
+            decision = dict(payload["rewrittenDecision"])
+        agent["divineHold"] = False
+        self._apply_divine_possessed_decision(agent, decision, gate, gate_kind="veto_resolve")
+        outgoing_id = gate.get("id")
+        self._close_decision_gate(key, "resolved")
+        intervention_id = self._next_intervention_id()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "decision_veto_resolve",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "resolution": resolution, "appliedAction": decision.get("action"),
+            "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "decision_veto_resolve",
+            "targetId": target_id,
+            "targetName": agent["name"],
+            "resolution": resolution,
+            "appliedAction": decision.get("action"),
+            "gateId": outgoing_id,
+        }, None
+
+    def _god_apply_agent_possession(self, payload):
+        target_id = payload["targetId"]
+        intervention_id = self._next_intervention_id()
+        expires_frame = self.frameTick + payload["durationFrames"]
+        record = {
+            "id": intervention_id,
+            "targetId": target_id,
+            "mode": "possession",
+            "bypassLlm": True,
+            "createdFrame": self.frameTick,
+            "expiresFrame": expires_frame,
+            "queueIndex": 0,
+        }
+        if payload.get("queue"):
+            record["queue"] = copy.deepcopy(payload["queue"])
+        else:
+            record["pinnedDecision"] = copy.deepcopy(payload["pinnedDecision"])
+        return self._god_set_decision_gate(target_id, record, "agent_possession")
+
+    def _god_apply_revoke_decision_gate(self, payload):
+        target_id = payload["targetId"]
+        key = str(target_id)
+        outgoing = self._close_decision_gate(key, "revoked")
+        if outgoing is None:
+            return None, "no active decision gate for this agent"
+        intervention_id = self._next_intervention_id()
+        agent = self._find_agent_by_id(target_id)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "revoke_decision_gate",
+            "frameTick": self.frameTick, "targetId": target_id,
+            "revokedGateId": outgoing.get("id"), "status": "applied", "public": False,
+        })
+        return {
+            "interventionId": intervention_id,
+            "kind": "revoke_decision_gate",
+            "targetId": target_id,
+            "targetName": agent["name"] if agent else None,
+            "revokedGateId": outgoing.get("id"),
+        }, None
+
+    def _close_agent_sampling(self, key, status):
+        """Remove one agentSampling entry exactly once. Must be called with
+        self.lock already held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        sampling = god.get("agentSampling")
+        if not isinstance(sampling, dict):
+            return None
+        rec = sampling.pop(key, None)
+        if not isinstance(rec, dict):
+            return None
+        self._log_divine(rec.get("id"), None, "agent_sampling", rec,
+                         {"status": status}, status, public=False)
+        return rec
+
+    def _close_context_mask(self, key, status):
+        """Remove one contextMasks entry exactly once. Must be called with
+        self.lock already held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        masks = god.get("contextMasks")
+        if not isinstance(masks, dict):
+            return None
+        rec = masks.pop(key, None)
+        if not isinstance(rec, dict):
+            return None
+        self._log_divine(rec.get("id"), None, "context_mask", rec,
+                         {"status": status}, status, public=False)
+        broadcast_id = rec.get("dreamBroadcastId")
+        if broadcast_id:
+            self._maybe_finalize_dream_broadcast(broadcast_id)
+        return rec
+
+    def _god_active_decision_gate_record(self, agent_id):
+        """Active decision gate for agent_id, or None if absent/expired."""
+        god = self.civilization.get("godState") or {}
+        rec = (god.get("decisionGates") or {}).get(str(agent_id))
+        if not isinstance(rec, dict):
+            return None
+        expires = rec.get("expiresFrame")
+        if isinstance(expires, int) and self.frameTick >= expires:
+            return None
+        agent = self._find_agent_by_id(agent_id)
+        if agent is None or agent.get("deathFrame") is not None:
+            return None
+        return rec
+
+    def _god_current_outgoing_decision_gate_id(self, target_id):
+        rec = (self.civilization.get("godState") or {}).get("decisionGates", {}).get(str(target_id))
+        return rec.get("id") if isinstance(rec, dict) else None
+
+    def _god_veto_hold_count(self):
+        gates = (self.civilization.get("godState") or {}).get("decisionGates") or {}
+        count = 0
+        for rec in gates.values():
+            if isinstance(rec, dict) and rec.get("mode") == "veto" and rec.get("status") == "holding":
+                count += 1
+        return count
+
+    def _god_decision_gate_pinned(self, agent, gate):
+        """Pinned decision for compulsion/possession (queue advances for possession)."""
+        queue = gate.get("queue")
+        if isinstance(queue, list) and queue:
+            idx = int(gate.get("queueIndex") or 0)
+            if idx >= len(queue):
+                return dict(queue[-1])
+            return dict(queue[idx])
+        pinned = gate.get("pinnedDecision")
+        if isinstance(pinned, dict):
+            return dict(pinned)
+        return {"action": "rest", "reasoning": "Divine gate default."}
+
+    def _god_agent_data_for_decision_norm(self, agent):
+        """Think-payload slice for normalize_decision during god preview/apply."""
+        payload = self._build_think_payload(agent)
+        build_fn = self.d.get("build_agent_data")
+        if build_fn is None:
+            return payload
+        return build_fn(
+            payload,
+            payload.get("nearby_agents_formatted") or payload.get("nearby_agents"),
+            payload.get("known_resources") or [],
+            payload.get("pending_blueprints") or [],
+            payload.get("approved_custom_projects") or [],
+            payload.get("rejected_blueprints") or [],
+        )
+
+    def _god_normalize_pinned_decision(self, agent, raw):
+        if not isinstance(raw, dict):
+            return None, "pinnedDecision must be an object"
+        action = raw.get("action")
+        if not isinstance(action, str) or not action.strip():
+            return None, "pinnedDecision.action is required"
+        norm_fn = self.d.get("normalize_decision")
+        if norm_fn is not None:
+            agent_data = self._god_agent_data_for_decision_norm(agent)
+            normalized = norm_fn(dict(raw), agent_data)
+            requested = action.strip()
+            if normalized.get("action") != requested:
+                note = (
+                    normalized.get("rejection_note")
+                    or normalized.get("council_rejection_note")
+                    or normalized.get("terraform_rejection_note")
+                    or normalized.get("upgrade_rejection_note")
+                    or normalized.get("sprite_rejection_note")
+                    or "normalize_decision substituted a fallback"
+                )
+                return None, f"invalid pinned decision: {note}"
+            return normalized, None
+        if action.strip() not in self.d.get("AVAILABLE_ACTIONS", []):
+            return None, f"unknown action {action.strip()}"
+        return dict(raw), None
+
+    def _close_decision_gate(self, key, status):
+        """Remove one decisionGates entry exactly once. Lock held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        gates = god.get("decisionGates")
+        if not isinstance(gates, dict):
+            return None
+        rec = gates.pop(key, None)
+        if not isinstance(rec, dict):
+            return None
+        agent = self._find_agent_by_id(int(key))
+        if agent is not None:
+            agent["divineHold"] = False
+        self._log_divine(rec.get("id"), None, rec.get("mode") or "decision_gate", rec,
+                         {"status": status}, status, public=False)
+        deja_id = rec.get("dejaVuReplayId")
+        if deja_id and status in ("expired", "replaced", "revoked", "restore-closed"):
+            replays = (self.civilization.get("godState") or {}).get("dejaVuReplays") or {}
+            if isinstance(replays, dict) and deja_id in replays:
+                self._finalize_deja_vu_replay(deja_id, status)
+        crowd_id = rec.get("crowdCompulsionId")
+        if crowd_id:
+            self._maybe_finalize_crowd_compulsion(crowd_id)
+        return rec
+
+    def _advance_possession_queue(self, gate):
+        if not isinstance(gate.get("queue"), list):
+            return
+        idx = int(gate.get("queueIndex") or 0) + 1
+        gate["queueIndex"] = idx
+        if idx >= len(gate["queue"]):
+            gate["queueIndex"] = len(gate["queue"]) - 1
+
+    def _dec_compulsion_turn(self, gate):
+        remaining = gate.get("remainingTurns")
+        if remaining is None:
+            return
+        if not isinstance(remaining, int) or remaining <= 0:
+            return
+        remaining -= 1
+        gate["remainingTurns"] = remaining
+        if remaining <= 0:
+            key = str(gate.get("targetId"))
+            deja_id = gate.get("dejaVuReplayId")
+            step_index = gate.get("dejaVuStepIndex")
+            self._close_decision_gate(key, "completed")
+            if deja_id is not None and step_index is not None:
+                self._advance_deja_vu_after_step(deja_id, step_index)
+
+    def _apply_divine_possessed_decision(self, agent, decision, gate, gate_kind=None):
+        """Apply a compelled/possessed decision with explicit divine attribution."""
+        kind = gate_kind or gate.get("mode") or "possession"
+        action = decision.get("action") or "rest"
+        self.apply_decision(agent, decision)
+        label = f"Divine {kind}: {agent['name']} — {action}"
+        self._push_communication(f"divine_{kind}", "divine", agent["name"], label, source="divine")
+        if action not in ("rest", "talk_to_nearby"):
+            self._push_chronicle(label, kind="divine", source="divine")
+        self._log_benchmark("divine_decision_gate", 1.0, {
+            "kind": kind, "agent": agent["name"], "action": action,
+        })
+
+    def _apply_gated_decision(self, agent, decision, bypass_gate=False):
+        """Decision gate hook immediately before apply_decision on the LLM path.
+
+        Sage emergency rush-heal and in-flight Sage discard call apply_decision
+        directly (bypass_gate=True) so survival stays authoritative over story."""
+        voice = self._active_voice_guidance(agent)
+        if voice.get("voice_guidance_active"):
+            divine_response = decision.get("divine_response")
+            if not isinstance(divine_response, dict):
+                divine_response = {
+                    "stance": "continue",
+                    "reason": "missing_divine_response",
+                }
+                decision["divine_response"] = divine_response
+                decision["divine_response_synthetic"] = True
+            if divine_response.get("stance") == "follow":
+                agent["goal"] = None
+                agent["assignedTask"] = None
+        if bypass_gate:
+            self.apply_decision(agent, decision)
+            if voice.get("voice_guidance_active"):
+                self._record_divine_response_adherence(agent, decision, voice)
+            return True
+        gate = self._god_active_decision_gate_record(agent["id"])
+        if not gate:
+            self.apply_decision(agent, decision)
+            self._append_decision_digest(agent["id"], decision)
+            if voice.get("voice_guidance_active"):
+                self._record_divine_response_adherence(agent, decision, voice)
+            return True
+        mode = gate.get("mode")
+        if mode == "possession":
+            pinned_raw = self._god_decision_gate_pinned(agent, gate)
+            pinned, _ = self._god_normalize_pinned_decision(agent, pinned_raw)
+            if pinned:
+                self._apply_divine_possessed_decision(agent, pinned, gate)
+                self._advance_possession_queue(gate)
+            return True
+        if mode == "compulsion":
+            pinned_raw = gate.get("pinnedDecision")
+            if isinstance(pinned_raw, dict):
+                pinned, _ = self._god_normalize_pinned_decision(agent, pinned_raw)
+                if pinned:
+                    self._apply_divine_possessed_decision(agent, pinned, gate, gate_kind="compulsion")
+                    self._dec_compulsion_turn(gate)
+            return True
+        if mode == "veto":
+            status = gate.get("status") or "armed"
+            if status == "holding":
+                return False
+            if gate.get("armed"):
+                if self._god_veto_hold_count() >= GOD_VETO_HOLD_CAP:
+                    self.apply_decision(agent, {
+                        "action": "rest",
+                        "reasoning": "Divine veto hold cap reached — auto-rest.",
+                    })
+                    return True
+                gate["pendingDecision"] = copy.deepcopy(decision)
+                gate["status"] = "holding"
+                gate["holdFrame"] = self.frameTick
+                gate["holdExpiresFrame"] = self.frameTick + GOD_VETO_HOLD_TIMEOUT_FRAMES
+                agent["divineHold"] = True
+                self._push_activity(
+                    f"{agent['name']} is held for divine veto review (action withheld)")
+                self._push_communication(
+                    "divine_veto_hold", "divine", agent["name"],
+                    f"Divine veto: {agent['name']}'s decision is withheld for operator review",
+                    source="divine")
+                return False
+        self.apply_decision(agent, decision)
+        self._append_decision_digest(agent["id"], decision)
+        if voice.get("voice_guidance_active"):
+            self._record_divine_response_adherence(agent, decision, voice)
+        return True
+
+    def _expire_decision_gates(self, restore=False):
+        """Expire decision gates and resolve veto hold timeouts. Lock held."""
+        god = self.civilization.get("godState") or {}
+        gates = god.get("decisionGates")
+        if not isinstance(gates, dict) or not gates:
+            return
+        ft = self.frameTick
+        for key in list(gates.keys()):
+            rec = gates.get(key)
+            if not isinstance(rec, dict):
+                gates.pop(key, None)
+                continue
+            if rec.get("mode") == "veto" and rec.get("status") == "holding":
+                hold_expires = rec.get("holdExpiresFrame")
+                if isinstance(hold_expires, int) and ft >= hold_expires:
+                    agent = self._find_agent_by_id(int(key))
+                    if agent is not None:
+                        agent["divineHold"] = False
+                        self._apply_divine_possessed_decision(
+                            agent, {"action": "rest", "reasoning": "Divine veto timed out."},
+                            rec, gate_kind="veto_timeout")
+                    self._close_decision_gate(key, "restore-closed" if restore else "veto-timeout")
+                    continue
+            expires = rec.get("expiresFrame")
+            if isinstance(expires, int) and ft >= expires:
+                agent = self._find_agent_by_id(int(key))
+                if agent is not None:
+                    agent["divineHold"] = False
+                status = "restore-closed" if restore else "expired"
+                self._close_decision_gate(key, status)
+
+    def _close_whisper_campaign(self, campaign_id, status):
+        """Revoke every linked omen still active and remove the campaign record.
+        Must be called with self.lock already held."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        campaigns = god.get("whisperCampaigns")
+        campaign = campaigns.get(campaign_id) if isinstance(campaigns, dict) else None
+        if not isinstance(campaign, dict):
+            return None
+        omens = god.get("privateOmens") or {}
+        for agent_key, omen_id in (campaign.get("targets") or {}).items():
+            omen = omens.get(agent_key) if isinstance(omens, dict) else None
+            if isinstance(omen, dict) and omen.get("id") == omen_id:
+                self._close_omen(agent_key, status)
+        if isinstance(campaigns, dict):
+            campaigns.pop(campaign_id, None)
+        self._log_divine(campaign_id, None, "whisper_campaign", campaign,
+                         {"status": status}, status, public=False)
+        return campaign
+
+    def _close_crowd_compulsion(self, compulsion_id, status):
+        """Revoke every linked gate still active and remove the parent record."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        compulsions = god.get("crowdCompulsions")
+        parent = compulsions.get(compulsion_id) if isinstance(compulsions, dict) else None
+        if not isinstance(parent, dict):
+            return None
+        gates = god.get("decisionGates") or {}
+        for agent_key, gate_id in (parent.get("targets") or {}).items():
+            gate = gates.get(agent_key) if isinstance(gates, dict) else None
+            if isinstance(gate, dict) and gate.get("id") == gate_id:
+                self._close_decision_gate(agent_key, status)
+        if isinstance(compulsions, dict):
+            compulsions.pop(compulsion_id, None)
+        self._log_divine(compulsion_id, None, "crowd_compulsion", parent,
+                         {"status": status}, status, public=False)
+        return parent
+
+    def _maybe_finalize_crowd_compulsion(self, compulsion_id):
+        """Drop a crowd compulsion when every linked gate has closed."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        compulsions = god.get("crowdCompulsions")
+        parent = compulsions.get(compulsion_id) if isinstance(compulsions, dict) else None
+        if not isinstance(parent, dict):
+            return
+        gates = god.get("decisionGates") or {}
+        for agent_key, gate_id in (parent.get("targets") or {}).items():
+            gate = gates.get(agent_key) if isinstance(gates, dict) else None
+            if isinstance(gate, dict) and gate.get("id") == gate_id:
+                return
+        if isinstance(compulsions, dict):
+            compulsions.pop(compulsion_id, None)
+
+    def _sweep_crowd_compulsions(self, restore=False):
+        """Expire or finalize crowd compulsion parents after gate closures."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        compulsions = god.get("crowdCompulsions")
+        if not isinstance(compulsions, dict) or not compulsions:
+            return
+        ft = self.frameTick
+        for compulsion_id in list(compulsions.keys()):
+            parent = compulsions.get(compulsion_id)
+            if not isinstance(parent, dict):
+                del compulsions[compulsion_id]
+                continue
+            expires_frame = parent.get("expiresFrame")
+            if isinstance(expires_frame, int) and ft >= expires_frame:
+                status = "restore-closed" if restore else "expired"
+                self._close_crowd_compulsion(compulsion_id, status)
+            else:
+                self._maybe_finalize_crowd_compulsion(compulsion_id)
+
+    def _close_dream_broadcast(self, broadcast_id, status):
+        """Revoke every linked dream mask still active and remove the parent."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        broadcasts = god.get("dreamBroadcasts")
+        parent = broadcasts.get(broadcast_id) if isinstance(broadcasts, dict) else None
+        if not isinstance(parent, dict):
+            return None
+        masks = god.get("contextMasks") or {}
+        for agent_key, mask_id in (parent.get("targets") or {}).items():
+            mask = masks.get(agent_key) if isinstance(masks, dict) else None
+            if isinstance(mask, dict) and mask.get("id") == mask_id:
+                self._close_context_mask(agent_key, status)
+        if isinstance(broadcasts, dict):
+            broadcasts.pop(broadcast_id, None)
+        self._log_divine(broadcast_id, None, "dream_broadcast", parent,
+                         {"status": status}, status, public=False)
+        return parent
+
+    def _maybe_finalize_dream_broadcast(self, broadcast_id):
+        """Drop a dream broadcast when every linked mask has closed."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        broadcasts = god.get("dreamBroadcasts")
+        parent = broadcasts.get(broadcast_id) if isinstance(broadcasts, dict) else None
+        if not isinstance(parent, dict):
+            return
+        masks = god.get("contextMasks") or {}
+        for agent_key, mask_id in (parent.get("targets") or {}).items():
+            mask = masks.get(agent_key) if isinstance(masks, dict) else None
+            if isinstance(mask, dict) and mask.get("id") == mask_id:
+                return
+        if isinstance(broadcasts, dict):
+            broadcasts.pop(broadcast_id, None)
+
+    def _sweep_dream_broadcasts(self, restore=False):
+        """Expire or finalize dream broadcast parents after mask closures."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        broadcasts = god.get("dreamBroadcasts")
+        if not isinstance(broadcasts, dict) or not broadcasts:
+            return
+        ft = self.frameTick
+        for broadcast_id in list(broadcasts.keys()):
+            parent = broadcasts.get(broadcast_id)
+            if not isinstance(parent, dict):
+                del broadcasts[broadcast_id]
+                continue
+            expires_frame = parent.get("expiresFrame")
+            if isinstance(expires_frame, int) and ft >= expires_frame:
+                status = "restore-closed" if restore else "expired"
+                self._close_dream_broadcast(broadcast_id, status)
+            else:
+                self._maybe_finalize_dream_broadcast(broadcast_id)
+
+    def _maybe_finalize_whisper_campaign(self, campaign_id):
+        """Drop a campaign when every linked omen has already closed."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        campaigns = god.get("whisperCampaigns")
+        campaign = campaigns.get(campaign_id) if isinstance(campaigns, dict) else None
+        if not isinstance(campaign, dict):
+            return
+        omens = god.get("privateOmens") or {}
+        for agent_key, omen_id in (campaign.get("targets") or {}).items():
+            omen = omens.get(agent_key) if isinstance(omens, dict) else None
+            if isinstance(omen, dict) and omen.get("id") == omen_id:
+                return
+        campaigns.pop(campaign_id, None)
+
+    def _sweep_whisper_campaigns(self, restore=False):
+        """Expire or finalize whisper campaigns after omen closures."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return
+        campaigns = god.get("whisperCampaigns")
+        if not isinstance(campaigns, dict) or not campaigns:
+            return
+        ft = self.frameTick
+        for campaign_id in list(campaigns.keys()):
+            campaign = campaigns.get(campaign_id)
+            if not isinstance(campaign, dict):
+                del campaigns[campaign_id]
+                continue
+            expires_frame = campaign.get("expiresFrame")
+            if isinstance(expires_frame, int) and ft >= expires_frame:
+                status = "restore-closed" if restore else "expired"
+                self._close_whisper_campaign(campaign_id, status)
+            else:
+                self._maybe_finalize_whisper_campaign(campaign_id)
+
+    def _god_apply_revoke_guidance(self, guidance_id):
+        """Ends a providence or omen early by id (docs/plan: "records a
+        revocation"). Returns (outcome, reason) directly -- unlike the other
+        _god_apply_* helpers this can itself fail (unknown/already-inactive
+        id), and a failed revoke must never consume an intervention id."""
+        god = self.civilization["godState"]
+        prov = god.get("providence")
+        if isinstance(prov, dict) and prov.get("id") == guidance_id:
+            self._close_providence("revoked")
+            self._push_activity("A divine providence is revoked.")
+            intervention_id = self._next_intervention_id()
+            self._god_record_intervention({
+                "id": intervention_id, "kind": "revoke_guidance", "frameTick": self.frameTick,
+                "targetGuidanceId": guidance_id, "targetKind": "providence",
+                "status": "applied", "public": True,
+            })
+            return {"interventionId": intervention_id, "kind": "revoke_guidance",
+                    "targetGuidanceId": guidance_id, "targetKind": "providence"}, None
+        for key, omen in list((god.get("privateOmens") or {}).items()):
+            if isinstance(omen, dict) and omen.get("id") == guidance_id:
+                self._close_omen(key, "revoked")
+                intervention_id = self._next_intervention_id()
+                self._god_record_intervention({
+                    "id": intervention_id, "kind": "revoke_guidance", "frameTick": self.frameTick,
+                    "targetGuidanceId": guidance_id, "targetKind": "private_omen",
+                    "status": "applied", "public": False,
+                })
+                return {"interventionId": intervention_id, "kind": "revoke_guidance",
+                        "targetGuidanceId": guidance_id, "targetKind": "private_omen"}, None
+        return None, "guidance id not found or already inactive"
+
+    # --- Sovereign God mode Phase 4: bounded immediate miracles ---
+    # All three are irreversible (docs/plan "Honest reversibility" -- the
+    # default branch of _god_reversibility_class covers them; god_cancel and
+    # _god_apply_revoke_guidance only ever look inside providence/
+    # privateOmens, so an intervention id from one of these three can never
+    # match either and is therefore already refused by construction, with no
+    # extra code needed). Each is public (no private-omen-style visibility
+    # boundary applies to vitals/resources/structures), source-attributed via
+    # source="divine" through the same _push_communication/_push_chronicle
+    # helpers proclamation/providence use, and records one recentInterventions
+    # entry + one divine.jsonl "applied" record via the shared
+    # _next_intervention_id/_god_record_intervention/_log_divine machinery.
+    def _god_apply_agent_vitals(self, payload):
+        """v1 "cannot kill" (Decision #6): a negative healthDelta is clamped
+        to GOD_VITALS_HEALTH_FLOOR, never lower -- see that constant's
+        comment for why 0 (the _update_survival incapacitation threshold) is
+        never reachable through this miracle. Never touches deathFrame,
+        incapacitated, or any lifecycle-succession state."""
+        target_id = payload["targetId"]
+        agent = self._find_agent_by_id(target_id)
+        health_delta, hunger_delta = payload["healthDelta"], payload["hungerDelta"]
+        old_health, old_hunger = agent["health"], agent["hunger"]
+        new_health, new_hunger = old_health, old_hunger
+        if health_delta:
+            new_health = (min(100.0, old_health + health_delta) if health_delta >= 0
+                         else max(GOD_VITALS_HEALTH_FLOOR, old_health + health_delta))
+            agent["health"] = new_health
+        if hunger_delta:
+            new_hunger = max(0.0, min(100.0, old_hunger + hunger_delta))
+            agent["hunger"] = new_hunger
+        intervention_id = self._next_intervention_id()
+        parts = []
+        if health_delta:
+            parts.append(f"health {old_health:g} -> {new_health:g}")
+        if hunger_delta:
+            parts.append(f"hunger {old_hunger:g} -> {new_hunger:g}")
+        detail = ", ".join(parts)
+        verb = "touches" if (health_delta >= 0 and hunger_delta >= 0) else "afflicts"
+        text = f"A divine hand {verb} {agent['name']} ({detail})"
+        self._push_activity(text)
+        self._push_communication("divine_vitals", "divine", agent["name"], text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        self._mark_context_dirty(agent)
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "agent_vitals", "frameTick": self.frameTick,
+            "targetId": target_id, "healthDelta": health_delta, "hungerDelta": hunger_delta,
+            "newHealth": new_health, "newHunger": new_hunger, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "agent_vitals", "targetId": target_id,
+                "newHealth": new_health, "newHunger": new_hunger}
+
+    def _god_apply_grant_resource(self, payload):
+        """Storage/carry semantics preserved explicitly (docs/plan Phase 4):
+        a grant to an agent fills their _carry_cap room first, then routes
+        any remainder to the village stockpile -- the SAME two sinks every
+        normal gather/trade/tax path already uses, never a third bypass
+        sink. A grant to "stockpile" always goes straight to the stockpile."""
+        resource_id = payload["resourceId"]
+        amount = payload["amount"]
+        target = payload["target"]
+        target_kind = "stockpile" if target == "stockpile" else "agent"
+        c = self.civilization
+        intervention_id = self._next_intervention_id()
+        target_agent_id = None
+        if target_kind == "stockpile":
+            c["stockpile"][resource_id] = c["stockpile"].get(resource_id, 0) + amount
+            agent_added, stockpile_added = 0, amount
+            target_desc = "the village stockpile"
+            comm_to = "everyone"
+        else:
+            target_agent_id = target["agentId"]
+            agent = self._find_agent_by_id(target_agent_id)
+            cap = self._carry_cap(agent)
+            held = agent["resources"].get(resource_id, 0)
+            room = max(0, cap - held)
+            agent_added = min(amount, room)
+            stockpile_added = amount - agent_added
+            if agent_added:
+                agent["resources"][resource_id] = held + agent_added
+            if stockpile_added:
+                c["stockpile"][resource_id] = c["stockpile"].get(resource_id, 0) + stockpile_added
+            target_desc = agent["name"]
+            comm_to = agent["name"]
+        self._god_grant_session_total += amount
+        text = f"A divine gift of {amount} {resource_id} appears for {target_desc}"
+        if target_kind == "agent" and stockpile_added:
+            text += f" ({agent_added} carried, {stockpile_added} overflow to the village stockpile)"
+        self._push_activity(text)
+        self._push_communication("divine_grant", "divine", comm_to, text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "grant_resource", "frameTick": self.frameTick,
+            "resourceId": resource_id, "amount": amount, "targetKind": target_kind,
+            "targetAgentId": target_agent_id, "agentAdded": agent_added,
+            "stockpileAdded": stockpile_added, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "grant_resource",
+                "resourceId": resource_id, "amount": amount, "targetKind": target_kind,
+                "targetAgentId": target_agent_id, "agentAdded": agent_added,
+                "stockpileAdded": stockpile_added}
+
+    def _god_apply_structure_condition(self, payload):
+        """Repair (delta >= 0) and damage (delta < 0) both go through the
+        SAME _apply_structure_condition_delta helper _tick_structure_decay
+        uses, so a damage delta that crosses the ruin threshold fires the
+        identical disrepair/ruin narration and homeOf homeless handling a
+        natural decay collapse would (docs/plan Phase 4: "damage may
+        legitimately drive a structure to ruin -- if it does, it must go
+        through the same ruin path"). Validation already rejected ruined
+        structures, so repair here can never recreate a destroyed structure
+        (it only ever restores condition on a structure that was never a
+        ruin to begin with)."""
+        structure_id = payload["structureId"]
+        delta = payload["delta"]
+        structure = next((s for s in self.civilization["structures"]
+                          if s.get("id") == structure_id), None)
+        intervention_id = self._next_intervention_id()
+        old_cond = structure.get("condition", 100.0)
+        new_cond = self._apply_structure_condition_delta(structure, delta)
+        name = structure.get("name") or structure.get("type")
+        did = structure.get("districtId") or "the village"
+        verb = "mends" if delta >= 0 else "strikes"
+        text = f"A divine hand {verb} the {name} in {did} (condition {old_cond:g} -> {new_cond:g})"
+        self._push_activity(text)
+        self._push_communication("divine_structure", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        became_ruin = bool(structure.get("isRuin"))
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "structure_condition", "frameTick": self.frameTick,
+            "structureId": structure_id, "delta": delta, "oldCondition": old_cond,
+            "newCondition": new_cond, "becameRuin": became_ruin,
+            "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "structure_condition",
+                "structureId": structure_id, "oldCondition": old_cond, "newCondition": new_cond,
+                "becameRuin": became_ruin}
+
+    def _god_apply_repair_structures(self, payload):
+        """Batch condition restore / un-ruin for operator escape."""
+        structures, sel_reason = self._god_select_repair_structures(payload)
+        if sel_reason or not structures:
+            return None
+        condition_target = payload.get("conditionTarget")
+        un_ruin = payload.get("unRuin", True)
+        intervention_id = self._next_intervention_id()
+        outcomes = []
+        for structure in structures:
+            old_cond = structure.get("condition", 100.0)
+            was_ruin = bool(structure.get("isRuin")) or old_cond <= 0
+            name = structure.get("name") or structure.get("type")
+            if was_ruin:
+                target = condition_target if condition_target is not None else REPAIR_CONDITION_RESTORE
+                new_cond = max(REPAIR_CONDITION_RESTORE, min(100.0, float(target)))
+                structure["condition"] = new_cond
+                structure["isRuin"] = False
+                structure.pop("ruinedSinceFrame", None)
+            elif condition_target is not None:
+                delta = float(condition_target) - old_cond
+                delta = max(-GOD_REPAIR_STRUCTURES_CONDITION_MAX,
+                            min(GOD_REPAIR_STRUCTURES_CONDITION_MAX, delta))
+                new_cond = self._apply_structure_condition_delta(structure, delta)
+            else:
+                new_cond = self._apply_structure_condition_delta(
+                    structure, min(REPAIR_CONDITION_RESTORE, GOD_REPAIR_STRUCTURES_CONDITION_MAX))
+            outcomes.append({
+                "structureId": structure["id"],
+                "structureName": name,
+                "oldCondition": old_cond,
+                "newCondition": structure.get("condition", new_cond),
+                "unRuined": was_ruin and un_ruin,
+            })
+        count = len(outcomes)
+        text = f"A divine hand restores {count} structure(s) across the village"
+        self._push_activity(text)
+        self._push_communication("divine_repair_structures", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "repair_structures", "frameTick": self.frameTick,
+            "count": count, "structures": outcomes, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "repair_structures",
+                "count": count, "structures": outcomes}
+
+    def _god_apply_clear_ruins(self, payload):
+        """Delete selected or aged ruins from the registry."""
+        ruins, sel_reason = self._god_select_clear_ruins(payload)
+        if sel_reason or not ruins:
+            return None
+        intervention_id = self._next_intervention_id()
+        ids = [s["id"] for s in ruins]
+        names = [s.get("name") or s.get("type") for s in ruins]
+        removed = self._remove_structures_from_registry(ids)
+        if removed:
+            text = f"A divine hand clears {removed} ruin(s) from the village: {', '.join(names)}"
+            self._push_activity(text)
+            self._push_communication("divine_clear_ruins", "divine", "everyone", text, source="divine")
+            self._push_chronicle(text, kind="divine", source="divine")
+            self._tick_structure_health_benchmark()
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "clear_ruins", "frameTick": self.frameTick,
+            "structureIds": ids, "removed": removed, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "clear_ruins",
+                "structureIds": ids, "removed": removed}
+
+    # --- Huntable wildlife god kinds (irreversible; same public audit path) ---
+    def _god_apply_wildlife_spawn(self, payload):
+        """Spawn via god_wildlife_spawn under the lock. Returns (outcome, reason)."""
+        district_id = payload["districtId"]
+        creature_kind = payload["kind"]
+        cre = self.god_wildlife_spawn(district_id, creature_kind, respect_cap=True)
+        if cre is None:
+            return None, "wildlife spawn rejected"
+        intervention_id = self._next_intervention_id()
+        text = (f"A divine hand releases a {creature_kind} into {district_id} "
+                f"({cre.get('id')})")
+        self._push_activity(text)
+        self._push_communication("divine_wildlife", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        outcome = {
+            "interventionId": intervention_id, "kind": "wildlife_spawn",
+            "id": cre.get("id"), "creatureKind": creature_kind,
+            "districtId": district_id, "hp": cre.get("hp"), "maxHp": cre.get("maxHp"),
+            "x": cre.get("x"), "y": cre.get("y"),
+        }
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "wildlife_spawn", "frameTick": self.frameTick,
+            "wildlifeId": cre.get("id"), "creatureKind": creature_kind,
+            "districtId": district_id, "status": "applied", "public": True,
+        })
+        return outcome, None
+
+    def _god_apply_wildlife_despawn(self, payload):
+        """Despawn via god_wildlife_despawn under the lock. Returns (outcome, reason)."""
+        creature_id = payload.get("id")
+        district_id = payload.get("districtId")
+        count = self.god_wildlife_despawn(
+            creature_id=creature_id, district_id=district_id)
+        if count <= 0:
+            return None, "wildlife despawn rejected"
+        intervention_id = self._next_intervention_id()
+        if creature_id is not None:
+            text = f"A divine hand banishes wildlife {creature_id}"
+        else:
+            text = f"A divine hand clears wildlife from {district_id} ({count} removed)"
+        self._push_activity(text)
+        self._push_communication("divine_wildlife", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        outcome = {
+            "interventionId": intervention_id, "kind": "wildlife_despawn",
+            "id": creature_id, "districtId": district_id, "despawnCount": count,
+        }
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "wildlife_despawn", "frameTick": self.frameTick,
+            "wildlifeId": creature_id, "districtId": district_id,
+            "despawnCount": count, "status": "applied", "public": True,
+        })
+        return outcome, None
+
+    def _god_apply_wildlife_set_hp(self, payload):
+        """Set HP via god_wildlife_set_hp under the lock. Returns (outcome, reason)."""
+        creature_id = payload["id"]
+        hp = payload["hp"]
+        cre = self.god_wildlife_set_hp(creature_id, hp)
+        if cre is None:
+            return None, "wildlife set_hp rejected"
+        intervention_id = self._next_intervention_id()
+        new_hp = int(cre.get("hp") or 0)
+        max_hp = int(cre.get("maxHp") or 1)
+        killed = not cre.get("alive")
+        kind_name = cre.get("kind") or "creature"
+        if killed:
+            text = (f"A divine hand strikes down a {kind_name} "
+                    f"({creature_id}, hp {new_hp}/{max_hp})")
+        else:
+            text = (f"A divine hand reshapes a {kind_name} "
+                    f"({creature_id}, hp {new_hp}/{max_hp})")
+        self._push_activity(text)
+        self._push_communication("divine_wildlife", "divine", "everyone", text, source="divine")
+        self._push_chronicle(text, kind="divine", source="divine")
+        outcome = {
+            "interventionId": intervention_id, "kind": "wildlife_set_hp",
+            "id": creature_id, "creatureKind": kind_name,
+            "districtId": cre.get("districtId"), "hp": new_hp, "maxHp": max_hp,
+            "alive": bool(cre.get("alive")), "killed": killed,
+        }
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "wildlife_set_hp", "frameTick": self.frameTick,
+            "wildlifeId": creature_id, "hp": new_hp, "maxHp": max_hp,
+            "alive": bool(cre.get("alive")), "status": "applied", "public": True,
+        })
+        return outcome, None
+
+    # --- Sovereign God mode Phase 6: weather override ---
+    def _god_apply_weather_override(self, payload):
+        """docs/plan Phase 6 Answers 1-4. By the time this runs, god_apply
+        has already revalidated the whole normalized command against current
+        live state under the same lock, so replaceEffectId (if any) still
+        names the active weather override.
+
+        Answer 1 (clock ownership): activeEvents[].expiresFrame is
+        authoritative -- weather["exitFrame"] is set to the SAME absolute
+        frame via _weather_enter_forced, so _tick_weather's early-return
+        (frameTick < exitFrame) defers to the override automatically; no
+        second clock can drift out of sync because there is only ever one
+        frame value, read by both.
+
+        Answer 3 (RNG discipline): enters via _weather_enter_forced, which
+        draws no RNG -- state/districts/exitFrame all come from the already-
+        validated command, never random.randint/random.sample.
+
+        `priorState` is recorded for audit/preview only, per Answer 2 --
+        it is NEVER used to restore anything; ending the override always
+        hands off FORWARD to the natural cycle's successor of the
+        overridden state (see _close_weather_override), not back to
+        priorState."""
+        replace_effect_id = payload.get("replaceEffectId")
+        replaced_event = None
+        if replace_effect_id:
+            replaced_event = self._god_active_weather_override()
+            if replaced_event is not None and replaced_event.get("id") == replace_effect_id:
+                self._close_weather_override(replaced_event, "replaced")
+
+        intervention_id = self._next_intervention_id()
+        now = self.frameTick
+        expires_frame = now + payload["durationFrames"]
+        state, districts = payload["state"], payload["districts"]
+        prior_state = (self.civilization.get("weather") or {}).get("state", "clear")
+
+        self._weather_enter_forced(state, districts, expires_frame)
+
+        event = {
+            "id": intervention_id, "kind": "weather_override",
+            "state": state, "districts": list(districts), "priorState": prior_state,
+            "createdFrame": now, "startFrame": now, "expiresFrame": expires_frame,
+            "status": "active",
+            "replaces": replaced_event.get("id") if replaced_event else None,
+        }
+        self._god_events_insert(event)
+
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "weather_override", "frameTick": self.frameTick,
+            "state": state, "districts": list(districts), "priorState": prior_state,
+            "expiresFrame": expires_frame, "status": "applied", "public": True,
+        })
+        return {"interventionId": intervention_id, "kind": "weather_override",
+                "state": state, "districts": list(districts), "priorState": prior_state,
+                "expiresFrame": expires_frame,
+                "replacedEventId": replaced_event.get("id") if replaced_event else None}
+
+    def _close_weather_override(self, event, status):
+        """Closes one weather_override activeEvents record exactly once and
+        hands off to the natural cycle's successor of the OVERRIDDEN state
+        via _weather_handoff_successor (docs/plan Phase 6 Answer 2 -- never
+        restores `event["priorState"]`, which would desync the cycle).
+        Shared verbatim by expiry (_expire_divine_effects) and cancel
+        (god_cancel) so both paths behave identically -- "cancelling an
+        active override runs the SAME expiry handoff (so the machine never
+        gets stranded mid-override), and says plainly that any damage
+        already dealt stands" (docs/plan Validation)."""
+        if not isinstance(event, dict) or event.get("status") != "active":
+            return
+        event["status"] = status
+        self._weather_handoff_successor(event.get("state", "clear"))
+        self._log_divine(event.get("id"), None, "weather_override", event,
+                         {"status": status}, status, public=True)
+
+    # --- Sovereign God mode Phase 5: storyteller events ---
+    def _god_events_insert(self, event):
+        """Append to the bounded activeEvents ring (cap GOD_ACTIVE_EVENTS_CAP
+        per docs/plan). Evicts the oldest CLOSED (non-"active") entry first
+        so a full ring never displaces something still live; only falls back
+        to evicting the oldest active entry if every slot happens to be
+        active, which the cap (8) plus normal expiry/cancellation makes an
+        edge case rather than the common path."""
+        events = self.civilization["godState"]["activeEvents"]
+        events.append(event)
+        if len(events) > GOD_ACTIVE_EVENTS_CAP:
+            closed_idx = next((i for i, e in enumerate(events) if e.get("status") != "active"), None)
+            del events[closed_idx if closed_idx is not None else 0]
+
+    def _close_story_event(self, event, status):
+        """Closes one activeEvents record exactly once (docs/plan "Expiry
+        ownership" -- shared by cancel and _expire_divine_effects so both
+        paths log identically). Once closed, _divine_modifier can no longer
+        see its modifiers (status != "active"). If the event carried an
+        embedded providence, that providence is closed through the SAME
+        _close_providence path expiry/revocation/replacement use -- but only
+        if it is STILL the active providence (a later divine command may
+        have already replaced it independently, in which case there is
+        nothing left here to touch). Primitives already applied are NOT
+        retracted -- see _god_reversibility_class's "consequential" class."""
+        if not isinstance(event, dict) or event.get("status") != "active":
+            return
+        event["status"] = status
+        god = self.civilization.get("godState") or {}
+        providence_id = event.get("providenceId")
+        if providence_id:
+            prov = god.get("providence")
+            if isinstance(prov, dict) and prov.get("id") == providence_id:
+                self._close_providence(status)
+        self._log_divine(event.get("id"), None, "story_event", event,
+                         {"status": status}, status, public=(event.get("visibility") != "private"))
+
+    def _god_apply_story_event(self, payload):
+        """Atomic multi-effect apply (docs/plan "Storyteller events" --
+        "Events are atomic: preview validates every component; apply
+        accepts all or changes nothing"). By the time this runs, god_apply
+        has already revalidated the WHOLE normalized command against
+        current state under the same lock (a stale replaceEffectId target or
+        a since-occupied modifier key would already have rejected before
+        reaching this method), so every step below always succeeds -- there
+        is no partial-application path to guard against here."""
+        god = self.civilization["godState"]
+        replace_effect_id = payload.get("replaceEffectId")
+        replaced_event = None
+        if replace_effect_id:
+            replaced_event = next(
+                (e for e in god["activeEvents"]
+                 if isinstance(e, dict) and e.get("id") == replace_effect_id
+                 and e.get("status") == "active"), None)
+            if replaced_event is not None:
+                self._close_story_event(replaced_event, "replaced")
+
+        intervention_id = self._next_intervention_id()
+        now = self.frameTick
+        expires_frame = now + payload["durationFrames"]
+        modifiers = dict(payload.get("modifiers") or {})
+        title, narration = payload["title"], payload["narration"]
+        visibility, target_id = payload["visibility"], payload.get("targetId")
+
+        # Immediate primitives reuse the EXACT SAME apply helpers (and
+        # therefore the exact same clamp arithmetic/narration/audit trail)
+        # the standalone agent_vitals/grant_resource/structure_condition
+        # commands use -- each still mints its own intervention id (for its
+        # own recentInterventions/divine.jsonl record), tagged with
+        # parentEventId so every sub-effect stays traceable to this one
+        # story event.
+        primitive_outcomes = []
+        for prim in payload.get("primitives") or []:
+            prim_kind = prim["kind"]
+            if prim_kind == "agent_vitals":
+                prim_outcome = self._god_apply_agent_vitals(prim["payload"])
+            elif prim_kind == "grant_resource":
+                prim_outcome = self._god_apply_grant_resource(prim["payload"])
+            elif prim_kind == "structure_condition":
+                prim_outcome = self._god_apply_structure_condition(prim["payload"])
+            else:
+                continue
+            prim_outcome["parentEventId"] = intervention_id
+            primitive_outcomes.append(prim_outcome)
+
+        providence_id = None
+        if payload.get("providence"):
+            prov_outcome = self._god_apply_providence({
+                "text": payload["providence"]["text"],
+                "durationFrames": payload["durationFrames"],
+            })
+            providence_id = prov_outcome["interventionId"]
+
+        target_name = None
+        if visibility == "private" and target_id is not None:
+            target_agent = self._find_agent_by_id(target_id)
+            target_name = target_agent["name"] if target_agent else None
+
+        event = {
+            "id": intervention_id, "kind": "story_event",
+            "title": title, "narration": narration,
+            "visibility": visibility, "targetId": target_id,
+            "createdFrame": now, "startFrame": now, "expiresFrame": expires_frame,
+            "status": "active",
+            "modifiers": modifiers,
+            "primitiveInterventionIds": [o["interventionId"] for o in primitive_outcomes],
+            "providenceId": providence_id,
+            "replaces": replaced_event.get("id") if replaced_event else None,
+        }
+        self._god_events_insert(event)
+
+        if visibility == "public":
+            self._push_activity(f'A divine story unfolds -- "{title}": {narration}')
+            self._push_communication("divine_story_event", "divine", "everyone", narration, source="divine")
+            self._push_chronicle(f"{title}: {narration}", kind="divine", source="divine")
+        # Private events never touch public activity/communication/Chronicle
+        # (same visibility boundary private_omen already enforces).
+
+        self._god_record_intervention({
+            "id": intervention_id, "kind": "story_event", "frameTick": self.frameTick,
+            "title": title, "narration": narration, "visibility": visibility,
+            "targetId": target_id, "expiresFrame": expires_frame,
+            "modifierKeys": list(modifiers.keys()),
+            "primitiveInterventionIds": event["primitiveInterventionIds"],
+            "providenceId": providence_id,
+            "status": "applied", "public": (visibility == "public"),
+        })
+        return {"interventionId": intervention_id, "kind": "story_event",
+                "title": title, "expiresFrame": expires_frame,
+                "modifiers": modifiers, "primitiveOutcomes": primitive_outcomes,
+                "providenceId": providence_id, "targetId": target_id, "targetName": target_name,
+                "replacedEventId": replaced_event.get("id") if replaced_event else None}
+
+    def god_apply(self, preview_id, request_id):
+        """Apply an exact previewed command. Accepts only {previewId,
+        requestId} -- the client-returned normalizedCommand is NEVER
+        authoritative input; apply resolves the server-held preview by id."""
+        with self.lock:
+            if not GOD_MODE_ENABLED:
+                return {"ok": False, "reason": "god mode disabled"}
+            if not isinstance(request_id, str) or not request_id.strip():
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "requestId is required"}
+            request_id = request_id.strip()
+            if not isinstance(preview_id, str) or not preview_id.strip():
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "previewId is required"}
+            preview_id = preview_id.strip()
+
+            self._god_preview_evict_expired()
+            preview = self._god_preview_cache.get(preview_id)
+            digest = preview["commandDigest"] if preview else None
+
+            existing = self._god_requests.get(request_id)
+            if existing is not None:
+                # Idempotent replay: same requestId returns the ORIGINAL
+                # response without re-applying. Same requestId bound to a
+                # DIFFERENT preview/digest is a conflict -- reject, apply
+                # nothing, return neither the old nor a new response.
+                if existing.get("previewId") != preview_id or (
+                    digest is not None and existing.get("commandDigest") != digest
+                ):
+                    self._god_rejected_count += 1
+                    return {"ok": False, "reason": "requestId already used with a different preview"}
+                return existing.get("response")
+
+            if preview is None:
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "preview missing or expired"}
+            if preview["expiresAt"] <= time.time():
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "preview expired"}
+
+            normalized = preview["normalizedCommand"]
+            # Revalidate atomically against current live state: re-run the
+            # SAME validator over the server-held normalized command (never
+            # fresh client input), recompute and compare the digest, then
+            # recheck the recorded precondition fingerprint. frameTick drift
+            # alone is acceptable; a fingerprint mismatch is not.
+            revalidated, reason = self._validate_god_envelope(normalized)
+            if reason:
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": f"preview no longer valid: {reason}"}
+            fresh_digest = self._god_command_digest(revalidated)
+            if fresh_digest != preview["commandDigest"]:
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": "preview digest mismatch"}
+            fp_reason = self._god_check_fingerprint(revalidated, preview["fingerprint"])
+            if fp_reason:
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": fp_reason}
+
+            outcome, apply_reason = self._god_apply_command(revalidated)
+            if apply_reason:
+                del self._god_preview_cache[preview_id]
+                self._god_rejected_count += 1
+                return {"ok": False, "reason": apply_reason}
+
+            response = {
+                "ok": True, "interventionId": outcome["interventionId"],
+                "outcome": outcome, "appliedFrame": self.frameTick,
+            }
+            self._god_requests[request_id] = {
+                "previewId": preview_id,
+                "commandDigest": preview["commandDigest"],
+                "interventionId": outcome["interventionId"],
+                "status": "applied",
+                "response": response,
+                "createdAt": time.time(),
+            }
+            self._god_requests_evict()
+            self._god_preview_cache.pop(preview_id, None)  # single-use once applied
+            self._log_divine(outcome["interventionId"], request_id, revalidated["kind"],
+                             revalidated, outcome, "applied", public=True)
+            return response
+
+    def god_cancel(self, target_id):
+        """Cancel an active omen, providence, or timed story event by id
+        (docs/plan Phase 5: "wire the /control/god/cancel route properly").
+        A direct, lock-held mutation -- unlike every other applyable command
+        this route intentionally has no preview/apply step (Phase 2 already
+        established that shape for this stub; nothing here changes it).
+        Only ever finds ids inside the three cancellable stores
+        (godState["providence"], godState["privateOmens"], and ACTIVE
+        entries of godState["activeEvents"]) -- an id minted by an
+        irreversible Phase 4 miracle (agent_vitals/grant_resource/
+        structure_condition) or a one-shot proclamation can never appear in
+        any of those, so it is refused by construction, falling straight
+        through to "nothing to cancel" with no special-case code needed."""
+        with self.lock:
+            if not GOD_MODE_ENABLED:
+                return {"ok": False, "reason": "god mode disabled"}
+            if not isinstance(target_id, str) or not target_id.strip():
+                return {"ok": True, "cancelled": False,
+                        "reason": "nothing to cancel", "targetId": target_id}
+            target_id = target_id.strip()
+            god = self.civilization["godState"]
+
+            prov = god.get("providence")
+            if isinstance(prov, dict) and prov.get("id") == target_id:
+                self._close_providence("cancelled")
+                self._push_activity("A divine providence is revoked.")
+                return {"ok": True, "cancelled": True, "targetId": target_id, "targetKind": "providence"}
+
+            for key, omen in list((god.get("privateOmens") or {}).items()):
+                if isinstance(omen, dict) and omen.get("id") == target_id:
+                    self._close_omen(key, "cancelled")
+                    return {"ok": True, "cancelled": True, "targetId": target_id, "targetKind": "private_omen"}
+
+            campaigns = god.get("whisperCampaigns") or {}
+            if isinstance(campaigns, dict) and target_id in campaigns:
+                self._close_whisper_campaign(target_id, "cancelled")
+                return {"ok": True, "cancelled": True, "targetId": target_id,
+                        "targetKind": "whisper_campaign"}
+
+            compulsions = god.get("crowdCompulsions") or {}
+            if isinstance(compulsions, dict) and target_id in compulsions:
+                self._close_crowd_compulsion(target_id, "cancelled")
+                return {"ok": True, "cancelled": True, "targetId": target_id,
+                        "targetKind": "crowd_compulsion"}
+
+            broadcasts = god.get("dreamBroadcasts") or {}
+            if isinstance(broadcasts, dict) and target_id in broadcasts:
+                self._close_dream_broadcast(target_id, "cancelled")
+                return {"ok": True, "cancelled": True, "targetId": target_id,
+                        "targetKind": "dream_broadcast"}
+
+            replays = god.get("dejaVuReplays") or {}
+            if isinstance(replays, dict) and target_id in replays:
+                self._close_deja_vu_replay(target_id, "cancelled")
+                return {"ok": True, "cancelled": True, "targetId": target_id,
+                        "targetKind": "deja_vu_replay"}
+
+            sampling = god.get("agentSampling") or {}
+            if isinstance(sampling, dict):
+                for key, rec in list(sampling.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_agent_sampling(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "agent_sampling"}
+
+            masks = god.get("contextMasks") or {}
+            if isinstance(masks, dict):
+                for key, rec in list(masks.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_context_mask(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "context_mask"}
+
+            gates = god.get("decisionGates") or {}
+            if isinstance(gates, dict):
+                for key, rec in list(gates.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_decision_gate(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "decision_gate"}
+
+            bushes = god.get("burningBush") or {}
+            if isinstance(bushes, dict):
+                for key, rec in list(bushes.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_burning_bush(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "burning_bush"}
+                    bargain = rec.get("bargain") if isinstance(rec, dict) else None
+                    if isinstance(bargain, dict) and bargain.get("id") == target_id:
+                        if bargain.get("status") == "open":
+                            bargain["status"] = "cancelled"
+                            bargain["settledFrame"] = self.frameTick
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "merovingian_bargain"}
+
+            anointments = god.get("anointments") or {}
+            if isinstance(anointments, dict):
+                for key, rec in list(anointments.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_anointment(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "anoint"}
+
+            forges = god.get("identityForges") or {}
+            if isinstance(forges, dict):
+                for key, rec in list(forges.items()):
+                    if isinstance(rec, dict) and rec.get("id") == target_id:
+                        self._close_identity_forge(key, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "identity_forge"}
+
+            zones = god.get("architectZones") or []
+            if isinstance(zones, list):
+                for zone in zones:
+                    if isinstance(zone, dict) and zone.get("id") == target_id and zone.get("status") == "active":
+                        self._close_architect_zone(target_id, "cancelled")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "architect_zone"}
+
+            for event in god.get("activeEvents") or []:
+                if (isinstance(event, dict) and event.get("id") == target_id
+                        and event.get("status") == "active"):
+                    if event.get("kind") == "weather_override":
+                        # Phase 6: cancel runs the SAME handoff expiry uses --
+                        # the machine never gets stranded mid-override -- and
+                        # any storm damage already dealt stands (consequential,
+                        # not undone).
+                        self._close_weather_override(event, "cancelled")
+                        self._push_activity(
+                            "A divine weather override is cancelled -- the sky "
+                            "returns to its natural course. Any damage already "
+                            "dealt stands.")
+                        return {"ok": True, "cancelled": True, "targetId": target_id,
+                                "targetKind": "weather_override"}
+                    self._close_story_event(event, "cancelled")
+                    if event.get("visibility", "public") == "public":
+                        self._push_activity(f'A divine story is cut short: "{event.get("title")}"')
+                    return {"ok": True, "cancelled": True, "targetId": target_id, "targetKind": "story_event"}
+
+            return {
+                "ok": True, "cancelled": False,
+                "reason": "nothing to cancel", "targetId": target_id,
+            }
+
+    def god_sight(self, filters=None):
+        """Bounded private projection: authenticated inspection beyond what
+        /state exposes publicly. Must NOT include memory-store embeddings,
+        raw unbounded logs, or any auth material."""
+        with self.lock:
+            if not GOD_MODE_ENABLED:
+                return {"ok": False, "reason": "god mode disabled"}
+            god = self.civilization.get("godState") or self._default_god_state()
+            omens = god.get("privateOmens") or {}
+
+            def _omen_status(agent_id):
+                # Phase 3: STATUS only (active + exact remaining frame), not
+                # raw omen content -- the sight comment this replaces already
+                # named that contract; the omen's actual text is still
+                # reachable through recentInterventions ("intervention
+                # outcomes" is explicitly in scope for /control/god/sight per
+                # docs/plan) or by the operator recalling what they wrote.
+                omen = omens.get(str(agent_id))
+                if not isinstance(omen, dict):
+                    return None
+                if not self._voice_guidance_in_window(omen):
+                    return None
+                return {
+                    "active": True,
+                    "expiresFrame": omen.get("expiresFrame"),
+                    "unacked": not omen.get("acked"),
+                }
+
+            def _providence_status(agent_id):
+                prov = god.get("providence")
+                if not isinstance(prov, dict) or not self._voice_guidance_in_window(prov):
+                    return None
+                acked = prov.get("ackedAgentIds") or {}
+                return {
+                    "active": True,
+                    "expiresFrame": prov.get("expiresFrame"),
+                    "unacked": not acked.get(str(agent_id)),
+                }
+
+            def _sampling_status(agent_id):
+                rec = self._god_active_agent_sampling_record(agent_id)
+                if rec is None:
+                    return None
+                status = {
+                    "active": True,
+                    "model": rec.get("model"),
+                    "temperature": rec.get("temperature"),
+                }
+                if rec.get("expiresFrame") is not None:
+                    status["expiresFrame"] = rec.get("expiresFrame")
+                return status
+
+            def _mask_status(agent_id):
+                rec = self._god_active_context_mask_record(agent_id)
+                if rec is None:
+                    return None
+                return {
+                    "active": True,
+                    "mode": rec.get("mode"),
+                    "expiresFrame": rec.get("expiresFrame"),
+                }
+
+            def _gate_status(agent_id):
+                rec = self._god_active_decision_gate_record(agent_id)
+                if rec is None:
+                    return None
+                status = {
+                    "active": True,
+                    "mode": rec.get("mode"),
+                    "armed": rec.get("armed"),
+                    "status": rec.get("status"),
+                    "expiresFrame": rec.get("expiresFrame"),
+                    "hasPending": bool(rec.get("pendingDecision")),
+                }
+                pin = rec.get("pinnedDecision")
+                if isinstance(pin, dict) and pin.get("action"):
+                    status["pinnedAction"] = pin.get("action")
+                elif isinstance(rec.get("queue"), list) and rec["queue"]:
+                    status["pinnedAction"] = rec["queue"][0].get("action")
+                return status
+
+            def _burning_bush_status(agent_id):
+                rec = (god.get("burningBush") or {}).get(str(agent_id))
+                if not isinstance(rec, dict) or rec.get("status") != "active":
+                    return None
+                thread = rec.get("thread") or []
+                message_count = len(thread) if isinstance(thread, list) else 0
+                bargain = rec.get("bargain")
+                bargain_active = (
+                    isinstance(bargain, dict) and bargain.get("status") == "open"
+                )
+                status = {
+                    "active": True,
+                    "messageCount": message_count,
+                    "bargainActive": bargain_active,
+                }
+                if bargain_active and isinstance(bargain.get("expiresFrame"), int):
+                    status["expiresFrame"] = bargain.get("expiresFrame")
+                return status
+
+            def _anointment_status(agent_id):
+                rec = self._god_active_anointment_record(agent_id)
+                if rec is None:
+                    return None
+                status = {
+                    "active": True,
+                    "tagCount": len(rec.get("stigmataTags") or []),
+                    "expiresFrame": rec.get("expiresFrame"),
+                }
+                next_oracle = self._anointment_next_oracle_frame(rec)
+                if next_oracle is not None:
+                    status["nextOracleFrame"] = next_oracle
+                return status
+
+            def _identity_forge_status(agent_id):
+                rec = self._god_active_identity_forge_record(agent_id)
+                if rec is None:
+                    return None
+                status = {
+                    "active": True,
+                    "progress": rec.get("progress"),
+                    "expiresFrame": rec.get("expiresFrame"),
+                }
+                if rec.get("copyFromId") is not None:
+                    status["copyFromId"] = rec.get("copyFromId")
+                    status["rate"] = rec.get("rate")
+                return status
+
+            def _architect_limbo_status(agent_id):
+                agent = self._find_agent_by_id(agent_id)
+                hold = agent.get("architectLimbo") if agent else None
+                if not isinstance(hold, dict):
+                    return None
+                return {
+                    "active": True,
+                    "zoneId": hold.get("zoneId"),
+                }
+
+            def _architect_zones_sight_summary():
+                summary = []
+                for zone in self._god_active_architect_zones():
+                    cells_expanded, _ = self._expand_architect_cells(zone.get("cells"))
+                    entry = {
+                        "id": zone.get("id"),
+                        "kind": zone.get("kind"),
+                        "districtId": zone.get("districtId"),
+                        "cellCount": len(cells_expanded or []),
+                        "expiresFrame": zone.get("expiresFrame"),
+                    }
+                    if zone.get("kind") == "limbo":
+                        entry["holdCount"] = len(zone.get("holdAgentIds") or [])
+                    summary.append(entry)
+                return summary
+
+            def _checkpoints_sight_summary():
+                summary = []
+                for rec in (god.get("checkpoints") or []):
+                    if not isinstance(rec, dict):
+                        continue
+                    summary.append({
+                        "id": rec.get("id"),
+                        "label": rec.get("label"),
+                        "frameTick": rec.get("frameTick"),
+                        "createdAt": rec.get("createdAt"),
+                    })
+                return summary
+
+            def _decision_digests_sight_summary():
+                digests = god.get("decisionDigests") or []
+                if not isinstance(digests, list):
+                    return []
+                filter_agent_id = None
+                if isinstance(filters, dict):
+                    filter_agent_id = filters.get("agentId")
+                rows = []
+                for d in digests:
+                    if not isinstance(d, dict):
+                        continue
+                    if filter_agent_id is not None and d.get("agentId") != filter_agent_id:
+                        continue
+                    if not isinstance(d.get("action"), str):
+                        continue
+                    row = {
+                        "frameTick": d.get("frameTick"),
+                        "agentId": d.get("agentId"),
+                        "action": d.get("action"),
+                    }
+                    if isinstance(d.get("reasoningHash"), str):
+                        row["reasoningHash"] = d.get("reasoningHash")
+                    rows.append(row)
+                cap = GOD_DEJA_VU_MAX_STEPS * 4 if filter_agent_id is not None else 40
+                return rows[-cap:]
+
+            def _deja_vu_replays_sight_summary():
+                summary = []
+                replays = god.get("dejaVuReplays") or {}
+                if not isinstance(replays, dict):
+                    return summary
+                for rec in replays.values():
+                    if not isinstance(rec, dict):
+                        continue
+                    summary.append({
+                        "id": rec.get("id"),
+                        "targetId": rec.get("targetId"),
+                        "stepCount": len(rec.get("steps") or []),
+                        "currentIndex": rec.get("currentIndex"),
+                        "status": rec.get("status"),
+                    })
+                return summary
+
+            def _crowd_compulsions_sight_summary():
+                summary = []
+                compulsions = god.get("crowdCompulsions") or {}
+                if not isinstance(compulsions, dict):
+                    return summary
+                for rec in compulsions.values():
+                    if not isinstance(rec, dict):
+                        continue
+                    summary.append({
+                        "id": rec.get("id"),
+                        "targetCount": len(rec.get("targets") or {}),
+                        "expiresFrame": rec.get("expiresFrame"),
+                        "status": rec.get("status"),
+                    })
+                return summary
+
+            def _dream_broadcasts_sight_summary():
+                summary = []
+                broadcasts = god.get("dreamBroadcasts") or {}
+                if not isinstance(broadcasts, dict):
+                    return summary
+                for rec in broadcasts.values():
+                    if not isinstance(rec, dict):
+                        continue
+                    summary.append({
+                        "id": rec.get("id"),
+                        "targetCount": len(rec.get("targets") or {}),
+                        "expiresFrame": rec.get("expiresFrame"),
+                        "status": rec.get("status"),
+                    })
+                return summary
+
+            def _village_pulse_sight_summary():
+                """Ephemeral village aggregate — derived live, never persisted."""
+                crisis = []
+                for a in self.agents:
+                    if a.get("deathFrame") is not None:
+                        continue
+                    reasons = []
+                    health = a.get("health", 100)
+                    hunger = a.get("hunger", 100)
+                    if a.get("incapacitated"):
+                        reasons.append("incapacitated")
+                    if health < SAGE_CRITICAL_HEALTH:
+                        reasons.append("critical health")
+                    elif health < 60:
+                        reasons.append("low health")
+                    if hunger <= 0:
+                        reasons.append("starving")
+                    elif hunger <= 30:
+                        reasons.append("very hungry")
+                    if reasons:
+                        crisis.append({
+                            "id": a["id"],
+                            "name": a["name"],
+                            "reason": "; ".join(reasons),
+                        })
+
+                def _crisis_rank(entry):
+                    agent = next((x for x in self.agents if x["id"] == entry["id"]), None)
+                    if not agent:
+                        return 99
+                    if agent.get("incapacitated"):
+                        return 0
+                    if agent.get("health", 100) < SAGE_CRITICAL_HEALTH:
+                        return 1
+                    if agent.get("hunger", 100) <= 0:
+                        return 2
+                    if agent.get("health", 100) < 60:
+                        return 3
+                    return 4
+
+                crisis.sort(key=_crisis_rank)
+                crisis = crisis[:8]
+
+                stockpile = self.civilization.get("stockpile") or {}
+                stockpile_totals = {
+                    k: v for k, v in stockpile.items()
+                    if isinstance(v, (int, float)) and v > 0
+                }
+                open_projects = sum(
+                    1 for p in (self.civilization.get("districtProjects") or {}).values() if p
+                )
+
+                sage = next(
+                    (a for a in self.agents
+                     if a["role"] == "elder" and a.get("deathFrame") is None),
+                    None,
+                )
+                if sage:
+                    if sage.get("incapacitated"):
+                        sage_summary = "incapacitated"
+                    elif sage.get("health", 100) < SAGE_CRITICAL_HEALTH:
+                        sage_summary = "critical"
+                    else:
+                        sage_summary = "living"
+                    sage_status = {
+                        "present": True,
+                        "name": sage["name"],
+                        "role": sage["role"],
+                        "status": sage_summary,
+                        "health": sage.get("health"),
+                        "hunger": sage.get("hunger"),
+                    }
+                else:
+                    sage_status = {"present": False, "status": "absent"}
+
+                event_titles = []
+                for event in god.get("activeEvents") or []:
+                    if not isinstance(event, dict) or event.get("status") != "active":
+                        continue
+                    title = event.get("title")
+                    if isinstance(title, str) and title.strip():
+                        event_titles.append(title.strip())
+                    elif isinstance(event.get("kind"), str):
+                        event_titles.append(event["kind"])
+
+                prov = god.get("providence")
+                if isinstance(prov, dict) and self._voice_guidance_in_window(prov):
+                    pulse_providence = {
+                        "active": True,
+                        "expiresFrame": prov.get("expiresFrame"),
+                    }
+                else:
+                    pulse_providence = {"active": False}
+
+                return {
+                    "crisisAgents": crisis,
+                    "stockpileTotals": stockpile_totals,
+                    "openProjectsCount": open_projects,
+                    "sageStatus": sage_status,
+                    "weather": self._weather_snapshot(),
+                    "activeEventTitles": event_titles[:GOD_ACTIVE_EVENTS_CAP],
+                    "providence": pulse_providence,
+                }
+
+            agents = [{
+                "id": a["id"], "name": a["name"], "role": a["role"],
+                "health": a.get("health"), "hunger": a.get("hunger"),
+                "incapacitated": a.get("incapacitated"),
+                "deceased": bool(a.get("deathFrame") is not None),
+                "resources": dict(a.get("resources") or {}),
+                "relationships": dict(a.get("relationships") or {}),
+                "lastAction": a.get("lastAction"),
+                "lastReasoning": (a.get("lastReasoning") or "")[:240] or None,
+                "currentDistrict": a.get("currentDistrict"),
+                "omen": _omen_status(a["id"]),
+                "providence": _providence_status(a["id"]),
+                "sampling": _sampling_status(a["id"]),
+                "contextMask": _mask_status(a["id"]),
+                "decisionGate": _gate_status(a["id"]),
+                "burningBush": _burning_bush_status(a["id"]),
+                "anointment": _anointment_status(a["id"]),
+                "identityForge": _identity_forge_status(a["id"]),
+                "architectLimbo": _architect_limbo_status(a["id"]),
+                "divineHold": bool(a.get("divineHold")),
+                "memoryCounts": {
+                    "working": len((a.get("memory") or {}).get("working") or []),
+                    "shortTerm": len((a.get("memory") or {}).get("shortTerm") or []),
+                },
+                "beliefCount": len(a.get("beliefs") or ()),
+            } for a in self.agents]
+            recent_divine_responses = list(god.get("recentDivineResponses") or [])
+            if isinstance(filters, dict):
+                filter_agent_id = filters.get("agentId")
+                if filter_agent_id is not None:
+                    recent_divine_responses = [
+                        r for r in recent_divine_responses
+                        if isinstance(r, dict) and r.get("agentId") == filter_agent_id
+                    ]
+            return {
+                "ok": True,
+                "frameTick": self.frameTick,
+                "intervened": bool(god.get("intervened")),
+                "providence": god.get("providence"),
+                "activeEvents": list(god.get("activeEvents") or [])[:GOD_ACTIVE_EVENTS_CAP],
+                "recentInterventions": list(god.get("recentInterventions") or [])[-GOD_RECENT_INTERVENTIONS_CAP:],
+                "recentDivineResponses": recent_divine_responses[:GOD_DIVINE_RESPONSE_LOG_MAX],
+                "architectZones": _architect_zones_sight_summary(),
+                "checkpoints": _checkpoints_sight_summary(),
+                "decisionDigests": _decision_digests_sight_summary(),
+                "dejaVuReplays": _deja_vu_replays_sight_summary(),
+                "crowdCompulsions": _crowd_compulsions_sight_summary(),
+                "dreamBroadcasts": _dream_broadcasts_sight_summary(),
+                "pulse": _village_pulse_sight_summary(),
+                "agents": agents,
+            }
 
     # --- control + snapshot (Contract 2) ---
     def pause(self):
         with self.lock:
             self.paused = True
+            self._paused_mod_frame = self.frameTick
+            self._dirty_this_frame.add("paused")
 
     def resume(self):
         with self.lock:
             self.paused = False
+            self._paused_mod_frame = self.frameTick
+            self._dirty_this_frame.add("paused")
 
     def reset(self, roster_size=None):
         with self.lock:
@@ -13632,6 +23673,12 @@ class SimEngine:
             self._module_note_ages = []
             self.shipments = []
             self._shipment_seq = 0
+            self._god_preview_cache = {}
+            self._god_requests = {}
+            self._god_rejected_count = 0
+            self._god_grant_session_total = 0
+            self._god_deja_vu_session_total = 0
+            self._god_compiler_state = {"lastCompileWallTime": 0.0, "compileCount": 0}
             ms = self.d.get("memory_store")
             if ms is not None:
                 try:
@@ -13643,7 +23690,7 @@ class SimEngine:
         # Replace the on-disk save so a reset truly starts fresh: clear the old
         # snapshot, then immediately persist the fresh cold-started world.
         self.clear_state()
-        self.save_state()
+        self.save_state(force=True)
 
     def _social_ties_snapshot(self):
         """Return compact non-neutral ties between living agents for the viewer.
@@ -13679,208 +23726,390 @@ class SimEngine:
             if (kind := entry.get("kind")) in CHRONICLE_MILESTONE_KINDS
         ][-CHRONICLE_CAP:]
 
-    def snapshot(self):
-        """Consistent /state snapshot per Contract 2 (copied under lock)."""
-        with self.lock:
-            c = self.civilization
-            district_projects = {}
-            for did, ap in c["districtProjects"].items():
-                if not ap:
-                    district_projects[did] = None
-                    continue
-                total = sum(ap["needs"].values())
-                done = sum(min(ap["contributed"].get(r, 0), n) for r, n in ap["needs"].items())
-                pct = round(done / total * 100) if total else 0
-                progress_text = ", ".join(f"{r} {ap['contributed'].get(r, 0)}/{n}"
-                                          for r, n in ap["needs"].items())
-                district_projects[did] = {"name": ap["name"], "type": ap["type"],
-                                          "progressText": progress_text, "progressPercent": pct}
-            agents = [{
-                "id": a["id"], "name": a["name"], "role": a["role"], "color": a["color"],
-                "x": a["x"], "y": a["y"], "currentZone": a["currentZone"],
-                "currentDistrict": a.get("currentDistrict"),
-                "waypoints": len(a.get("waypoints") or []),
-                "resources": dict(a["resources"]), "hunger": a["hunger"], "health": a["health"],
-                "incapacitated": a["incapacitated"], "message": a["message"],
-                "isThinking": a["isThinking"],
-                "beliefs": [self._belief_text(b) for b in a["beliefs"]],
-                "beliefIds": sorted(a["beliefs"]) if MEMES_ENABLED else [],
-                "lastAction": a["lastAction"], "assignedTask": a["assignedTask"],
-                "age": round(a["age"], 1) if LIFECYCLE_ENABLED and a.get("age") is not None else None,
-                "lifeStage": self._life_stage(a) if LIFECYCLE_ENABLED else None,
-                "skills": {k: round(v, 1) for k, v in a["skills"].items()} if CULTURE_ENABLED else None,
-                "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
-                # Cemetery/burial (viewer-only booleans, not the raw frame --
-                # same discipline as councilActive's "frame" omission): lets
-                # the renderer tell a permanent death (tombstone sprite) apart
-                # from a temporary survival collapse (grey overlay, same body).
-                "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
-                "buried": bool(CEMETERY_ENABLED and a.get("buried")),
-                # Non-neutral social ties only, to keep the payload small.
-                "relationships": {k: v for k, v in (a.get("relationships") or {}).items() if v != "neutral"},
-                # Capped preview of the model's last decision justification.
-                "lastReasoning": (a.get("lastReasoning") or "")[:160] or None,
-            } for a in self.agents]
-            env_lit_types = self._env_lit_types() if ENV_EFFECTS_ENABLED else set()
-            civ = {
-                "level": c["level"],
-                "structures": [{"id": s["id"], "type": s["type"], "x": s["x"], "y": s["y"],
-                                "visualStyle": s.get("visualStyle"), "name": s.get("name"),
-                                "sprite": s.get("sprite"),
-                                "districtId": s.get("districtId"),
-                                "condition": s.get("condition", 100),
-                                "isRuin": bool(s.get("isRuin")),
-                                "conditionTier": structure_condition_tier(s),
-                                "homeOf": s.get("homeOf"),
-                                "level": s.get("level", 1),
-                                "visualTier": s.get("visualTier", 1),
-                                "renderScale": s.get("renderScale", 1.0),
-                                "light": bool(
-                                    ENV_EFFECTS_ENABLED and s["type"] in env_lit_types
-                                    and not s.get("isRuin")
-                                    and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)}
-                               for s in c["structures"]],
-                "districtProjects": district_projects,
-                "completedProjects": c["completedProjects"],
-                "resourceRegistry": {rid: dict(d) for rid, d in c["resourceRegistry"].items()},
-                "projectRegistry": {pid: dict(p) for pid, p in c["projectRegistry"].items()},
-                "pendingBlueprints": [dict(b) for b in c["pendingBlueprints"]],
-                "pendingRecipes": [dict(r) for r in c["pendingRecipes"]],
-                # The viewer's Recipes sidebar row reads civ.recipes; it was
-                # dead (always empty) because the snapshot never included the
-                # live RECIPES registry (C5 cleanup, 2026-07-06).
-                "recipes": {rid: {"name": r["name"], "inputs": dict(r["inputs"]),
-                                  "station": r.get("station")}
-                            for rid, r in self.RECIPES.items()} if CRAFTING_ENABLED else {},
-                "rules": [dict(r) for r in c["rules"]],
-                "pendingRules": [dict(r) for r in c["pendingRules"]],
-                "constitution": [dict(p) for p in self._ensure_constitution()],
-                "directive": self._current_directive(),
-                "season": self._current_season(),
-                "stockpile": dict(c["stockpile"]),
-                "taxDue": c["taxDue"], "taxPaid": c["taxPaid"],
-                "collectAttempts": c["collectAttempts"], "collectSuccesses": c["collectSuccesses"],
-            }
-            if CULTURE_ENABLED:
-                # Phase G: chronicle + library knowledge for the viewer (thin,
-                # read-only -- no simulation logic moves to the browser).
-                civ["chronicle"] = list((c.get("chronicle") or [])[-CHRONICLE_CAP:])
-                civ["libraryKnowledge"] = list(c.get("libraryKnowledge") or [])
-                civ["memeMutations"] = c.get("memeMutations", 0)
-                civ["beliefRegistry"] = json.loads(json.dumps(self._belief_registry(), default=str))
-                civ["beliefPitchCalls"] = c.get("beliefPitchCalls", 0)
-            if DAILY_COUNCIL_ENABLED:
-                # Full live projection is intentionally engine-authored: the
-                # later viewer phase consumes these persisted seats, agenda,
-                # transcript, ballot, and verdict without deriving mechanics.
-                civ["dailyCouncil"] = json.loads(json.dumps(
-                    c.get("dailyCouncil"), default=str))
-                civ["councilDigests"] = json.loads(json.dumps(
-                    (c.get("councilDigests") or [])[:DAILY_COUNCIL_DIGEST_CAP],
-                    default=str))
-                if not TECH_TREE_ENABLED:
-                    civ["councilLog"] = json.loads(json.dumps(
-                        (c.get("councilLog") or [])[:DAILY_COUNCIL_LOG_CAP],
-                        default=str))
-            if TECH_TREE_ENABLED:
-                # Phase D: era chip, council banner, and the persisted debate
-                # records for the viewer's Council panel.
-                civ["era"] = self._current_era_name()
-                civ["techTier"] = self._village_tech_tier()
-                council = c.get("councilActive")
-                civ["councilActive"] = ({
-                    "active": True,
-                    "trigger": council.get("trigger"),
-                    "proposers": list(council.get("proposers") or []),
-                    "proposals": len(council.get("proposals") or []),
-                } if council else None)
+    def _agent_snapshot_row(self, a):
+        """One agent row for /state (lock held)."""
+        return {
+            "id": a["id"], "name": a["name"], "role": a["role"], "color": a["color"],
+            "x": a["x"], "y": a["y"], "currentZone": a["currentZone"],
+            "currentDistrict": a.get("currentDistrict"),
+            "waypoints": len(a.get("waypoints") or []),
+            "resources": dict(a["resources"]), "hunger": a["hunger"], "health": a["health"],
+            "incapacitated": a["incapacitated"], "message": a["message"],
+            "isThinking": a["isThinking"],
+            "beliefs": [self._belief_text(b) for b in a["beliefs"]],
+            "beliefIds": sorted(a["beliefs"]) if MEMES_ENABLED else [],
+            "lastAction": a["lastAction"], "assignedTask": a["assignedTask"],
+            "age": round(a["age"], 1) if LIFECYCLE_ENABLED and a.get("age") is not None else None,
+            "lifeStage": self._life_stage(a) if LIFECYCLE_ENABLED else None,
+            "skills": {k: round(v, 1) for k, v in a["skills"].items()} if CULTURE_ENABLED else None,
+            "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
+            "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
+            "buried": bool(CEMETERY_ENABLED and a.get("buried")),
+            "relationships": {k: v for k, v in (a.get("relationships") or {}).items() if v != "neutral"},
+            "lastReasoning": (a.get("lastReasoning") or "")[:160] or None,
+        }
+
+    def _structure_snapshot_row(self, s, env_lit_types, include_sprite=True):
+        """One structure row for /state (lock held)."""
+        row = {
+            "id": s["id"], "type": s["type"], "x": s["x"], "y": s["y"],
+            "visualStyle": s.get("visualStyle"), "name": s.get("name"),
+            "districtId": s.get("districtId"),
+            "condition": s.get("condition", 100),
+            "isRuin": bool(s.get("isRuin")),
+            "conditionTier": structure_condition_tier(s),
+            "homeOf": s.get("homeOf"),
+            "level": s.get("level", 1),
+            "visualTier": s.get("visualTier", 1),
+            "renderScale": s.get("renderScale", 1.0),
+            "light": bool(
+                ENV_EFFECTS_ENABLED and s["type"] in env_lit_types
+                and not s.get("isRuin")
+                and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD),
+        }
+        if include_sprite:
+            row["sprite"] = s.get("sprite")
+        return row
+
+    def _build_district_projects_snapshot(self):
+        c = self.civilization
+        district_projects = {}
+        for did, ap in c["districtProjects"].items():
+            if not ap:
+                district_projects[did] = None
+                continue
+            total = sum(ap["needs"].values())
+            done = sum(min(ap["contributed"].get(r, 0), n) for r, n in ap["needs"].items())
+            pct = round(done / total * 100) if total else 0
+            progress_text = ", ".join(f"{r} {ap['contributed'].get(r, 0)}/{n}"
+                                      for r, n in ap["needs"].items())
+            district_projects[did] = {"name": ap["name"], "type": ap["type"],
+                                      "progressText": progress_text, "progressPercent": pct}
+        return district_projects
+
+    def _build_civ_snapshot(self):
+        """Full civilization projection for /state (lock held)."""
+        c = self.civilization
+        env_lit_types = self._env_lit_types() if ENV_EFFECTS_ENABLED else set()
+        civ = {
+            "level": c["level"],
+            "structures": [self._structure_snapshot_row(s, env_lit_types, include_sprite=True)
+                           for s in c["structures"]],
+            "districtProjects": self._build_district_projects_snapshot(),
+            "completedProjects": c["completedProjects"],
+            "resourceRegistry": {rid: dict(d) for rid, d in c["resourceRegistry"].items()},
+            "projectRegistry": {pid: dict(p) for pid, p in c["projectRegistry"].items()},
+            "pendingBlueprints": [dict(b) for b in c["pendingBlueprints"]],
+            "pendingRecipes": [dict(r) for r in c["pendingRecipes"]],
+            "recipes": {rid: {"name": r["name"], "inputs": dict(r["inputs"]),
+                              "station": r.get("station")}
+                        for rid, r in self.RECIPES.items()} if CRAFTING_ENABLED else {},
+            "rules": [dict(r) for r in c["rules"]],
+            "pendingRules": [dict(r) for r in c["pendingRules"]],
+            "constitution": [dict(p) for p in self._ensure_constitution()],
+            "directive": self._current_directive(),
+            "season": self._current_season(),
+            "stockpile": dict(c["stockpile"]),
+            "taxDue": c["taxDue"], "taxPaid": c["taxPaid"],
+            "collectAttempts": c["collectAttempts"], "collectSuccesses": c["collectSuccesses"],
+        }
+        if CULTURE_ENABLED:
+            civ["chronicle"] = list((c.get("chronicle") or [])[-CHRONICLE_CAP:])
+            civ["libraryKnowledge"] = list(c.get("libraryKnowledge") or [])
+            civ["memeMutations"] = c.get("memeMutations", 0)
+            civ["beliefRegistry"] = json.loads(json.dumps(self._belief_registry(), default=str))
+            civ["beliefPitchCalls"] = c.get("beliefPitchCalls", 0)
+        if DAILY_COUNCIL_ENABLED:
+            civ["dailyCouncil"] = json.loads(json.dumps(c.get("dailyCouncil"), default=str))
+            civ["councilDigests"] = json.loads(json.dumps(
+                (c.get("councilDigests") or [])[:DAILY_COUNCIL_DIGEST_CAP], default=str))
+            if not TECH_TREE_ENABLED:
                 civ["councilLog"] = json.loads(json.dumps(
-                    (c.get("councilLog") or [])[:COUNCIL_LOG_CAP], default=str))
-            if ECONOMY_ENABLED:
-                # Phase E: market status + a live prices dict for the viewer
-                # (thin-viewer-only rendering -- no simulation logic moves).
-                civ["marketActive"] = self._market_active()
-                civ["prices"] = ({rid: self._resource_price(rid)
-                                  for rid in c["resourceRegistry"] if rid != "gold"}
-                                 if civ["marketActive"] else {})
-            if path1_on():
-                civ["settlements"] = list(c.get("settlements") or [])
-                civ["treaties"] = list(c.get("treaties") or [])
-                civ["isNight"] = self._is_night()
-            if ENV_EFFECTS_ENABLED:
-                civ["litDistricts"] = list(c.get("litDistricts") or [])
-            if TRANSIT_ENABLED:
-                boat_count = int(c.get("stockpile", {}).get("boat", 0))
-                civ["physicalProps"] = ([{"resource": "boat", "count": min(3, boat_count)}]
-                                        if boat_count >= 3 else [])
-            benchmarks = dict(self.lastBenchmarks)
-            activity = list(self.activityLog)
-            conversation = list(self.conversationLog[:30])
-            snapshot = {
-                "frameTick": self.frameTick,
-                "paused": self.paused,
-                "uptimeSeconds": time.time() - self.processStartTime,
-                "calendar": self._calendar(),
-                "lmStatus": self.lmStatus,
-                "agents": agents,
-                "civilization": civ,
-                "benchmarks": benchmarks,
-                "activity": activity,
-                "conversation": conversation,
-                "config": {
-                    "WORLD_W": WORLD_W, "WORLD_H": WORLD_H,
-                    "flags": {
-                        "SURVIVAL_ENABLED": SURVIVAL_ENABLED, "USE_GOALS": USE_GOALS,
-                        "EMERGENT_ROLES": EMERGENT_ROLES, "RULES_ENABLED": RULES_ENABLED,
-                        "MEMES_ENABLED": MEMES_ENABLED, "CRAFTING_ENABLED": CRAFTING_ENABLED,
-                        "META_SYSTEM": META_SYSTEM, "PIANO_MODULES": PIANO_MODULES,
-                        "ROADS_ENABLED": ROADS_ENABLED,
-                        "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
-                        "GOODS_ENABLED": GOODS_ENABLED,
-                        "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
-                        "ECONOMY_ENABLED": ECONOMY_ENABLED,
-                        "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
-                        "CULTURE_ENABLED": CULTURE_ENABLED,
-                        "CEMETERY_ENABLED": CEMETERY_ENABLED,
-                        "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
-                        "STRUCTURE_WEAR_ENABLED": STRUCTURE_WEAR_ENABLED,
-                        "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
-                        "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
-                        "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
-                        "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
-                        "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
-                        "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
-                        "PATH1_ENABLED": PATH1_ENABLED,
-                        "INDUSTRY_ENABLED": path1_on("INDUSTRY_ENABLED"),
-                        "TOOL_TIERS_ENABLED": path1_on("TOOL_TIERS_ENABLED"),
-                        "COMPOSABLE_BUILD_ENABLED": path1_on("COMPOSABLE_BUILD_ENABLED"),
-                        "TERRAIN_TILES_ENABLED": path1_on("TERRAIN_TILES_ENABLED"),
-                        "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
-                        "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
-                        "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
-                        "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
-                        "LIBRARY_SCALING_ENABLED": LIBRARY_SCALING_ENABLED,
-                        "TRANSIT_ENABLED": TRANSIT_ENABLED,
-                        "ECONOMY_SINKS_ENABLED": ECONOMY_SINKS_ENABLED,
-                        "WIKI_MEMORY": WIKI_MEMORY,
-                        "CROP_GROWTH_ENABLED": CROP_GROWTH_ENABLED,
-                        "WILDLIFE_ENABLED": WILDLIFE_ENABLED,
-                        "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
-                        "WEATHER_ENABLED": WEATHER_ENABLED,
-                        "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
-                    },
-                },
+                    (c.get("councilLog") or [])[:DAILY_COUNCIL_LOG_CAP], default=str))
+        if TECH_TREE_ENABLED:
+            civ["era"] = self._current_era_name()
+            civ["techTier"] = self._village_tech_tier()
+            council = c.get("councilActive")
+            civ["councilActive"] = ({
+                "active": True,
+                "trigger": council.get("trigger"),
+                "proposers": list(council.get("proposers") or []),
+                "proposals": len(council.get("proposals") or []),
+            } if council else None)
+            civ["councilLog"] = json.loads(json.dumps(
+                (c.get("councilLog") or [])[:COUNCIL_LOG_CAP], default=str))
+        if ECONOMY_ENABLED:
+            civ["marketActive"] = self._market_active()
+            civ["prices"] = ({rid: self._resource_price(rid)
+                              for rid in c["resourceRegistry"] if rid != "gold"}
+                             if civ["marketActive"] else {})
+        if path1_on():
+            civ["settlements"] = list(c.get("settlements") or [])
+            civ["treaties"] = list(c.get("treaties") or [])
+            civ["settlementStores"] = {
+                sid: dict(bucket or {})
+                for sid, bucket in (c.get("settlementStores") or {}).items()
             }
-            if SOCIAL_LAYER_ENABLED:
-                snapshot["socialTies"] = self._social_ties_snapshot()
-            if CHRONICLE_ENABLED and CULTURE_ENABLED:
-                snapshot["chronicle"] = self._chronicle_snapshot()
-            if CROP_GROWTH_ENABLED or WILDLIFE_ENABLED:
-                # Shared prerequisite for both consumers (2A) -- omitted
-                # entirely when neither viewer feature is on.
-                snapshot["districtEcology"] = self._district_ecology_snapshot()
-            if CARAVAN_VISUALS_ENABLED:
-                snapshot["shipments"] = self._shipment_snapshot()
-            if WEATHER_ENABLED:
-                snapshot["weather"] = self._weather_snapshot()
-            return snapshot
+            civ["caravanLog"] = list(c.get("caravanLog") or [])[-CARAVAN_LOG_CAP:]
+            civ["isNight"] = self._is_night()
+        if ENV_EFFECTS_ENABLED:
+            civ["litDistricts"] = list(c.get("litDistricts") or [])
+        if TRANSIT_ENABLED:
+            boat_count = int(c.get("stockpile", {}).get("boat", 0))
+            civ["physicalProps"] = ([{"resource": "boat", "count": min(3, boat_count)}]
+                                    if boat_count >= 3 else [])
+        return civ
+
+    def _build_snapshot_config(self):
+        return {
+            "WORLD_W": WORLD_W, "WORLD_H": WORLD_H,
+            "flags": {
+                "SURVIVAL_ENABLED": SURVIVAL_ENABLED, "USE_GOALS": USE_GOALS,
+                "EMERGENT_ROLES": EMERGENT_ROLES, "RULES_ENABLED": RULES_ENABLED,
+                "MEMES_ENABLED": MEMES_ENABLED, "CRAFTING_ENABLED": CRAFTING_ENABLED,
+                "META_SYSTEM": META_SYSTEM, "PIANO_MODULES": PIANO_MODULES,
+                "ROADS_ENABLED": ROADS_ENABLED,
+                "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
+                "GOODS_ENABLED": GOODS_ENABLED,
+                "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
+                "ECONOMY_ENABLED": ECONOMY_ENABLED,
+                "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
+                "CULTURE_ENABLED": CULTURE_ENABLED,
+                "CEMETERY_ENABLED": CEMETERY_ENABLED,
+                "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
+                "STRUCTURE_WEAR_ENABLED": STRUCTURE_WEAR_ENABLED,
+                "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
+                "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
+                "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
+                "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
+                "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
+                "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
+                "PATH1_ENABLED": PATH1_ENABLED,
+                "INDUSTRY_ENABLED": path1_on("INDUSTRY_ENABLED"),
+                "TOOL_TIERS_ENABLED": path1_on("TOOL_TIERS_ENABLED"),
+                "COMPOSABLE_BUILD_ENABLED": path1_on("COMPOSABLE_BUILD_ENABLED"),
+                "TERRAIN_TILES_ENABLED": path1_on("TERRAIN_TILES_ENABLED"),
+                "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
+                "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
+                "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
+                "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
+                "LIBRARY_SCALING_ENABLED": LIBRARY_SCALING_ENABLED,
+                "TRANSIT_ENABLED": TRANSIT_ENABLED,
+                "ECONOMY_SINKS_ENABLED": ECONOMY_SINKS_ENABLED,
+                "WIKI_MEMORY": WIKI_MEMORY,
+                "CROP_GROWTH_ENABLED": CROP_GROWTH_ENABLED,
+                "WILDLIFE_ENABLED": WILDLIFE_ENABLED,
+                "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
+                "WEATHER_ENABLED": WEATHER_ENABLED,
+                "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
+                "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
+                "GOD_AUTH_REQUIRED": GOD_AUTH_REQUIRED,
+                "GOD_DEJA_VU_REPLAY": GOD_DEJA_VU_REPLAY,
+            },
+        }
+
+    def _build_god_snapshot(self):
+        c = self.civilization
+        god = c.get("godState") or self._default_god_state()
+        return {
+            "intervened": bool(god.get("intervened")),
+            "providence": god.get("providence"),
+            "activePublicEvents": [
+                e for e in (god.get("activeEvents") or [])[:GOD_ACTIVE_EVENTS_CAP]
+                if isinstance(e, dict) and e.get("status") == "active"
+                and e.get("visibility", "public") == "public"
+            ],
+            "recentPublicInterventions": [
+                r for r in (god.get("recentInterventions") or [])[-GOD_RECENT_INTERVENTIONS_CAP:]
+                if isinstance(r, dict) and r.get("public", True)
+            ],
+        }
+
+    def _build_snapshot_core(self):
+        """Full /state body. Must be called under self.lock."""
+        snapshot = {
+            "frameTick": self.frameTick,
+            "paused": self.paused,
+            "uptimeSeconds": time.time() - self.processStartTime,
+            "calendar": self._calendar(),
+            "lmStatus": self.lmStatus,
+            "agents": [self._agent_snapshot_row(a) for a in self.agents],
+            "civilization": self._build_civ_snapshot(),
+            "benchmarks": dict(self.lastBenchmarks),
+            "activity": list(self.activityLog),
+            "conversation": list(self.conversationLog[:30]),
+            "config": self._build_snapshot_config(),
+        }
+        if SOCIAL_LAYER_ENABLED:
+            snapshot["socialTies"] = self._social_ties_snapshot()
+        if CHRONICLE_ENABLED and CULTURE_ENABLED:
+            snapshot["chronicle"] = self._chronicle_snapshot()
+        if CROP_GROWTH_ENABLED or WILDLIFE_ENABLED:
+            snapshot["districtEcology"] = self._district_ecology_snapshot()
+        if WILDLIFE_ENABLED:
+            snapshot["wildlife"] = self._wildlife_snapshot()
+        else:
+            snapshot["wildlife"] = []
+        if CARAVAN_VISUALS_ENABLED:
+            snapshot["shipments"] = self._shipment_snapshot()
+        if WEATHER_ENABLED:
+            snapshot["weather"] = self._weather_snapshot()
+        if GOD_MODE_ENABLED:
+            snapshot["god"] = self._build_god_snapshot()
+        return snapshot
+
+    def _snapshot_delta_top_key(self, key):
+        """Project one optional top-level /state key (lock held)."""
+        if key == "activity":
+            return "activity", list(self.activityLog)
+        if key == "conversation":
+            return "conversation", list(self.conversationLog[:30])
+        if key == "benchmarks":
+            return "benchmarks", dict(self.lastBenchmarks)
+        if key == "lmStatus":
+            return "lmStatus", self.lmStatus
+        if key == "wildlife":
+            return "wildlife", self._wildlife_snapshot() if WILDLIFE_ENABLED else []
+        if key == "shipments" and CARAVAN_VISUALS_ENABLED:
+            return "shipments", self._shipment_snapshot()
+        if key == "weather" and WEATHER_ENABLED:
+            return "weather", self._weather_snapshot()
+        if key == "socialTies" and SOCIAL_LAYER_ENABLED:
+            return "socialTies", self._social_ties_snapshot()
+        if key == "chronicle" and CHRONICLE_ENABLED and CULTURE_ENABLED:
+            return "chronicle", self._chronicle_snapshot()
+        if key == "districtEcology" and (CROP_GROWTH_ENABLED or WILDLIFE_ENABLED):
+            return "districtEcology", self._district_ecology_snapshot()
+        if key == "god" and GOD_MODE_ENABLED:
+            return "god", self._build_god_snapshot()
+        if key == "config":
+            return "config", self._build_snapshot_config()
+        return None, None
+
+    def snapshot(self):
+        """Consistent full /state snapshot per Contract 2 (copied under lock)."""
+        with self.lock:
+            snap = self._build_snapshot_core()
+            snap["stateGeneration"] = self.stateGeneration
+            snap["full"] = True
+            self._dirty_this_frame.clear()
+            self._prune_state_dirty(self.frameTick)
+            return snap
+
+    def snapshot_delta(self, since):
+        """Incremental /state for GET /state?since=<frameTick> (lock held for copy)."""
+        with self.lock:
+            ft = self.frameTick
+            gen = self.stateGeneration
+            try:
+                since_int = int(since) if since is not None else 0
+            except (TypeError, ValueError):
+                since_int = 0
+
+            def _full_and_prune():
+                snap = self._build_snapshot_core()
+                snap["stateGeneration"] = gen
+                snap["full"] = True
+                self._dirty_this_frame.clear()
+                self._prune_state_dirty(ft)
+                return snap
+
+            if since is None or since_int <= 0:
+                return _full_and_prune()
+            if since_int > ft or since_int < self._last_reset_frame:
+                return _full_and_prune()
+            if ft - since_int > STATE_DELTA_MAX_GAP:
+                return _full_and_prune()
+            if since_int == ft and not self._has_state_dirty(since_int):
+                self._prune_state_dirty(ft)
+                return {"frameTick": ft, "stateGeneration": gen, "unchanged": True}
+
+            payload = {
+                "frameTick": ft,
+                "baseFrame": since_int,
+                "stateGeneration": gen,
+                "calendar": self._calendar(),
+                "uptimeSeconds": time.time() - self.processStartTime,
+            }
+            if (self._paused_mod_frame is not None
+                    and self._delta_include_mod(
+                        self._paused_mod_frame, since_int, "paused")):
+                payload["paused"] = self.paused
+                self._discard_frame_tags(since_int, "paused")
+
+            dirty_agents = [
+                aid for aid, mod in self._dirty_agents.items()
+                if self._delta_include_mod(mod, since_int, f"a:{aid}")
+            ]
+            if dirty_agents:
+                by_id = {a["id"]: a for a in self.agents}
+                payload["agents"] = [
+                    self._agent_snapshot_row(by_id[aid])
+                    for aid in sorted(dirty_agents) if aid in by_id
+                ]
+                self._discard_frame_tags(
+                    since_int, *(f"a:{aid}" for aid in dirty_agents))
+
+            dirty_civ_keys = [
+                k for k, mod in self._dirty_civ_keys.items()
+                if self._delta_include_mod(mod, since_int, f"c:{k}")
+            ]
+            dirty_upserts = [
+                sid for sid, mod in self._dirty_structure_upserts.items()
+                if self._delta_include_mod(mod, since_int, f"su:{sid}")
+            ]
+            dirty_removals = [
+                sid for sid, mod in self._dirty_structure_removals.items()
+                if self._delta_include_mod(mod, since_int, f"sr:{sid}")
+            ]
+            if dirty_civ_keys or dirty_upserts or dirty_removals:
+                full_civ = self._build_civ_snapshot()
+                civ_partial = {}
+                for key in dirty_civ_keys:
+                    if key == "structures":
+                        continue
+                    if key in full_civ:
+                        civ_partial[key] = full_civ[key]
+                if dirty_upserts or dirty_removals:
+                    env_lit_types = self._env_lit_types() if ENV_EFFECTS_ENABLED else set()
+                    by_struct = {s["id"]: s for s in self.civilization["structures"]}
+                    upserts = []
+                    for sid in sorted(dirty_upserts):
+                        s = by_struct.get(sid)
+                        if s:
+                            sprite_mod = self._dirty_structure_sprites.get(sid, 0)
+                            include_sprite = self._delta_include_mod(
+                                sprite_mod, since_int, f"sp:{sid}")
+                            upserts.append(self._structure_snapshot_row(
+                                s, env_lit_types, include_sprite=include_sprite))
+                    if upserts:
+                        civ_partial["structures"] = upserts
+                    if dirty_removals:
+                        civ_partial["structuresRemoved"] = sorted(dirty_removals)
+                if civ_partial:
+                    payload["civilization"] = civ_partial
+                self._discard_frame_tags(
+                    since_int,
+                    *(f"c:{k}" for k in dirty_civ_keys),
+                    *(f"su:{sid}" for sid in dirty_upserts),
+                    *(f"sp:{sid}" for sid in dirty_upserts),
+                    *(f"sr:{sid}" for sid in dirty_removals),
+                )
+
+            dirty_top_keys = [
+                k for k, mod in self._dirty_top_keys.items()
+                if self._delta_include_mod(mod, since_int, f"t:{k}")
+            ]
+            for key in sorted(dirty_top_keys):
+                k, val = self._snapshot_delta_top_key(key)
+                if k is not None:
+                    payload[k] = val
+            if dirty_top_keys:
+                self._discard_frame_tags(
+                    since_int, *(f"t:{k}" for k in dirty_top_keys))
+            if self._config_mod_frame is not None and self._config_mod_frame > since_int:
+                payload["config"] = self._build_snapshot_config()
+                self._discard_frame_tags(since_int, "config")
+
+            self._prune_state_dirty(ft)
+            return payload

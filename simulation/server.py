@@ -9,6 +9,7 @@
 
 import atexit
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -350,13 +351,22 @@ def resolve_high_stakes(data):
 
 def model_for_decision(data):
     """Phase 3 revision: every decision turn -- routine or high-stakes --
-    routes to MODEL_SMART. is_high_stakes_turn(data) is still computed by
-    callers (build_decision_payload, run_agent_decision's timeout choice, the
-    slim retry) to select thinking/timeout/max_tokens, but no longer selects
-    the model id here. MODEL_FAST is reserved for background cognition
-    (PIANO modules, memory summarizer/wiki merge, meta system, belief pitch
-    -- every direct lm_complete() caller), never for decisions. See the
-    MODEL_SMART/MODEL_FAST comment block above for why."""
+    routes to MODEL_SMART unless a Divine Matrix agent_sampling override is
+    active (sim-fast forces MODEL_FAST; sim-smart stays on the smart tier).
+    is_high_stakes_turn(data) is still computed by callers
+    (build_decision_payload, run_agent_decision's timeout choice, the slim
+    retry) to select thinking/timeout/max_tokens, but no longer selects the
+    model id here except via divine_sampling. MODEL_FAST is otherwise
+    reserved for background cognition (PIANO modules, memory summarizer/wiki
+    merge, meta system, belief pitch -- every direct lm_complete() caller),
+    never for decisions. See the MODEL_SMART/MODEL_FAST comment block above."""
+    sampling = data.get("divine_sampling")
+    if isinstance(sampling, dict):
+        model_key = sampling.get("model")
+        if model_key == "sim-fast":
+            return MODEL_FAST
+        if model_key == "sim-smart":
+            return MODEL_SMART
     return MODEL_SMART
 
 
@@ -372,6 +382,36 @@ try:
     LOG_RETENTION_SESSIONS = int(os.environ.get("SIM_LOG_RETENTION", "20") or 20)
 except (TypeError, ValueError):
     LOG_RETENTION_SESSIONS = 20
+# Buffered benchmarks.jsonl writes: _sample_benchmarks emits many records per
+# burst; cap prevents unbounded memory if flush is delayed.
+BENCHMARK_BUFFER_MAX = 256
+# SIM_LLM_LOG_FULL: when true, llm.jsonl records include full request/response
+# bodies (legacy default). Default off — slim records omit them to cut disk I/O.
+LLM_LOG_FULL = str(os.environ.get("SIM_LLM_LOG_FULL", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+_LLM_RESPONSE_PREVIEW_MAX = 240
+
+
+def _llm_response_preview(response):
+    """Short excerpt from an Ollama response body for slim llm.jsonl records."""
+    if response is None:
+        return None
+    text = None
+    if isinstance(response, dict):
+        msg = response.get("message")
+        if isinstance(msg, dict):
+            text = msg.get("content") or msg.get("reasoning_content")
+        if text is None and response.get("error"):
+            text = str(response.get("error"))
+    elif isinstance(response, str):
+        text = response
+    if not text:
+        return None
+    text = str(text).strip()
+    if len(text) <= _LLM_RESPONSE_PREVIEW_MAX:
+        return text
+    return text[:_LLM_RESPONSE_PREVIEW_MAX] + "…"
 
 
 class SessionLogger:
@@ -389,8 +429,25 @@ class SessionLogger:
         # features can be measured (specialization index, rule adherence,
         # meme adoption, memory-store size, module-activation timeline).
         self.benchmark_path = os.path.join(self.dir, "benchmarks.jsonl")
+        # divine.jsonl (Sovereign God mode Phase 2, docs/plan-sovereign-god-
+        # mode-v2.md's "Logging" section): the fifth stream, one record per
+        # applied/cancelled/expired/rejected-after-preview/restore-closed
+        # divine intervention. Preview-only calls are not world events and
+        # never reach this stream. Never receives the token or raw request
+        # headers -- see log_divine below, which only accepts an already-
+        # hashed request_id.
+        self.divine_path = os.path.join(self.dir, "divine.jsonl")
+        # compiler.jsonl (Sovereign God mode Optional Phase 8, docs/plan-
+        # sovereign-god-mode-v2.md "Log separately"): a SIXTH stream, one
+        # record per free-prose compile attempt (draft or rejection). Kept
+        # separate from llm.jsonl (agent cognition) and divine.jsonl
+        # (world-affecting audit) on purpose -- a compile is neither. Never
+        # receives SIM_GOD_TOKEN -- see log_compiler below.
+        self.compiler_path = os.path.join(self.dir, "compiler.jsonl")
+        self._benchmark_buffer = []
+        self._benchmark_lock = threading.Lock()
         for path in [self.activity_path, self.conversation_path, self.llm_path,
-                     self.benchmark_path]:
+                     self.benchmark_path, self.divine_path, self.compiler_path]:
             open(path, "a", encoding="utf-8").close()
         self.log_conversation(
             "system",
@@ -460,8 +517,22 @@ class SessionLogger:
         self._append(self.conversation_path, record)
 
     def log_lm_exchange(self, record):
+        record = dict(record)
+        if not LLM_LOG_FULL:
+            record.pop("request", None)
+            response = record.pop("response", None)
+            preview = _llm_response_preview(response)
+            if preview is not None:
+                record["response_preview"] = preview
         record = {"type": "llm", **record}
         self._append(self.llm_path, record)
+
+    def _stamp_record(self, record):
+        return {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "session_id": self.session_id,
+            **record,
+        }
 
     def log_benchmark(self, metric, value, frame_tick=None, detail=None):
         record = {
@@ -472,10 +543,70 @@ class SessionLogger:
         }
         if detail is not None:
             record["detail"] = detail
-        self._append(self.benchmark_path, record)
+        with self._benchmark_lock:
+            self._benchmark_buffer.append(record)
+            if len(self._benchmark_buffer) >= BENCHMARK_BUFFER_MAX:
+                self._flush_benchmark_buffer_unlocked()
+
+    def flush_benchmarks(self):
+        """Write all buffered benchmark records in one file append."""
+        with self._benchmark_lock:
+            self._flush_benchmark_buffer_unlocked()
+
+    def _flush_benchmark_buffer_unlocked(self):
+        if not self._benchmark_buffer:
+            return
+        lines = [
+            json.dumps(self._stamp_record(record), ensure_ascii=False) + "\n"
+            for record in self._benchmark_buffer
+        ]
+        self._benchmark_buffer.clear()
+        try:
+            with open(self.benchmark_path, "a", encoding="utf-8") as fh:
+                fh.write("".join(lines))
+        except OSError:
+            pass
+
+    def log_divine(self, intervention_id=None, request_id=None, frame_tick=None,
+                   kind=None, normalized_command=None, outcome=None,
+                   status=None, public=None):
+        """Sovereign God mode Phase 2. `request_id` must already be hashed by
+        the caller (sim_engine._hash_request_id) -- this method never sees
+        (and therefore can never log) the God token or any raw HTTP header."""
+        record = {
+            "type": "divine",
+            "intervention_id": intervention_id,
+            "request_id": request_id,
+            "frame_tick": frame_tick,
+            "kind": kind,
+            "normalized_command": normalized_command,
+            "outcome": outcome,
+            "status": status,
+            "public": public,
+        }
+        self._append(self.divine_path, record)
+
+    def log_compiler(self, prose=None, model=None, latency_ms=None,
+                     status=None, reason=None, preview_id=None):
+        """Sovereign God mode Optional Phase 8. `prose` is the operator's
+        already-normalized free-text input, `status` is "draft" or
+        "rejected", `reason` is set only for rejections. Never accepts or
+        logs SIM_GOD_TOKEN -- sim_engine.god_compile_prose never sees the
+        token in the first place, so there is nothing to redact here."""
+        record = {
+            "type": "compiler",
+            "prose": prose,
+            "model": model,
+            "latency_ms": latency_ms,
+            "status": status,
+            "reason": reason,
+            "preview_id": preview_id,
+        }
+        self._append(self.compiler_path, record)
 
 
 session_logger = SessionLogger(os.path.dirname(os.path.abspath(__file__)))
+atexit.register(session_logger.flush_benchmarks)
 print(f"[server] Logging session to: {session_logger.dir}")
 
 
@@ -676,6 +807,68 @@ class MemoryStore:
         if tier:
             snapshot = [e for e in snapshot if e["tier"] == tier]
         return snapshot[-max(1, int(limit)):]
+
+    def delete_where(self, *, agent=None, keyword=None, frame_from=None,
+                     frame_to=None, kinds=None):
+        """Delete entries matching structured filters. Thread-safe. Returns count
+        deleted. At least one filter should be supplied by the caller."""
+        kinds_set = set(kinds) if kinds else None
+        kw_lower = keyword.lower() if isinstance(keyword, str) and keyword else None
+        deleted = 0
+        with self._lock:
+            kept = []
+            for e in self.entries:
+                if agent and e.get("agent") != agent:
+                    kept.append(e)
+                    continue
+                if kw_lower is not None and kw_lower not in (e.get("text") or "").lower():
+                    kept.append(e)
+                    continue
+                ft = e.get("frame_tick")
+                if frame_from is not None and (not isinstance(ft, int) or ft < frame_from):
+                    kept.append(e)
+                    continue
+                if frame_to is not None and (not isinstance(ft, int) or ft > frame_to):
+                    kept.append(e)
+                    continue
+                if kinds_set is not None and e.get("kind") not in kinds_set:
+                    kept.append(e)
+                    continue
+                deleted += 1
+            if deleted:
+                self.entries = kept
+                self._since_persist += 1
+                should_persist = self._since_persist >= MEMORY_PERSIST_EVERY
+                if should_persist:
+                    self._since_persist = 0
+            else:
+                should_persist = False
+        if should_persist:
+            self._persist()
+        return deleted
+
+    def count_where(self, *, agent=None, keyword=None, frame_from=None,
+                    frame_to=None, kinds=None):
+        """Non-mutating count of entries that delete_where would remove."""
+        kinds_set = set(kinds) if kinds else None
+        kw_lower = keyword.lower() if isinstance(keyword, str) and keyword else None
+        count = 0
+        with self._lock:
+            snapshot = list(self.entries)
+        for e in snapshot:
+            if agent and e.get("agent") != agent:
+                continue
+            if kw_lower is not None and kw_lower not in (e.get("text") or "").lower():
+                continue
+            ft = e.get("frame_tick")
+            if frame_from is not None and (not isinstance(ft, int) or ft < frame_from):
+                continue
+            if frame_to is not None and (not isinstance(ft, int) or ft > frame_to):
+                continue
+            if kinds_set is not None and e.get("kind") not in kinds_set:
+                continue
+            count += 1
+        return count
 
     def _trim_locked(self):
         """Drop the lowest-value entries once over the global cap."""
@@ -984,6 +1177,10 @@ DECISION_ACTIONS = [
     # Path 1: composable tiles, terrain mutation, diplomacy treaties.
     "place_block", "remove_block", "dig_terrain", "plant_terrain",
     "propose_treaty", "vote_treaty",
+    "deliver_caravan",
+    # Huntable wildlife (WILDLIFE_ENABLED): engine offers only when prey is in range.
+    "hunt_wildlife",
+    "confront_agent",
     # Daily Council Assembly. Offered only to a seated attendee in-session.
     "council_speak", "council_propose", "council_vote",
 ]
@@ -1052,6 +1249,7 @@ DECISION_SCHEMA = {
                 "kind": {"type": "string"},
                 "value": {"type": ["number", "string", "null"]},
                 "description": {"type": ["string", "null"]},
+                "tariff": {"type": ["number", "null"], "minimum": 0, "maximum": 0.25},
                 "supersedes": {"type": ["string", "null"]},
                 "effect": {
                     "type": ["object", "null"],
@@ -1126,6 +1324,18 @@ DECISION_SCHEMA = {
                 "palette": {"type": "array"},
                 "grid": {"type": "array"},
             },
+        },
+        # Required on every decision turn while voice_guidance_active is true
+        # (binding Voice guidance). Missing/invalid values are synthesized in
+        # synthesize_divine_response() — not rejected.
+        "divine_response": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "properties": {
+                "stance": {"type": "string", "enum": ["follow", "continue"]},
+                "reason": {"type": "string"},
+            },
+            "required": ["stance", "reason"],
         },
     },
 }
@@ -1272,7 +1482,7 @@ Known beliefs (id/name/tenet): {belief_registry}
 Belief authoring exemplars: {belief_examples}
 Nearby agents' belief ids: {nearby_beliefs}
 Agents near you: {nearby_agents}
-Current zone: {world_zone}
+{nearby_wildlife_line}Current zone: {world_zone}
 Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
@@ -1281,7 +1491,7 @@ Terraform projects (start_terraform targets): {known_terraform}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
-Invention status: {invention_status}
+{divine_lines}Invention status: {invention_status}
 Commitment: {commitment_text}
 Idle agents needing a task: {idle_agents}
 Known resources: {known_resources}
@@ -1391,7 +1601,12 @@ def format_nearby_agents(nearby):
                 food = item.get("food", 0)
                 wood = item.get("wood", 0)
                 gold = item.get("gold", 0)
-                parts.append(f"{name} ({role}, food:{food} wood:{wood} gold:{gold})")
+                stigma_suffix = ""
+                stigmata = item.get("stigmata")
+                if isinstance(stigmata, list) and stigmata:
+                    stigma_suffix = f", signs: {', '.join(str(t) for t in stigmata)}"
+                parts.append(
+                    f"{name} ({role}, food:{food} wood:{wood} gold:{gold}{stigma_suffix})")
             else:
                 parts.append(str(item))
         return "; ".join(parts)
@@ -2243,6 +2458,11 @@ def role_fallback_action(role, agent_data):
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Contributing a held resource the project needs."}
 
+    if role == "hunter" and agent_data.get("prey_in_range"):
+        return {"action": "hunt_wildlife", "target": None, "message": None,
+                "new_role": None, "relationship_update": None,
+                "reasoning": "Hunting nearby wildlife for meat or fish."}
+
     if role in ("farmer", "fisher", "gatherer"):
         zone = agent_data.get("world_zone", "")
         if role == "farmer" and zone != "farm":
@@ -2273,6 +2493,16 @@ def role_fallback_action(role, agent_data):
                 "new_role": None, "relationship_update": None,
                 "reasoning": "Mining gold for civilization."}
 
+    if role == "hunter":
+        zone = agent_data.get("world_zone", "")
+        if zone not in ("forest", "farm", "beach"):
+            return {"action": "move_to_district", "target": "forest", "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Heading to hunting grounds for wildlife."}
+        return {"action": "collect_resource", "target": None, "message": None,
+                "new_role": None, "relationship_update": None,
+                "reasoning": "No prey in range; gathering while scouting for wildlife."}
+
     if role == "builder":
         needed = first_shortfall_resource(agent_data) or "wood"
         return {"action": "contribute_resources", "target": needed, "message": None,
@@ -2302,6 +2532,34 @@ def role_fallback_action(role, agent_data):
     return {"action": "collect_resource", "target": None, "message": None,
             "new_role": None, "relationship_update": None,
             "reasoning": "Working toward civilization goals."}
+
+
+def synthesize_divine_response(decision, agent_data):
+    """When binding Voice guidance is active, ensure divine_response is present.
+
+    Missing/invalid values synthesize continue + missing_divine_response without
+    rejecting the validated action."""
+    if not isinstance(decision, dict) or not agent_data.get("voice_guidance_active"):
+        return decision
+    raw = decision.get("divine_response")
+    valid = (
+        isinstance(raw, dict)
+        and raw.get("stance") in ("follow", "continue")
+        and isinstance(raw.get("reason"), str)
+        and raw.get("reason", "").strip()
+    )
+    if valid:
+        decision["divine_response"] = {
+            "stance": raw["stance"],
+            "reason": raw["reason"].strip()[:240],
+        }
+        return decision
+    decision["divine_response"] = {
+        "stance": "continue",
+        "reason": "missing_divine_response",
+    }
+    decision["divine_response_synthetic"] = True
+    return decision
 
 
 def normalize_decision(decision, agent_data):
@@ -2590,6 +2848,28 @@ def sprites():
     return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "sprites.js")
 
 
+@app.route("/viewer.css")
+def viewer_css():
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "viewer.css")
+
+
+@app.route("/viewer.js")
+def viewer_js():
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "viewer.js")
+
+
+@app.route("/wildlife_refsheet.html")
+def wildlife_refsheet():
+    return send_from_directory(
+        os.path.dirname(os.path.abspath(__file__)), "wildlife_refsheet.html"
+    )
+
+
+@app.route("/wildlife.png")
+def wildlife_png():
+    return send_from_directory(os.path.dirname(os.path.abspath(__file__)), "wildlife.png")
+
+
 @app.route("/roles.js")
 def roles_js():
     # Serve the single role source as a JS global so the browser uses the exact
@@ -2809,6 +3089,9 @@ def run_piano_module(module, agent_name, context, frame_tick=None, timeout_s=Non
             "error": "piano_module_timeout",
             "timeout_s": timeout_s,
         })
+        eng = globals().get("engine")
+        if eng is not None:
+            eng._record_llm_orphan_timeout()
         return None
     except Exception:
         return None
@@ -3031,7 +3314,7 @@ def lm_message_text(message):
 
 
 def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
-                timeout=30, raise_timeout=False):
+                timeout=30, raise_timeout=False, model=None):
     """Plain-text Ollama completion for the background cognition loops
     (Summarizer, meta system, PIANO modules / Cognitive Controller). Returns the
     text or None on any failure so every caller can degrade gracefully.
@@ -3041,13 +3324,24 @@ def lm_complete(system_prompt, user_prompt, max_tokens=200, temperature=0.5,
     see run_piano_module(). `raise_timeout=True` re-raises
     requests.exceptions.Timeout instead of swallowing it, so a caller that
     wants to log/count timeouts distinctly (run_piano_module) can -- every
-    other caller keeps the original swallow-and-return-None behavior."""
+    other caller keeps the original swallow-and-return-None behavior.
+
+    `model` defaults to None, which resolves to MODEL_FAST -- every existing
+    caller is background cognition and keeps that default unchanged. The ONE
+    exception is the Sovereign God mode Optional Phase 8 free-prose compiler
+    (sim_engine.god_compile_prose), which explicitly passes model="sim-smart"
+    -- see that call site's comment for why it deliberately does NOT use
+    MODEL_FAST (sim-fast contention has previously increased PIANO module
+    drops; this is a distinct LLM path this module's design intentionally
+    keeps off that tier)."""
     payload = {
-        # Background cognition is routine work -- always the fast model. (No
-        # LM-Studio-style "local-model" alias to fall back to in Ollama -- a
-        # missing model id is a setup failure, handled where the call sites
-        # actually see the error, not here.)
-        "model": MODEL_FAST,
+        # Background cognition is routine work -- always the fast model,
+        # unless a caller explicitly names a different model id (see the
+        # `model` docstring paragraph above). (No LM-Studio-style
+        # "local-model" alias to fall back to in Ollama -- a missing model
+        # id is a setup failure, handled where the call sites actually see
+        # the error, not here.)
+        "model": model or MODEL_FAST,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -3281,6 +3575,12 @@ def build_invention_prompt(data):
     )
 
 
+def _format_voice_guidance_line(kind, text):
+    """Binding Voice prompt line for public providence or private omen."""
+    label = "Divine guidance (binding)" if kind == "public" else "Private guidance (binding)"
+    return f"{label}: {text} State whether you follow or continue in divine_response.\n"
+
+
 def build_user_prompt(data, slim=False):
     """Fill in USER_PROMPT_TEMPLATE from the agent/civilization state. When
     slim=True (the context-overflow retry, see run_agent_decision), drop the
@@ -3332,6 +3632,10 @@ def build_user_prompt(data, slim=False):
     # byte-identical to Phase 4 alone.
     weather_raw = data.get("weather_line")
     weather_line = f"Weather: {weather_raw}\n" if weather_raw else ""
+    # Huntable wildlife hint: rendered ONLY when the engine reports prey in
+    # HUNT_RADIUS (WILDLIFE_ENABLED), same fold-in-only-when-set pattern.
+    wildlife_raw = data.get("nearby_wildlife_line")
+    nearby_wildlife_line = f"{wildlife_raw}\n" if wildlife_raw else ""
     # Phase F: one-word life stage folded into the existing personality line
     # (no new template line -- near-zero token cost, and with the flag off
     # the engine sends life_stage=None so this renders byte-identical to
@@ -3354,6 +3658,31 @@ def build_user_prompt(data, slim=False):
     # entry) so flag-off / empty-chronicle prompts stay byte-identical.
     chronicle_line_raw = data.get("chronicle_line")
     chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
+    # Sovereign God mode (Phase 3 — Voice binding): public providence and
+    # private omens use binding prompt lines requiring divine_response; Matrix
+    # anoint/bush/story lines keep soft "interpret or ignore" wording.
+    divine_lines_parts = []
+    divine_public_raw = data.get("divine_public_line")
+    if divine_public_raw:
+        divine_lines_parts.append(_format_voice_guidance_line("public", divine_public_raw))
+    divine_private_raw = data.get("divine_private_line")
+    if divine_private_raw:
+        divine_lines_parts.append(_format_voice_guidance_line("private", divine_private_raw))
+    divine_bush_raw = data.get("divine_burning_bush_line")
+    if divine_bush_raw:
+        divine_lines_parts.append(
+            f"Divine audience: {divine_bush_raw} You may respond in talk or reason.\n")
+    divine_anoint_raw = data.get("divine_anointment_line")
+    if divine_anoint_raw:
+        divine_lines_parts.append(
+            f"Anointed destiny: {divine_anoint_raw} You may interpret or ignore it.\n")
+    divine_event_raw = data.get("divine_public_event_line")
+    if divine_event_raw:
+        divine_lines_parts.append(f"Divine story: {divine_event_raw} You may interpret or ignore it.\n")
+    truth_raw = data.get("divine_simulation_truth_line")
+    if truth_raw:
+        divine_lines_parts.append(f"{truth_raw}\n")
+    divine_lines = "".join(divine_lines_parts)
     council_digest_raw = data.get("council_digest_line")
     council_digest_line = (
         f"Recent council: {council_digest_raw}\n" if council_digest_raw else ""
@@ -3367,6 +3696,8 @@ def build_user_prompt(data, slim=False):
         path1_parts.append(data["path1_industry_line"])
     if data.get("path1_neighbor_line"):
         path1_parts.append(data["path1_neighbor_line"])
+    if data.get("settlement_stores_line"):
+        path1_parts.append(f"Settlement stores: {data['settlement_stores_line']}")
     path1_lines = ("\n".join(path1_parts) + "\n") if path1_parts else ""
 
     return USER_PROMPT_TEMPLATE.format(
@@ -3391,6 +3722,7 @@ def build_user_prompt(data, slim=False):
         ) or "none",
         nearby_beliefs=data.get("nearby_beliefs") or "none",
         nearby_agents=nearby_formatted,
+        nearby_wildlife_line=nearby_wildlife_line,
         world_zone=data.get("world_zone"),
         current_district=data.get("current_district", "none"),
         known_districts=format_known_districts(data.get("known_districts") or []),
@@ -3401,6 +3733,7 @@ def build_user_prompt(data, slim=False):
         active_project=data.get("active_project", "none"),
         project_progress=data.get("project_progress", "none"),
         directive=data.get("directive", "none"),
+        divine_lines=divine_lines,
         invention_status=data.get("invention_status", "not needed"),
         commitment_text=format_commitment(data.get("commitment")),
         idle_agents=format_idle_agents(idle_agents),
@@ -3571,6 +3904,18 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
             payload["presence_penalty"] = ROUTINE_PRESENCE_PENALTY
     if response_format is not None:
         payload["response_format"] = response_format
+    divine_sampling = data.get("divine_sampling")
+    if isinstance(divine_sampling, dict):
+        model_key = divine_sampling.get("model")
+        if model_key == "sim-fast":
+            payload["model"] = MODEL_FAST
+        elif model_key == "sim-smart":
+            payload["model"] = MODEL_SMART_SYS if omit_system_prompt else MODEL_SMART
+        if "temperature" in divine_sampling:
+            payload["temperature"] = divine_sampling["temperature"]
+        for key in ("top_p", "top_k", "min_p"):
+            if key in divine_sampling:
+                payload[key] = divine_sampling[key]
     return payload
 
 
@@ -3698,13 +4043,19 @@ def run_agent_decision(data):
         # consuming a queue slot. Do not add a retry-on-timeout loop here;
         # every requests.exceptions.RequestException path below (including
         # Timeout) returns immediately instead of firing a second request.
+        def _request_error_tag(exc):
+            if isinstance(exc, requests.exceptions.Timeout):
+                return "llm timeout"
+            return "llm offline"
+
         start = datetime.now()
         try:
             resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as exc:
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            log_lm(latency_ms, error="llm offline")
-            return {"error": "llm offline", "action": "rest"}
+            err = _request_error_tag(exc)
+            log_lm(latency_ms, error=err)
+            return {"error": err, "action": "rest"}
 
         latency_ms = int((datetime.now() - start).total_seconds() * 1000)
         http_status = resp.status_code
@@ -3729,10 +4080,11 @@ def run_agent_decision(data):
             start = datetime.now()
             try:
                 resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as exc:
                 latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-                log_lm(latency_ms, error="llm offline")
-                return {"error": "llm offline", "action": "rest"}
+                err = _request_error_tag(exc)
+                log_lm(latency_ms, error=err)
+                return {"error": err, "action": "rest"}
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -3780,10 +4132,11 @@ def run_agent_decision(data):
             retry_start = datetime.now()
             try:
                 resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(slim_payload), timeout=request_timeout)
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as exc:
                 latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
-                log_lm(latency_ms, error=error_kind)
-                return {"error": "llm offline", "action": "rest"}
+                err = _request_error_tag(exc)
+                log_lm(latency_ms, error=err)
+                return {"error": err, "action": "rest"}
             latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -3818,7 +4171,10 @@ def run_agent_decision(data):
             return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
                                           error=error_kind or "bad_response")
 
-        decision = score_belief_pitch_decision(normalize_decision(decision, agent_data), data)
+        decision = synthesize_divine_response(
+            score_belief_pitch_decision(normalize_decision(decision, agent_data), data),
+            agent_data,
+        )
 
         log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=error_kind)
         return decision
@@ -3895,12 +4251,18 @@ _ENGINE_DEPS = {
     "log_activity": session_logger.log_activity,
     "log_conversation": session_logger.log_conversation,
     "log_benchmark": session_logger.log_benchmark,
+    "flush_benchmarks": session_logger.flush_benchmarks,
+    "log_divine": session_logger.log_divine,
+    "log_compiler": session_logger.log_compiler,
     "validate_blueprint": validate_blueprint,
     "validate_sprite_block": validate_sprite_block,
     "sprite_spec_is_degenerate": sprite_spec_is_degenerate,
     "canonical_effect_vector": canonical_effect_vector,
     "run_piano_module": run_piano_module,
     "run_meta_update": run_meta_update,
+    "normalize_decision": normalize_decision,
+    "synthesize_divine_response": synthesize_divine_response,
+    "build_agent_data": build_agent_data,
 }
 
 _roster_env = os.environ.get("SIM_AGENTS")
@@ -3923,13 +4285,39 @@ else:
     print("[server] cold start (no valid state.db)")
 
 
-def _council_llm_entries_from_file(path, start_frame, end_frame, agent_set):
-    """Return slim decision records from one llm.jsonl matching a council
-    frame window. Shared by /council-llm-log across every retained session
-    directory -- see that route's docstring for the filtering rules."""
+# Per-file (min_frame, max_frame) for llm.jsonl — keyed by absolute path,
+# invalidated by mtime+size so /council-llm-log can skip out-of-range files
+# without a full council-filter parse.
+_COUNCIL_LLM_FRAME_BOUNDS_CACHE = {}
+
+
+def _cache_llm_jsonl_frame_bounds(path, min_frame, max_frame):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    _COUNCIL_LLM_FRAME_BOUNDS_CACHE[path] = {
+        "mtime": st.st_mtime,
+        "size": st.st_size,
+        "min_frame": min_frame,
+        "max_frame": max_frame,
+    }
+
+
+def _llm_jsonl_frame_bounds(path):
+    """Return (min_frame, max_frame) for type=llm records, or (None, None)."""
     if not os.path.isfile(path):
-        return []
-    entries = []
+        return None, None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None
+    cached = _COUNCIL_LLM_FRAME_BOUNDS_CACHE.get(path)
+    if (cached
+            and cached["mtime"] == st.st_mtime
+            and cached["size"] == st.st_size):
+        return cached["min_frame"], cached["max_frame"]
+    min_frame, max_frame = None, None
     try:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
@@ -3943,6 +4331,56 @@ def _council_llm_entries_from_file(path, start_frame, end_frame, agent_set):
                 if rec.get("type") != "llm":
                     continue
                 ft = rec.get("frame_tick")
+                if ft is None:
+                    continue
+                if min_frame is None or ft < min_frame:
+                    min_frame = ft
+                if max_frame is None or ft > max_frame:
+                    max_frame = ft
+    except OSError:
+        return None, None
+    _cache_llm_jsonl_frame_bounds(path, min_frame, max_frame)
+    return min_frame, max_frame
+
+
+def _llm_frame_window_fully_covered(min_frame, max_frame, start_frame, end_frame):
+    if min_frame is None or max_frame is None:
+        return False
+    return min_frame <= start_frame and end_frame <= max_frame
+
+
+def _council_llm_entries_from_file(path, start_frame, end_frame, agent_set):
+    """Return slim decision records from one llm.jsonl matching a council
+    frame window. Shared by /council-llm-log -- see that route's docstring
+    for the filtering rules."""
+    entries, _, _ = _scan_council_llm_file(path, start_frame, end_frame, agent_set)
+    return entries
+
+
+def _scan_council_llm_file(path, start_frame, end_frame, agent_set):
+    """One pass over llm.jsonl: council-filtered entries plus file bounds."""
+    if not os.path.isfile(path):
+        return [], None, None
+    entries = []
+    min_frame, max_frame = None, None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("type") != "llm":
+                    continue
+                ft = rec.get("frame_tick")
+                if ft is not None:
+                    if min_frame is None or ft < min_frame:
+                        min_frame = ft
+                    if max_frame is None or ft > max_frame:
+                        max_frame = ft
                 if ft is None or ft < start_frame or ft > end_frame:
                     continue
                 name = rec.get("agent_name")
@@ -3980,8 +4418,9 @@ def _council_llm_entries_from_file(path, start_frame, end_frame, agent_set):
                     "error": rec.get("error"),
                 })
     except OSError:
-        return []
-    return entries
+        return [], None, None
+    _cache_llm_jsonl_frame_bounds(path, min_frame, max_frame)
+    return entries, min_frame, max_frame
 
 
 @app.route("/council-llm-log")
@@ -3991,12 +4430,13 @@ def council_llm_log():
     Only blueprint-pitch and verdict turns are included — routine gather/talk
     decisions from the same agents during the council window are omitted.
 
-    Searches every retained session directory under logs/ (not just the
-    live one), since a past council meeting's frame window may fall inside
-    an older server session's llm.jsonl (frame_tick is monotonic and never
-    resets across restarts, but each session only covers the frame range it
-    was alive for). Session dirs are pruned by SessionLogger._prune_old_sessions
-    to LOG_RETENTION_SESSIONS newest, so this scan is bounded and cheap."""
+    Scans the live session's llm.jsonl first; only reads older retained
+    session directories when the requested frame window is not fully covered
+    by the live file's frame range (frame_tick is monotonic across restarts,
+    but each session only spans the frames recorded while that server run was
+    alive). Out-of-range files are skipped using cached per-file bounds when
+    possible. Session dirs are pruned by SessionLogger._prune_old_sessions to
+    LOG_RETENTION_SESSIONS newest."""
     try:
         start_frame = int(request.args.get("start_frame", 0))
         end_frame = int(request.args.get("end_frame", 0))
@@ -4005,18 +4445,29 @@ def council_llm_log():
     agents_raw = request.args.get("agents") or ""
     agent_set = {a.strip() for a in agents_raw.split(",") if a.strip()}
     logs_root = os.path.dirname(session_logger.dir)
-    try:
-        session_dirs = sorted(
-            name for name in os.listdir(logs_root)
-            if SESSION_DIR_RE.match(name)
-            and os.path.isdir(os.path.join(logs_root, name))
-        )  # ISO session-id names sort lexicographically == chronologically
-    except OSError:
-        session_dirs = []
-    entries = []
-    for name in session_dirs:
-        path = os.path.join(logs_root, name, "llm.jsonl")
-        entries.extend(_council_llm_entries_from_file(path, start_frame, end_frame, agent_set))
+    live_path = session_logger.llm_path
+    entries, live_min, live_max = _scan_council_llm_file(
+        live_path, start_frame, end_frame, agent_set)
+    if not _llm_frame_window_fully_covered(
+            live_min, live_max, start_frame, end_frame):
+        try:
+            session_dirs = sorted(
+                name for name in os.listdir(logs_root)
+                if SESSION_DIR_RE.match(name)
+                and os.path.isdir(os.path.join(logs_root, name))
+            )  # ISO session-id names sort lexicographically == chronologically
+        except OSError:
+            session_dirs = []
+        for name in session_dirs:
+            if name == session_logger.session_id:
+                continue
+            path = os.path.join(logs_root, name, "llm.jsonl")
+            fmin, fmax = _llm_jsonl_frame_bounds(path)
+            if fmin is not None and fmax is not None:
+                if fmax < start_frame or fmin > end_frame:
+                    continue
+            entries.extend(_council_llm_entries_from_file(
+                path, start_frame, end_frame, agent_set))
     entries.sort(key=lambda e: e.get("frame_tick") or 0)
     return jsonify({"entries": entries})
 
@@ -4024,32 +4475,59 @@ def council_llm_log():
 @app.route("/state")
 def state():
     """Consistent world snapshot for the thin viewer (Contract 2)."""
-    return jsonify(engine.snapshot())
+    since_raw = request.args.get("since")
+    since = None
+    if since_raw is not None:
+        try:
+            since = int(since_raw)
+        except (TypeError, ValueError):
+            since = None
+    if since is None:
+        return jsonify(engine.snapshot())
+    return jsonify(engine.snapshot_delta(since))
 
 
 @app.route("/districts.js")
 def districts_js():
-    """Live districts/roads for the viewer (world-expansion plan). Unlike the
-    static /roles.js precedent, this reads the engine's LIVE civilization
-    state under its lock -- like /state does -- so a district founded mid-session
-    shows up to a connected viewer on its next poll, no reload needed. Despite
-    the ".js" name (matching the plan's route naming), the body is plain JSON;
-    the viewer fetch()-polls it rather than re-injecting a <script> tag, which
-    would otherwise throw on re-declaring `const` globals every poll."""
+    """Live districts/roads for the viewer (world-expansion plan). Despite the
+    ".js" name (matching the plan's route naming), the body is plain JSON;
+    the viewer fetch()-polls it rather than re-injecting a <script> tag.
+
+    Under the engine lock, read districtsEpoch and either return a tiny
+    unchanged body when ?since= matches, or shallow-copy district/road data
+    into plain dicts/lists. JSON assembly happens after the lock is released."""
+    since_raw = request.args.get("since")
+    since = None
+    if since_raw is not None:
+        try:
+            since = int(since_raw)
+        except (TypeError, ValueError):
+            since = None
+
     with engine.lock:
-        c = engine.civilization
-        districts = [
-            {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
-             "bounds": dict(d["bounds"]),
-             "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
-             "tiles": dict(d.get("tiles") or {}),
-             "terrain": dict(d.get("terrain") or {}),
-             "settlementId": d.get("settlementId")}
-            for did, d in c["districts"].items()
-        ]
-        road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
-        road_edges = [list(e) for e in c["roadEdges"]]
-    return jsonify({"districts": districts, "roadNodes": road_nodes, "roadEdges": road_edges})
+        epoch = engine.districtsEpoch
+        if since is not None and since == epoch:
+            payload = {"unchanged": True, "epoch": epoch}
+        else:
+            c = engine.civilization
+            districts = [
+                {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
+                 "bounds": dict(d["bounds"]),
+                 "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
+                 "tiles": dict(d.get("tiles") or {}),
+                 "terrain": dict(d.get("terrain") or {}),
+                 "settlementId": d.get("settlementId")}
+                for did, d in c["districts"].items()
+            ]
+            road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
+            road_edges = [list(e) for e in c["roadEdges"]]
+            payload = {
+                "districts": districts,
+                "roadNodes": road_nodes,
+                "roadEdges": road_edges,
+                "epoch": epoch,
+            }
+    return jsonify(payload)
 
 
 @app.route("/control/pause", methods=["POST"])
@@ -4064,9 +4542,18 @@ def control_resume():
     return jsonify({"ok": True, "paused": False})
 
 
+_RESET_PASSWORD_RAW = os.environ.get("SIM_RESET_PASSWORD", "").strip()
+RESET_PASSWORD = _RESET_PASSWORD_RAW if _RESET_PASSWORD_RAW else "reset"
+
+
 @app.route("/control/reset", methods=["POST"])
 def control_reset():
     body = request.get_json(force=True, silent=True) or {}
+    supplied = body.get("password", "")
+    if not isinstance(supplied, str):
+        supplied = ""
+    if not hmac.compare_digest(supplied, RESET_PASSWORD):
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
     agents = body.get("agents")
     try:
         agents = int(agents) if agents else None
@@ -4076,14 +4563,828 @@ def control_reset():
     return jsonify({"ok": True, "agents": engine.roster_size})
 
 
+# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
+# Two-gate model: GOD_MODE_ENABLED (sim_engine.py) is always required;
+# GOD_AUTH_REQUIRED (sim_engine.py, default False) optionally requires a
+# token. GOD_TOKEN is read ONCE at import here -- no route may change any of
+# these, and there is no live on/off switch by design. Routes go live when the
+# flag is on AND either auth is off OR a non-empty token is configured. A
+# flag-on/auth-required/token-missing combination is a misconfiguration,
+# reported once at startup WITHOUT the secret itself (there is none to reveal
+# -- the token is simply absent), and every /control/god/* route stays
+# disabled until a restart supplies one.
+GOD_TOKEN = os.environ.get("SIM_GOD_TOKEN", "").strip()
+GOD_ROUTES_ACTIVE = (
+    _sim_engine.GOD_MODE_ENABLED
+    and (bool(GOD_TOKEN) or not _sim_engine.GOD_AUTH_REQUIRED)
+)
+if _sim_engine.GOD_MODE_ENABLED and not _sim_engine.GOD_AUTH_REQUIRED:
+    _god_bind_host = os.environ.get("SIM_HOST", "0.0.0.0")
+    print("[server] SECURITY: God API is unauthenticated (SIM_GOD_AUTH off); "
+          f"listening bind will be {_god_bind_host} — any LAN client can "
+          "mutate the world via /control/god/*.")
+elif _sim_engine.GOD_MODE_ENABLED and _sim_engine.GOD_AUTH_REQUIRED and not GOD_TOKEN:
+    print("[server] WARNING: SIM_GOD_MODE is enabled but SIM_GOD_TOKEN is unset/blank -- "
+          "every /control/god/* route stays disabled until a token is configured "
+          "and the server is restarted.")
+
+# A proclamation payload is small; this bounds request bodies well above any
+# legitimate use while still capping abuse. Checked before request.get_json
+# so an oversized body never reaches JSON parsing.
+GOD_MAX_BODY_BYTES = 8192
+
+
+def _god_authorized():
+    """True when God routes are active and, if GOD_AUTH_REQUIRED, the
+    request's X-God-Token header matches via constant-time comparison."""
+    if not GOD_ROUTES_ACTIVE:
+        return False
+    if not _sim_engine.GOD_AUTH_REQUIRED:
+        return True
+    supplied = request.headers.get("X-God-Token", "")
+    return hmac.compare_digest(supplied, GOD_TOKEN)
+
+
+def _god_unauthorized_response():
+    """ONE uniform shape for every authorization failure -- disabled flag,
+    missing token config, missing header, and wrong token are all
+    indistinguishable from the outside, and no God route ever reveals
+    whether a target/event exists to an unauthorized caller."""
+    return jsonify({"error": "unauthorized"}), 401
+
+
+def _god_body_too_large():
+    length = request.content_length
+    return isinstance(length, int) and length > GOD_MAX_BODY_BYTES
+
+
+@app.route("/control/god/capabilities", methods=["GET"])
+def control_god_capabilities():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    return jsonify({
+        "ok": True,
+        "godModeEnabled": _sim_engine.GOD_MODE_ENABLED,
+        "tokenConfigured": bool(GOD_TOKEN),
+        "kinds": {
+            "proclamation": {
+                "applyable": True,
+                "payload": {"text": {"type": "string",
+                                     "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                     "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES}},
+                "reversibilityClass": "irreversible",
+                "notes": (
+                    "Chronicle/activity proclamation plus auto-applies as timed "
+                    "providence (same text, default duration, replace slot)."
+                ),
+            },
+            # Sovereign God mode Phase 3 (docs/plan-sovereign-god-mode-v2.md
+            # "Voice and providence").
+            "providence": {
+                "applyable": True,
+                "payload": {
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+            },
+            "private_omen": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 1: batch whisper campaign (private omens per target).
+            "whisper_campaign": {
+                "applyable": True,
+                "payload": {
+                    "theme": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                              "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                    "whispers": {
+                        "type": "array",
+                        "maxItems": _sim_engine.GOD_WHISPER_CAMPAIGN_MAX_TARGETS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "targetId": {"type": "integer"},
+                                "text": {"type": "string",
+                                         "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                         "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                            },
+                        },
+                    },
+                },
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 2: per-agent LLM sampling overlay (private).
+            "agent_sampling": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "model": {"type": "string", "enum": list(_sim_engine.GOD_AGENT_SAMPLING_MODELS),
+                              "optional": True, "default": "sim-smart"},
+                    "temperature": {"type": "number",
+                                    "min": _sim_engine.GOD_AGENT_SAMPLING_TEMP_MIN,
+                                    "max": _sim_engine.GOD_AGENT_SAMPLING_TEMP_MAX},
+                    "top_p": {"type": "number", "optional": True,
+                              "min": _sim_engine.GOD_AGENT_SAMPLING_TOP_P_MIN,
+                              "max": _sim_engine.GOD_AGENT_SAMPLING_TOP_P_MAX},
+                    "top_k": {"type": "integer", "optional": True,
+                              "min": _sim_engine.GOD_AGENT_SAMPLING_TOP_K_MIN,
+                              "max": _sim_engine.GOD_AGENT_SAMPLING_TOP_K_MAX},
+                    "min_p": {"type": "number", "optional": True,
+                              "min": _sim_engine.GOD_AGENT_SAMPLING_MIN_P_MIN,
+                              "max": _sim_engine.GOD_AGENT_SAMPLING_MIN_P_MAX},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": (
+                    f"at most {_sim_engine.GOD_AGENT_SAMPLING_FAST_DECISION_CAP} living agent "
+                    "may use sim-fast for decisions at once (PIANO pool contention)."
+                ),
+            },
+            "revoke_agent_sampling": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 3: memory surgery (private, irreversible).
+            "memory_insert": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "salience": {"type": "number", "min": 0.0, "max": 1.0,
+                                 "optional": True, "default": 0.7},
+                    "kind": {"type": "string", "optional": True,
+                             "default": _sim_engine.GOD_MEMORY_DEFAULT_KIND,
+                             "maxLen": _sim_engine.GOD_MEMORY_KIND_MAX_LEN},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "never in public activity/chronicle; outcomes omit memory text.",
+            },
+            "memory_delete": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "keyword": {"type": "string", "optional": True},
+                    "frameFrom": {"type": "integer", "optional": True},
+                    "frameTo": {"type": "integer", "optional": True},
+                    "kinds": {"type": "array", "optional": True, "items": {"type": "string"}},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "at least one of keyword/frameFrom/frameTo/kinds required; "
+                         "outcome is deletedCount only.",
+            },
+            "belief_plant": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "beliefId": {"type": "string", "optional": True},
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES, "optional": True},
+                    "plantInMemeTexts": {"type": "boolean"},
+                    "salience": {"type": "number", "min": 0.0, "max": 1.0,
+                                 "optional": True, "default": 0.7},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "at least one of beliefId or text; never in public logs.",
+            },
+            # Divine Matrix Phase 4: reality distortion / context masks (private).
+            "context_mask": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "mode": {"type": "string",
+                             "enum": sorted(_sim_engine.GOD_CONTEXT_MASK_MODES)},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                    "dreamSnapshot": {
+                        "type": "object", "optional": True,
+                        "allowedKeys": sorted(_sim_engine.GOD_CONTEXT_MASK_DREAM_KEYS),
+                        "notes": "required when mode=dream; unknown keys rejected",
+                    },
+                    "forgedConversations": {
+                        "type": "array", "optional": True,
+                        "maxItems": _sim_engine.GOD_CONTEXT_MASK_FORGED_MAX,
+                        "notes": "required when mode=whisper_chain",
+                    },
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "mutates think payload only; cancel via god_cancel on mask id.",
+            },
+            # Divine Matrix Phase 5: decision gate / possession pipeline (private).
+            "decision_compulsion": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "pinnedDecision": {"type": "object", "notes": "must include action; validated via normalize_decision"},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES},
+                    "remainingTurns": {"type": "integer", "optional": True, "min": 1},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "at least one of durationFrames or remainingTurns required; cancel via god_cancel.",
+            },
+            "decision_veto_arm": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+            },
+            "decision_veto_resolve": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "resolution": {"type": "string", "enum": ["approve", "reject", "rewrite"]},
+                    "rewrittenDecision": {"type": "object", "optional": True},
+                },
+                "reversibilityClass": "irreversible",
+            },
+            "agent_possession": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "pinnedDecision": {"type": "object", "optional": True},
+                    "queue": {"type": "array", "optional": True, "maxItems": 8},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "skips LLM when active; pinnedDecision or queue required.",
+            },
+            "revoke_decision_gate": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 6: Burning Bush + Merovingian Bargain (private).
+            "burning_bush_message": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "text": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                             "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "private thread; never in /state; Sight shows messageCount only.",
+            },
+            "burning_bush_close": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "cancellable",
+            },
+            "merovingian_bargain": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "termsText": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                  "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "successPredicate": {
+                        "type": "object",
+                        "kindEnum": sorted(_sim_engine.GOD_BARGAIN_PREDICATES),
+                    },
+                    "failurePredicate": {
+                        "type": "object", "optional": True,
+                        "kindEnum": sorted(_sim_engine.GOD_BARGAIN_PREDICATES),
+                    },
+                    "rewardPrimitive": {
+                        "type": "object", "optional": True,
+                        "kindEnum": sorted(_sim_engine.GOD_BARGAIN_PRIMITIVE_KINDS),
+                    },
+                    "punishPrimitive": {
+                        "type": "object", "optional": True,
+                        "kindEnum": sorted(_sim_engine.GOD_BARGAIN_PRIMITIVE_KINDS),
+                    },
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "predicates allowlisted only; auto-settle on tick; grant rewards are public.",
+            },
+            "bargain_settle": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "outcome": {"type": "string", "enum": ["success", "failure"]},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "manual settle; tick auto-settle is primary path.",
+            },
+            # Divine Matrix Phase 7: Anointed (destiny private, stigmata in neighbor prompts).
+            "anoint": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "destinyText": {"type": "string",
+                                    "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                    "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "stigmataTags": {
+                        "type": "array", "optional": True,
+                        "maxItems": _sim_engine.GOD_ANOINT_STIGMATA_MAX,
+                        "items": {"type": "string",
+                                  "maxChars": _sim_engine.GOD_ANOINT_STIGMATA_TAG_MAX_CHARS},
+                    },
+                    "oracleHints": {
+                        "type": "array", "optional": True,
+                        "maxItems": _sim_engine.GOD_ANOINT_ORACLE_HINTS_MAX,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "text": {"type": "string",
+                                         "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                         "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                                "revealFrame": {"type": "integer", "min": 0},
+                            },
+                        },
+                    },
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "destiny/oracle private; stigmata in nearby-agent prompt only; "
+                         "cancel via god_cancel or revoke_anoint.",
+            },
+            "revoke_anoint": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 8: Identity Forge (persona/personality/role).
+            "identity_edit": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "persona": {
+                        "type": "string", "optional": True,
+                        "maxChars": _sim_engine.GOD_IDENTITY_PERSONA_MAX_CHARS,
+                    },
+                    "personality": {
+                        "type": "string", "optional": True,
+                        "maxChars": _sim_engine.GOD_IDENTITY_PERSONALITY_MAX_CHARS,
+                        "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES,
+                    },
+                    "role": {"type": "string", "optional": True,
+                             "description": "must exist in roles.json"},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "timed edits restore snapshot on expiry/cancel; permanent edits are consequential.",
+            },
+            "identity_copy_overwrite": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "sourceId": {"type": "integer"},
+                    "ratePerThink": {"type": "number", "min": 0.0, "max": 1.0},
+                    "syncMemories": {"type": "boolean", "optional": True, "default": False},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "blends persona/personality each think; optional syncMemories plants up to 3 source memories.",
+            },
+            "identity_forge_cancel": {
+                "applyable": True,
+                "payload": {"targetId": {"type": "integer"}},
+                "reversibilityClass": "irreversible",
+                "notes": "restores snapshot taken at apply; clears active forge.",
+            },
+            # Divine Matrix Phase 9: Architect Zones (paint / door / limbo).
+            "architect_zone": {
+                "applyable": True,
+                "payload": {
+                    "zoneKind": {"type": "string", "enum": ["paint", "door", "limbo"]},
+                    "districtId": {"type": "string", "optional": True},
+                    "cells": {
+                        "type": "array",
+                        "maxItems": _sim_engine.GOD_ARCHITECT_ZONE_MAX_CELLS,
+                        "description": 'gx,gy strings or {gx1,gy1,gx2,gy2} bounds',
+                    },
+                    "paintTerrain": {
+                        "type": "string", "optional": True,
+                        "enum": sorted(_sim_engine.GOD_ARCHITECT_PAINT_TERRAINS),
+                    },
+                    "keyId": {"type": "string", "optional": True,
+                              "maxChars": _sim_engine.GOD_ARCHITECT_KEY_MAX_LEN},
+                    "grantKeyAgentIds": {"type": "array", "optional": True,
+                                         "items": {"type": "integer"}},
+                    "holdAgentIds": {"type": "array", "optional": True,
+                                     "items": {"type": "integer"}},
+                    "reversible": {"type": "boolean", "optional": True, "default": True},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "paint is public/world-visible; door/limbo audit private. grantKeyAgentIds grants godKeys tags on apply.",
+            },
+            "architect_zone_cancel": {
+                "applyable": True,
+                "payload": {"zoneId": {"type": "string"}},
+                "reversibilityClass": "cancellable",
+            },
+            "architect_release_hold": {
+                "applyable": True,
+                "payload": {
+                    "zoneId": {"type": "string"},
+                    "agentIds": {"type": "array", "optional": True,
+                                 "items": {"type": "integer"}},
+                },
+                "reversibilityClass": "cancellable",
+            },
+            # Divine Matrix Phase 10: Reload / Déjà Vu checkpoints.
+            "checkpoint_create": {
+                "applyable": True,
+                "payload": {
+                    "label": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                              "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "replaceOldest": {"type": "boolean", "optional": True, "default": False},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": (
+                    f"cap {_sim_engine.GOD_CHECKPOINT_MAX} checkpoints; "
+                    "reject at preview when full unless replaceOldest is true."
+                ),
+            },
+            "checkpoint_restore": {
+                "applyable": True,
+                "payload": {"checkpointId": {"type": "string"}},
+                "reversibilityClass": "irreversible",
+                "notes": "irreversible world replace — copies checkpoint state.db + memory_store.json, then restore_state().",
+            },
+            "deja_vu_replay": {
+                "applyable": _sim_engine.GOD_DEJA_VU_REPLAY,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "maxSteps": {
+                        "type": "integer", "optional": True,
+                        "min": 1, "max": _sim_engine.GOD_DEJA_VU_MAX_STEPS,
+                        "default": _sim_engine.GOD_DEJA_VU_MAX_STEPS,
+                    },
+                },
+                "reversibilityClass": "cancellable",
+                "sessionCap": _sim_engine.GOD_DEJA_VU_SESSION_CAP,
+                "notes": (
+                    f"sequences up to {_sim_engine.GOD_DEJA_VU_MAX_STEPS} compulsion "
+                    "steps from decisionDigests for one agent; cancel parent clears "
+                    "remaining gates."
+                ),
+            },
+            "crowd_compulsion": {
+                "applyable": True,
+                "payload": {
+                    "theme": {
+                        "type": "string", "optional": True,
+                        "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                        "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES,
+                    },
+                    "durationFrames": {
+                        "type": "integer", "optional": True,
+                        "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                        "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                    },
+                    "remainingTurns": {"type": "integer", "optional": True, "min": 1},
+                    "targets": {
+                        "type": "array",
+                        "maxItems": _sim_engine.GOD_CROWD_COMPULSION_MAX_TARGETS,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "targetId": {"type": "integer"},
+                                "pinnedDecision": {
+                                    "type": "object",
+                                    "notes": "must include action; validated via normalize_decision",
+                                },
+                            },
+                        },
+                    },
+                },
+                "reversibilityClass": "cancellable",
+                "notes": (
+                    "at least one of durationFrames or remainingTurns required; "
+                    "cancel parent id clears all linked gates."
+                ),
+            },
+            "dream_broadcast": {
+                "applyable": True,
+                "payload": {
+                    "durationFrames": {
+                        "type": "integer",
+                        "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                        "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                        "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES,
+                    },
+                    "dreamSnapshot": {
+                        "type": "object",
+                        "notes": "required; keys validated per GOD_CONTEXT_MASK_DREAM_KEYS",
+                    },
+                    "targetIds": {
+                        "type": "array",
+                        "maxItems": _sim_engine.GOD_DREAM_BROADCAST_MAX_TARGETS,
+                        "items": {"type": "integer"},
+                    },
+                },
+                "reversibilityClass": "cancellable",
+                "notes": "shared dream snapshot per target; cancel parent clears all linked masks.",
+            },
+            "revoke_guidance": {
+                "applyable": True,
+                "payload": {"id": {"type": "string"}},
+                "reversibilityClass": "irreversible",
+            },
+            # Sovereign God mode Phase 4 (docs/plan-sovereign-god-mode-v2.md
+            # "Immediate miracles"). All three are irreversible.
+            "agent_vitals": {
+                "applyable": True,
+                "payload": {
+                    "targetId": {"type": "integer"},
+                    "healthDelta": {"type": "number", "optional": True,
+                                    "min": -_sim_engine.GOD_VITALS_DELTA_MAX,
+                                    "max": _sim_engine.GOD_VITALS_DELTA_MAX},
+                    "hungerDelta": {"type": "number", "optional": True,
+                                    "min": -_sim_engine.GOD_VITALS_DELTA_MAX,
+                                    "max": _sim_engine.GOD_VITALS_DELTA_MAX},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": ("cannot kill: a negative healthDelta is clamped to stop at "
+                          f"{_sim_engine.GOD_VITALS_HEALTH_FLOOR} (never reaching the "
+                          "incapacitation threshold), never touches deathFrame."),
+            },
+            "grant_resource": {
+                "applyable": True,
+                "payload": {
+                    "resourceId": {"type": "string"},
+                    "amount": {"type": "integer", "min": 1,
+                              "max": _sim_engine.GOD_GRANT_PER_COMMAND_CAP},
+                    "target": {"type": "object", "optional": True,
+                              "description": '"stockpile" (default) or {"agentId": <int>}'},
+                },
+                "reversibilityClass": "irreversible",
+                "sessionCap": _sim_engine.GOD_GRANT_SESSION_CAP,
+            },
+            "structure_condition": {
+                "applyable": True,
+                "payload": {
+                    "structureId": {"type": "integer"},
+                    "delta": {"type": "number",
+                             "min": -_sim_engine.GOD_STRUCTURE_DELTA_MAX,
+                             "max": _sim_engine.GOD_STRUCTURE_DELTA_MAX},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "positive delta repairs, negative delta damages (may reach ruin).",
+            },
+            "repair_structures": {
+                "applyable": True,
+                "payload": {
+                    "scope": {"type": "string | object",
+                              "enum": ["ids", "all_critical"],
+                              "description": '"ids", "all_critical", or {"districtId": "<id>"}'},
+                    "structureIds": {"type": "array", "optional": True,
+                                    "description": "required when scope is ids"},
+                    "conditionTarget": {"type": "number", "optional": True,
+                                       "min": 0, "max": 100},
+                    "unRuin": {"type": "boolean", "optional": True, "default": True},
+                },
+                "reversibilityClass": "irreversible",
+                "batchMax": _sim_engine.GOD_REPAIR_STRUCTURES_BATCH_MAX,
+                "conditionMax": _sim_engine.GOD_REPAIR_STRUCTURES_CONDITION_MAX,
+                "notes": "batch restore / un-ruin; only this command and agent repair_structure may un-ruin.",
+            },
+            "clear_ruins": {
+                "applyable": True,
+                "payload": {
+                    "structureIds": {"type": "array", "optional": True},
+                    "minAgeFrames": {"type": "integer", "optional": True,
+                                    "default": _sim_engine.RUIN_CULL_AGE_FRAMES},
+                    "districtId": {"type": "string", "optional": True},
+                },
+                "reversibilityClass": "irreversible",
+                "batchMax": _sim_engine.GOD_CLEAR_RUINS_BATCH_MAX,
+                "notes": "delete selected or aged ruins; mirrors engine cull cleanup.",
+            },
+            # Sovereign God mode Phase 5 (docs/plan-sovereign-god-mode-v2.md
+            # "Storyteller events" + "Timed lawgiver modifiers"). Reversibility
+            # is "cancellable" with no primitives, "consequential" once any
+            # primitive is included (see _god_reversibility_class).
+            "story_event": {
+                "applyable": True,
+                "payload": {
+                    "title": {"type": "string", "maxChars": _sim_engine.GOD_EVENT_TITLE_MAX_CHARS},
+                    "narration": {"type": "string", "maxChars": _sim_engine.GOD_TEXT_MAX_CHARS,
+                                 "maxBytes": _sim_engine.GOD_TEXT_MAX_BYTES},
+                    "visibility": {"type": "string", "optional": True,
+                                  "enum": ["public", "private"], "default": "public"},
+                    "targetId": {"type": "integer", "optional": True,
+                                "description": "required when visibility is 'private'"},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                    "modifiers": {"type": "object", "optional": True,
+                                 "keys": _sim_engine.GOD_MODIFIER_RANGES},
+                    "primitives": {"type": "array", "optional": True,
+                                  "maxItems": _sim_engine.GOD_STORY_EVENT_MAX_PRIMITIVES,
+                                  "itemKinds": ["agent_vitals", "grant_resource", "structure_condition"]},
+                    "providence": {"type": "object", "optional": True,
+                                  "description": "{text} -- reuses this event's own durationFrames"},
+                    "replaceEffectId": {"type": "string", "optional": True,
+                                        "description": "required to reuse a modifier key already active"},
+                },
+                "reversibilityClass": "cancellable | consequential (with primitives)",
+                "notes": "atomic: preview validates every component; apply accepts all or changes nothing.",
+            },
+            # Sovereign God mode Phase 6 (docs/plan-sovereign-god-mode-v2.md
+            # "Weather override"). Always "consequential": entering "storm"
+            # can permanently damage structures in the named districts, and
+            # neither cancelling nor natural expiry undoes that damage.
+            "weather_override": {
+                "applyable": True,
+                "requires": "WEATHER_ENABLED",
+                "payload": {
+                    "state": {"type": "string", "enum": list(_sim_engine.WEATHER_STATES)},
+                    "districts": {"type": "array", "optional": True,
+                                 "description": ('district ids; empty ONLY for state="clear"; '
+                                                 "at least one required for every other state")},
+                    "durationFrames": {"type": "integer", "optional": True,
+                                       "min": _sim_engine.GOD_GUIDANCE_MIN_DURATION_FRAMES,
+                                       "max": _sim_engine.GOD_GUIDANCE_MAX_DURATION_FRAMES,
+                                       "default": _sim_engine.GOD_GUIDANCE_DEFAULT_DURATION_FRAMES},
+                    "replaceEffectId": {"type": "string", "optional": True,
+                                        "description": "required to replace the already-active weather override"},
+                },
+                "reversibilityClass": "consequential",
+                "notes": ('clock ownership: activeEvents[].expiresFrame == weather["exitFrame"] '
+                         "(the divine event owns duration). Cancelling or expiry hands off to the "
+                         "natural cycle's next state -- never restores the prior state. Entering "
+                         "'storm' can permanently damage structures in the named districts."),
+            },
+            # Huntable wildlife god kinds (specs/02-engine-core.md
+            # "Sovereign God mode: wildlife kinds"). Irreversible one-shots
+            # like grant_resource; gated on WILDLIFE_ENABLED.
+            "wildlife_spawn": {
+                "applyable": True,
+                "requires": "WILDLIFE_ENABLED",
+                "payload": {
+                    "districtId": {"type": "string"},
+                    "kind": {"type": "string",
+                             "description": "must be valid for that district's habitat pool"},
+                },
+                "reversibilityClass": "irreversible",
+                "kindPools": dict(_sim_engine.WILDLIFE_KIND_POOLS),
+                "capPerDistrict": _sim_engine.WILDLIFE_CAP_PER_DISTRICT,
+                "notes": "respects WILDLIFE_CAP_PER_DISTRICT; rejects unknown district/kind or full cap.",
+            },
+            "wildlife_despawn": {
+                "applyable": True,
+                "requires": "WILDLIFE_ENABLED",
+                "payload": {
+                    "id": {"type": "string", "optional": True,
+                           "description": "creature id (mutually exclusive with districtId)"},
+                    "districtId": {"type": "string", "optional": True,
+                                   "description": "clear all alive fauna in district (mutually exclusive with id)"},
+                },
+                "reversibilityClass": "irreversible",
+                "notes": "exactly one of id or districtId required; marks target(s) dead with ordinary respawn bookkeeping.",
+            },
+            "wildlife_set_hp": {
+                "applyable": True,
+                "requires": "WILDLIFE_ENABLED",
+                "payload": {
+                    "id": {"type": "string"},
+                    "hp": {"type": "integer", "min": 0,
+                           "description": "clamped to [0, maxHp]; hp<=0 kills with ordinary respawn bookkeeping"},
+                },
+                "reversibilityClass": "irreversible",
+            },
+        },
+        "modifierRanges": _sim_engine.GOD_MODIFIER_RANGES,
+        "previewTtlSeconds": _sim_engine.GOD_PREVIEW_TTL_SECONDS,
+        "activeEventsCap": _sim_engine.GOD_ACTIVE_EVENTS_CAP,
+        "weatherEnabled": _sim_engine.WEATHER_ENABLED,
+        "wildlifeEnabled": _sim_engine.WILDLIFE_ENABLED,
+        # Sovereign God mode Optional Phase 8 (docs/plan-sovereign-god-mode-
+        # v2.md "Free-prose story compiler"): dual-gated on GOD_MODE_ENABLED
+        # (already true to reach this route) AND the SEPARATE
+        # GOD_COMPILER_ENABLED dark flag -- so the viewer can render or hide
+        # the Compile tab correctly without probing /control/god/compile.
+        "compiler": {
+            "enabled": _sim_engine.GOD_MODE_ENABLED and _sim_engine.GOD_COMPILER_ENABLED,
+            "minIntervalSec": _sim_engine.GOD_COMPILER_MIN_INTERVAL_SEC,
+            "sessionCap": _sim_engine.GOD_COMPILER_SESSION_CAP,
+            "promptMaxChars": _sim_engine.GOD_COMPILER_PROSE_MAX_CHARS,
+        },
+    })
+
+
+@app.route("/control/god/sight", methods=["GET"])
+def control_god_sight():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    return jsonify(engine.god_sight())
+
+
+@app.route("/control/god/preview", methods=["POST"])
+def control_god_preview():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    if _god_body_too_large():
+        return jsonify({"error": "payload_too_large"}), 413
+    envelope = request.get_json(force=True, silent=True) or {}
+    return jsonify(engine.god_preview(envelope))
+
+
+@app.route("/control/god/compile", methods=["POST"])
+def control_god_compile():
+    """Sovereign God mode Optional Phase 8 (docs/plan-sovereign-god-mode-
+    v2.md "Free-prose story compiler"). Token-gated exactly like every other
+    God route, but the token itself is NEVER forwarded to
+    engine.god_compile_prose -- that method has no parameter for it and
+    never reads SIM_GOD_TOKEN. This route only ever produces a PREVIEW; it
+    never applies anything (there is no god_apply call anywhere on this
+    path)."""
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    if _god_body_too_large():
+        return jsonify({"error": "payload_too_large"}), 413
+    body = request.get_json(force=True, silent=True) or {}
+    prose = body.get("prose")
+    if not isinstance(prose, str) or len(prose) > _sim_engine.GOD_COMPILER_PROSE_MAX_CHARS:
+        return jsonify({"compileOk": False,
+                        "reason": f"prose must be a string of at most "
+                                  f"{_sim_engine.GOD_COMPILER_PROSE_MAX_CHARS} characters"})
+    return jsonify(engine.god_compile_prose(prose))
+
+
+@app.route("/control/god/apply", methods=["POST"])
+def control_god_apply():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    if _god_body_too_large():
+        return jsonify({"error": "payload_too_large"}), 413
+    body = request.get_json(force=True, silent=True) or {}
+    return jsonify(engine.god_apply(body.get("previewId"), body.get("requestId")))
+
+
+@app.route("/control/god/cancel", methods=["POST"])
+def control_god_cancel():
+    if not _god_authorized():
+        return _god_unauthorized_response()
+    if _god_body_too_large():
+        return jsonify({"error": "payload_too_large"}), 413
+    body = request.get_json(force=True, silent=True) or {}
+    return jsonify(engine.god_cancel(body.get("targetId")))
+
+
 if __name__ == "__main__":
     # Bind 0.0.0.0 so any device on the LAN can reach the sim (req #3); find this
     # machine's LAN IP with `ipconfig` and open the URL from another device as
     # http://<host-ip>:5001. On Windows, allow inbound TCP 5001 through the
     # firewall (or accept the first-run prompt). threaded=True lets the request
     # handlers run concurrently alongside the (forthcoming) SimEngine thread.
-    # NOTE: this exposes the server — including the Ollama proxy — to the whole
-    # local network. Intended for a trusted home LAN, not a hostile network.
+    # NOTE: this exposes the server — including the Ollama proxy and, when
+    # GOD_AUTH_REQUIRED is off (the default), the unauthenticated God API —
+    # to the whole local network. Intended for a trusted home LAN, not a
+    # hostile network. Set SIM_GOD_AUTH=1 to restore token gating.
     HOST = os.environ.get("SIM_HOST", "0.0.0.0")
     PORT = int(os.environ.get("SIM_PORT", "5001"))
     # Start the server-authoritative engine thread BEFORE the HTTP server so the
@@ -4101,8 +5402,9 @@ if __name__ == "__main__":
         if _saved_once.is_set():
             return
         _saved_once.set()
+        session_logger.flush_benchmarks()
         engine.stop()
-        engine.save_state()
+        engine.save_state(force=True)
 
     atexit.register(_flush_on_exit)
 

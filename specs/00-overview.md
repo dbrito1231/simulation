@@ -13,8 +13,32 @@ deep mechanics.
 
 ## Non-goals
 
-- Not a game or shippable product — no win condition, scoring, or player input beyond
-  observation and admin controls (pause/resume/reset/roster size).
+- Not a game or shippable product — no win condition or scoring. Player input is
+  limited to observation and admin controls (pause/resume/reset/roster size),
+  plus the optional intervention mode described below.
+- **Optional intervention mode (God mode).** `GOD_MODE_ENABLED` (`SIM_GOD_MODE`) is
+  **on by default**; disable with `0`/`false`/`no`/`off` at startup. When off,
+  the simulation is exactly as autonomous as it was before the flag existed.
+  When on, an operator may observe private state and author bounded, typed
+  interventions. Token auth is a separate optional gate: `GOD_AUTH_REQUIRED`
+  (`SIM_GOD_AUTH`) defaults **off**; when auth is on, a non-empty
+  `SIM_GOD_TOKEN` must also be configured or routes stay disabled until restart.
+  This is a deliberate departure
+  from the pure-observer stance of earlier drafts, and it is stated here rather
+  than hidden behind an "admin tool" label: a god-enabled run is partly
+  interactive. Divine influence must never masquerade as emergent agent behavior,
+  so every intervention is attributable and replay-auditable, and a run that has
+  received one is permanently marked `intervened`. **Intervened runs are not
+  comparable to untouched autonomous runs** and must never be cited as evidence
+  of emergent behavior. The optional **Matrix interventions** expansion (whisper
+  campaigns, temperature dial, memory surgery, and more) extends the same God
+  control plane — not agent `DECISION_ACTIONS` — with phased rollout on branch
+  `feature/divine-matrix-interventions`. **Voice** (proclamation, providence,
+  private omen, whisper campaign) is **binding guidance**: agents must return
+  `divine_response` `{stance, reason}` on every think while guidance is active,
+  with adherence visible in Sight and the Divine Console Voice Adherence panel.
+  See [02-engine-core.md](02-engine-core.md) for state and
+  [04-http-api.md](04-http-api.md) for the routes.
 - Not a research-grade multi-agent benchmark — `BENCHMARKS_ENABLED` sampling exists for
   observability, not publishable evaluation.
 - Kept minimal and observable: every mechanic must be debuggable from JSONL logs and
@@ -30,7 +54,9 @@ deep mechanics.
 |---|---|
 | `simulation/sim_engine.py` | The engine: all world state, tick loop, `apply_decision`, persistence |
 | `simulation/server.py` | Flask app + cognition: routes, prompt building, LLM calls, decision validation |
-| `simulation/index.html` | Thin browser viewer — polls `/state`, renders, holds no sim state |
+| `simulation/index.html` | Thin browser viewer shell — markup only |
+| `simulation/viewer.css` | Viewer stylesheet (layout, panels, Divine Console chrome) |
+| `simulation/viewer.js` | Viewer client — polls `/state`, render loop, sidebar, holds no sim state |
 | `simulation/sprites.js` | Pure stateless Canvas drawing helpers |
 | `simulation/roles.json` | Single source of truth for role definitions |
 | `simulation/logs/<timestamp>/` | Per-run JSONL logs (gitignored) |
@@ -63,7 +89,7 @@ the Ollama dependency): [CLAUDE.md](../CLAUDE.md#commands).
 | [08-systems-economy.md](08-systems-economy.md) | Survival, crafting, goals, structure effects, goods, economy |
 | [09-systems-society.md](09-systems-society.md) | Tech tree, Daily Council/governance and voting, memes, culture, benchmarks |
 | [10-path1.md](10-path1.md) | Path 1 bundle: industry, tools, terrain, diplomacy, pressure loop |
-| [11-viewer.md](11-viewer.md) | Thin-viewer contract, sprites.js rendering |
+| [11-viewer.md](11-viewer.md) | Thin-viewer contract, viewer.js/viewer.css, sprites.js rendering |
 | [12-ops.md](12-ops.md) | SessionLogger, log ingestion, scripts/ tools |
 
 ## Spec-driven development contract

@@ -7,10 +7,11 @@ zone kinds, ecology stocks/regrow/terraform, structure registry/levels/upgrades,
 terrain grid + composable blocks (mechanics), cemetery/grave grid.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index (semantics of
 `ECOLOGY_ENABLED`/`ROADS_ENABLED`/`STRUCTURE_UPGRADES_ENABLED`/`CEMETERY_ENABLED`/
-`TERRAIN_TILES_ENABLED`/`COMPOSABLE_BUILD_ENABLED` live in their owning specs);
-[10-path1.md](10-path1.md) for Path-1 flag semantics (industry, tool tiers, diplomacy);
-[07-actions.md](07-actions.md) for the build/terraform/block/dig actions;
-[08-systems-economy.md](08-systems-economy.md) for structure decay/repair/upkeep detail.
+`TERRAIN_TILES_ENABLED`/`COMPOSABLE_BUILD_ENABLED`/`WILDLIFE_ENABLED` live in their
+owning specs); [10-path1.md](10-path1.md) for Path-1 flag semantics (industry, tool
+tiers, diplomacy); [07-actions.md](07-actions.md) for the build/terraform/block/dig/
+hunt actions; [08-systems-economy.md](08-systems-economy.md) for structure
+decay/repair/upkeep detail and hunt yields.
 
 ## World geometry
 
@@ -109,6 +110,27 @@ one-time module-load constant. `_road_path_between(agent, dest_district_id)`
 True; semantics/rendering owned here, echo status in
 [01-architecture.md](01-architecture.md#flag-index-complete--30-module-level-flags-sim_enginepy)).
 
+## Inter-settlement movement (ocean corridor)
+
+When `PATH1_DIPLOMACY_ENABLED`, `TRANSIT_ENABLED`, and `_has_ocean_transit()`
+are all true, **caravan goals only** that travel between different
+`settlementId`s may route through a bounded ocean corridor instead of
+road-only paths:
+
+1. Leave the source settlement via its dock or shipyard district (working
+   structure with a `transit`/`ocean` unlock).
+2. Traverse ocean waypoint(s) on the road graph (no free-swim for ordinary
+   `move_to_district`, gather, or non-caravan goals).
+3. Enter the destination settlement at its dock/district.
+
+Transit cost is consumed once per crossing via `_consume_ocean_transit`
+([10-path1.md](10-path1.md#transit_enabled)). `_set_agent_target_once` /
+`_step_goal` for `kind: "caravan"` selects the corridor when the destination
+district's settlement differs from the actor's. Shipment visuals use
+`mode: "boat"` under the same boundary signal
+([08-systems-economy.md](08-systems-economy.md#caravan_visuals_enabled)).
+No persistent vehicle entities are spawned — movement remains agent-centric.
+
 ## Zone kinds
 
 `ZONE_NAMES = ["farm", "forest", "village", "market", "beach", "cave", "ocean",
@@ -195,15 +217,47 @@ resource and are omitted. Omitted entirely when both flags are off.
 - The projection is computed inside `snapshot()` itself (no new engine tick);
   it is cheap (one pass over already-in-memory `districtStocks`) and safe to
   recompute on every poll since hysteresis state is idempotent between calls.
-- Consumers: viewer crop/tree growth-stage terrain and ambient-wildlife
-  density both key off this same `stage`, per district — see
+- Consumers: viewer crop/tree growth-stage terrain and huntable-wildlife
+  spawn density both key off this same `stage`, per district — see
   [11-viewer.md](11-viewer.md).
+
+## Huntable wildlife (`WILDLIFE_ENABLED`)
+
+`WILDLIFE_ENABLED` (default True; flag index [01-architecture.md](01-architecture.md))
+gates the **server-authoritative** fauna subsystem: engine-owned creature
+state in `civilization["wildlife"]`, every-tick motion (`_move_wildlife`),
+slower spawn/respawn/migration (`_tick_huntable_wildlife`), the agent action
+`hunt_wildlife`, hunter specialty yields (`meat` / `fish`), and the viewer
+`/state` `wildlife[]` projection. Off → no fauna state, no hunt in
+`available_actions`, viewer draw no-ops.
+
+This is **not** Path-1's `_tick_wildlife` forest-attack pressure event
+(gated by `PRESSURE_LOOP_ENABLED` — [10-path1.md](10-path1.md)); the names
+are adjacent but the systems are unrelated.
+
+Full tick/combat/migration/god-kind detail:
+[02-engine-core.md](02-engine-core.md#huntable-wildlife-wildlife_enabled).
+Yield table and `meat` edible:
+[08-systems-economy.md](08-systems-economy.md#huntable-wildlife-yields-wildlife_enabled).
+Viewer contract: [11-viewer.md](11-viewer.md#ambient-wildlife-wildlife_enabled).
+Action: [07-actions.md](07-actions.md). Role: [06-agents.md](06-agents.md).
+
+`districtEcology` stage still drives per-district spawn caps
+(`WILDLIFE_STAGE_COUNT` / `WILDLIFE_CAP_PER_DISTRICT = 4`); fauna population
+itself is separate from `districtStocks` (killing a creature does not
+decrement ecology gather stocks).
 
 ## Structures
 
 `civilization["structures"]` is a flat list of built structure instances
 (`{id, type, districtId, condition, level, visualTier, renderScale, isRuin, ...}`,
-sim_engine.py:3786-3808). Structure *types* are declared once via two registries:
+sim_engine.py:3786-3808). In-memory and full `/state` snapshots include an
+optional `sprite` grid per structure when present; delta `/state` upserts omit
+`sprite` unless the structure was created, visually upgraded, or received a
+custom `submit_structure_sprite` since the client's last applied frame (the
+viewer merges partial rows and keeps prior sprites). On disk (`state.db`), sprite
+grids are stored in the `structure_sprites` table, not embedded in the civ
+JSON blob — see [02-engine-core.md](02-engine-core.md#persistence).
 
 - `PROJECT_TEMPLATES` (sim_engine.py:754-765, extended by flag-gated blocks like
   `granary` under `CRAFTING_ENABLED`, `kiln`/`harbor`/`mill`/`foundry` under Path-1
@@ -215,6 +269,20 @@ sim_engine.py:3786-3808). Structure *types* are declared once via two registries
   stations), `stores` (storage capacity, `GOODS_ENABLED` only). Custom blueprints
   supply their own `function` block at proposal time (see
   [07-actions.md](07-actions.md#the-build-pipeline)).
+
+**Condition/ruin transitions** (decay, disrepair, ruin — the `condition`,
+`isRuin`, and `homeOf`/`homeStructureId` fields above) go through one shared
+helper, `_apply_structure_condition_delta(structure, delta)`, extracted
+specifically so the passive per-goods-tick decay (`_tick_structure_decay`,
+always a negative delta) and the Sovereign God mode `structure_condition`
+miracle (repair with a positive delta, damage with a negative one) fire
+identical `STRUCTURE_DISREPAIR_THRESHOLD`-crossing and ruin-transition
+narration — including clearing `homeOf`/`homeStructureId` and the
+"left homeless" line when a structure someone lives in collapses into a
+ruin — rather than the miracle taking a parallel shortcut. See
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-4--bounded-immediate-miracles)
+and [08-systems-economy.md](08-systems-economy.md) (the "Structure decay"
+row) for the full decay-rate/threshold/repair-cost contract this reuses.
 
 **Levels/upgrades:** gated by `STRUCTURE_UPGRADES_ENABLED` (default True).
 `MAX_STRUCTURE_LEVEL = 100` (sim_engine.py:277); `LEVEL_STEP = 1` per
@@ -247,6 +315,21 @@ are owned by [10-path1.md](10-path1.md).
   refund the block's resource cost and reject on unknown type, out-of-district,
   tile-cap, or occupied-cell. Shelter blocks count toward night-exposure protection
   (`NIGHT_EXPOSURE_DAMAGE`) alongside houses — see [10-path1.md](10-path1.md).
+
+### Architect Zones (Divine Matrix Phase 9)
+
+God paint/door overlays on the Path1 terrain grid — not composable `tiles` blocks.
+See [02-engine-core.md](02-engine-core.md#architect-zones-divine-matrix-phase-9).
+
+- **Paint:** `architect_zone` with `zoneKind: paint` writes `district["terrain"]`
+  cells (`paintTerrain` ∈ `GOD_ARCHITECT_PAINT_TERRAINS`). Reversible zones store
+  `revertSnapshot` and restore on cancel/expiry.
+- **Door:** `zoneKind: door` with `keyId` — `_move_agent` calls
+  `_architect_door_blocks_move`; agents lacking the matching `godKeys` tag bounce
+  in place (no crash). Optional `grantKeyAgentIds` grants the tag on apply.
+- **Limbo:** `zoneKind: limbo` teleports `holdAgentIds` to `GOD_LIMBO_STATION`
+  `(140, 500)` in the ocean district and sets `divineHold` (think/move pause).
+  `architect_release_hold` or zone cancel/expiry restores prior pose when safe.
 
 ## Weather (`WEATHER_ENABLED`, living-ecosystem Phase 4)
 
@@ -299,6 +382,65 @@ structure decay, and the disaster roll. **No new timer.**
   no-op (the `weather` key is never read or mutated further after cold
   start/restore), `/state` omits `weather`, and `_maybe_disaster` reverts to
   its pre-Phase-4 behavior (see 08).
+
+### Divine weather override (Sovereign God mode Phase 6, `weather_override`)
+
+A `god_mode` intervention kind (see [03-cognition.md](03-cognition.md) for the
+preview/apply/cancel envelope shared by every divine command) that forces the
+natural weather machine above into an operator-chosen `state` + `districts`
+for a bounded duration, then hands control back to the natural cycle. Four
+behaviors, all enforced in `sim_engine.py`:
+
+- **Event-authoritative clock.** `godState["activeEvents"][].expiresFrame` is
+  the single source of truth for when the override ends.
+  `_god_apply_weather_override` sets `civilization["weather"]["exitFrame"]`
+  to that **same** absolute frame, so `_tick_weather`'s existing
+  `frameTick < exitFrame` early-return defers to the override automatically —
+  there is only one clock value, read by both the natural machine and the
+  override, so it cannot drift out of sync.
+- **RNG-free forced entry.** `_weather_enter_forced(state, districts,
+  exit_frame)` sets `state`/`since`/`exitFrame`/`districts` directly from the
+  already-validated command and draws no RNG at all — no `random.randint`,
+  no `random.sample` — and emits the same narration `_weather_enter` emits
+  for that state, so a forced storm/clearing reads identically to a natural
+  one in activity. `_weather_enter` itself (the RNG-driven natural-cycle
+  entry point) is untouched and only ever called from the natural
+  `_tick_weather` cycle or from the handoff below.
+- **Handoff to the natural cycle's successor, not back to the pre-override
+  state.** Ending an override — via expiry (`_expire_divine_effects`), cancel
+  (`god_cancel`), or a `replaceEffectId` replacement — always calls
+  `_close_weather_override(event, status)`, which closes the
+  `weather_override` `activeEvents` record exactly once and then calls
+  `_weather_handoff_successor(event["state"])`: the natural-cycle successor
+  of the **overridden** state (`clear -> gathering`, `gathering -> storm` or
+  `clear` per the normal probability roll, `storm -> clearing`, `clearing ->
+  clear`), entered through the same RNG-drawing `_weather_enter`. The
+  override's `priorState` is recorded on the event for audit only and is
+  never restored — restoring it would double back and desync the strict
+  cycle.
+- **Consequential reversibility.** `_god_reversibility_class` reports
+  `weather_override` as `"consequential"`, not merely `"cancellable"`:
+  entering `"storm"` can trigger real, permanent structure damage through the
+  normal `_maybe_disaster` path, and neither cancelling the override nor
+  letting it expire retracts that damage. `_god_preview_outcome` discloses
+  this explicitly — the target `state`/`districts`, the count of currently
+  non-ruined structures at risk in those districts, and (for `state ==
+  "storm"`) a warning that any damage dealt stands regardless of how the
+  override ends.
+
+Validation (`_validate_god_weather_override`) requires `WEATHER_ENABLED`,
+`state` to be one of `WEATHER_STATES`, real district ids (empty only for
+`"clear"`, at least one required for every other state — matching what
+`_weather_enter` itself does for each), and enforces "one active weather
+override at a time" unless `replaceEffectId` names the currently active one
+(`_god_active_weather_override`) — the same one-active-per-slot discipline
+`story_event`'s `replaceEffectId` uses for a modifier key. Replacing closes
+the previous override's `activeEvents` record with status `"replaced"` (see
+[12-ops.md](12-ops.md) for the full status vocabulary). An active override's
+`expiresFrame` is absolute and round-trips `save_state`/`restore_state`
+unchanged; a save captured after an override's clock ran out but before the
+next `_expire_divine_effects` sweep closes it, and hands off, exactly once on
+restore (status `"restore-closed"`).
 
 ## Cemetery + grave grid
 

@@ -7,6 +7,9 @@ world. No simulation logic lives here.
 rendering pipeline (terrain cache, day/night, zoom/minimap), sidebar panel
 inventory, `ACTION_LABELS` (display-only), and `sprites.js`'s pure drawing
 rules (structure sprite resolution order, seasonal variants).
+**Files:** `simulation/index.html` (markup shell), `simulation/viewer.css`
+(styles), `simulation/viewer.js` (polling, render loop, sidebar, Divine
+Console), `simulation/sprites.js` (stateless Canvas helpers).
 **See also:** [01-architecture.md](01-architecture.md) for the
 server-authoritative topology this file implements the "thin viewer" half of;
 [04-http-api.md](04-http-api.md) for `/state`/`/districts.js` payload shapes;
@@ -15,10 +18,12 @@ labels.
 
 ## Thin-viewer contract
 
-`simulation/index.html` states its own contract in a banner comment
-(index.html:673-680): it is a **PURE RENDERER** — it polls `GET /state`
+`simulation/viewer.js` states its own contract in a banner comment at the top
+of the file: it is a **PURE RENDERER** — it polls `GET /state`
 (~10 Hz), keeps the latest snapshot in a module-level `world` variable, and
-draws agents/structures/sidebar from it. Closing the browser tab does **not**
+draws agents/structures/sidebar from it. `simulation/index.html` is markup
+only (panels, canvas, modals, script tags); `simulation/viewer.css` holds
+layout and panel chrome. Closing the browser tab does **not**
 stop the simulation; all engine logic (decisions, movement, survival, rules,
 memes, memory, build pipeline) runs server-side only. `simulation/sprites.js`
 is a second, purely-functional file: stateless Canvas drawing helpers that
@@ -27,21 +32,39 @@ world state beyond a cached palette/season key.
 
 ## Polling and render loop
 
-- `STATE_POLL_MS = 100` (index.html:2142) drives `pollState()`: fetches
-  `GET /state`, replaces `world` wholesale, and on fetch failure patches
-  `world.lmStatus = "disconnected"` while keeping the last-known snapshot
-  (index.html:2182-2190). **Offline behavior**: the last good frame stays on
-  screen and the sidebar status dot goes gray (`#9E9E9E`, index.html:1660)
+- `STATE_POLL_MS = 100` (`viewer.js`, `pollState()`) drives polling: the first
+  successful fetch uses `GET /state` (full snapshot); thereafter
+  `GET /state?since=<lastFrameTick>` unless an error or `stateGeneration`
+  mismatch forces another full fetch. The client merges deltas into module-level
+  `world` (`mergeStateDelta()`): full/`full: true` replaces wholesale;
+  `unchanged: true` keeps `world`; partial payloads replace agents by `id`,
+  deep-merge allowlisted `civilization` keys (structure upserts by `id`,
+  `structuresRemoved` tombstones), and replace any other included top-level keys.
+  The server emits only fields whose `lastMod` frame is greater than the
+  client's `since` (within `STATE_DELTA_MAX_GAP`); multiple tabs with different
+  `since` cursors each receive the same one-time updates.
+  Responses with `frameTick` older than the last applied frame are ignored
+  (stale poll race). On fetch failure, patches `world.lmStatus = "disconnected"`
+  while keeping the last-known snapshot and sets `statePollFull` so the next
+  poll retries with a full snapshot.
+  **Offline behavior**: the last good frame stays on
+  screen and the sidebar status dot goes gray (`#9E9E9E`, `renderSidebar()`)
   with the hint "Showing last frame; retrying /state…"
-  (index.html:1663-1664) — distinct from `lmStatus: "offline"` (Ollama
+  — distinct from `lmStatus: "offline"` (Ollama
   unreachable, Flask up) and `"compute_error"` (GPU memory error), each with
-  its own dot color/label (index.html:1654-1665).
-- `DISTRICTS_POLL_MS = 3000` (index.html:1069) drives `pollDistricts()`
-  (`GET /districts.js`) on a slower cadence since districts/roads change
-  only when a district is founded server-side; rebuilds the terrain cache
-  only when the served district-id list actually changed (index.html:1064-1086).
+  its own dot color/label in `renderSidebar()`.
+- `DISTRICTS_POLL_MS = 3000` drives `pollDistricts()` (`GET /districts.js`
+  with optional `?since=<districtsEpoch>`) on a slower cadence since
+  districts/roads change only when district/tile/terrain/road data mutates
+  server-side. The viewer tracks `districtsEpoch` from each full response;
+  when the server returns `{unchanged: true, epoch}`, the last payload is
+  kept (no parse/merge of district tiles/terrain). The first terrain-cache
+  build starts immediately at page kickoff (via `scheduleTerrainCacheBuild`)
+  using `STARTER_DISTRICTS_JS` as a fallback — it does **not** wait for
+  `/districts.js`. When the served district-id list or `districtsEpoch`
+  changes, `pollDistricts()` nulls `terrainCanvas` and rebuilds.
 - The render loop is **decoupled from polling** via `requestAnimationFrame`:
-  `tick()` (index.html:2899-2914) redraws every animation frame from
+  `tick()` (`viewer.js`) redraws every animation frame from
   whatever `world` currently holds, keeping ~60fps even though network polls
   land at ~10 Hz.
 - **Render-error resilience**: `tick()` is a thin wrapper that calls the
@@ -55,22 +78,34 @@ world state beyond a cached palette/season key.
   independent `setInterval` kept fetching fresh `/state` data in the
   background that was never rendered.
 - Controls (Pause/Resume/Reset) POST to `/control/pause|resume|reset` via
-  `postControl()` (index.html:2202-2224) with optimistic local flips
+  `postControl()` (`viewer.js`) with optimistic local flips
   reconciled by the next poll; keyboard shortcut `R` also resets
-  (index.html:2229-2232).
+  (`viewer.js`), ignored while focus is in an input, textarea, select, or
+  contenteditable field. Reset additionally prompts for the `SIM_RESET_PASSWORD`
+  value (default `reset` when unset) after the confirm dialog; cancel/empty
+  aborts, and HTTP 401 shows an alert — see [04-http-api.md](04-http-api.md).
 
 ## Canvas / world rendering
 
-- `WORLD_W = 5200`, `WORLD_H = 5400` (index.html:689-690) must match
+- `WORLD_W = 5200`, `WORLD_H = 5400` (`viewer.js`) must match
   `sim_engine.py`'s `WORLD_W`/`WORLD_H` (sim_engine.py:69-70) exactly — the
-  comment at index.html:686-688 says so explicitly.
+  comment in `viewer.js` says so explicitly.
 - **Offscreen terrain cache**: static terrain (zones, crops, trees, dock,
   ocean) is rendered once into an offscreen `terrainCanvas` and blitted each
   frame instead of re-tiling per frame (`buildTerrainCache`/
-  `scheduleTerrainCacheBuild`, index.html:740-756), invalidated on resize, a
-  season change (index.html:2173-2178), a district-list change
-  (index.html:1079-1081), or (`CROP_GROWTH_ENABLED`, living-ecosystem Phase 2)
-  a district's `districtEcology` stage change — see below.
+  `scheduleTerrainCacheBuild`). Tiling uses `createPattern` in
+  `fillRectWithTile` / `fillRectWithTiles` (sprites.js): each 16×16 tile grid
+  is rasterized once, then repeated natively; `fillRectWithTiles` pattern-fills
+  the whole rect with the base tile and overdrawing `PATH_CELLS` only for
+  road cells. `scheduleTerrainCacheBuild` runs the build synchronously on
+  the main thread (~10 ms after pattern-fill); there is no
+  `requestIdleCallback` deferral. The `#worldLoading` overlay covers the build
+  and is hidden in the same turn via `hideWorldLoading()`. The cache is
+  invalidated on resize, a season change, a district-list change (when
+  `districtsKey` from `/districts.js` differs), or (`CROP_GROWTH_ENABLED`,
+  living-ecosystem Phase 2) a district's `districtEcology` stage change — see
+  below. Optional load-perf timings: set `VIEWER_LOAD_DEBUG = true` in
+  `viewer.js` to log build stage splits and performance marks.
 
 **Crop/tree growth stages (`CROP_GROWTH_ENABLED`, living-ecosystem Phase 2):**
 terrain — including crops and trees — is baked into the static
@@ -78,7 +113,7 @@ terrain — including crops and trees — is baked into the static
 a small number of discrete stages that key into the same cache-invalidation
 mechanism the season tint already uses.
 
-- `ecologyStagesForTerrain()` (index.html) reduces the top-level
+- `ecologyStagesForTerrain()` (`viewer.js`) reduces the top-level
   `world.districtEcology` list (a sibling of `civilization`, see
   [05-world.md](05-world.md)) to a `{districtId: stage}` map plus a
   stable string key. `buildTerrainCache()` passes the map through
@@ -115,16 +150,22 @@ mechanism the season tint already uses.
   [05-world.md](05-world.md)) — the viewer just reads whatever `stage` string
   it's given, so a ratio hovering on a boundary can't thrash the terrain
   cache multiple times per second.
-- **Seasonal color grading** (`applySeasonTint`, index.html:704-733) is baked
-  into the terrain cache once at build time: autumn = warm multiply+overlay,
-  winter = desaturate then cool overlay+lighter passes, spring = faint green
-  overlay, summer = untinted baseline (no-op).
-- **Day/night overlay** (`nightAlpha`, index.html): ramps a
-  `MAX_NIGHT_ALPHA = 0.45` navy overlay in over `dayFraction` 0.70–0.80,
-  holds through 0.95, ramps out to 1.00 — applied as a full-canvas `fillRect`
-  after agents/structures each frame. When `ENV_EFFECTS_ENABLED` is on, a
-  low-alpha golden band is composited during the same dusk (0.70–0.80) and
-  dawn (0.95–1.00) ramps; it adds no state or separate feature flag.
+- **Seasonal color grading** (`applySeasonTintForKind`, `viewer.js`): baked into
+  the terrain cache at build time via per-district, per-terrain-kind passes —
+  forest/farm/beach/quarry/village each get distinct spring/autumn/winter
+  grading clipped to that district's bounds; ecology `stage` scales tint
+  strength through `STAGE_TINT_FACTOR`; barren districts get an extra brown
+  overlay; farm summer gets a subtle lighter pass. Winter ground speckle and
+  tree snow caps are drawn in `sprites.js`. The terrain cache key is
+  `season|ecologyStageKey` (`terrainVisualCacheKey`).
+- **Day/night overlay** (`nightAlpha`, `viewer.js`): ramps a navy overlay from
+  `calendar.dayFraction` (night is the last 25% of each day). Wider twilight
+  (`TWILIGHT_START = 0.62` … `TWILIGHT_END_DUSK = 0.78`, dawn from
+  `TWILIGHT_START_DAWN = 0.92`); quadratic ease-in/out; peak
+  `MAX_NIGHT_ALPHA = 0.58`; optional night desaturation pass when
+  `na > 0.35`; golden hour (`ENV_EFFECTS_ENABLED`) peaks at
+  `GOLDEN_HOUR_MAX = 0.22` over those bands plus a warm rim pass at band edges.
+  Applied as full-canvas `fillRect` after agents/structures each frame.
 - **World clock HUD** (`WORLD_CLOCK_HUD_ENABLED`): a fixed, non-interactive
   badge over the map projects the existing `calendar.season` and
   `calendar.dayFraction`/`isNight` as one of dawn, day, dusk, or night. It is
@@ -133,10 +174,10 @@ mechanism the season tint already uses.
 - **Light glow** (`ENV_EFFECTS_ENABLED`): while the night overlay is active,
   each structure flagged `light: true` in the `/state` structures payload
   whose district is in `civilization.litDistricts` gets a warm radial
-  gradient (center ~`rgba(255,190,90,…)` fading to transparent, radius
-  ~140 world px) composited over the night overlay so lit districts visibly
-  push back the dark. No glow by day or for unfueled lights (they simply
-  lack the flag/district entry that night).
+  gradient composited over the night overlay — core glow (`LIGHT_GLOW_RADIUS
+  = 200`) scaled by `na / MAX_NIGHT_ALPHA`, plus an outer halo
+  (`LIGHT_GLOW_HALO_RADIUS = 280`) when deep night. No glow by day or for
+  unfueled lights (they simply lack the flag/district entry that night).
 - **Weather sky tint + particles** (`WEATHER_ENABLED`, living-ecosystem
   Phase 4): see the dedicated section below.
 - **Structure wear** (`STRUCTURE_WEAR_ENABLED`): the server snapshot's
@@ -158,15 +199,15 @@ mechanism the season tint already uses.
   nearby in world space. Ally lines are warm and rival lines cool; alpha fades
   with distance. The pass does no all-world pair scan and is a clean no-op when
   the flag is off or an older snapshot lacks `socialTies`.
-- **Zoom**: `zoomLevel` (index.html:780) scales `canvas.style.width/height`
-  over the fixed-resolution backing store (`applyZoom`, index.html:784-786);
-  +/- buttons multiply by 1.25/0.8 (index.html:819-820), scroll-wheel zoom
-  is wired (index.html:833), and "Fit" computes the zoom that fits the whole
+- **Zoom**: `zoomLevel` (`viewer.js`) scales `canvas.style.width/height`
+  over the fixed-resolution backing store (`applyZoom`, `viewer.js`);
+  +/- buttons multiply by 1.25/0.8, scroll-wheel zoom
+  is wired, and "Fit" computes the zoom that fits the whole
   world.
-- **Minimap**: `#minimap` (220×160, index.html:585), `renderMinimap()`
-  (index.html:2070+) draws a scaled-down world plus a viewport rectangle
-  from scroll position/`zoomLevel` (index.html:2092-2100); clicking it
-  recenters the main view (index.html:2114-2115).
+- **Minimap**: `#minimap` (220×160, `viewer.css`), `renderMinimap()`
+  (`viewer.js`) draws a scaled-down world plus a viewport rectangle
+  from scroll position/`zoomLevel`; clicking it
+  recenters the main view.
 - **Two side panels**, both filled by `renderSidebar()`:
   - **Left panel** (`#convPanel`), titled "Agents & Activity": the **Agents**
     section (`#agentsPanel` — rollup header, living-agent list with
@@ -175,11 +216,11 @@ mechanism the season tint already uses.
     section (`#conversationLog`) and a **Settlements** section
     (`#settlementsSection`) also live here but are **hidden by default** behind
     the client-side viewer toggles `SHOW_CONVERSATIONS` / `SHOW_SETTLEMENTS`
-    (index.html ~1028, both `false`). These are viewer-only display flags, not
+    (`viewer.js`, both `false`). These are viewer-only display flags, not
     server `config.flags`; flip either to `true` to restore its section. The
     underlying `world.conversation` and `civ.settlements` data still arrives in
     `/state` regardless. `#agentsPanel` is a flex child of `#convPanel` with its
-    own `overflow-y: auto` (index.html ~608), so a long agent roster scrolls
+    own `overflow-y: auto` (`viewer.css`), so a long agent roster scrolls
     within the section instead of being clipped by the panel's own
     `overflow: hidden`.
   - **Right panel** (`#sidebar`): the "AI Simulation World" title, LM/server
@@ -188,15 +229,26 @@ mechanism the season tint already uses.
     `flex-shrink: 0`, natural height), **Civilization** (`#civPanel`
     era/level/structures/active builds/resources), and **Activity**
     (`#activityLog`, the world-event feed, `#actList`). Civilization and
-    Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (index.html
-    ~142-153), so they split the space remaining after Time equally and each
-    scrolls independently. A third scrollable **Chronicle** panel is a curated
+    Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (`viewer.css`),
+    so they split the space remaining after Time equally and each
+    scrolls independently. The Civilization panel's **Village resources**
+    row (`#civResources` headline + `#civResourceList` chips) shows
+    `civ.stockpile` **plus** every agent inventory, keyed through
+    `resourceRegistry`, filtered to `n > 0` (retired or zero holdings never
+    render), with chip colours from `resourceRegistry`. The headline count
+    (`totalVillageResources()`) is the sum of `villageResourceBreakdown()` so
+    the number and chips cannot disagree. Sidebar change detection includes
+    `villageResourceBreakdown()` inside `sidebarKey` (`viewer.js`); the
+    raw `civ.stockpile` dict is intentionally **not** in the key — it is a
+    ~40-key map that changes nearly every tick and would force a sidebar
+    re-render on every poll; the breakdown is the stockpile's proxy in this
+    key. A third scrollable **Chronicle** panel is a curated
     projection of top-level `world.chronicle`, distinct from the raw Activity
     feed. It preserves its scroll position across snapshot updates and is
     hidden cleanly when `CHRONICLE_ENABLED` is off.
-- **`ACTION_LABELS`** (index.html:1357-1390) maps each `DECISION_ACTIONS`
+- **`ACTION_LABELS`** (`viewer.js`) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
-  `humanizeAction(agent)` (index.html:1391-1398) special-cases
+  `humanizeAction(agent)` (`viewer.js`) special-cases
   dead/incapacitated/thinking agents and falls back to
   `a.replace(/_/g, " ")` for any action missing from the map. Display-only —
   not the source of truth for what actions exist (see
@@ -229,7 +281,8 @@ client already parses the full `chronicle` array every poll for the Chronicle
 panel (see above), so no additional data is needed to detect a new founding.
 
 No terrain-cache tint/highlight for newly founded districts was added (the
-plan's stretch item): the static `terrainCanvas` cache (index.html ~921/1233)
+plan's stretch item): the static `terrainCanvas` cache (`viewer.js`,
+  `buildTerrainCache` / `scheduleTerrainCacheBuild`)
 is invalidated only on season change and districts-list change, and adding a
 time-limited "under construction" visual state would require either a new
 per-frame cache-bust condition or extra state tracked outside that cache —
@@ -263,7 +316,7 @@ The existing Council sidebar/history continues to render bounded `councilLog`
 records. `ACTION_LABELS` adds display gerunds for `council_speak`,
 `council_propose`, and `council_vote`.
 
-The history transcript modal (`openCouncilTranscript`, index.html) reads
+The history transcript modal (`openCouncilTranscript`, `viewer.js`) reads
 `record.transcript` from a past `councilLog` entry, which may have been
 written by either council system — the legacy invention council
 (`proposer`/`elder`/`blueprint_name`/... fields, `type` in `convene`,
@@ -316,7 +369,7 @@ heading are chosen per the same classification.
   top edge (sprites.js:794-797). Seasonal agent accents also read the
   module-level `spriteSeason` mirror rather than an explicit `season` param.
   `setSpriteSeason(season)` (sprites.js:7) is called once per `/state` poll
-  from `pollState()` (index.html:2170) so rendering tracks
+  from `pollState()` (`viewer.js`) so rendering tracks
   `calendar.season`. `SEASONAL_AGENTS_ENABLED` uses the same mirror and a
   viewer-set boolean to draw small post-body seasonal accessory pixels on
   living agents (winter wool cap/scarf, spring leaf pin, summer straw brim,
@@ -341,104 +394,175 @@ Reads the top-level `world.weather` projection (`{state, since, districts}`,
 see [05-world.md](05-world.md)) — a sibling of `civilization`, same
 placement as `socialTies`/`districtEcology`/`shipments`.
 
-- **Sky tint** (`weatherSkyAlpha(weather, nightAlpha)`, index.html):
+- **Sky tint** (`weatherSkyAlpha(weather, nightAlpha)`, `viewer.js`):
   composited in the **same full-canvas overlay stage** as the existing
   night overlay — drawn immediately after it, before the golden-hour band —
   so the two stack coherently instead of fighting. `WEATHER_SKY_ALPHA =
-  {clear: 0, gathering: 0.10, storm: 0.26, clearing: 0.14}` is a step ramp
+  {clear: 0, gathering: 0.17, storm: 0.41, clearing: 0.20}` is a step ramp
   keyed by `weather.state` (the server sends only the current state, not a
   within-state progress fraction, so this is a discrete ramp across state
-  transitions rather than a continuous animation). Color is a slate-teal
-  (`rgba(18, 26, 34, …)`), distinct from the night overlay's navy, so a
-  storm during the day is still visually legible as weather rather than
-  dusk.
+  transitions rather than a continuous animation). Color is a cooler
+  green-slate (`rgba(12, 28, 32, …)`), distinct from the night overlay's
+  navy, so a storm during the day is still visually legible as weather
+  rather than dusk.
 - **Darkness clamp:** `MAX_NIGHT_PLUS_WEATHER_ALPHA = 0.68`. The weather
   alpha actually drawn is `min(rawWeatherAlpha, 0.68 - nightAlpha)`, so
   night + storm can never exceed a combined 0.68 before sequential
   `fillRect` alpha compounding (`1 - (1-night)*(1-weather)`). Worst case
-  (winter storm, deep night `nightAlpha = MAX_NIGHT_ALPHA = 0.45`, no golden
-  hour since deep night falls outside the golden-hour dawn/dusk bands, no
-  light glow since the district is unlit): `weatherAlpha` clamps from a raw
-  0.26 down to 0.23, combined visible darkening ≈ 0.577 — noticeably
-  stormier than a plain night but still well short of opaque; verified by
-  inspection in the Phase 4 report (agents/structures/terrain remain
-  identifiable underneath the tint).
-- **Locality tradeoff:** the tint (and particles, below) are **world-wide**,
-  not clipped to `weather.districts`, even though `_maybe_disaster`'s damage
-  targeting *is* localized to those districts (see
-  [08-systems-economy.md](08-systems-economy.md)). Per-district clipping of
-  a full-canvas overlay would fight the also-global night overlay for
-  little visual payoff — a deliberate v1 simplification, not an oversight.
-- **Particles** (`drawWeatherParticles`, index.html; `drawWeatherParticle`,
-  sprites.js): drawn every frame (not baked into `terrainCanvas` — motion
-  can't live in a static cache, same reasoning as `drawWildlife`). Active
-  only during `storm` (full intensity) and `clearing` (45% intensity,
-  tapering off); `clear`/`gathering` draw nothing (`WEATHER_STATE_INTENSITY`).
-  Snow (`drawWeatherParticle(ctx, "snow", …)`, small drifting dot) replaces
-  rain (a short diagonal streak) when `calendar.season === "winter"`.
-  Positions are deterministic from `frameTick` and a per-particle-index hash
-  (`weatherParticleHash`, FNV-1a-style) — no retained state, same discipline
-  as `drawStructureSmoke`/`drawActivityDust`: `x` is a hashed fraction of
-  the visible width, `y` is `frameTick` modulo a per-kind fall period
-  (`130` frames for rain, `500` for the slower-drifting snow) mapped into
-  the visible height, so particles continuously "fall" through the visible
-  band without ever being stored between frames.
-- **Cap by visible area, not world area:** particle count is
-  `min(WEATHER_PARTICLE_CAP(260), floor(visibleW * visibleH /
-  WEATHER_PARTICLE_DENSITY_DIVISOR(14000) * intensity))`, where
+  (winter storm, deep night `nightAlpha` up to `MAX_NIGHT_ALPHA = 0.58`, no
+  golden hour since deep night falls outside the golden-hour dawn/dusk bands,
+  no light glow since the district is unlit): `weatherAlpha` clamps from a raw
+  0.41 down to 0.23, combined visible darkening remains well short of
+  opaque; agents/structures/terrain stay identifiable underneath the tint.
+- **Locality split:** the **base sky tint** is **world-wide** (same stage as
+  the also-global night overlay). During `storm`/`clearing`, districts listed
+  in `weather.districts` additionally receive a **local storm veil**
+  (`drawDistrictStormVeil`): a darker translucent fill clipped to each
+  district's `bounds` rect from `/districts.js` (`getDistrictBounds(id)`).
+  The global tint reads as atmosphere; the veil reads as "the storm is here"
+  while damage targeting stays localized per [08-systems-economy.md](08-systems-economy.md).
+- **Particles** (`drawWeatherParticles`, `viewer.js`; `drawWeatherParticle`,
+  sprites.js): drawn every frame (not baked into `terrainCanvas`). Active during
+  `storm` (full intensity), `clearing` (45% intensity), and `gathering`
+  (light drizzle at intensity `0.18`). Cap **`380`**; divisors
+  **`11000`/`7200`**; sheet every **6th** rain streak; **two depth layers**
+  (background 60% count ×0.5 alpha, foreground 40%); wind-varied rain
+  angles/lengths from per-particle hash; snow uses a flake cluster with slower
+  fall and horizontal wobble. District rain merges into the global layer with
+  bounds clip (no separate district-local rain pass). Snow replaces rain when
+  `calendar.season === "winter"`. Positions deterministic from `frameTick` and
+  `weatherParticleHash` — no retained state.
+- **Cap by visible area, not world area:** global particle count is
+  `min(380, floor(visibleW * visibleH / densityDiv * intensity))`, where
   `visibleW`/`visibleH` come from the same `canvasWrapEl.scrollLeft/scrollTop
   / zoomLevel` viewport math `drawWildlife`/`drawShipments` already use.
-  Zooming out shrinks the effective per-particle screen size but the *count*
-  is bounded by the actual visible pixel area, so a fully-zoomed-out view of
-  the whole (5200x5400) world never spends time computing or drawing
-  hundreds of off-screen or redundant particles.
-- **Lightning:** intentionally **not implemented** in Phase 4 — the plan
-  allowed skipping it ("keep it subtle and rate-limited... skip if unsure")
-  and a flash tied to individual (per-goods-tick, server-side-only) damage
-  events would need either new `/state` signal plumbing or client-side
-  activity-log diffing to trigger correctly without becoming either a
-  seizure risk or visually decoupled from the actual damage event: left out
-  of scope rather than shipped half-verified.
+- **Lightning** (`drawLightningFlash`, `viewer.js`): during `storm` only,
+  deterministic rare full-canvas white/blue flashes (~8–18 display frames,
+  ~130–300ms at 60fps), keyed off local `renderFrame` (rAF), not
+  `frameTick`, in `LIGHTNING_BUCKET_FRAMES` (540) windows — no new
+  `/state` fields. Drawn immediately after the sky tint, before golden hour;
+  alpha ~0.10–0.20 so readability is preserved. ~12% of buckets may flash
+  (~every ~75s at 60fps), not every second.
+- **Weather chip on World Clock HUD** (`renderWorldClockHud`, `viewer.js`,
+  `WORLD_CLOCK_HUD_ENABLED`): when `WEATHER_ENABLED` and `world.weather` are
+  present, appends the title-case state label after season+phase, e.g.
+  `spring day · Storm`.
+- **Disaster banner** (`#disasterBanner`, `viewer.js`): mirrors the founding
+  banner pattern — edge-detects new `world.chronicle` entries with
+  `kind === "disaster"` via a first-snapshot-seen `Set` on `frame` (no replay
+  on page load). Shows storm-colored slate/teal banner for 5.5s with entry
+  text. Gated on `CHRONICLE_ENABLED`; edge-detection mirrors founding (runs
+  whenever enabled — empty chronicle clears the seen Set).
+- **Structure hit flash** (`trackStructureConditionDeltas`,
+  `drawStructureHitFlash`, `viewer.js`): client-only diff of structure
+  `condition`/`isRuin` between polls; flashes when condition drops by at
+  least `STRUCTURE_HIT_FLASH_MIN_DROP` (5 — enough to ignore passive decay
+  ~0.025 per goods tick, still catches disasters at 40–70) or when
+  `isRuin` newly becomes true. That id flashes white/cyan outline + bright
+  overlay for ~800ms wall clock. Gated on `STRUCTURE_WEAR_ENABLED`.
 - **Gate:** `WEATHER_ENABLED = false` — `weatherSkyAlpha` returns 0 (no sky
-  change) and `drawWeatherParticles` returns immediately (nothing drawn),
-  regardless of `world.weather`'s presence/content.
+  change), lightning/veil/particles all no-op, and the World Clock HUD omits
+  the weather chip, regardless of `world.weather`'s presence/content.
 
-## Ambient wildlife (`WILDLIFE_ENABLED`, living-ecosystem Phase 2)
+## Atmosphere rendering (permanent defaults)
 
-Follows the same physicalProps precedent above: server-derived decoration
-with deterministic positions, not a new entity type. Unlike terrain/crops,
-wildlife is **not** baked into `terrainCanvas` — it is drawn every frame in
-`tickBody()` (`drawWildlife(ctx, renderFrame)`, called right after
-`drawSocialTies`) since animating it via the static cache isn't possible.
+The Phase 4 atmosphere pack (lighting, seasonal terrain grading, weather
+particles, Divine Console chrome) is **always on** in the viewer — not gated by
+module-level flags. Only `WEATHER_ENABLED`, `ENV_EFFECTS_ENABLED`, and
+`GOD_MODE_ENABLED` still toggle their respective subsystems.
+`docs/plan-visual-*.md` files are historical design records (superseded banners
+note the removed flag gates); this section and the viewer implementation are the
+runtime contract. Implementation plans: `docs/plan-visual-1-day-night-lighting.md`,
+`docs/plan-visual-2-seasonal-terrain-grading.md`,
+`docs/plan-visual-atmosphere-systems.md`.
 
-- **Density** reuses the exact same top-level `world.districtEcology` stage as
-  the crop/tree growth pass (see above and [05-world.md](05-world.md)):
+## Ambient wildlife (`WILDLIFE_ENABLED`)
+
+Server-authoritative huntable fauna. Unlike terrain/crops, wildlife is
+**not** baked into `terrainCanvas` — it is drawn every frame in `tickBody()`
+(`drawWildlife(ctx, renderFrame)`, called right after `drawSocialTies`)
+from the live `/state` projection. The viewer holds no fauna state of its
+own and does **not** pathfind, spawn, or reposition creatures.
+
+- **`/state` projection:** when `WILDLIFE_ENABLED`, `snapshot()` exposes a
+  top-level `wildlife` list — `[{id, kind, districtId, x, y, hp, maxHp}]` —
+  one entry per **alive** creature (same sibling placement as
+  `districtEcology`/`socialTies`). Dead / pending-respawn creatures are
+  omitted. Engine ownership, spawn/respawn, wander/flee, migration, and
+  combat live in [02-engine-core.md](02-engine-core.md); hunt yield in
+  [07-actions.md](07-actions.md) / [08-systems-economy.md](08-systems-economy.md).
+- **Density (engine):** spawn caps still key off `world.districtEcology`
+  stage per district ([05-world.md](05-world.md)):
   `WILDLIFE_STAGE_COUNT = {barren: 0, sparse: 1, healthy: 2, lush: 4}`,
   capped at `WILDLIFE_CAP_PER_DISTRICT = 4`. Only forest/farm/beach district
-  kinds are mapped to a wildlife kind at all (`WILDLIFE_KIND_BY_DISTRICT_KIND`)
-  regardless of whether other kinds have a `districtEcology` entry.
-- **Which creature per district kind:** `WILDLIFE_KIND_BY_DISTRICT_KIND =
-  {forest: "bird", farm: "grazer", beach: "fish"}`. Fish are placed within
-  the first ~70px of the beach district's bounds (the shore edge against the
-  adjacent ocean district) rather than scattered across dry sand.
-- **Positions** are deterministic per district+slot: `wildlifeHashSeed(districtId)`
-  (FNV-1a-style string hash) seeds a simple integer PRNG so a given creature
-  slot always lands at the same point in the district's bounds — no
-  per-creature state is persisted, and nothing repositions between polls.
-  `frameTick` only drives a small animation (a sine-wave vertical bob shared
-  by all kinds, plus wing-flap/fin-wiggle detail in the sprite draw calls in
-  sprites.js: `drawFishRipple`, `drawBird`, `drawGrazer`).
-- **Viewport culling** mirrors the shipped `drawSocialTies` pattern: the
-  whole district's bounds are culled against the scroll/zoom-derived
-  viewport before any per-creature work, then each creature position is
-  culled individually.
-- **Limitation (intentional):** wildlife is decoration only. They cannot be
-  hunted, gathered, or interacted with in any way, and do not feed the food
-  supply or any other resource. Making them huntable would require a new
-  agent action and a new resource path — explicitly out of scope for this
-  phase (see [plan-living-ecosystem-2-ecology-visible.md](../docs/plan-living-ecosystem-2-ecology-visible.md)).
-- **Gate:** `WILDLIFE_ENABLED = false` → `drawWildlife` returns immediately;
-  nothing is drawn, no cost beyond the flag check.
+  kinds host fauna pools.
+- **Kind pools (16 kinds):**
+
+  | District | Kinds | Kill yield |
+  |---|---|---|
+  | forest | `bird`, `squirrel`, `deer`, `fox`, `boar`, `owl` | `meat` |
+  | farm | `cow`, `rabbit`, `chicken`, `mouse` | `meat` |
+  | farm | `bee` | none — decorative, not huntable |
+  | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
+
+- **Rendering (`sprites.js`):** `drawWildlifeCreature` dispatches in order:
+  sheet blit for kinds in `WILDLIFE_SHEET_FRAMES` (all 16 when atlas present)
+  → canvas silhouette helpers → procedural pixel grids — nothing ever renders
+  blank.
+  - **Spritesheet loader:** at module load, `preloadWildlifeSheet()` fires
+    a fire-and-forget `Image()` fetch for `/wildlife.png` (served beside
+    `sprites.js`; see [12-ops.md](12-ops.md)). `_wildlifeSheetReady` is
+    set only on successful load with non-zero dimensions; `onerror` or a
+    missing file (404) leaves it `false` permanently for that page load.
+    When ready **and** the kind has an entry in `WILDLIFE_SHEET_FRAMES`,
+    `tryDrawWildlifeFromSheet` blits via `ctx.drawImage` with
+    `imageSmoothingEnabled = false`, using optional `destW`/`destH` overrides.
+    Extracted frame regions are cached in `_wildlifeSheetBlitCache` keyed by
+    source rect (same module-level cache idiom as `_tileSourceCanvasCache`).
+    Frame entries may be a bare `{ sx, sy, sw, sh, destW?, destH? }` or
+    `{ stand, alt? }` with the same `frameTick` cadence as procedural
+    animation. **`WILDLIFE_SHEET_FRAMES` maps all 16 user-art kinds** packed from
+    `simulation/assets/wildlife/*.png` into `/wildlife.png` (variable source
+    rects; dest sizes fit tier boxes preserving aspect ratio).
+  - **Canvas silhouette helpers:** fallback when the sheet is missing or not
+    ready; restored pre-sheet canvas primitives (V-wing birds, owl blink,
+    squirrel tail-flick, bee wing flap, etc.) via `WILDLIFE_CANVAS_HELPERS`. Each helper is drawn with a tier scale transform (`WILDLIFE_CANVAS_SCALE_BY_TIER`:
+    large ~1.8, mid ~1.3, small 1.0) around the creature anchor so size tiers
+    remain visible. Per-kind alt-frame cadence matches the former helpers
+    (8–20 ticks where animated).
+  - **Procedural fallback:** each kind also has a pixel-grid entry in the
+    `WILDLIFE_SPRITES` table (flat-color, black-outline idiom matching
+    agent sprites). `drawWildlifeCreatureProcedural` is the last resort when
+    neither sheet nor canvas helper applies. An entry may be a bare grid
+    (static kinds) or `{ stand, alt? }` (animated kinds). Drawing uses
+    `drawPixelSprite` with **per-tier scale** via `WILDLIFE_SIZE_TIER` /
+    `WILDLIFE_TIER_SCALE`. Approximate on-screen sizes:
+
+  | Tier | Sheet dest | Canvas scale | Procedural scale | Kinds |
+  |---|---|---|---|---|
+  | large | ≈44 px max side | ~1.8 | 2 | `deer`, `boar`, `cow`, `seal` |
+  | mid | ≈34 px max side | ~1.3 | 2 | `fox`, `owl`, `turtle`, `rabbit`, `chicken`, `gull`, `bird` |
+  | small | ≈26 px max side | 1.0 | 1 | `mouse`, `squirrel`, `fish`, `crab`, `bee` |
+
+  Cosmetic motion also includes the caller-side `bob` sine offset in
+  `drawWildlife` (`viewer.js`); `frameTick` drives frame swap only and does
+  not invent a second position.
+- **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
+  (and `districtId`). The viewer does not seed positions client-side and
+  does not run a road pathfinder for fauna — motion and cross-district
+  migration are already resolved server-side between polls. `frameTick` is
+  passed through for alt-frame animation; it does not invent a
+  second position.
+- **Viewport culling** mirrors `drawSocialTies`: cull by district bounds
+  against the scroll/zoom viewport, then per-creature `(x, y)`.
+- **Interaction:** fauna are huntable via the agent action `hunt_wildlife`
+  (multi-hit HP; land kills grant `meat`, beach kills grant `fish`;
+  `bee` is never a valid target) — see [07-actions.md](07-actions.md).
+  The viewer does not resolve hunt hits; it only renders the projected
+  alive set (optional cheap HP cue is allowed but not required).
+- **Gate:** `WILDLIFE_ENABLED = false` → no `wildlife` key (or empty) and
+  `drawWildlife` returns immediately; nothing is drawn beyond the flag
+  check.
 
 ## Goods-in-motion shipments (`CARAVAN_VISUALS_ENABLED`, living-ecosystem Phase 3)
 
@@ -481,15 +605,536 @@ via `drawShipments(ctx, world.frameTick)`, called right after
   server restart `world.shipments` is simply absent/empty until new
   transfers occur, so there is nothing to orphan visually.
 
+## Divine Console (Sovereign God mode, Phase 7)
+
+The Divine Console is a fixed bottom action bar plus a large modal dialog —
+not a sidebar panel. Eight feature buttons (**Unlock**, **Sight**, **Voice**,
+**Miracles**, **Story**, **Laws**, **History**, plus **Compile** when the
+server reports the Optional Phase 8 compiler enabled — see below) live in
+`#divineBar` (`position: fixed; bottom: 0; left: 0; right: 0`). Clicking a
+button opens `#divineModalScrim` / `#divineModal` (`role="dialog"`,
+`aria-modal="true"`), whose body is `#divineModalBody`. At load time the eight
+`#divineTab-<name>` panel nodes sit in a hidden holding container
+`#divineTabHold` so `wireDivineForm()` and other `getElementById` bindings
+still resolve at startup; **opening a feature reparents** (moves, never clones)
+the matching `#divineTab-<name>` into `#divineModalBody`, and **closing**
+returns it to `#divineTabHold`. A shared floating tooltip element `#tooltip`
+serves every `data-tip` control in the bar and modal. `#godPublicBanner` remains
+independent (fixed top-center; see "Public banner" below). The console is
+strictly additive over
+[docs/plan-sovereign-god-mode-v2.md](../docs/plan-sovereign-god-mode-v2.md)'s
+already-shipped backend (Phases 2–6, see
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel)
+and [04-http-api.md](04-http-api.md#sovereign-god-mode)) — no engine or route
+code changed for this phase.
+
+**Feature gate.** Bar visibility and modal behavior are driven by
+`GOD_MODE_ENABLED_FLAG`, a module-level mirror of
+`state.config.flags.GOD_MODE_ENABLED`, set in `applyFlags()` the same way every
+other echoed flag is (see "Polling and render loop" above).
+`updateGodModeGate()` (called once per `renderSidebar()`, itself once per
+`pollState()` tick — **no new poll loop**) toggles `#divineBar`'s `display` and,
+when off, force-hides `#godPublicBanner` too. When `GOD_MODE_ENABLED` is absent
+or false — including an older snapshot from before this key existed, or a
+snapshot from a `GOD_MODE_ENABLED`-off server — the console makes zero
+`/control/god/*` requests except where noted below for open-mode bootstrap.
+
+**Divine Console chrome (permanent default).** When `GOD_MODE_ENABLED` is on,
+the bar uses 100px viewport clearance, a taller bar with gold underline on the
+active feature button, a sticky **preview strip** at modal top
+(`#divinePreviewStrip`) showing command name + reversibility badge +
+Apply/Discard when a preview is cached, collapsible preview panel
+default-expanded, fieldset hierarchy with crimson left border on irreversible
+sections, a **pin row** for the last applied intervention (link to History), bar
+brand secondary line `N interventions` from `recentPublicInterventions` length,
+and **Ctrl/Cmd+Enter** applies when a preview is valid. All UX is viewer-only
+— no new routes or engine mutations. **`GOD_MODE_ENABLED` off:** bar hidden.
+
+**Authorization gate (dual signal).** Whether the Unlock lifecycle runs is
+driven by a second mirror, `GOD_AUTH_REQUIRED_FLAG` (from
+`state.config.flags.GOD_AUTH_REQUIRED`, also set in `applyFlags()` and synced
+on every `updateGodModeGate()` tick). When `GOD_AUTH_REQUIRED` is **false**
+(the default): there is no Unlock step — the brand state reads `open` (green),
+the Unlock bar button and its `statuspip` are hidden, every
+`.gbtn.locked-dependent` is enabled immediately via
+`godEffectivelyAuthorized()` (`godAuthorized || !GOD_AUTH_REQUIRED_FLAG`), and
+`/control/god/capabilities` is fetched once without a token as soon as God mode
+is confirmed on (`godOpenModeBootstrap()`, guarded so it runs at most once per
+session and only while `GOD_MODE_ENABLED_FLAG` is true). `godLockConsole()` is
+a no-op re-lock in this mode (console.warn only — a stray 401 must not pop the
+hidden Unlock modal). `restoreGodTokenFromSession()` and the remember-checkbox
+/sessionStorage wiring are skipped entirely.
+
+When `GOD_AUTH_REQUIRED` is **true**: behavior matches the original Phase 7
+contract — `godAuthorized` starts false, the Unlock button and pip are visible,
+locked-dependent buttons stay disabled until `godConnect()` succeeds, a 401 from
+any God call clears the token and re-locks via `godLockConsole()` (opening the
+Unlock modal), and the remember-checkbox may mirror the token into
+`sessionStorage`. The Unlock tab markup and `openDivineModal("unlock")` remain
+in the codebase as dead-but-harmless paths for re-enabling auth.
+
+When God mode is off, a flag-off render is byte-identical to the pre-Phase-7
+page for every other panel; no bootstrap fetch runs.
+
+**Modal UX.** `openDivineModal(name)` and `closeDivineModal()` are the
+primary open/close API (replacing the prior in-sidebar `showGodTab()` toggle;
+`showGodTab` may remain as a thin alias that delegates to `openDivineModal`).
+Opening reparents `#divineTab-<name>` into `#divineModalBody`, sets the modal
+header title/icon/subtitle, and shows `#divineModalScrim`. Closing via the ✕
+button, a backdrop click on `#divineModalScrim`, or Escape reparents the panel
+back to `#divineTabHold` and hides the scrim. Side effects that previously
+fired on tab switch now fire on open: Sight → `refreshGodSight()` when
+effectively authorized (`godEffectivelyAuthorized()`); Laws →
+`renderGodLawsActive()`; History → `renderGodHistory()`.
+The Compile bar button `#godCompileTabBtn` stays dual-gated via
+`capabilities.compiler.enabled` (see Compile below).
+
+**Modal width (Divine Console improvements, Phase 1).** Default `#divineModal`
+width is `min(680px, 96vw)`. `openDivineModal(name)` toggles a `wide` class on
+`#divineModal` for **matrix**, **story**, **laws**, and **compile**; `closeDivineModal()`
+removes it. Wide modals use `min(960px, 96vw)`. All other features keep the
+default width. Presentation-only — no route or engine changes.
+
+**Operator context + speed (Divine Console improvements, Phase 2).** Viewer-only
+UX; engine preview/apply payloads unchanged (durations remain frames server-side).
+
+- **Agent focus (`godFocusAgentId`).** Module-level focus id (initially `null`).
+  Sidebar agent selection sets `godFocusAgentId` to match `selectedAgentId`
+  (cleared on deselect). `setGodFocusAgent(id, opts)` sets focus, optionally
+  mirrors sidebar selection, and refreshes agent `<select>`s. `populateGodAgentSelects()`
+  rebuilds options via `godAgentOptionsHtml(preferredId)` where `preferredId`
+  is `godFocusAgentId` then `selectedAgentId`, but still preserves an open
+  dropdown's current value when that agent is still living (existing
+  preserve-value pattern). `#godAgentFilter` (modal head) narrows living-agent
+  option lists by name/role/id substring; repopulates on filter change.
+- **Canvas pick.** When `GOD_MODE_ENABLED_FLAG` is true, a canvas click on a
+  living agent (via `clientToWorld` + `agentAtWorldPoint`) sets both
+  `selectedAgentId` and `godFocusAgentId`, syncs sidebar selection/detail,
+  centers the camera (`centerCameraOnAgent`), and refreshes agent selects.
+  Empty-space clicks do **not** clear focus. Hover (`hoveredAgentId`) and
+  existing camera controls are unchanged. **Priority:** agent hit-test wins
+  over structure pick (Phase 7).
+- **Canvas structure pick (Phase 7).** While the Miracles or Story divine
+  modal is open and God mode is on, a canvas click that misses agents but
+  hits a non-ruin structure (`structureAtWorldPoint`, bounding box from
+  `getStructureRenderSize`) sets structure targets: `#godStructureSelect` on
+  Miracles; every `.godPrimStructure` select in Story primitive rows on Story.
+  Does not invalidate an cached preview until the operator edits a wired field.
+- **Seconds-first durations.** Divine Console duration number inputs display
+  **seconds** (labels/placeholders). Preview envelope builders convert with
+  `godSecondsToFrames(sec)` → `Math.round(sec * 30)` before setting
+  `durationFrames`; blank still means until-revoke / omit. Capability bounds
+  from `applyGodCapabilitiesToForms()` are converted frames→seconds for
+  `min`/`max`/`default` on those inputs. Display helpers (`godDurationLabel`,
+  Sight countdowns) still show both seconds and frames.
+- **Keyboard (modal open).** Shortcuts are ignored while focus is in
+  `input`/`textarea`/`select` except **Ctrl/Cmd+Enter** (Apply). With the
+  modal open: digit keys **1–9** open the Nth **visible, enabled** bar feature
+  in DOM order (Unlock skipped when `GOD_AUTH_REQUIRED_FLAG` is false; Compile
+  skipped when hidden); **`/`** focuses `#godAgentFilter`; **`S`** calls
+  `refreshGodSight()` when effectively authorized; **Ctrl/Cmd+Enter** applies
+  the cached preview (same irreversible guard as the Apply button).
+- **Favorites.** Up to four shortcuts in `sessionStorage` key
+  `divineFavorites`: `{feature, fieldsetId?, label}`. `#divineBarFavorites`
+  renders chips on the bar; click opens the feature and scrolls to
+  `fieldsetId` when set. **Pin this section** (`#divinePinSectionBtn`, modal
+  head) pins the current scroll target; fieldset legends with `data-fav` support
+  double-click pin. Token is never stored in favorites or `localStorage`.
+- **Irreversible confirm.** Apply on `.divine-fieldset-irreversible` forms and
+  on `#divinePreviewStrip` when the owning fieldset is irreversible requires
+  **hold Apply ~400ms** or typing the target agent's name (first agent
+  `<select>` in the fieldset, else `godFocusAgentId` / `selectedAgentId`) into
+  `#divineIrreversibleConfirmInput` (shown in the preview strip when relevant).
+  Agent-less irreversible forms (e.g. mass repair) accept hold-only. Crimson
+  `.divine-fieldset-irreversible` styling unchanged; reversible applies
+  unchanged.
+
+**Bar situational awareness (Divine Console improvements, Phase 3).**
+Viewer-only HUD on `#divineBar`; no new poll loop — wired into the existing
+`updateGodModeGate()` / `renderDivineConsole()` / `pollState()` →
+`renderSidebar()` path.
+
+- **`#divineBarEffects` chips** (between `.bar-brand` and `.bar-buttons`):
+  compact clickable chips for **Providence** (on/off), **Omens** (count),
+  **Laws/events** (active count), **Gates** (gate + possession aggregate),
+  **Zones** (architect zones), and **Sampling** (agent sampling overrides).
+  **Data sources:** when `godEffectivelyAuthorized()`, prefer the last Sight
+  snapshot (`godLastSight` from `GET /control/god/sight`); always merge public
+  fields from `/state` `world.god` (`providence`, `activePublicEvents`,
+  `recentPublicInterventions` for pulse only). **Private counts** (omens,
+  gates, sampling, zones) render only after Sight has been fetched while
+  authorized — chips are omitted (not shown as "—") until then. **Providence**
+  and **public law/event** counts may render from `/state` alone. Clicking a
+  chip calls `openDivineModal()` for the owning feature and
+  `scrollIntoView()` on a relevant fieldset/section when one exists (Voice →
+  providence/omen fieldsets; Laws → `#godLawsActive`; Matrix → Mind/Will/Place
+  sections).
+- **Status pips on feature buttons.** Small count badges (`.gbtn-countpip`) on
+  `.gbtn.voice`, `.gbtn.laws`, and `.gbtn.matrix`: Voice shows providence/omen
+  activity; Laws shows active timed law/event count; Matrix shows
+  gate+possession+sampling+zone aggregate. Unlock, History, Sight, Miracles,
+  Story, and Compile stay clean unless a future phase adds signal.
+- **Bar pulse.** When `recentPublicInterventions` gains a new id, edge-detect
+  with the same `godSeenInterventionIds` set as `#godPublicBanner` and briefly
+  add `.divine-bar-pulse` on `#divineBar` (CSS keyframe; disabled under
+  `prefers-reduced-motion`, falling back to a static gold top border).
+- **Sight soft-refresh for bar counts.** When authorized, no divine modal is
+  open, and the last Sight fetch is older than ~30s (or Sight was never
+  fetched), `maybeRefreshGodSight()` may call `refreshGodSight()` once —
+  throttled, not on every 100ms poll — so private chips populate without
+  spamming `/control/god/sight`. Between refreshes, chips and pips update from
+  `godLastSight` plus public `/state` each poll.
+
+**Sight HUD (Divine Console improvements, Phase 4).** Viewer-only; no new routes
+unless noted. Engine `god_sight()` shape unchanged — architect zone summaries
+still expose `id`, `kind`, `districtId`, `cellCount`, `expiresFrame`, and
+optional `holdCount` only (no per-cell bounds in Sight).
+
+- **Live Sight soft-refresh.** `maybeRefreshGodSight()` (same hook as bar
+  refresh inside `updateGodModeGate()` / `pollState()` → `renderSidebar()`) uses
+  two throttles: **~30s** when no divine modal is open (bar private chips); **~1.5s**
+  when the Sight feature modal or Voice feature modal (adherence panel) is open
+  and the operator is effectively authorized. No second poll loop.
+- **Client-side diff.** Each successful `refreshGodSight()` compares the new
+  snapshot to the prior one. For the Sight-selected agent (prefer
+  `godFocusAgentId` when set) show detailed vitals/`lastAction`/`decisionGate`/
+  `divineHold` deltas; other agents contribute compact one-line entries when
+  changed. A **Changed since last look** strip at the top of `#godSightOutput`
+  escapes all dynamic text via `escapeHtml()`.
+- **One-click intervene.** Sight agent rows and relevant effect summaries expose
+  small buttons (**Omen**, **Heal**, **Possess**, **Sampling**) that call
+  `setGodFocusAgent()` + `openDivineModal(feature)` + `scrollIntoView()` on the
+  owning fieldset (`godOmenFieldset`, `godVitalsFieldset`, `godPossessionFieldset`,
+  `godSamplingFieldset`), reusing Phase 2/3 scroll helpers.
+- **Canvas overlays (divine modal open).** While `#divineModalScrim` is open,
+  the render pass draws viewer-only overlays from Sight (when authorized) plus
+  public agent positions from `/state`:
+  - **Focus ring** — gold ellipse on `godFocusAgentId` (else `selectedAgentId`).
+  - **Architect zones** — dashed district-bounds rectangle per
+    `godLastSight.architectZones[]` entry, colored by `kind` (`paint` gold,
+    `door` cyan, `limbo` violet); cell-level outlines deferred until Sight
+    exposes cells.
+  - **Limbo / divine hold** — pulsing violet ring on agents with
+    `architectLimbo.active` or `divineHold` in Sight.
+  - **Anointed** — warm halo on agents with `anointment.active` in Sight.
+  Does not mutate world state.
+
+**Village pulse (Divine Console improvements, Phase 10).** When
+`godLastSight.pulse` is present, a compact **Village pulse** card renders in
+`#godSightOutput` immediately below the Phase 4 diff strip and above the
+per-agent detail / intervene row. All dynamic text uses `escapeHtml()`. The
+card summarizes: crisis agents (name + reason, capped display), stockpile
+totals, open project count, Sage/elder status, weather state + affected
+districts, active event titles, and providence active/expiry — mirroring the
+engine `pulse` object without secret omen/providence text.
+
+**Tooltips.** Every interactive control, every fieldset legend, and every bar
+button carries a `data-tip` attribute whose value is JSON `{t,d}` (short title
++ one-sentence description). A single shared engine on `#tooltip` shows on
+`mouseenter`/`focusin` and hides on `mouseleave`/`focusout` (keyboard accessible,
+not hover-only); positions above the target, flipping below if the viewport top
+would clip; writes content via `escapeHtml`/`textContent` only — never raw HTML
+from variables; and respects `prefers-reduced-motion` for show/hide transitions.
+
+**Token handling (auth-required mode only).** When `GOD_AUTH_REQUIRED_FLAG` is
+true, the token lives in one JS variable, `godToken`, held only in memory. The
+Unlock feature window offers a "remember for this tab" checkbox
+(`#godRememberCheckbox`, default unchecked) that, only when checked, mirrors the
+token into `sessionStorage` — `localStorage` is never used anywhere in this
+section. `godApiFetch()` (the single fetch wrapper every God call goes through)
+clears `godToken`/`godAuthorized`/the cached capabilities/sight response and
+re-locks the console (`godLockConsole()`, switches back to the Unlock feature
+via `openDivineModal("unlock")`) on any `401` response, matching the backend's
+uniform unauthorized shape (04-http-api.md). When `GOD_AUTH_REQUIRED_FLAG` is
+false, `godApiFetch()` omits the `X-God-Token` header (no token in memory) and
+`godLockConsole()` does not clear state or open the Unlock modal on 401.
+
+**Rendering contract.** Every dynamic string this section writes into
+`innerHTML` is escaped with the file's existing `escapeHtml()` helper before
+insertion (this section alone adds dozens of call sites, on top of the
+65+ pre-existing ones cited above) — narration, titles, error/rejection
+reasons, agent names, resource/structure labels, and history entries all go
+through it. `god_preview()`'s `normalizedCommand` field is deliberately
+**never** written into `innerHTML` or otherwise rendered anywhere; every
+preview/apply outcome shown to the operator is instead rebuilt field-by-field
+from the response's typed keys (`renderGodPreviewOutcomeHtml()`/
+`renderGodAppliedHtml()`), each value escaped individually.
+
+**Preview → Apply.** `wireDivineForm(formSelector, opts)` is the one reusable
+wiring helper behind every mutating subform (proclamation, providence,
+private omen, miracle subforms, story event, law): an `input`/`change`
+listener on the whole `<fieldset>` invalidates any cached preview and
+disables Apply; Preview posts the built envelope to
+`/control/god/preview` and, on success, caches the response and renders
+`reversibilityClass` as a color-coded badge
+(`.divine-badge-irreversible`/`-consequential`/`-cancellable`) plus the
+preview's outcome and any disclosed replacement (`fingerprint.outgoingId`,
+rendered as an explicit "this will REPLACE …" warning for
+providence/private_omen); Apply posts **only** `{previewId, requestId}` — the
+client never re-sends the normalized command — and renders exactly what
+`/control/god/apply` returns, clearing the cached preview either way (success
+or rejection) so a second Apply always requires a fresh Preview.
+
+Timed effects display both units together via `godDurationLabel()`
+(`"Xs (Yf)"`, dividing by the same 30-ticks/s assumption the rest of the
+viewer uses) and a live countdown via `godCountdownLabel()` computed against
+the latest polled `world.frameTick`.
+
+**Replacement-conflict asymmetry (Story/Laws).** Providence and private-omen
+replacement is disclosed proactively by the preview response
+(`fingerprint.outgoingId`), so the console can show the warning before the
+operator ever needs to know an id. A `story_event` modifier-key conflict
+(used by both the Story and Laws feature windows, since Laws submits a `story_event`
+carrying only `modifiers`) is instead a **hard preview rejection** naming the
+occupying event's id in the reason string (`_validate_god_story_event`, see
+02-engine-core.md) — there is no disclosed `outgoingId` to read. The console
+recovers the id by pattern-matching the rejection text
+(`onPreviewRejected` in `wireDivineForm`), then offers a "Replace conflicting
+effect" checkbox pre-filled with that id so a second Preview (now carrying
+`replaceEffectId`) can succeed. This is a viewer-side accommodation of an
+existing backend asymmetry, not a claim that the backend discloses the
+conflict the same way — see this phase's report for the underlying gap.
+
+**Sections:**
+
+- **Unlock** (visible only when `GOD_AUTH_REQUIRED_FLAG` is true) — token
+  field, "remember for this tab" checkbox, Connect button, and a status readout
+  (`locked` / `Authorized.` / an unauthorized message). When auth is not
+  required the bar button is hidden and the brand state shows `open` instead.
+  A disabled-flag hint line was scoped out per the phase brief (the bar is
+  never rendered at all when God mode is off, so there is nothing to hint from
+  inside it).
+- **Sight** — an agent selector (`getLivingAgents()`, the same public roster
+  every other panel already reads) plus a Refresh button that calls
+  `GET /control/god/sight` and renders the selected agent's health/hunger/
+  incapacitated/district/resources/last action, private-omen status
+  (active + countdown + `unacked` flag only, never the omen text — matching
+  `god_sight()`'s own restraint), every active effect from the authenticated
+  `activeEvents` list (including private-visibility ones, tagged with a
+  `private` badge) with a countdown each, and a **Voice adherence** subsection
+  listing `recentDivineResponses` entries for the selected agent (newest first,
+  capped display): agent name, guidance kind/id, `follow`/`continue` stance,
+  reason (including `missing_divine_response` when synthetic), frame, and the
+  applied `action`. Private omen text never appears in this list.
+- **Voice** — four independent subforms (`proclamation`, `providence` with
+  a duration field, `private_omen` with an agent selector and duration, and
+  `whisper_campaign` with shared theme + per-agent whisper rows up to 12),
+  each following the Preview → Apply contract above. **Proclamation** applies
+  as timed providence (same slot, duration, revoke) per
+  [02-engine-core.md](02-engine-core.md); capabilities echoes optional
+  `durationFrames` on the proclamation kind.
+- **Voice presets (Phase 5).** `sessionStorage` key `divineVoicePresets` holds
+  named presets for `proclamation`, `providence`, and `private_omen` (text,
+  duration seconds where applicable, optional `presentation` for public kinds).
+  Minimal controls at the top of the Voice tab: preset `<select>`, **Load**,
+  **Save current** (prompts for a label), **Delete**. Loading a preset fills
+  the matching fieldset inputs only — never auto-previews or applies.
+- **Voice Adherence (Phase 5).** A dedicated panel section (reachable from the
+  Voice feature window and cross-linked from Sight) fed by the authenticated
+  `recentDivineResponses` ring from the latest `god_sight()` refresh. Two
+  sub-panels beside each other:
+  - **Adherence timeline** — compact chronological list (newest first, capped)
+    of `follow`/`continue` entries with agent name, stance badge, reason
+    snippet (~80 chars), and frame. All dynamic text via `escapeHtml`.
+  - **Reply inbox** — same ring, reason-focused: agent name + full stated
+    reason (truncated for layout), newest first; never shows private omen text
+    or raw `normalizedCommand`. Distinct layout from the timeline so operators
+    can scan stances vs read replies.
+  Refresh reuses the same Sight fetch. Sight's per-agent subsection keeps a
+  compact table (hide agent column) cross-linked to Voice → Adherence.
+- **Voice presentation (Phase 5).** Proclamation and Providence fieldsets
+  expose a **Presentation** control (`soft` \| `thunder`, default soft) passed
+  through preview builders. `#godPublicBanner` toggles CSS classes
+  `divine-banner-soft` / `divine-banner-thunder` from
+  `recentPublicInterventions[].presentation` (setdefault `"soft"`). Chronicle
+  list items add `chronicle-presentation-thunder` when `entry.presentation ===
+  "thunder"`. Cognition/prompt text is unchanged server-side.
+**Plain-language operator help (Divine Console improvements).** `DIVINE_FEATURES`
+in `viewer.js` is the source of truth for modal title, subtitle, bar tooltip,
+and the always-visible `#divineFeatureGuide` callout (`.divine-feature-guide`)
+inserted at the top of `#divineModalBody` on `openDivineModal()` and removed on
+`closeDivineModal()`. Guide copy uses `textContent` only. Individual controls
+keep delegated `#tooltip` hovers via `data-tip` JSON (`t` title, `d` detail) —
+operator-facing strings use village/villager vocabulary (no API paths, no
+preview/apply protocol jargon); Preview ≈ “check without changing the village”,
+Apply ≈ “make it real”. Irreversible fieldsets retain crimson styling and say
+“cannot be undone” in legend or `.divine-help`.
+
+- **Matrix** — brain, memory, distortion, possession, dialogue, identity, zone,
+  and checkpoint interventions (see phase list below). Each tool fieldset shows
+  an always-visible `.divine-help` blurb under its legend plus `data-tip`
+  tooltips on labels, controls, and Preview/Apply buttons (same delegated
+  `#tooltip` handler as Voice). The panel opens with a short intro paragraph;
+  tools are grouped under `.divine-matrix-section` blocks with stable ids
+  (`#matrix-sec-mind`, `#matrix-sec-memory`, …) and section headings (Brain,
+  Memory, Distortion, Possession, Dialogue & Bargain, Identity, Zones, Reload).
+  **Matrix category nav (Phase 1):** a sticky chip row (`.divine-matrix-nav`)
+  at the top of `#divineTab-matrix` scrolls the modal body to the matching
+  section via `scrollIntoView` — chip labels Mind / Memory / Distortion / Will /
+  Covenant / Form / Place / Time map to those sections (Brain→Mind,
+  Possession→Will, Dialogue & Bargain→Covenant, Identity→Form, Zones→Place,
+  Reload→Time). Sections use `scroll-margin-top` so headings clear the sticky
+  chips. Phase 2 ships **Brain / Temperature
+  Dial** (`agent_sampling`: agent + model + temperature slider + optional
+  `top_p`/`top_k`/`min_p` + duration; `revoke_agent_sampling` to clear).
+  Phase 3 adds **Memory Surgery** (`memory_insert`, `memory_delete`,
+  `belief_plant` — three independent fieldsets with agent selectors).
+  Phase 4 adds **Reality distortion** (`context_mask`: agent + mode radio
+  — blue pill / red pill / dream / whisper chain — plus duration; dream and
+  whisper modes accept JSON field inputs). Phase 5 adds **Possession pipeline**
+  fieldsets: `decision_compulsion` (agent + pin action + duration/turns),
+  `decision_veto_arm`, `decision_veto_resolve` (approve/reject/rewrite),
+  `agent_possession` (agent + pin action + duration), and `revoke_decision_gate`.
+  Phase 6 adds **Burning Bush** (`burning_bush_message`, `burning_bush_close`)
+  and **Merovingian Bargain** (`merovingian_bargain`, `bargain_settle`) with
+  predicate dropdowns and grant/vitals primitive fields. Pin actions use a curated `GOD_PIN_ACTIONS` select (labels from
+  `ACTION_LABELS`). Preview → Apply via `wireDivineForm`. Sight shows gate
+  status (`decisionGate`, `divineHold`) and pinned action summary; never
+  `decisionGates` map contents on `/state`. Whisper campaigns remain under Voice.
+  Phase 7 adds **Anoint** (`anoint`: agent + destiny + comma-separated stigmata
+  tags + oracle hints textarea `revealFrame|text` per line + duration; `revoke_anoint`
+  for one agent). Destiny/oracle never in `/state`; Sight shows anointment status
+  summary only. Phase 8 adds **Identity** (`identity_edit`: agent + optional
+  persona/personality/role + duration; `identity_copy_overwrite`: target + source
+  + rate + optional sync memories + duration; `identity_forge_cancel` for one
+  agent). `identityForges` never in `/state`; Sight shows forge progress summary.
+  Phase 9 adds **Architect Zones** (`architect_zone`: kind select paint/door/limbo,
+  district + cells textarea, paint terrain, key id, grant-key / limbo-hold agent
+  multi-selects, duration, reversible paint; `architect_zone_cancel`; `architect_release_hold`).
+  `architectZones` never in `/state`; paint is world-visible via terrain; door/limbo
+  audit `public: false`. Sight: zone summaries + per-agent `architectLimbo` status.
+  Phase 10 adds **Reload** (`checkpoint_create`: label + optional `replaceOldest`;
+  `checkpoint_restore`: checkpoint picker from Sight; irreversible fieldset +
+  strong confirm copy in preview). `checkpoints` never in `/state`; Sight lists
+  id/label/frameTick/createdAt only. **Déjà Vu** (`deja_vu_replay`): enabled
+  when `/control/god/capabilities` reports `kinds.deja_vu_replay.applyable`
+  (requires `GOD_DEJA_VU_REPLAY`); agent picker + optional max steps; wired
+  through `wireDivineForm`; Sight shows recent `decisionDigests` snippets when
+  authorized. **Crowd compulsion** (`crowd_compulsion`): optional theme +
+  shared duration (seconds) or remaining turns + repeatable target rows (agent +
+  pinned action, max 12) under Will; Preview→Apply via `wireDivineForm`; cancel
+  parent id clears all linked gates. **Dream broadcast** (`dream_broadcast`):
+  shared duration + dream snapshot JSON + multi-select target agents (max 12)
+  under Distortion; private dream text never in `/state`; cancel parent clears
+  all linked dream masks.
+- **Miracles** — Phase 4 trio (`agent_vitals`, `grant_resource`,
+  `structure_condition`) plus town-integrity kinds (`repair_structures`,
+  `clear_ruins` — [02-engine-core.md](02-engine-core.md)); all labeled
+  `IRREVERSIBLE` in their preview badge, matching `_god_reversibility_class`.
+- **Story** — title, narration, visibility (public, or private with an
+  agent target), duration, a shared 7-key modifier editor
+  (`renderGodModifierEditor()`, bounds populated from
+  `capabilities.modifierRanges` after Connect), an optional embedded
+  providence, and a bounded (`capabilities`-reported `primitives.maxItems`,
+  default 5) repeatable primitive-effect list reusing the same three
+  Miracles payload shapes inline. `reversibilityClass` in the response
+  badge flips from `cancellable` to `CONSEQUENTIAL` automatically once any
+  primitive is present, per the engine's own rule.
+- **Laws** — the same 7-key modifier editor submitted as a `story_event`
+  with no primitives (so mechanically identical to Story minus title/
+  narration ceremony — both are auto-filled with a sensible default if left
+  blank rather than forced on the operator), plus a live "currently active"
+  list (preferring the authenticated Sight projection when available, since
+  it — unlike the public `/state` projection — can include a
+  private-visibility law's modifiers; falling back to
+  `state.god.activePublicEvents` otherwise) with a per-effect Cancel button
+  wired straight to `/control/god/cancel`.
+- **History** — intervention log with filter/search, re-run, soft undo, and
+  narrative export (Divine Console improvements, Phase 6). Default source is
+  `state.god.recentPublicInterventions` (newest first, up to 50 displayed
+  after filter). When effectively authorized and `godLastSight.recentInterventions`
+  exists, an **Include private (Sight)** toggle merges the fuller Sight ring
+  (deduped by id). Controls: kind substring/select, agent id/name substring,
+  **Public only** toggle, frame from/to. `#godHistoryList` re-renders from the
+  filtered list; every dynamic string uses `escapeHtml()`.
+  - **Re-run** — per-row **Re-run** rebuilds the owning form from typed keys
+    present on the History/Sight record only (never `normalizedCommand` into
+    DOM). Opens the correct feature modal, fills fields, scrolls to the
+    fieldset, invalidates any cached preview — operator must **Preview** again
+    (never auto-apply). Kinds without enough stored payload disable Re-run or
+    show a short reason (e.g. whisper per-agent text, law modifier values,
+    matrix compulsion pinned action).
+  - **Soft undo** — `#divinePinRow` adds **Revoke last cancellable** when the
+    last applied intervention id (or the newest still-active cancellable entry
+    from Sight `recentInterventions`) matches a kind `POST /control/god/cancel`
+    accepts and is likely still active (providence slot, `activeEvents`, zone
+    summaries, or `expiresFrame` vs `world.frameTick`). Irreversible kinds hide
+    the control. Reuses `godCancelEffect()` / Laws cancel wiring.
+  - **Narrative export** — **Export Markdown** downloads the currently filtered
+    list (kind, frame, id, public flag, short text/title fields) for demos.
+  Private-only entries never appear without Sight authorization + toggle.
+- **Miracles / Story / Laws QoL (Phase 7).**
+  - **Law conflict warnings.** Successful previews of modifier-bearing
+    `story_event` commands (Story tab and Laws tab) may return additive
+    `warnings: string[]` from the engine. `#divinePreviewStrip` and the form
+    result panel render each warning through `escapeHtml()` in
+    `.divine-warning` styling; Apply stays enabled.
+  - **Story recipes.** `#godStoryRecipeSelect` + **Apply recipe to form**
+    (`#godStoryRecipeApplyBtn`) expand a named client-side bundle (Festival,
+    Famine week, Plague scare, Harsh winter, Bountiful seas) into Story title,
+    narration, duration (seconds), and modifier checkboxes/values only — does
+    not call Preview or Apply automatically; operator must Preview again.
+- **Compile** (Optional Phase 8, dual-gated, **supported experimental when
+  enabled**) — `#godCompileTabBtn` stays `display:none` until
+  `applyGodCapabilitiesToForms()` sees `capabilities.compiler.enabled ===
+  true` (the AND of `GOD_MODE_ENABLED` and `GOD_COMPILER_ENABLED` /
+  `SIM_GOD_COMPILER=1` on the server — see
+  [04-http-api.md](04-http-api.md#optional-phase-8-controlgodcompile) and
+  [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler)); when
+  visible it uses the same solid `.gbtn` chrome as other bar buttons (no
+  dashed “dark/experimental” border). Help text: experimental — enable with
+  `SIM_GOD_COMPILER=1`; contention A/B measurement is documented in
+  [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler) and is
+  **not** claimed green until run. The same capability check bounds the prose
+  textarea's `maxLength` to `capabilities.compiler.promptMaxChars` and stores
+  `capabilities.compiler.minIntervalSec` for the client-side rate-limit UX
+  below. The feature window holds one textarea and a single Compile button —
+  **no Apply button of its own, on purpose**. Clicking Compile posts `{prose}` to
+  `POST /control/god/compile`; on `compileOk: true` the server returns the
+  same preview record shape as `POST /control/god/preview` (`previewId`,
+  `normalizedCommand`, `reversibilityClass`, `previewOutcome`, …). The
+  client calls `godPopulateStoryFromCompiled(normalizedCommand, {
+  skipPreviewInvalidate: true })` — filling Story title/narration/visibility/
+  target/duration/modifier-checkboxes/primitive rows/providence from the
+  draft without clearing an in-flight preview — then
+  `godDivineFormControllers["#godStoryFieldset"].acceptServerPreview(...)`
+  wires the compile preview into `#godStoryResult`, enables Story Apply, and
+  shows `#divinePreviewStrip`; finally `openDivineModal("story")`. The
+  operator may edit fields (which invalidates the handoff per the standard
+  `wireDivineForm` contract) or Apply directly from the sticky strip. On
+  rejection or a network error the reason is written via `.textContent` only
+  (never `innerHTML`) into `#godCompileResult`. After every click (success,
+  rejection, or error alike) the Compile button disables itself client-side
+  for `minIntervalSec` seconds — advisory only;
+  `GOD_COMPILER_MIN_INTERVAL_SEC` on the server is authoritative.
+
+**Public banner.** `#godPublicBanner` (fixed, top-center, styled distinctly
+from `#councilBanner`/`#foundingBanner`) fires on the same client-diff
+edge-detection pattern the Founding banner already established: each
+`renderDivineConsole()` call (itself gated by a `JSON.stringify(world.god)`
+change-detect key, mirroring `lastChronicleKey`) diffs
+`state.god.recentPublicInterventions` for an id not yet in a small in-memory
+`Set` (`godSeenInterventionIds`, pruned as the bounded ring evicts old
+entries), shows one line of `textContent` for 6s on a fresh one, and — on
+the very first snapshot after a page load — records existing history as
+"already seen" without banner-ing it, so resuming a long `GOD_MODE_ENABLED`
+session doesn't replay its whole intervention history as a banner burst.
+Presentation class: `divine-banner-soft` (default) or `divine-banner-thunder`
+from the intervention's optional `presentation` field. There is no full-screen
+flash, no forced camera movement, and no banner (or any other public surface)
+for a private omen or private story event.
+
 ## Active viewer work
 
-Three open design docs describe further, not-yet-fully-landed viewer polish
-(verified status lines as of this writing):
+Atmosphere pack (Phase 4) shipped lighting v2, seasonal terrain v2, weather
+particles v2, God console chrome v2, and the calendar retune — see
+[docs/plan-visual-atmosphere-systems.md](../docs/plan-visual-atmosphere-systems.md).
+Earlier plan docs remain as design records:
 
 - [docs/plan-visual-1-day-night-lighting.md](../docs/plan-visual-1-day-night-lighting.md)
-  — **PLANNED (not implemented)**, viewer-only + one small engine addition.
+  — **DONE** (atmosphere pack lighting; permanent default in viewer).
 - [docs/plan-visual-2-seasonal-terrain-grading.md](../docs/plan-visual-2-seasonal-terrain-grading.md)
-  — **PLANNED (not implemented)**, viewer-only, composes with Plan 1.
+  — **DONE** (atmosphere pack seasonal terrain; permanent default in viewer).
 - [docs/plan-visual-3-seasonal-sprite-variants.md](../docs/plan-visual-3-seasonal-sprite-variants.md)
   — **DONE** (plumbing + art passes both shipped and verified; kept for the
   design record). The `setSpriteSeason`/`TREE_GRIDS`/winter-snow-cap

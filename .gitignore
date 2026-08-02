@@ -29,6 +29,7 @@ simulation/memory_store.json.tmp
 
 # Manual state backups
 archive/
+simulation/backup/
 
 # Local agent/tool state (not part of the repo)
 .codex/
@@ -39,3 +40,6 @@ scripts/out/
 # Local scheduled-task helper scripts (machine-specific paths)
 scripts/sim_schedule_start.ps1
 scripts/sim_schedule_stop.ps1
+
+# Kenney asset vendor cache (build script reads; wildlife.png is committed)
+simulation/_vendor/

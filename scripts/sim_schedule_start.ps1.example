@@ -1,0 +1,20 @@
+# Template for scripts/sim_schedule_start.ps1 (gitignored -- machine-specific
+# paths and secrets). Copy this to sim_schedule_start.ps1 and adjust paths as
+# needed. SIM_GOD_TOKEN below is only required when SIM_GOD_AUTH=1 (auth gate).
+#
+# Scheduled start for the sim server (10:00 daily). See CLAUDE.md "Restarting/starting the server".
+Get-CimInstance Win32_Process -Filter "name='python.exe'" |
+    Where-Object { $_.CommandLine -match 'simulation[\\/]server\.py' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+Start-Sleep -Seconds 2
+
+Set-Location 'C:\Users\dbadmin\Desktop\GitServ\simulation'
+& uv run python scripts\ollama_setup.py
+
+# God mode (specs/12-ops.md): GOD_MODE_ENABLED defaults on (Divine Console
+# always renders). Auth is OFF by default (GOD_AUTH_REQUIRED / SIM_GOD_AUTH);
+# SIM_GOD_TOKEN below is unused unless SIM_GOD_AUTH=1 is set to restore the
+# token gate. Left in place as that escape hatch. HOST stays 0.0.0.0 (LAN).
+$env:SIM_GOD_TOKEN = 'REPLACE_WITH_YOUR_SIM_GOD_TOKEN'
+
+Start-Process cmd.exe -ArgumentList '/k', 'title simserver && cd /d C:\Users\dbadmin\Desktop\GitServ\simulation && uv run python simulation\server.py' -WorkingDirectory 'C:\Users\dbadmin\Desktop\GitServ\simulation'

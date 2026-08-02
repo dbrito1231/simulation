@@ -1,0 +1,12 @@
+---
+description: Thin-viewer contract — no simulation logic in the browser
+globs: simulation/index.html,simulation/viewer.js,simulation/viewer.css,simulation/sprites.js
+alwaysApply: false
+---
+
+# Viewer
+
+- Pure renderer: poll `/state`, draw `world`. No decisions, movement, or mutation.
+- `index.html` is markup shell only; logic lives in `viewer.js`; styles in `viewer.css`.
+- `sprites.js` is stateless Canvas helpers only.
+- Keep `WORLD_W`/`WORLD_H` and `ACTION_LABELS` in sync with the engine (labels = display only).

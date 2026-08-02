@@ -84,8 +84,16 @@ for movement and the viewer.
 
 The session agenda always covers current world status, ongoing/stalled projects,
 resource limitations, active rules, ideas/proposals, and agents' feelings about
-the village's evolution. If `_invention_required()` is true, the demand appears
-as an agenda item. A succession emergency adds `leadership_vacancy`, explicitly
+the village's evolution. The **limitations** topic reports a resource as low
+stores only when it is *obtainable* (gather zone, recipe or pending recipe,
+structure function that produces it, or — for `coin` only — an active mint) and
+**village-wide holdings** (stockpile plus every agent inventory, deliberately
+excluding `districtStocks` in-ground deposits, which have their own prompt
+channel) are at or below `DAILY_COUNCIL_SCARCITY_THRESHOLD` (default 3). Up to
+`DAILY_COUNCIL_SCARCITY_TOPICS` (default 8) scarce ids and active projects are
+listed. `EDIBLE_RESERVE` is **not** used for this agenda scan. If
+`_invention_required()` is true, the demand appears as an agenda item. A
+succession emergency adds `leadership_vacancy`, explicitly
 naming every current candidate and directing discussion to compare their
 suitability; it does not replace any normal topic. With this flag on,
 `_maybe_invention_backstop()` does not
@@ -166,7 +174,8 @@ retention keeps the newest 30 meeting ids, as specified in [02](02-engine-core.m
 | Guard | Constant | Behavior |
 |---|---|---|
 | Approval ceiling | `MAX_APPROVED_CUSTOM = 15` | `_maybe_retire_blueprint`: once reached, retires the oldest *built* custom type from the registry to free a slot. Retirement means the recipe is forgotten; standing structures keep their name/visuals. Code that attaches semantics to a registry entry must tolerate its absence or recreate a minimal entry from a standing instance before attaching them. |
-| Resource/recipe ceilings | `MAX_CUSTOM_RESOURCES = 10`, `MAX_CUSTOM_RECIPES = 12` | `_validate_blueprint`/`_validate_recipe` reject new proposals past these. |
+| Resource/recipe ceilings | `MAX_CUSTOM_RECIPES = 12` | `_validate_recipe` rejects new recipe proposals past this. `MAX_CUSTOM_RESOURCES = 10` is **not enforced** — `validate_blueprint` (server.py) ignores the cap by policy; invention is unlimited. |
+| Orphan resource retirement | `CUSTOM_RESOURCE_RETIRE_FRAMES = STALL_THRESHOLD * 120` (~40 min) | `_maybe_retire_custom_resource`: prunes `resourceRegistry` + `stockpile` + `districtStocks` for any custom resource unreferenced for the full window; no cap, stamp-on-first-sight clock (ids restored from old saves start their clock at first tick after deploy), retired ids re-inventable (no tombstone). Predicate: `_custom_resource_referenced` (shared obtainability spine via `_resource_is_obtainable`). See approval-ceiling row above for blueprint retirement — standing structures still protect their produce ids even after registry archival. |
 | Rejection amnesty | `BLUEPRINT_AMNESTY_FRAMES = STALL_THRESHOLD * 60` (~20 min) | `_maybe_amnesty_rejected_blueprints`: a rejected id is no longer a permanent blacklist — it expires and can be re-proposed. |
 | Sage review timeout | `SAGE_REVIEW_TIMEOUT_FRAMES = STALL_THRESHOLD * 20` (~6.7 min) | `_maybe_skip_sage_review`: if no living, non-incapacitated elder exists, a pending review auto-skips rather than blocking forever. |
 | Denied-review amnesty | same `BLUEPRINT_AMNESTY_FRAMES` | `_maybe_amnesty_denied_sage_reviews`: a sage-denied proposal is withdrawn and blacklisted (subject to the same rejection amnesty) after the window. |
@@ -207,6 +216,19 @@ Rule kinds: `RULE_KINDS = {"resource_tax", "custom", "priority"}`
 `PATH1_DIPLOMACY_ENABLED` (see [10-path1.md](10-path1.md) for treaty
 mechanics). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
 enacted at `MAX_ACTIVE_RULES = 8`.
+
+**Treaty proposals (`kind: "treaty"`).** Reuse the shared propose/vote
+scaffold via `propose_treaty`/`vote_treaty` ([07-actions.md](07-actions.md)).
+The `rule` object requires `id` and `name`; optional fields include `value`
+(trade pact label, default `"trade"`), `description`, and **`tariff`** — a
+fraction `0`–`0.25` (default `0`) applied on caravan delivery: the tariff
+share credits the source settlement store (or village `stockpile` when
+unset); the remainder credits the destination store
+([10-path1.md](10-path1.md#treaty-tariffs)). `_validate_rule` rejects
+out-of-range `tariff` values; `_propose_treaty` copies `tariff` onto the
+pending entry and enacted `civilization["treaties"]` record. Council
+`council_propose` with `kind: "rule"` may include the same `tariff` field when
+opening a treaty ballot.
 
 **Effectful custom rules.** A `kind: "custom"` proposal may include one safe
 `effect` object; arbitrary code, expressions, and free-form selectors are
@@ -493,6 +515,27 @@ small compatible food-contribution tilt. `meme_adoption` benchmarks include
 all live beliefs with a per-belief holder breakdown, including authored
 beliefs.
 
+A successful adoption, gated additionally by `CULTURE_ENABLED`, also rolls a
+chance to drift the spreading belief's wording. `_maybe_mutate_meme` fires
+after the recipient adopts and before the adoption is logged/messaged/
+remembered, so the recipient's own memory of the belief already carries any
+drifted text — the mutation is one probability roll (`MEME_MUTATION_PROB`)
+against a hard, process-lifetime `MEME_MUTATION_SESSION_CAP = 30`, the same
+budget discipline as the pitch-scoring cap above, and each attempt makes at
+most one `lm_complete` call to reword the current text. A failed, empty, or
+rejected (meta-commentary, echoed instructions, no real change) rewrite is a
+silent no-op; the belief keeps its prior text. A successful mutation rewrites
+the live `beliefRegistry` entry's `tenet` in place — preserving the
+pre-mutation wording once in `originalTenet` via `setdefault`, so repeated
+drift never loses the true original and authorship (`authoredBy`) is left
+untouched — and only falls back to writing `civilization["memeTexts"]` when
+the belief has no registry entry at all. `_belief_text` still resolves a
+registry `tenet` first; `memeTexts` is read only as a legacy fallback for
+entries with no tenet, e.g. when restoring an old save. Each successful
+mutation is logged as activity and recorded in the chronicle under the
+`meme_mutation` kind, and increments `civilization["memeMutations"]`, which
+also feeds the `meme_mutations` benchmark.
+
 ## CULTURE_ENABLED
 
 **Skills:** `SKILL_KINDS = ("gather", "craft", "build", "heal", "reflection")`, one float
@@ -523,17 +566,73 @@ events, folded into prompts as one "Village history: ..." line
 ring. It never creates a second event store and never changes prompt history.
 The projection admits only the named milestone kinds `death`, `burial`,
 `election`, `belief_founded`, `belief_adoption`, `meme_mutation`,
-`knowledge_preserved`, `disaster`, and `district_founded`; routine gather,
-talk, craft, and build activity remains exclusively in `activity`. `disaster`
-entries are pushed unconditionally from `_maybe_disaster` (see
-[08](08-systems-economy.md)); `district_founded` entries are pushed from
-`_found_district` only when `FOUNDING_EVENTS_ENABLED` is True (see
-[05](05-world.md)). `CHRONICLE_CAP` was raised from 20 to 100 (living-ecosystem
-Phase 2, item 0) after live verification showed a storm-heavy stretch
-(`DISASTER_PROB` fires roughly every 100 simulated minutes) evicting real
-history (deaths/elections/beliefs) within about a day at the old cap; 100
-entries absorbs many more disasters before crowding out anything else, at a
-negligible cost (~80 extra short strings in `/state` and `state.db`).
+`knowledge_preserved`, `disaster`, `district_founded`, `emergency_measure`,
+and `divine`; routine gather, talk, craft, and build activity remains
+exclusively in `activity`. `disaster` entries are pushed unconditionally from
+`_maybe_disaster` (see [08](08-systems-economy.md)); `district_founded`
+entries are pushed from `_found_district` only when `FOUNDING_EVENTS_ENABLED`
+is True (see [05](05-world.md)). `CHRONICLE_CAP` was raised from 20 to 100
+(living-ecosystem Phase 2, item 0) after live verification showed a
+storm-heavy stretch (`DISASTER_PROB` fires roughly every 100 simulated
+minutes) evicting real history (deaths/elections/beliefs) within about a day
+at the old cap; 100 entries absorbs many more disasters before crowding out
+anything else, at a negligible cost (~80 extra short strings in `/state` and
+`state.db`).
+
+**Divine communication (Sovereign God mode, `GOD_MODE_ENABLED`):** an applied
+`proclamation` (which auto-applies as timed providence) or standalone
+`providence` command pushes to all three of `activity`,
+`conversationLog` (`kind="divine_proclamation"`/`"divine_providence"`), and
+Chronicle (`kind="divine"`) in one call, each entry carrying explicit
+`source="divine"` attribution so it never masquerades as emergent agent
+speech. `providence`'s expiry and `revoke_guidance` targeting it additionally
+push one plain `activity` line ("fades"/"is revoked") with no matching
+Chronicle/communication duplication.
+
+**Voice adherence (`divine_response`).** When an agent's think records a valid
+or synthesized `divine_response` against active binding guidance, the engine
+appends one `conversationLog` entry (`kind="divine_response"`,
+`source="divine"`, `from` = agent name, `to` = `"divine"`, `message` =
+`"{stance}: {reason}"`, `outcome` = the applied `action`) and one plain
+`activity` line summarizing stance + agent + guidance kind (e.g. "Ash
+continued private guidance: …"). These are **public** audit surfaces — they
+expose adherence stance and the agent's stated reason, never the private omen
+text itself. Synthetic `missing_divine_response` records use the same shape
+with `synthetic: true` in the divine-response log ([02](02-engine-core.md)).
+No Chronicle milestone — routine adherence stays in `activity`/
+`conversation.jsonl`.
+
+**Private omens are the deliberate opposite for guidance text:** a
+`private_omen` apply, replace, expiry, or revocation never writes the omen
+text to `activity`, `conversationLog`, or the Chronicle under any
+circumstance — the only place its content is ever readable outside the
+target's own (eventual, exactly-once) memory is the authenticated
+`/control/god/sight` route (see [02](02-engine-core.md#sovereign-god-mode-phase-3--voice-binding-guidance)
+and [06](06-agents.md)). `snapshot()`'s `god.recentPublicInterventions` is
+filtered to `"public": True` records for the same reason — a private omen's
+outcome record is written with `"public": False` and is excluded from
+`/state` by that filter, not merely by omission.
+
+**Storyteller events (Sovereign God mode Phase 5, `story_event`):** a
+**public** event pushes the same `activity`/`conversationLog`
+(`kind="divine_story_event"`)/Chronicle trio, `source="divine"`, using its
+title and narration (`"{title}: {narration}"` in the Chronicle entry); a
+**private** event (bound to one living `targetId`) writes none of those,
+matching the private-omen visibility boundary exactly — its title/narration
+never reach public `activity`, `conversationLog`, `/state`, or the
+Chronicle, only the authenticated `/control/god/sight` route. Any embedded
+`agent_vitals`/`grant_resource`/`structure_condition` primitive still writes
+its own **public** activity/communication/Chronicle line regardless of the
+parent event's visibility — Phase 4 miracles have no private-visibility
+concept of their own — so a "private" story event's narrative framing can
+stay hidden while a primitive it triggers remains an observable public
+event, same as it would applied standalone. Expiry and cancellation each
+push one plain `activity` line ("A divine story fades: ..." /
+"A divine story is cut short: ...") for public events only, with no matching
+Chronicle/communication duplication, mirroring providence's own
+expiry/revocation narration. See
+[02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
+for the full command/composition/closure contract.
 
 **Social ties:** `SOCIAL_LAYER_ENABLED` (default True) is another read-only
 viewer gate. `/state.socialTies` is a compact, deduplicated list of non-neutral
@@ -542,6 +641,84 @@ relationships between living agents, shaped as `{from, to, valence}` where
 disagreement resolves conservatively to `rival`. The browser uses this
 authoritative projection only to render nearby relationship cues; it does not
 derive or mutate social state.
+
+## Bounded agent conflict (`confront_agent`)
+
+Deterministic, opt-in agent-vs-agent friction — not a combat minigame and not
+a free-for-all raid system. Full action params and `apply_decision` effects:
+[07-actions.md](07-actions.md). Pair cooldown persistence:
+[06-agents.md](06-agents.md).
+
+**Design intent.** Conflict resolves scarce-food pressure and existing social
+tension without introducing always-on PvP. Most agent pairs never qualify.
+
+### Social gate
+
+`confront_agent` appears in `available_actions` only when the actor can name a
+valid target and at least one **authorization** holds:
+
+| Authorization | Condition |
+|---|---|
+| Rivalry | Actor's `relationships[targetName] == "rival"` (seller-side opinion semantics — the actor must personally hold the rival tie toward the named target). |
+| Path-1 pressure context | `path1_on("PRESSURE_LOOP_ENABLED")` **and** (`_is_night()` with actor unsheltered **or** actor was startled by Path-1 forest wildlife within `CONFRONT_PRESSURE_WINDOW_FRAMES = STALL_THRESHOLD * 2` — i.e. recent `lastNightNote` / wildlife-attack frame). |
+
+Neutral and ally pairs **reject** at validation (`normalize_decision` /
+`apply_decision`) even if the action were forced. Sage (`role == "elder"`) is
+never a valid target — attempts log a rejection note and do nothing.
+
+### Resolution (contact range)
+
+Contact radius `CONFRONT_CONTACT_DIST = 80` px (matches heal/bury/trade
+adjacency). Out of range: action sets movement toward target (same pattern as
+`trade_resource` / `heal_agent`).
+
+### Divine Matrix Phase 5: decision-gate attribution
+
+Compelled, possessed, and veto-resolved actions that mutate the world must not
+read as emergent agent initiative. The engine writes explicit
+`source="divine"` entries to `conversationLog` (kinds like `divine_compulsion`,
+`divine_possession`, `divine_veto_hold`, `divine_veto_resolve`) and to
+`chronicle` for consequential actions (not plain `rest` / `talk_to_nearby`).
+Routine `apply_decision` activity lines may still describe the mechanical
+outcome; divine attribution is additive via the communication/chronicle path
+(same discipline as `agent_vitals` / `grant_resource` in Phase 4).
+
+**Anointed (Phase 7):** destiny and oracle hints are cognition-only — they
+must not appear in `activity`, `conversationLog`, or `chronicle`. Stigmata tags
+are folded into neighbor **prompt** text only (`format_nearby_agents`); they
+are not broadcast proclamations and must not masquerade as emergent social
+status on `/state`.
+
+On contact, deterministic order:
+
+1. **Damage** — subtract `CONFRONT_DAMAGE = 10` from target `health`.
+   - **Non-lethal default:** clamp so target `health` never drops below
+     `CONFRONT_INCAP_HEALTH = 1` (mirrors God vitals floor — cannot
+     incapacitate a healthy target in one swing).
+   - **Lethal exception:** if target `health` was already `<=
+     CONFRONT_LETHAL_THRESHOLD = 15` before damage, allow `health` to reach `0`
+     and flip `incapacitated = True` through the ordinary survival path — no
+     instant `_agent_dies` / permanent death.
+2. **Steal (optional)** — if target holds any edible above `EDIBLE_RESERVE`,
+   transfer `1` unit of the target's most-abundant edible (`food`/`fish`/`meat`)
+   to the actor (carry-cap overflow routes to village stockpile like any other
+   transfer).
+3. **Flee** — actor retargets ~`CONFRONT_FLEE_DIST = 60` px away from target
+   (short disengage, not map-wide flight).
+4. **Social hit** — if relationship was neutral, set actor→target to `rival`;
+   if already `rival`, leave unchanged (reinforced by activity copy only).
+5. **Cooldown** — write `civilization["confrontCooldowns"][pairKey] =
+   frameTick + CONFRONT_COOLDOWN_FRAMES` where `CONFRONT_COOLDOWN_FRAMES =
+   STALL_THRESHOLD * 4` (~4 min real time) and `pairKey` is
+   `"<minId>:<maxId>"`.
+
+**Activity + memory.** One activity line (e.g. confrontation + optional steal);
+optional `_push_memory` on both parties with salience proportional to outcome.
+No Chronicle milestone — routine conflict stays in `activity.jsonl`.
+
+**Explicit non-goals.** No multi-agent brawls, no structure damage, no
+settlement raids, no confronting incapacitated or dead agents, no bypass of
+Sage emergency responder exemption (actors in `_sage_responders()` reject).
 
 **Personality drift:** major life events (collapse, etc.) append one short
 deterministic trait clause to an agent's persona text, capped at

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -32,6 +33,8 @@ SIM_DIR = ROOT / "simulation"
 DEFAULT_DURATION_S = 7200  # 2 hours per SA-9 spec
 DEFAULT_AGENTS = 8
 SERVER_URL = "http://127.0.0.1:5001"
+_RESET_PASSWORD_RAW = os.environ.get("SIM_RESET_PASSWORD", "").strip()
+RESET_PASSWORD = _RESET_PASSWORD_RAW if _RESET_PASSWORD_RAW else "reset"
 POLL_INTERVAL_S = 60
 # Path 1 prompts can reach ~5.8k tokens with all feature flags enabled. Keep
 # this below the ~6.6k per-slot budget from the 20k-context/3-slot target.
@@ -417,7 +420,7 @@ def run_soak(duration_s: float, agents: int, reset: bool, spawn_server: bool) ->
     log_dir_before = newest_log_dir()
     if reset:
         print(f"Resetting world with agents={agents} …")
-        http_post(f"{SERVER_URL}/control/reset", {"agents": agents})
+        http_post(f"{SERVER_URL}/control/reset", {"password": RESET_PASSWORD, "agents": agents})
 
     log_dir = newest_log_dir()
     if log_dir and log_dir != log_dir_before:

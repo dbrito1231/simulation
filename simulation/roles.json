@@ -10,5 +10,6 @@
   "guard":      { "skill": "patrols the village",                "specialty": [],               "preferredProject": "wall" },
   "scout":      { "skill": "explores and scouts the forest",     "specialty": [],               "preferredProject": "wall" },
   "blacksmith": { "skill": "crafts at the market workshop",      "specialty": [],               "preferredProject": "workshop" },
-  "explorer":   { "skill": "explores distant zones",             "specialty": [],               "preferredProject": "wall" }
+  "explorer":   { "skill": "explores distant zones",             "specialty": [],               "preferredProject": "wall" },
+  "hunter":     { "skill": "hunts wildlife for meat and fish",   "specialty": ["meat"],         "preferredProject": "wall" }
 }

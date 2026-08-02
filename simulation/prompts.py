@@ -94,6 +94,19 @@ SURVIVAL:
    act until revived. Use heal_agent (target a nearby hurt/collapsed villager; any role
    may, healers heal more) to restore their health.
 
+HUNTING (when hunt_wildlife is available):
+12b. Use hunt_wildlife to attack nearby wildlife (multi-hit; prey may flee after a hit).
+   Optional target is a creature id from Nearby wildlife; omit target to hit the nearest
+   valid prey. Forest/farm kills yield meat; beach kills yield fish — never land→food.
+   Bees are decorative and not huntable. Do not confuse hunt_wildlife with
+   collect_resource (zone gathering). Hunters deal more damage per hit and specialize
+   in meat.
+
+CONFLICT (when confront_agent is available):
+12c. Use confront_agent only against a named rival or under night/wildlife pressure.
+   Target must be a living villager (never the elder). On contact: damage, possible
+   steal of one edible, then disengage. Friendly/neutral pairs reject.
+
 CRAFTING (recipe tree):
 13. Some advanced builds need crafted goods. Use craft_item with target set to the item
    id; you must be in the recipe's station zone and hold its inputs.
@@ -110,7 +123,8 @@ SAGE PRIORITY (absolute):
 PATH 1 (when enabled):
 P1. Some resources need tools: stone needs wooden_pick, copper_ore needs stone_pick, iron_ore needs iron_pick (craft picks at workshop; smelt ores at kiln via craft_item after building kiln). No pick? dig_terrain digs stone from soil tool-free.
 P2. place_block/remove_block build 2D tiles in your district (wall/floor/door/fence). dig_terrain/plant_terrain mutate local terrain (dig yields stone; plant costs wood).
-P3. propose_treaty/vote_treaty govern inter-settlement trade pacts (reuse rule object with kind treaty).
+P3. propose_treaty/vote_treaty govern inter-settlement trade pacts (reuse rule object with kind treaty; optional tariff 0–0.25).
+P4. deliver_caravan starts a caravan run when you hold a cart/wagon and enough cargo — goods transfer on arrival at the destination settlement.
 
 EMERGENT ROLES:
 16. Your role is not fixed. If "Incoming messages" or a NOTE says the village
@@ -209,7 +223,7 @@ Do not use chain-of-thought or reasoning — output the JSON object immediately.
 The JSON must match this structure exactly:
 {
   "action": "<one of the available_actions>",
-  "target": "<agent name, district id, project type, resource id, blueprint id, or null>",
+  "target": "<agent name, district id, project type, resource id, blueprint id, wildlife creature id, or null>",
   "target_district": "<district id for start_project/contribute_resources/build_structure, or null to use your current district>",
   "message": "<what you say if talking, or null>",
   "new_role": "<a new role name if changing role, or null>",
@@ -292,6 +306,9 @@ ROLE object schema (only for propose_role):
 
 EXAMPLE (farmer, no one nearby):
 {"action":"collect_resource","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"I should gather food for the village."}
+
+EXAMPLE (hunter, deer in range):
+{"action":"hunt_wildlife","target":"w3","message":null,"new_role":null,"relationship_update":null,"reasoning":"Hunting the nearby deer for meat."}
 
 EXAMPLE (builder, project needs wood):
 {"action":"contribute_resources","target":"wood","message":null,"new_role":null,"relationship_update":null,"reasoning":"Donating wood to the active build."}
