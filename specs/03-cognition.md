@@ -1037,7 +1037,10 @@ priority order. Both `_role_fallback_action()` (first match wins) and
 `role_fallback_candidates()` (accumulate up to `limit` matches) iterate the
 same ordered list of branch closures, `_role_fallback_candidate_checks()`,
 so the two cannot silently drift; duplicate `(action, target)` candidates
-are trimmed. With **≥2** candidates and budget remaining
+are trimmed. When `council_turn` and `council_seated` are both set,
+`role_fallback_candidates()` stops after the first match (the council
+ladder entry) so the terminal AI-choice step cannot swap a council beat for
+village work. With **≥2** candidates and budget remaining
 (`llm_calls_made < LLM_CALLS_PER_TURN_MAX`), one minimal A/B/C-style prompt
 (not the full decision schema, routed to `MODEL_FAST`, `max_tokens=5`,
 `FALLBACK_AI_CHOICE_TIMEOUT_S = 10`, never retried) asks the model to pick a

@@ -5594,8 +5594,11 @@ class SimEngine:
         validate_sprite_block/degenerate-sprite rejection (_apply_structure_sprite)
         as well as a decision whose action never made it to
         submit_structure_sprite at all (e.g. rejected server-side by
-        normalize_decision() and replaced with a role fallback; see
-        apply_decision). Bumps turn["attempts"], writes it back, and once
+        normalize_decision() and replaced with a _fallback-stamped role
+        fallback; see apply_decision). The apply_decision missing-case covers
+        _fallback-stamped substitutions only, not infra/network rests such as
+        _think_job's bare ``{"action": "rest"}`` with no _fallback stamp.
+        Bumps turn["attempts"], writes it back, and once
         SPRITE_DESIGN_MAX_ATTEMPTS is reached clears the turn (the existing
         procedural sprite stays on the structure) and logs the give-up.
         structure_or_name may be the structure dict, a plain name string, or
@@ -15000,12 +15003,16 @@ class SimEngine:
         # Missing-case counting: the decision's action never reached
         # submit_structure_sprite (typically because server.py's
         # normalize_decision() rejected the model's sprite reply and
-        # substituted a role fallback action). Only count if the pending
-        # turn is still the exact same object -- if _upgrade_structure (or
-        # anything else) already replaced/cleared spriteDesignTurn during
-        # dispatch above, don't double-count it here.
-        if pending_sprite_turn is not None and action != "submit_structure_sprite" \
-                and agent.get("spriteDesignTurn") is pending_sprite_turn:
+        # substituted a _fallback-stamped role fallback action). Only count
+        # _fallback-stamped substitutions -- _think_job's infra/network path
+        # applies bare {"action": "rest"} with no _fallback stamp. Only count
+        # if the pending turn is still the exact same object -- if
+        # _upgrade_structure (or anything else) already replaced/cleared
+        # spriteDesignTurn during dispatch above, don't double-count it here.
+        if (pending_sprite_turn is not None
+                and action != "submit_structure_sprite"
+                and agent.get("spriteDesignTurn") is pending_sprite_turn
+                and decision.get("_fallback")):
             sid = pending_sprite_turn.get("structureId")
             s = next((x for x in c["structures"] if x.get("id") == sid), None)
             self._count_sprite_design_failure(agent, s or pending_sprite_turn.get("structureName"))

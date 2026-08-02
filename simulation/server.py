@@ -2731,6 +2731,11 @@ def role_fallback_candidates(role, agent_data, limit=3):
     (FALLBACK_AI_CHOICE_ENABLED) -- every existing role_fallback_action call
     site is unaffected by this function's existence.
 
+    During a seated council turn (``council_turn`` and ``council_seated``
+    both set), the candidate set is intentionally capped to the first
+    ladder match (always ``council_branch``) so Fix 5 cannot replace a
+    council beat with village work (``assign_task``, etc.).
+
     Many branches are mutually exclusive by construction: a role only
     matches one of the per-role branches near the end of the ladder, and
     "no active project" vs. "has an active project" branches can't both
@@ -2744,6 +2749,7 @@ def role_fallback_candidates(role, agent_data, limit=3):
     role_fallback_action's wrapper semantics themselves)."""
     candidates = []
     seen = set()
+    council_only = bool(agent_data.get("council_turn") and agent_data.get("council_seated"))
     for check in _role_fallback_candidate_checks(role, agent_data):
         candidate = check()
         if candidate is None:
@@ -2761,7 +2767,7 @@ def role_fallback_candidates(role, agent_data, limit=3):
             continue
         seen.add(key)
         candidates.append(candidate)
-        if len(candidates) >= limit:
+        if council_only or len(candidates) >= limit:
             break
     return candidates
 

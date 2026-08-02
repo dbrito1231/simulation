@@ -314,9 +314,12 @@ fails to produce an applied `submit_structure_sprite`, not only an
 degenerate-sprite check: `apply_decision` also counts the case where the
 decision's action comes back as something other than
 `submit_structure_sprite` entirely — most commonly a sprite reply rejected
-server-side by `normalize_decision()` in server.py and replaced with an
-unrelated role fallback action, which previously left the turn untouched and
-re-prompted for the same sprite forever. That missing-case check only fires
+server-side by `normalize_decision()` in server.py and replaced with a
+_fallback-stamped role fallback action (the missing-case check requires
+`decision["_fallback"]`; infra/network rests from `_think_job` such as bare
+`{"action": "rest"}` with no `_fallback` stamp do not count), which
+previously left the turn untouched and re-prompted for the same sprite
+forever. That missing-case check only fires
 when the turn captured at the start of `apply_decision` is still the exact
 same object afterward, so it can't double-count a turn `_apply_structure_sprite`
 already handled or a turn cancelled for an unrelated reason (e.g. active voice
