@@ -26,7 +26,7 @@ import threading
 import time
 import unicodedata
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 
 # Full-state persistence (Contract 3), backed by a SQLite database. Resolved
@@ -62,6 +62,30 @@ def _connect_db(path):
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_DB_DDL)
     return conn
+
+
+def _json_safe_copy(value):
+    """Deep-copy a value into JSON-serializable form (sets -> sorted lists)."""
+    if isinstance(value, set):
+        return sorted(_json_safe_copy(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _json_safe_copy(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_copy(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe_copy(v) for v in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _state_content_hash(payload):
+    """Stable SHA-256 of a save payload, excluding the savedAt timestamp."""
+    canonical = {k: v for k, v in payload.items() if k != "savedAt"}
+    blob = json.dumps(
+        canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def _write_state_db(path, payload):
@@ -1071,6 +1095,12 @@ MODULE_REFRESH_TIMEOUT_S = 60
 # PIANO_MODULE_TIMEOUT_S (15s) HTTP timeout so that timeout, not this one,
 # is what fires and gets logged/counted as a drop in the normal case.
 PIANO_MODULE_TIMEOUT_WAIT_S = 18
+# Orphaned Ollama timeouts (client gave up but server-side generation continues)
+# share the sim-smart/sim-fast parallel budget. After this many decision or
+# PIANO module timeouts in a row, pause new decision dispatches briefly so
+# in-flight orphans can drain -- see _record_llm_orphan_timeout / _schedule_think.
+LLM_ORPHAN_TIMEOUT_THRESHOLD = 3
+LLM_ORPHAN_COOLDOWN_S = 30.0
 LLM_MIN_GAP_MS = 250
 # When _schedule_think can't dispatch (worker pool full, cooldown, min-gap),
 # the agent retries this soon instead of waiting a full thinkInterval (up to
@@ -2051,6 +2081,7 @@ class SimEngine:
         self.paused = False
         self.lmStatus = "offline"
         self.llm_cooldown_until = 0.0
+        self._llm_orphan_timeouts = 0
         self.last_llm_dispatch_ms = 0.0
         self.activityLog = []      # most-recent-first, capped 30
         self.conversationLog = []  # most-recent-first, capped 100
@@ -2114,6 +2145,10 @@ class SimEngine:
         # GOD_COMPILER_SESSION_CAP for this process's lifetime (bumped even
         # on a rejected/failed compile -- see god_compile_prose).
         self._god_compiler_state = {"lastCompileWallTime": 0.0, "compileCount": 0}
+        # Autosave skip-if-unchanged: last successful write hash + last tick
+        # the saver considered a write (even when skipped).
+        self._last_saved_hash = None
+        self._last_save_considered_at = 0.0
         self._reset_world(roster_size)
 
     # --- roster + cold start ---
@@ -2446,6 +2481,7 @@ class SimEngine:
         self._seed_beliefs()
         if WILDLIFE_ENABLED:
             self._seed_wildlife_population()
+        self.districtsEpoch = 1
 
     # --- logging helpers (mirror pushActivity / pushCommunication) ---
     def _push_activity(self, line):
@@ -2768,6 +2804,10 @@ class SimEngine:
         return _dist(a["x"], a["y"], b["x"], b["y"])
 
     # --- districts + roads ---
+    def _bump_districts_epoch(self):
+        """Content revision for GET /districts.js ?since= polls."""
+        self.districtsEpoch = getattr(self, "districtsEpoch", 0) + 1
+
     def _districts_of_kind(self, kind):
         return [did for did, d in self.civilization["districts"].items() if d["kind"] == kind]
 
@@ -5780,6 +5820,7 @@ class SimEngine:
         for res, n in bt["cost"].items():
             agent["resources"][res] -= n
         tiles[key] = block_type
+        self._bump_districts_epoch()
         agent["lastBlockRejection"] = None
         c = self.civilization
         c["path1Placements"] = c.get("path1Placements", 0) + 1
@@ -5802,6 +5843,7 @@ class SimEngine:
         if not block_type:
             agent["lastBlockRejection"] = {"reason": "no block here", "frame": self.frameTick}
             return f"{agent['name']} found no block to remove"
+        self._bump_districts_epoch()
         bt = BLOCK_TYPES.get(block_type, {})
         for res, n in bt.get("cost", {}).items():
             refund = max(0, int(n * BLOCK_REFUND_RATIO)) or 1
@@ -5837,8 +5879,10 @@ class SimEngine:
         gained = None
         if current == "grove":
             d["terrain"][key] = "soil"
+            self._bump_districts_epoch()
         elif current == "soil":
             d["terrain"][key] = "rock"
+            self._bump_districts_epoch()
             gained = "stone"
         else:
             # This tile is exhausted (rock/sand/water) -- relocate to the
@@ -5907,6 +5951,7 @@ class SimEngine:
             return f"{agent['name']} cannot plant on {current}"
         agent["resources"]["wood"] -= 1
         d["terrain"][key] = "grove"
+        self._bump_districts_epoch()
         c = self.civilization
         c["path1TerrainMutations"] = c.get("path1TerrainMutations", 0) + 1
         self._log_benchmark("terrain_mutations", c["path1TerrainMutations"], {"action": "plant", "district": did})
@@ -7984,6 +8029,8 @@ class SimEngine:
             key = self._tile_key(gx, gy)
             snap[key] = terrain.get(key, "soil")
             terrain[key] = paint_terrain
+        if snap:
+            self._bump_districts_epoch()
         return snap
 
     def _architect_revert_paint(self, zone):
@@ -7999,6 +8046,7 @@ class SimEngine:
         for key, value in snap.items():
             if isinstance(key, str) and isinstance(value, str):
                 terrain[key] = value
+        self._bump_districts_epoch()
 
     def _park_agent_in_limbo(self, agent, zone):
         limbo_x, limbo_y = GOD_LIMBO_STATION
@@ -8372,7 +8420,7 @@ class SimEngine:
 
         was_paused = self.paused
         self.paused = True
-        self.save_state()
+        self.save_state(force=True)
         ms = self.d.get("memory_store")
         if ms is not None:
             try:
@@ -9543,16 +9591,22 @@ class SimEngine:
             return
         c = self.civilization
         starter = STARTER_DISTRICTS["cemetery_grounds"]
+        mutated = False
         if "cemetery_grounds" not in c["districts"]:
             c["districts"]["cemetery_grounds"] = json.loads(json.dumps(starter))
             c["districtProjects"].setdefault("cemetery_grounds", None)
             c["districtLastContribution"].setdefault("cemetery_grounds", 0)
+            mutated = True
         if "cemetery_gate" not in c["roadNodes"]:
             c["roadNodes"]["cemetery_gate"] = dict(STARTER_ROAD_NODES["cemetery_gate"])
+            mutated = True
         edge = ["beach_gate", "cemetery_gate"]
         if edge not in c["roadEdges"] and list(reversed(edge)) not in c["roadEdges"]:
             c["roadEdges"].append(edge)
             self._recompute_road_paths()
+            mutated = True
+        if mutated:
+            self._bump_districts_epoch()
 
     def _migrate_cemetery_structure(self):
         """Move the cemetery chapel onto the burial district's build grid."""
@@ -13453,6 +13507,7 @@ class SimEngine:
             self._ensure_district_stocks()
             new_stocks = self._init_district_stocks({did: c["districts"][did]}, c["resourceRegistry"])
             c["districtStocks"].update(new_stocks)
+        self._bump_districts_epoch()
 
     def _maybe_found_district(self):
         """Deterministic, tick-gated backstop (same shape as
@@ -15807,6 +15862,28 @@ class SimEngine:
             self._module_note_ages.extend(ages)
         return " | ".join(reports) if reports else "none"
 
+    def _piano_free_slots(self):
+        """Shared PIANO pool budget for decision fan-out and always-on refresh."""
+        return max(0, PIANO_CONCURRENT_LLM - len(self._piano_refresh_inflight))
+
+    def _run_decision_piano_module(self, runner, agent_name, module, context, frame_tick):
+        """Decision-path module call; releases unified inflight slot on completion."""
+        try:
+            return runner(module, agent_name, context, frame_tick=frame_tick)
+        finally:
+            with self.lock:
+                self._piano_refresh_inflight.discard((agent_name, module))
+
+    def _fill_piano_report_from_cache(self, module, cache, tick, report_by_module):
+        """Serve a throttled/off-tick module from cache when still within TTL."""
+        cached = cache.get(module)
+        if cached and (tick - cached["tick"]) <= PIANO_MODULE_CACHE_TTL:
+            age = tick - cached["tick"]
+            report_by_module[module] = (
+                f"{module} ({age} turns ago): {cached['text']}")
+            return True
+        return False
+
     def _always_on_module_done(self, agent_name, module, dirty_since, text, started):
         """Store one background refresh after reacquiring the engine lock."""
         with self.lock:
@@ -15875,7 +15952,7 @@ class SimEngine:
                     # the legacy 1/1/2/3 cadence preference as a tie-breaker.
                     due.append((0 if dirty else 1, -age, priority, agent, module, dirty_since))
         due.sort(key=lambda item: item[:3])
-        free = max(0, PIANO_CONCURRENT_LLM - len(self._piano_refresh_inflight))
+        free = self._piano_free_slots()
         selected = due[:min(MODULE_PULSE_MAX_BATCH, free)]
         self._module_pulse_work.append(len(selected))
         for _, _, _, agent, module, dirty_since in selected:
@@ -15897,13 +15974,16 @@ class SimEngine:
             self.piano_workers.submit(self._run_always_on_module, runner, agent["name"],
                                       module, context, dirty_since)
 
-    def _run_piano_modules(self, agent_name, modules, module_tick, context):
+    def _run_piano_modules(self, agent_name, modules, module_tick, context, *,
+                          force_cache_only=False):
         """Sid-parity Phase 1/5: run staggered PIANO modules on the dedicated
         piano_workers pool (never the decision pool), so a module backlog can
         never starve the Cognitive Controller decision call. Stagger:
         perception+desire every turn; social every 2nd; reflection every 3rd.
         Modules not due this turn are served from the module-report cache
         (PIANO_MODULE_CACHE_TTL module-ticks) instead of an empty slot.
+        Decision-path dispatches share `_piano_refresh_inflight` with the
+        always-on pulse and never submit more work than free PIANO slots.
         Returns (report_string, new_module_tick, runs)."""
         runner = self.d.get("run_piano_module")
         if not runner or not PIANO_MODULES:
@@ -15935,7 +16015,21 @@ class SimEngine:
                 ordered.append(module)
         report_by_module = {}
         runs = 0
-        if to_run:
+
+        def _throttle_modules(modules_to_skip):
+            for module in modules_to_skip:
+                if not self._fill_piano_report_from_cache(
+                        module, cache, tick, report_by_module):
+                    self._piano_module_drops += 1
+
+        if to_run and not force_cache_only:
+            with self.lock:
+                if self._piano_free_slots() == 0:
+                    force_cache_only = True
+
+        if to_run and force_cache_only:
+            _throttle_modules(to_run)
+        elif to_run:
             # Cross-module visibility (working-memory half-step): build one
             # shared "last_reports=" suffix from every cached report still
             # within PIANO_CROSS_CONTEXT_TTL module-ticks, and give it to
@@ -15952,33 +16046,67 @@ class SimEngine:
                 suffix = "last_reports=" + " | ".join(
                     f"{mod_name}({age} ago): {text}" for age, mod_name, text in fresh)
                 dispatch_context = context + "; " + suffix
-            futures = {}
-            dispatch_started = {}
-            for module in to_run:
-                start_ts = time.time()
-                dispatch_started[module] = start_ts
-                futures[module] = self.piano_workers.submit(
-                    runner, module, agent_name, dispatch_context, frame_tick=self.frameTick)
-            for module, fut in futures.items():
-                try:
-                    text = fut.result(timeout=PIANO_MODULE_TIMEOUT_WAIT_S)
-                except Exception:
-                    text = None
-                latency_ms = (time.time() - dispatch_started[module]) * 1000.0
-                totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
-                totals[0] += latency_ms
-                totals[1] += 1
-                if text:
-                    cache[module] = {"tick": tick, "text": text}
-                    report_by_module[module] = f"{module}: {text}"
-                    runs += 1
-                else:
-                    self._piano_module_drops += 1
+            pending = list(to_run)
+            active = {}
+            while pending or active:
+                with self.lock:
+                    while pending and self._piano_free_slots() > 0:
+                        module = pending.pop(0)
+                        if (agent_name, module) in self._piano_refresh_inflight:
+                            if not self._fill_piano_report_from_cache(
+                                    module, cache, tick, report_by_module):
+                                self._piano_module_drops += 1
+                            continue
+                        self._piano_refresh_inflight.add((agent_name, module))
+                        start_ts = time.time()
+                        active[module] = (
+                            self.piano_workers.submit(
+                                self._run_decision_piano_module, runner,
+                                agent_name, module, dispatch_context,
+                                self.frameTick),
+                            start_ts,
+                        )
+                if not active:
+                    _throttle_modules(pending)
+                    pending.clear()
+                    break
+                done, _ = wait(
+                    [fut for fut, _ in active.values()],
+                    timeout=PIANO_MODULE_TIMEOUT_WAIT_S,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    for module, (fut, start_ts) in list(active.items()):
+                        latency_ms = (time.time() - start_ts) * 1000.0
+                        totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
+                        totals[0] += latency_ms
+                        totals[1] += 1
+                        self._piano_module_drops += 1
+                        with self.lock:
+                            self._piano_refresh_inflight.discard((agent_name, module))
+                        del active[module]
+                    continue
+                for module, (fut, start_ts) in list(active.items()):
+                    if fut not in done:
+                        continue
+                    try:
+                        text = fut.result(timeout=0)
+                    except Exception:
+                        text = None
+                    latency_ms = (time.time() - start_ts) * 1000.0
+                    totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
+                    totals[0] += latency_ms
+                    totals[1] += 1
+                    if text:
+                        cache[module] = {"tick": tick, "text": text}
+                        report_by_module[module] = f"{module}: {text}"
+                        runs += 1
+                    else:
+                        self._piano_module_drops += 1
+                    del active[module]
         for module in off_tick:
-            cached = cache.get(module)
-            if cached and (tick - cached["tick"]) <= PIANO_MODULE_CACHE_TTL:
-                age = tick - cached["tick"]
-                report_by_module[module] = f"{module} ({age} turns ago): {cached['text']}"
+            self._fill_piano_report_from_cache(
+                module, cache, tick, report_by_module)
         reports = [report_by_module[m] for m in ordered if m in report_by_module]
         return (" | ".join(reports) if reports else "none"), tick, runs
 
@@ -16018,6 +16146,14 @@ class SimEngine:
         if agent is not None:
             self._advance_identity_forge_on_think(agent)
 
+    def _record_llm_orphan_timeout(self):
+        """Count orphaned client-side timeouts toward decision-dispatch pause."""
+        with self.lock:
+            self._llm_orphan_timeouts += 1
+            if self._llm_orphan_timeouts >= LLM_ORPHAN_TIMEOUT_THRESHOLD:
+                self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
+                self._llm_orphan_timeouts = 0
+
     def _think_job(self, agent_name):
         """Runs in the worker pool. Build payload under lock, do the network
         call OUTSIDE the lock, then apply the result UNDER the lock."""
@@ -16038,10 +16174,13 @@ class SimEngine:
                 piano_context = None
                 piano_modules = None
                 piano_tick = 0
+                piano_force_cache_only = False
                 if PIANO_MODULES:
                     piano_context = self._piano_module_context(agent, payload)
                     piano_modules = dict(agent.get("modules") or {})
                     piano_tick = int(agent.get("moduleTick") or 0)
+                    if not ALWAYS_ON_MODULES and self._piano_free_slots() == 0:
+                        piano_force_cache_only = True
             if possession_skip:
                 with self.lock:
                     agent = self._find_agent(agent_name)
@@ -16075,7 +16214,8 @@ class SimEngine:
                 # lock so this worker-pool thread can block waiting on it
                 # without freezing the tick.
                 reports, new_tick, runs = self._run_piano_modules(
-                    agent_name, piano_modules, piano_tick, piano_context)
+                    agent_name, piano_modules, piano_tick, piano_context,
+                    force_cache_only=piano_force_cache_only)
                 payload["module_reports"] = reports
             else:
                 new_tick, runs = 0, 0
@@ -16113,9 +16253,14 @@ class SimEngine:
                     self.lmStatus = "offline"
                     self._apply_rule_based_fallback(agent)
                     self._finish_think_identity_forge(agent)
+                elif decision.get("error") == "llm timeout":
+                    self.lmStatus = "offline"
+                    self._record_llm_orphan_timeout()
+                    self._apply_rule_based_fallback(agent)
+                    self._finish_think_identity_forge(agent)
                 elif decision.get("error") == "compute_error":
                     self.lmStatus = "compute_error"
-                    self.llm_cooldown_until = time.time() + 30.0
+                    self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
                     self._apply_rule_based_fallback(agent)
                     self._finish_think_identity_forge(agent)
                 elif decision.get("error"):
@@ -16125,6 +16270,7 @@ class SimEngine:
                 else:
                     self.lmStatus = "online"
                     self.llm_cooldown_until = 0.0
+                    self._llm_orphan_timeouts = 0
                     if decision.get("terraform_rejection_note"):
                         agent["lastTerraformRejection"] = {
                             "reason": decision["terraform_rejection_note"],
@@ -16440,15 +16586,15 @@ class SimEngine:
         """Build the Contract-3 payload. Caller must hold self.lock."""
         c = self.civilization
         civ = {k: v for k, v in c.items() if k not in _CIV_SET_KEYS}
-        # Deep-ish copy of nested mutables so the JSON dump can't race a mutation
-        # after the lock is released; sets -> sorted arrays.
-        civ = json.loads(json.dumps(civ, default=str))
+        # Deep copy into JSON-safe form so the DB write can't race a mutation
+        # after the lock is released; known set keys are sorted arrays.
+        civ = _json_safe_copy(civ)
         for key in _CIV_SET_KEYS:
             civ[key] = sorted(c.get(key, set()))
         agents = []
         for a in self.agents:
             ad = {k: v for k, v in a.items() if k not in ("beliefs", "godKeys", "isThinking")}
-            ad = json.loads(json.dumps(ad, default=str))
+            ad = _json_safe_copy(ad)
             ad["beliefs"] = sorted(a.get("beliefs", set()))
             ad["godKeys"] = sorted(a.get("godKeys", set()))
             agents.append(ad)
@@ -16467,16 +16613,26 @@ class SimEngine:
             "civilization": civ,
             "agents": agents,
             "memory": memory,
-            "council_transcript": json.loads(json.dumps(
-                self.council_transcript_rows, default=str)),
+            "council_transcript": _json_safe_copy(self.council_transcript_rows),
         }
 
-    def save_state(self):
-        """Atomically write the complete world to state.db. Never raises."""
+    def save_state(self, force=False):
+        """Atomically write the complete world to state.db. Never raises.
+
+        Periodic autosave passes force=False and skips the SQLite rewrite when
+        the content hash (excluding savedAt) matches the last successful write.
+        Graceful shutdown, reset, and checkpoint paths pass force=True so
+        savedAt and on-disk bytes always refresh."""
         try:
+            content_hash = None
             with self.lock:
                 payload = self._serialize_state()
+                content_hash = _state_content_hash(payload)
+                self._last_save_considered_at = time.time()
+                if not force and content_hash == self._last_saved_hash:
+                    return True
             _write_state_db(DB_PATH, payload)
+            self._last_saved_hash = content_hash
             return True
         except Exception:
             # Persistence must never crash the sim.
@@ -16925,6 +17081,7 @@ class SimEngine:
                     self._relayout_cemetery_graves()
                 _validate_districts(self.civilization["districts"])
                 _validate_road_graph(self.civilization["roadNodes"], self.civilization["roadEdges"])
+                self._bump_districts_epoch()
                 # Rebuild the MemoryStore by re-embedding each entry's text.
                 ms = self.d.get("memory_store")
                 if ms is not None:
@@ -23287,7 +23444,7 @@ class SimEngine:
         # Replace the on-disk save so a reset truly starts fresh: clear the old
         # snapshot, then immediately persist the fresh cold-started world.
         self.clear_state()
-        self.save_state()
+        self.save_state(force=True)
 
     def _social_ties_snapshot(self):
         """Return compact non-neutral ties between living agents for the viewer.

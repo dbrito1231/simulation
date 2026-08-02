@@ -279,17 +279,26 @@ per agent, `data` JSON-encoded, `ord` preserving roster order on load); and
 ts)`. The latter is the full human/audit record for Daily Council events, not
 prompt context.
 
-`_write_state_db(path, payload)` performs a full rewrite on every save: it
-upserts `meta`, then deletes and re-inserts all `civ`/`agents`/`memory`/
-`council_transcript` rows, all inside a single transaction, followed by a
-`wal_checkpoint`. `save_state()`
-serializes the payload under the lock, then writes it outside the lock via a
-per-call connection (`_write_state_db`) and never raises — the single-
-transaction commit gives crash safety without the old tmp-file-plus-rename
-trick. A dedicated `SimSaver` daemon thread calls `save_state()` every
-`AUTOSAVE_SECONDS = 10` s (sim_engine.py:33, 9523-9529), unchanged. `atexit`
-and signal handlers in server.py additionally flush a final save on graceful
-shutdown (server.py:3420-3439).
+`_write_state_db(path, payload)` performs a full rewrite on every save that
+actually reaches disk: it upserts `meta`, then deletes and re-inserts all
+`civ`/`agents`/`memory`/`council_transcript` rows, all inside a single
+transaction, followed by a `wal_checkpoint`. `save_state(force=False)`
+serializes the payload under the lock, computes a stable SHA-256 content hash
+via `_state_content_hash()` over the payload **excluding** `savedAt`, updates
+an in-memory `_last_save_considered_at` timestamp, and **skips** the SQLite
+rewrite when the hash matches `_last_saved_hash` (typical for a paused/idle
+world). A successful write updates `_last_saved_hash`. Pass `force=True` to
+always rewrite — used by graceful shutdown, `reset()`, and God checkpoint
+snapshots so `savedAt` and on-disk bytes refresh even when gameplay state is
+unchanged. Serialization uses `_json_safe_copy()` (explicit set→sorted-list
+conversion) instead of a redundant `json.loads(json.dumps(...))` round-trip.
+The write itself happens outside the lock via a per-call connection
+(`_write_state_db`) and never raises — the single-transaction commit gives
+crash safety without the old tmp-file-plus-rename trick. A dedicated `SimSaver`
+daemon thread calls `save_state()` (default `force=False`) every
+`AUTOSAVE_SECONDS = 10` s, unchanged. `atexit` and signal handlers in
+server.py additionally flush a final `save_state(force=True)` on graceful
+shutdown.
 
 `_read_state_db(path)` checks the file exists, connects, and returns the same
 payload dict shape as `_serialize_state()` produced, or `None` if the file is

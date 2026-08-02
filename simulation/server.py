@@ -3089,6 +3089,9 @@ def run_piano_module(module, agent_name, context, frame_tick=None, timeout_s=Non
             "error": "piano_module_timeout",
             "timeout_s": timeout_s,
         })
+        eng = globals().get("engine")
+        if eng is not None:
+            eng._record_llm_orphan_timeout()
         return None
     except Exception:
         return None
@@ -4040,13 +4043,19 @@ def run_agent_decision(data):
         # consuming a queue slot. Do not add a retry-on-timeout loop here;
         # every requests.exceptions.RequestException path below (including
         # Timeout) returns immediately instead of firing a second request.
+        def _request_error_tag(exc):
+            if isinstance(exc, requests.exceptions.Timeout):
+                return "llm timeout"
+            return "llm offline"
+
         start = datetime.now()
         try:
             resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as exc:
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            log_lm(latency_ms, error="llm offline")
-            return {"error": "llm offline", "action": "rest"}
+            err = _request_error_tag(exc)
+            log_lm(latency_ms, error=err)
+            return {"error": err, "action": "rest"}
 
         latency_ms = int((datetime.now() - start).total_seconds() * 1000)
         http_status = resp.status_code
@@ -4071,10 +4080,11 @@ def run_agent_decision(data):
             start = datetime.now()
             try:
                 resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as exc:
                 latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-                log_lm(latency_ms, error="llm offline")
-                return {"error": "llm offline", "action": "rest"}
+                err = _request_error_tag(exc)
+                log_lm(latency_ms, error=err)
+                return {"error": err, "action": "rest"}
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -4122,10 +4132,11 @@ def run_agent_decision(data):
             retry_start = datetime.now()
             try:
                 resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(slim_payload), timeout=request_timeout)
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as exc:
                 latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
-                log_lm(latency_ms, error=error_kind)
-                return {"error": "llm offline", "action": "rest"}
+                err = _request_error_tag(exc)
+                log_lm(latency_ms, error=err)
+                return {"error": err, "action": "rest"}
             latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -4469,27 +4480,45 @@ def state():
 
 @app.route("/districts.js")
 def districts_js():
-    """Live districts/roads for the viewer (world-expansion plan). Unlike the
-    static /roles.js precedent, this reads the engine's LIVE civilization
-    state under its lock -- like /state does -- so a district founded mid-session
-    shows up to a connected viewer on its next poll, no reload needed. Despite
-    the ".js" name (matching the plan's route naming), the body is plain JSON;
-    the viewer fetch()-polls it rather than re-injecting a <script> tag, which
-    would otherwise throw on re-declaring `const` globals every poll."""
+    """Live districts/roads for the viewer (world-expansion plan). Despite the
+    ".js" name (matching the plan's route naming), the body is plain JSON;
+    the viewer fetch()-polls it rather than re-injecting a <script> tag.
+
+    Under the engine lock, read districtsEpoch and either return a tiny
+    unchanged body when ?since= matches, or shallow-copy district/road data
+    into plain dicts/lists. JSON assembly happens after the lock is released."""
+    since_raw = request.args.get("since")
+    since = None
+    if since_raw is not None:
+        try:
+            since = int(since_raw)
+        except (TypeError, ValueError):
+            since = None
+
     with engine.lock:
-        c = engine.civilization
-        districts = [
-            {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
-             "bounds": dict(d["bounds"]),
-             "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
-             "tiles": dict(d.get("tiles") or {}),
-             "terrain": dict(d.get("terrain") or {}),
-             "settlementId": d.get("settlementId")}
-            for did, d in c["districts"].items()
-        ]
-        road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
-        road_edges = [list(e) for e in c["roadEdges"]]
-    return jsonify({"districts": districts, "roadNodes": road_nodes, "roadEdges": road_edges})
+        epoch = engine.districtsEpoch
+        if since is not None and since == epoch:
+            payload = {"unchanged": True, "epoch": epoch}
+        else:
+            c = engine.civilization
+            districts = [
+                {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
+                 "bounds": dict(d["bounds"]),
+                 "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
+                 "tiles": dict(d.get("tiles") or {}),
+                 "terrain": dict(d.get("terrain") or {}),
+                 "settlementId": d.get("settlementId")}
+                for did, d in c["districts"].items()
+            ]
+            road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
+            road_edges = [list(e) for e in c["roadEdges"]]
+            payload = {
+                "districts": districts,
+                "roadNodes": road_nodes,
+                "roadEdges": road_edges,
+                "epoch": epoch,
+            }
+    return jsonify(payload)
 
 
 @app.route("/control/pause", methods=["POST"])
@@ -5366,7 +5395,7 @@ if __name__ == "__main__":
         _saved_once.set()
         session_logger.flush_benchmarks()
         engine.stop()
-        engine.save_state()
+        engine.save_state(force=True)
 
     atexit.register(_flush_on_exit)
 

@@ -41,7 +41,7 @@ configured; see "Sovereign God mode" below.
 | `/agent/think` | POST | **Legacy** — calls `run_agent_decision()` directly | full think-payload dict (see specs/03) | validated decision dict |
 | `/council-llm-log` | GET | Slim decision records (`llm.jsonl`) for a council frame window (blueprint pitches/verdicts only). **Scans the live session's `llm.jsonl` first**; only reads older retained session directories when the requested `[start_frame, end_frame]` is not fully covered by the live file's frame range (`frame_tick` is monotonic across restarts, but each session only spans frames recorded while that server run was alive — a past council window may fall entirely in an older session). Out-of-range files are skipped using cached per-file `(min_frame, max_frame)` when possible. Matches from all scanned directories are merged and re-sorted by `frame_tick` | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
 | `/state` | GET | Full world snapshot for the thin viewer | — | `engine.snapshot()` — see key inventory below |
-| `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected) | — | `{districts: [...], roadNodes: {...}, roadEdges: [...]}` |
+| `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected). Supports conditional polls via `districtsEpoch` | query param `since` (int, optional) — last seen `epoch` from a prior response | **First / gap:** `{districts: [...], roadNodes: {...}, roadEdges: [...], epoch: int}`. **Unchanged:** when `since == engine.districtsEpoch`, HTTP 200 with tiny body `{unchanged: true, epoch: int}` (no district/road payload). `districtsEpoch` bumps on district founding, tile place/remove, terrain dig/plant, road-graph change, architect paint/revert, restore, and reset |
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
 | `/control/resume` | POST | Resume the tick loop | — | `{ok: true, paused: false}` |
 | `/control/reset` | POST | Reset the world, optionally with a new roster size (requires password) | `{password: string, agents?: int}` — `password` must match `SIM_RESET_PASSWORD` (server.py, read once at import; default `"reset"` when unset/blank); `agents` optional (omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` on success; `{ok: false, error: "unauthorized"}` with HTTP 401 on wrong/missing password (no reset) |
@@ -64,6 +64,16 @@ plan's route-naming convention, but the handler reads `engine.civilization`
 live under the engine lock (same pattern as `/state`) and returns JSON; the
 viewer's periodic `fetch()` re-parses it rather than re-injecting a `<script>`
 tag (which would throw on re-declaring `const` globals every poll).
+
+**`/districts.js` conditional poll.** The viewer tracks `districtsEpoch`
+(engine attribute, not in `/state`). Each poll may send `GET
+/districts.js?since=<epoch>`. When `since` equals the current epoch, the
+handler returns only `{unchanged: true, epoch}` under the lock without
+copying district tiles/terrain; JSON is assembled after the lock is released.
+When the epoch differs (or `since` is omitted), the handler shallow-copies
+district/road data into plain dicts/lists under the lock, then `jsonify`s
+outside the lock. The viewer keeps its last full payload on `unchanged`
+responses.
 
 ## `/state` payload — top-level keys
 

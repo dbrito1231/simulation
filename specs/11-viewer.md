@@ -41,13 +41,16 @@ world state beyond a cached palette/season key.
   — distinct from `lmStatus: "offline"` (Ollama
   unreachable, Flask up) and `"compute_error"` (GPU memory error), each with
   its own dot color/label in `renderSidebar()`.
-- `DISTRICTS_POLL_MS = 3000` drives `pollDistricts()` (`GET /districts.js`)
-  on a slower cadence since districts/roads change only when a district is
-  founded server-side. The first terrain-cache build starts immediately at page
-  kickoff (via `scheduleTerrainCacheBuild`) using `STARTER_DISTRICTS_JS` as a
-  fallback — it does **not** wait for `/districts.js`. When the served
-  district-id list later differs, `pollDistricts()` nulls `terrainCanvas` and
-  rebuilds.
+- `DISTRICTS_POLL_MS = 3000` drives `pollDistricts()` (`GET /districts.js`
+  with optional `?since=<districtsEpoch>`) on a slower cadence since
+  districts/roads change only when district/tile/terrain/road data mutates
+  server-side. The viewer tracks `districtsEpoch` from each full response;
+  when the server returns `{unchanged: true, epoch}`, the last payload is
+  kept (no parse/merge of district tiles/terrain). The first terrain-cache
+  build starts immediately at page kickoff (via `scheduleTerrainCacheBuild`)
+  using `STARTER_DISTRICTS_JS` as a fallback — it does **not** wait for
+  `/districts.js`. When the served district-id list or `districtsEpoch`
+  changes, `pollDistricts()` nulls `terrainCanvas` and rebuilds.
 - The render loop is **decoupled from polling** via `requestAnimationFrame`:
   `tick()` (`viewer.js`) redraws every animation frame from
   whatever `world` currently holds, keeping ~60fps even though network polls

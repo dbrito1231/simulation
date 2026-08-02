@@ -364,6 +364,7 @@ const prevPos = {};
 // until the first fetch resolves.
 let districtsData = { districts: [], roadNodes: {}, roadEdges: [] };
 let districtsKey = "";
+let districtsEpoch = 0;
 
 function getDistricts() {
   return (districtsData.districts && districtsData.districts.length)
@@ -730,17 +731,21 @@ function drawWorld(ctx, frameTick) {
 }
 
 // Poll GET /districts.js on a slow interval -- districts/roads are
-// mostly-static and only change when _maybe_found_district() fires
-// server-side (a rare, deterministic event), so this doesn't need /state's
-// ~10Hz cadence. Rebuilds the terrain cache only when the served list
-// actually changed (a district was founded), not on every poll.
+// mostly-static and only change when district/tile/terrain/road data
+// mutates server-side, so this doesn't need /state's ~10Hz cadence.
+// Sends ?since=<districtsEpoch>; unchanged polls keep the last payload.
 const DISTRICTS_POLL_MS = 3000;
 let districtsJsResolvedLogged = false;
 async function pollDistricts() {
   try {
-    const res = await fetch("/districts.js", { cache: "no-store" });
+    const sinceParam = districtsEpoch > 0 ? `?since=${districtsEpoch}` : "";
+    const res = await fetch(`/districts.js${sinceParam}`, { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
+    if (data.unchanged) {
+      if (data.epoch != null) districtsEpoch = data.epoch;
+      return;
+    }
     if (!districtsJsResolvedLogged) {
       districtsJsResolvedLogged = true;
       if (VIEWER_LOAD_DEBUG) {
@@ -750,15 +755,19 @@ async function pollDistricts() {
         });
       }
     }
+    const newEpoch = data.epoch;
     const key = JSON.stringify((data.districts || []).map((d) => d.id));
-    if (key !== districtsKey) {
+    const epochChanged = newEpoch != null && newEpoch !== districtsEpoch;
+    if (key !== districtsKey || epochChanged) {
       districtsKey = key;
+      if (newEpoch != null) districtsEpoch = newEpoch;
       districtsData = data;
-      terrainCanvas = null; // force rebuild with the new district list
+      terrainCanvas = null; // force rebuild when district list or content revision changes
       terrainBuildScheduled = false;
       scheduleTerrainCacheBuild();
     } else {
-      districtsData = data; // road graph could still have grown even if district ids didn't
+      districtsData = data;
+      if (newEpoch != null) districtsEpoch = newEpoch;
     }
   } catch (err) { /* keep last known districts; /state polling surfaces connectivity issues */ }
 }
