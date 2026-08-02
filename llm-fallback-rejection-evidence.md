@@ -15,6 +15,7 @@ Read-only gather of local `simulation/logs/` evidence for two patterns:
 - Related hints: scanned all `activity.jsonl` / `conversation.jsonl` for fallback/rejection keywords; keyword scan alone found 0 hits (those files use plain English messages). Manually correlated timestamps from Pattern 2 LLM rows into activity/conversation echoes (listed below).
 - Role is **not** present on these LLM log lines (`agent_name` only).
 - Raw logs themselves are **not** committed (gitignored); this file is the durable evidence extract.
+- **Sprite failures** get a dedicated analysis in [Deep dive: bad sprite designs](#deep-dive-bad-sprite-designs) (validator vs prompt contradiction, claimed sizes, rejection-note meanings, council-gate interaction, logging gaps).
 
 ## Inventory of sessions scanned
 
@@ -714,9 +715,93 @@ Timestamp-correlated echoes of Pattern 2 fallbacks:
 - `2026-08-02T01-08-14` line 4 @ `2026-08-02T05:08:34.619062+00:00` — `directive` Rex→Kane: **Gather or contribute iron_ore to the active project** — _Conversation echo of Rex Pattern 2 assign_task fallback_
 - `2026-08-02T01-08-14` line 5 @ `2026-08-02T05:09:03.324370+00:00` — `directive` Rex→Zara: **Gather or contribute iron_ore to the active project** — _Conversation echo of Rex Pattern 2 assign_task fallback_
 
+## Deep dive: bad sprite designs
+
+This is the dominant Pattern 2 failure in the current logs. All sprite-design LLM turns below had `sprite_design_only: true` and returned `action: submit_structure_sprite` (visible in `response_preview`). Validation failed in `normalize_decision()` → `validate_sprite_block()`; the engine then applied `role_fallback_action()`.
+
+### Validator rules (from `server.py` `validate_sprite_block`)
+
+What must pass for a sprite to be accepted:
+
+| Rule | Requirement |
+|---|---|
+| Shape | `sprite` must be a **dict** with `palette` and `grid` |
+| Palette | 2–5 hex colors `#RRGGBB` |
+| Grid rows | **4–14** rows (hard max **14**) |
+| Grid cols | each row string **4–14** cells |
+| Cells | only `.` and letters `a`–`e` matching palette indices |
+| Upgrade mins | if `minRows`/`minCols` set, grid must be **strictly larger in both** dimensions than those mins |
+| Art | not a degenerate flat fill |
+
+### Prompt rules on the same turn (from `SPRITE_UPGRADE_*` prompts)
+
+The sprite-upgrade system prompt simultaneously says:
+
+1. `sprite.grid: 4-14 rows, each row 4-14 characters…`
+2. `The new grid MUST be STRICTLY BIGGER than the minimum dimensions given (more rows AND more columns).`
+3. User prompt: `Minimum size to beat: strictly more than {min_rows} rows AND strictly more than {min_cols} columns.`
+
+Upgrade turns set `minRows`/`minCols` from the **current** sprite dimensions (`sim_engine.py` after a visual-tier bump). When the current sprite is already **14×14** (max legal size), “strictly more than 14” is **impossible** without violating the 4–14 cap.
+
+### What the model said it was doing (from `response_preview` reasoning)
+
+`response_preview` is capped at **240 characters** (`SIM_LLM_LOG_FULL` was off), so the full `sprite` JSON body is **not** in these logs. Reasoning text still shows the intended sizes:
+
+| # | Session / line | Agent | Claimed target size in reasoning | `sprite_rejection_note` | Applied fallback |
+|---|---|---|---|---|---|
+| S1 | `2026-08-02T01-07-39` L1 | Ivy | “strictly exceed” prior 14×14 (tier 5 farm plot); preview cuts off before size | `sprite must be an object with palette and grid` | `collect_resource` → `iron_ore` |
+| S2 | `2026-08-02T01-08-14` L4 | Rex | **16×16** farm plot (“>14 rows and >14 columns”) | `sprite must be an object with palette and grid` | `assign_task` → Kane |
+| S3 | `2026-08-02T01-08-14` L8 | Rex | **16-row by 20**-col upgraded Farm Plot | `sprite must be an object with palette and grid` | `assign_task` → Dex (activity: “could not assign”) |
+| S4 | `2026-08-02T01-08-14` L9 | Ivy | **20×20** (“strictly exceeds 14×14”) | `sprite grid must be 4-14 rows` | `move_to_district` → `forest` |
+| S5 | `2026-08-02T01-08-14` L12 | Rex | **16×18** Farm Plot | `sprite must be an object with palette and grid` | `assign_task` → Zara |
+| S6 | `2026-08-02T01-08-14` L14 | Ivy | **16 rows by 20 columns** | `sprite grid must be 4-14 rows` | `collect_resource` → `iron_ore` |
+
+### Two rejection-note meanings (sprite cases)
+
+1. **`sprite must be an object with palette and grid`** (S1–S3, S5 — 4 hits)  
+   After JSON extraction, `decision["sprite"]` was missing or not a dict with `palette`/`grid`. With slim logging we cannot see the raw full body; plausible causes consistent with the previews:
+   - model emitted `action` + long `reasoning` first and the `sprite` block never made it into the parsed object (truncated/incomplete JSON), or
+   - model omitted `sprite` entirely while narrating a 16×N design.
+
+2. **`sprite grid must be 4-14 rows`** (S4, S6 — 2 hits)  
+   A `sprite` object **was** present and got far enough for grid-length checks, but `len(grid)` was outside 4–14. Matches the model’s own claims of **20×20** and **16×20** grids.
+
+### Feedback loop / high-stakes flag
+
+- Ivy’s turns carry `high_stakes_reason: "repeated_rejections"` — the engine already treated this agent as stuck in a rejection loop.
+- Reasoning text repeatedly cites prior failure as “too small (14×14)” / “did not exceed minimum dimensions (14×14)”, then proposes **>14** sizes, which either:
+  - violate the hard 14-row max → `sprite grid must be 4-14 rows`, or
+  - never arrive as a valid `sprite` object → `sprite must be an object with palette and grid`.
+
+### Related case: sprite attempt swallowed by council gate
+
+| Session / line | Agent | Notes |
+|---|---|---|
+| `2026-08-02T01-08-14` L17 | Rex | Still `sprite_design_only: true`; `response_preview` is `submit_structure_sprite` for a Smelter redraw. Daily Council had convened (~30s earlier). `normalize_decision` hits the **council branch first** when `council_turn` is set, so a non-council action is rejected with `council_rejection_note: "not a seated active council turn"` — **sprite validation never runs**. Fallback: canned `council_speak`. |
+
+This is still “bad sprite turn” evidence: the model tried to finish sprite work; session/action gating discarded it before `validate_sprite_block`.
+
+### Activity / conversation echoes of sprite fallbacks
+
+Already listed above; sprite-specific subset:
+
+- Ivy gather/move after S1, S4, S6
+- Rex `assign_task` directives after S2, S5; S3 assignment failed in-world (“Rex could not assign that task”)
+- No activity line says “sprite rejected” in plain English — rejection lives only in `llm.jsonl` notes
+
+### Logging gap for deeper sprite forensics
+
+- Slim `llm.jsonl` (`SIM_LLM_LOG_FULL` off): only `response_preview` ≤240 chars — **palette/grid bodies not retained** in these sessions.
+- To capture full bad sprite JSON next time: run with `SIM_LLM_LOG_FULL=1` (or equivalent) and re-check `llm.jsonl` / optional Ollama-side traces.
+- Ollama `server.log` does not record our validation notes; it only shows `/api/chat` transport success/failure.
+
+### Sprite deep-dive bottom line
+
+In these logs, “bad sprite designs” are not random art failures. They cluster on **upgrade-after-max-tier** pressure: the model is told the previous 14×14 was “too small” and to beat that minimum, while the validator still caps at 14×14. Observed outcomes are oversized grids (when parsed) or missing/incomplete `sprite` objects (when not), then role fallbacks that look like normal village work.
+
 ## Short pattern summary (plain language)
 
 - **Pattern 1:** not present in current local logs.
-- **Pattern 2 dominant failure:** `submit_structure_sprite` rejected for missing/invalid sprite object or grid outside 4–14 rows (often after prompts pushing >14×14). Engine fell back to elder `assign_task` or gather/move actions.
-- **Pattern 2 secondary failure:** `council_speak` rejected for wrong turn / missing `message`; engine injected canned council fallback speech, which activity still recorded as council speech.
+- **Pattern 2 dominant failure (sprites):** `submit_structure_sprite` rejected — either missing/`sprite` object (`palette`+`grid` required) or grid outside 4–14 rows after the model aimed for 16×16 / 16×18 / 16×20 / 20×20 to “beat” a 14×14 minimum. Fallbacks: elder `assign_task` or Ivy gather/move. See **Deep dive: bad sprite designs**.
+- **Pattern 2 secondary failure:** `council_speak` rejected for wrong turn / missing `message`; engine injected canned council fallback speech (including one Rex sprite-design turn blocked by the council gate).
 
