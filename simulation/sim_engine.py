@@ -1744,6 +1744,7 @@ WILDLIFE_GUARD_RADIUS = 120
 SETTLEMENT_STRUCT_THRESHOLD = 5
 SETTLEMENT_POP_THRESHOLD = 6
 CARAVAN_CARRY_MIN = 3
+CARAVAN_LOG_CAP = 20              # bounded ring -- oldest caravan deliveries drop first
 CARAVAN_VEHICLE_RESOURCES = frozenset({"cart", "wagon"})
 TREATY_TARIFF_MAX = 0.25
 PATH1_GRID_COLS = 8
@@ -6101,6 +6102,7 @@ class SimEngine:
             "frame": self.frameTick,
             "agent": agent["name"],
         })
+        c["caravanLog"] = c["caravanLog"][-CARAVAN_LOG_CAP:]
         self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
                             {"agent": agent["name"], "dest": dest_settlement_id, "goods": goods})
         dest_name = (dest_settlement or {}).get("name") or dest_settlement_id
@@ -13859,6 +13861,12 @@ class SimEngine:
                 {"intervened": bool(god.get("intervened")),
                  "active_effects": len(god.get("activeEvents") or []),
                  "rejected_commands": self._god_rejected_count})
+        try:
+            flush = self.d.get("flush_benchmarks")
+            if flush:
+                flush()
+        except Exception:
+            pass
 
     def _run_wiki_memory_merge(self, agent, ms, joined):
         """WIKI_MEMORY path for _run_memory_maintenance. Replaces the plain
@@ -23446,7 +23454,7 @@ class SimEngine:
                     sid: dict(bucket or {})
                     for sid, bucket in (c.get("settlementStores") or {}).items()
                 }
-                civ["caravanLog"] = list(c.get("caravanLog") or [])[-20:]
+                civ["caravanLog"] = list(c.get("caravanLog") or [])[-CARAVAN_LOG_CAP:]
                 civ["isNight"] = self._is_night()
             if ENV_EFFECTS_ENABLED:
                 civ["litDistricts"] = list(c.get("litDistricts") or [])

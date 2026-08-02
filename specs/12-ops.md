@@ -58,27 +58,30 @@ folder for its lifetime.
   (`state.db` is the authoritative memory store across restarts, so an old
   session's `memory.json` is pure disk bloat once its directory ages out of
   the retention window).
-- **`/council-llm-log` searches across retained sessions, not just the live
-  one**: `frame_tick` is a global counter persisted in `state.db` that never
-  resets on restart, so a council meeting's `[start_frame, end_frame]` window
-  can fall entirely inside an *older* session's `llm.jsonl` if the server was
-  restarted since that meeting happened. The route lists every subdirectory
-  of `logs/` matching `SESSION_DIR_RE` (same regex `_prune_old_sessions`
-  uses, so it never looks past the retention window), sorts them
-  lexicographically (== chronologically), applies the same per-line frame/
-  agent/action filter to each directory's `llm.jsonl` via a shared helper
-  (`_council_llm_entries_from_file`), and merges + re-sorts all matches by
-  `frame_tick`. This is a small, bounded scan (at most `LOG_RETENTION_SESSIONS`
-  files) — no attempt is made to guess which single session a frame range
-  belongs to via mtime/stat, since simplicity/correctness matters more than
-  the marginal cost of reading a few extra small JSONL files.
+- **`/council-llm-log` prefers the live session, then older retained sessions
+  only when needed**: `frame_tick` is a global counter persisted in
+  `state.db` that never resets on restart, so a council meeting's
+  `[start_frame, end_frame]` window can fall entirely inside an *older*
+  session's `llm.jsonl` if the server was restarted since that meeting
+  happened. The route **always scans the live session's `llm.jsonl` first**
+  via `_scan_council_llm_file` (shared council filter with
+  `_council_llm_entries_from_file`). If the live file's `(min_frame,
+  max_frame)` fully covers the requested window, older directories are not
+  read. Otherwise it lists every other subdirectory of `logs/` matching
+  `SESSION_DIR_RE` (same regex `_prune_old_sessions` uses, so it never
+  looks past the retention window), skips files whose cached or computed
+  bounds do not overlap the window (`_llm_jsonl_frame_bounds`), applies the
+  same per-line filter to the rest, and merges + re-sorts all matches by
+  `frame_tick`. Per-file bounds are cached in memory keyed by path with
+  mtime+size invalidation so steady-state council lookups after a long run
+  typically touch only the live `llm.jsonl`.
 - **Six JSONL streams**, each created empty on startup (server.py:255-264):
   | File | Written by | Record `type` |
   |---|---|---|
   | `activity.jsonl` | `log_activity(message, frame_tick)` (server.py:286-289) | `"activity"` |
   | `conversation.jsonl` | `log_conversation(sender, recipient, message, frame_tick, kind, outcome)` (server.py:291-303) | `"conversation"` |
   | `llm.jsonl` | `log_lm_exchange(record)` (server.py:305-307) | `"llm"` (sessions predating the Ollama migration, `docs/plan-ollama-migration.md` Phase 5, wrote `lm_studio.jsonl` with `type: "lm_studio"`) |
-  | `benchmarks.jsonl` | `log_benchmark(metric, value, frame_tick, detail)` (server.py:309-318) | `"benchmark"` |
+  | `benchmarks.jsonl` | `log_benchmark(metric, value, frame_tick, detail)` (server.py:309-318); flushed via `flush_benchmarks()` | `"benchmark"` |
   | `divine.jsonl` | `log_divine(intervention_id, request_id, frame_tick, kind, normalized_command, outcome, status, public)` — Sovereign God mode Phase 2 | `"divine"` |
   | `compiler.jsonl` | `log_compiler(prose, model, latency_ms, status, reason, preview_id)` — Sovereign God mode Optional Phase 8 | `"compiler"` |
 - Every record passes through `_append()` (server.py:272-284), which stamps
@@ -99,13 +102,33 @@ folder for its lifetime.
   - `activity`: `{type, message, frame_tick}`.
   - `conversation`: `{type, kind, from, to, message, frame_tick, outcome?}`.
   - `llm`: built per decision call by closure `log_lm(...)`
-    (server.py:3010-3035): `{agent_name, frame_tick, latency_ms,
+    (server.py:3010-3035), stripped in `log_lm_exchange` unless full logging
+    is enabled. **Default (slim):** `{agent_name, frame_tick, latency_ms,
     invention_only, sprite_design_only, high_stakes_reason,
     high_stakes_active, high_stakes_capped, prompt_chars, system_chars,
-    nudges_total, nudges_dropped, request, response, http_status, decision,
-    error}` — `request` is the exact payload sent (post any slim-retry
-    swap), `decision` is the normalized/applied decision or fallback.
+    nudges_total, nudges_dropped, response_preview?, http_status, decision,
+    error, module?, timeout_s?}` — omits full `request`/`response` bodies;
+    `response_preview` is a short excerpt of assistant text when present.
+    `decision` is the normalized/applied decision or fallback. PIANO module
+    timeout records omit bodies by default and may include `module` /
+    `timeout_s`. **`SIM_LLM_LOG_FULL=1`** (env, parsed like other `SIM_*`
+    truthy flags — `1`/`true`/`yes`/`on`, read once at import) restores the
+    legacy shape with full `request` (exact payload sent, post any slim-retry
+    swap) and full `response` (Ollama JSON body). Required for
+    `scripts/llm_replay_bench.py`, which replays logged `request.messages`.
+    `/council-llm-log` uses slim fields only (`decision`, `invention_only`,
+    etc.) and does not need full bodies when `invention_only` is stamped on
+    the record.
   - `benchmark`: `{type, metric, value, frame_tick, detail?}`.
+- **`benchmarks.jsonl` buffered flush (perf, docs/plan-perf-degradation-fixes.md
+  Agent 8):** `log_benchmark` appends to an in-memory buffer (cap
+  `BENCHMARK_BUFFER_MAX = 256`, server.py beside `SessionLogger`) instead of
+  opening the file per record. `_sample_benchmarks()` ends with
+  `flush_benchmarks()` (wired through engine deps as `flush_benchmarks`) so
+  each ~20s sample burst becomes one multi-line append. The buffer auto-flushes
+  when full; `atexit` and graceful shutdown also call `flush_benchmarks()` so
+  event-driven metrics are not lost. Record shape is unchanged — each flushed
+  line is still one stamped JSON object with `ts` and `session_id`.
   - `divine`: `{type, intervention_id, request_id, frame_tick, kind,
     normalized_command, outcome, status, public}`. `request_id` is a
     truncated SHA-256 hash of the client-supplied requestId, never the raw
