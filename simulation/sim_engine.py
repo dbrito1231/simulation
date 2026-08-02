@@ -10627,13 +10627,38 @@ class SimEngine:
         """An unused AGENT_DEFS entry if one exists (mirrors
         _maybe_welcome_newcomer); otherwise a generated villager beyond the
         fixed 12-name roster, so births never stall just because every named
-        slot is occupied by long-lived retirees."""
+        slot is occupied by long-lived retirees.
+
+        AGENT_DEFS ids must never collide with an id already held by any
+        agent that has ever existed in this world -- living or dead, since
+        buried/deceased agents stay in self.agents forever. This matters
+        because AGENT_DEFS has grown over the project's history (e.g. Kane
+        was added with a hardcoded id after some long-running worlds had
+        already generated a procedural agent using that same id via the
+        nextGeneratedAgentId counter). If an AGENT_DEFS entry's *name* is
+        free but its *id* is already taken, we keep the def's identity
+        (name/role/personality/color/zone) but substitute a fresh id from
+        the same generated-id counter the fallback path uses, so the two
+        paths can never hand out a colliding id. The generated-id fallback
+        itself also fast-forwards past any id already in use, in case the
+        counter is ever behind (e.g. after restoring an older save)."""
+        used_ids = {a["id"] for a in self.agents}
+        c = self.civilization
+
+        def _next_generated_id():
+            gen_id = c.get("nextGeneratedAgentId", 1000)
+            while gen_id in used_ids:
+                gen_id += 1
+            c["nextGeneratedAgentId"] = gen_id + 1
+            return gen_id
+
         unused = next((d for d in AGENT_DEFS if d["name"] not in self.agent_names), None)
         if unused:
-            return dict(unused), False
-        c = self.civilization
-        gen_id = c.get("nextGeneratedAgentId", 1000)
-        c["nextGeneratedAgentId"] = gen_id + 1
+            slot = dict(unused)
+            if slot["id"] in used_ids:
+                slot["id"] = _next_generated_id()
+            return slot, False
+        gen_id = _next_generated_id()
         roles = list(self.d["ROLES"].keys()) or ["gatherer"]
         role = random.choice([r for r in roles if r != "elder"] or roles)
         zone = random.choice(list(self.civilization["districts"].keys()))
@@ -12101,16 +12126,32 @@ class SimEngine:
         _generated_agent_defs is what the cold-start path already uses for
         these exact slot indices, so a newcomer looks identical regardless of
         whether the village started large or grew into this slot. Newcomers
-        persist via state.db like any other agent."""
+        persist via state.db like any other agent.
+
+        AGENT_DEFS ids must never collide with an id already held by any
+        agent that has ever existed in this world -- living or dead (mirrors
+        _next_agent_slot's fix for the same defect). Unlike that function,
+        this path is deliberately deterministic (see above), so a candidate
+        whose name is free but whose id collides is not eligible: we don't
+        substitute a different id for it, we just skip it and let the next
+        candidate (from AGENT_DEFS, then the generated pool) be considered.
+        If nothing in either source has both a free name and a free id, no
+        newcomer arrives this cycle -- same as any other "unused is None"
+        case today."""
         if not STRUCTURE_EFFECTS_ENABLED:
             return
         # Corpses remain in self.agents for burial; only the living occupy beds.
         if len(self._living_agents()) >= self._population_cap():
             return
-        unused = next((d for d in AGENT_DEFS if d["name"] not in self.agent_names), None)
+        used_ids = {a["id"] for a in self.agents}
+
+        def _free(d):
+            return d["name"] not in self.agent_names and d["id"] not in used_ids
+
+        unused = next((d for d in AGENT_DEFS if _free(d)), None)
         if not unused:
             generated_pool = _generated_agent_defs(MAX_ROSTER_SIZE - len(AGENT_DEFS))
-            unused = next((d for d in generated_pool if d["name"] not in self.agent_names), None)
+            unused = next((d for d in generated_pool if _free(d)), None)
         if not unused:
             return
         newcomer = self._make_agents([unused])[0]
