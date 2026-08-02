@@ -765,6 +765,8 @@ Upgrade turns set `minRows`/`minCols` from the **current** sprite dimensions (`s
    - model emitted `action` + long `reasoning` first and the `sprite` block never made it into the parsed object (truncated/incomplete JSON), or
    - model omitted `sprite` entirely while narrating a 16×N design.
 
+   **Superseded by [Phase 0 evidence gate: closed — truncation, not omission](#phase-0-evidence-gate-closed--truncation-not-omission) below.** The two bullets above were speculation written under `SIM_LLM_LOG_FULL` off, with no way to see the raw body. A dedicated repro measured Ollama's own `done_reason`/`eval_count` for this exact prompt shape and found the first bullet is what actually happens, unambiguously, in all 5 measured failures: JSON truncated mid-object because generation hit the sprite turn's `max_tokens` ceiling. The second bullet (genuine omission) was not observed in any measured case. This paragraph is left as-is for the historical record; treat the linked section as the current answer.
+
 2. **`sprite grid must be 4-14 rows`** (S4, S6 — 2 hits)  
    A `sprite` object **was** present and got far enough for grid-length checks, but `len(grid)` was outside 4–14. Matches the model’s own claims of **20×20** and **16×20** grids.
 
@@ -800,6 +802,45 @@ Already listed above; sprite-specific subset:
 ### Sprite deep-dive bottom line
 
 In these logs, “bad sprite designs” are not random art failures. They cluster on **upgrade-after-max-tier** pressure: the model is told the previous 14×14 was “too small” and to beat that minimum, while the validator still caps at 14×14. Observed outcomes are oversized grids (when parsed) or missing/incomplete `sprite` objects (when not), then role fallbacks that look like normal village work.
+
+## Phase 0 evidence gate: closed — truncation, not omission
+
+**Status: closed.** The plan `docs/create-a-plan-to-delightful-snowflake.md` Phase 0 asked, of the 4 `sprite must be an object with palette and grid` rejections above (S1–S3, S5), whether the cause is JSON **truncated mid-object** (generation-length problem) or the model **genuinely omitting** the `sprite` block while narrating. This is now answered: **truncation dominates, unambiguously.**
+
+### Verdict
+
+**5 of 5 measured failures were `done_reason: "length"` at `eval_count: 768`** — generation hit the sprite turn's `max_tokens = 768` ceiling exactly and was cut off mid-JSON. Zero measured failures were genuine omission: in every failing case the response *began* correctly (`{"action":"submit_structure_sprite","target":null,"sprite":{"palette":[...],"grid":[...`) and simply never reached the closing brace.
+
+### Method (reproducible)
+
+A deterministic probe drove the real sprite-design payload — `build_decision_payload` with `sprite_design_only=True`, the real `SPRITE_UPGRADE_SYSTEM_PROMPT` + `DECISION_SCHEMA` response format — against the live Ollama `sim-smart` model: 4 repetitions × 3 minimum-size cases (12 calls total), recording Ollama's own `done_reason` / `eval_count` per response (not just the app-level `normalize_decision()` verdict).
+
+### Per-case breakdown
+
+| Case (minRows, minCols) | Result |
+|---|---|
+| **at-cap-both** — the old buggy ask, "beat 14 rows AND 14 cols" | **4/4 truncated** (`done_reason=length`, `eval_count=768`) |
+| **one-dim-at-cap** — Fix 1's new output, minRows=10 / minCols=0 | **4/4 clean** (`done_reason=stop`, `eval_count` 269–292) |
+| **below-cap** — minRows=8 / minCols=8, regression baseline | **3/4 clean**; 1/4 truncated |
+
+12 calls total: 7 clean, 5 failed — all 5 failures `done_reason: "length"` @ `eval_count: 768`.
+
+### Mechanism — two contributing causes
+
+The truncated responses show the model generating wildly oversized grids — rows 50+ characters wide, and 30–100+ rows, far outside the documented 4–14 bound.
+
+1. Asking it to "beat 14×14" when 14 is the hard cap is unsatisfiable, so the model keeps growing the grid trying to comply. This is the Fix 1 bug, and Fix 1 eliminates it: the **one-dim-at-cap** case, which is what Fix 1 now emits, was 4/4 clean.
+2. **Independently of Fix 1**, the structured-output schema does not bound the grid: in `DECISION_SCHEMA`, the top-level `sprite` property declares `"palette": {"type": "array"}` and `"grid": {"type": "array"}` with no `minItems`/`maxItems` and no per-row length bound. Nothing at the grammar level stops a runaway. This is why the **below-cap** baseline still truncated 1 time in 4, even with no unsatisfiable minimum in play.
+
+### Consequence for the plan
+
+The plan states: *"If truncation dominates, add a token-budget adjustment to the work; if omission dominates, Fixes 1 and 4 already cover it."* Truncation dominates, so a token-budget adjustment is warranted. The chosen adjustment is to bound `sprite.grid`/`sprite.palette` in `DECISION_SCHEMA` so the decode grammar itself enforces the existing 4–14 rule, rather than merely raising `num_predict` (which cannot stop a 100-row runaway). That schema change is implemented separately — it is **not** part of this evidence record.
+
+Because the failures are truncation, Fix 4's same-turn retry is still genuinely useful for this class (a retry told "your previous reply was cut off; emit a smaller grid" can succeed), but the schema bound is the primary fix and the retry is the backstop.
+
+### Relationship to the earlier speculation
+
+This closes the open question left in [Deep dive: bad sprite designs → Two rejection-note meanings](#two-rejection-note-meanings-sprite-cases), where the `sprite must be an object with palette and grid` cause was marked unknown/speculative due to `SIM_LLM_LOG_FULL` being off. That passage has been annotated to point here rather than rewritten, to preserve the original record.
 
 ## Short pattern summary (plain language)
 

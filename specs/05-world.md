@@ -292,6 +292,49 @@ distinct from numeric `level`. `structure["renderScale"]` grows with level for a
 visible size cue. Decay (`condition` 0-100, disrepair threshold, ruin collapse) and
 `repair_structure` restore mechanics: [08-systems-economy.md](08-systems-economy.md).
 
+**Sprite-design turn at a visual-tier upgrade.** When an `upgrade_structure`
+call crosses a visual-tier boundary, `_upgrade_structure` (sim_engine.py)
+compares the structure's current sprite dimensions against the schema-level
+`SPRITE_GRID_MAX` (14, [03-cognition.md](03-cognition.md#structured-output)):
+if the sprite is already at the cap in **both** rows and columns, no
+`spriteDesignTurn` is issued at all — the procedural tier sprite from
+`_apply_visual_tier` stands, since asking for a bigger grid is unsatisfiable
+and a same-size redraw would burn an LLM turn for no visual change. If only
+one dimension is at cap, that dimension's `minRows`/`minCols` is set to `0`
+(no growth required on that axis) while the other keeps its normal "must grow"
+minimum; below cap on both axes, behavior is unchanged from before. A
+sprite-design turn now expires: the shared `SimEngine._count_sprite_design_failure`
+helper counts attempts and, at `SPRITE_DESIGN_MAX_ATTEMPTS = 3` (sim_engine.py)
+failed think cycles, clears the pending turn, keeps the existing (procedural)
+sprite, and logs "`<name> gave up refining the sprite for the <structure>`" —
+previously a rejected design turn was re-offered every think cycle
+indefinitely. An attempt is counted for **any** think cycle where the turn
+fails to produce an applied `submit_structure_sprite`, not only an
+`_apply_structure_sprite` rejection from `validate_sprite_block`/the
+degenerate-sprite check: `apply_decision` also counts the case where the
+decision's action comes back as something other than
+`submit_structure_sprite` entirely — most commonly a sprite reply rejected
+server-side by `normalize_decision()` in server.py and replaced with an
+unrelated role fallback action, which previously left the turn untouched and
+re-prompted for the same sprite forever. That missing-case check only fires
+when the turn captured at the start of `apply_decision` is still the exact
+same object afterward, so it can't double-count a turn `_apply_structure_sprite`
+already handled or a turn cancelled for an unrelated reason (e.g. active voice
+guidance clears `spriteDesignTurn` in `_build_think_payload` before the prompt
+is even built, so that cycle's decision never reaches this check with a
+pending turn to count).
+
+**Restore-time sanitation for pre-fix turns.** `restore_state` (sim_engine.py)
+re-applies the same cap rule above to every restored agent's
+`spriteDesignTurn`, healing worlds saved before `_upgrade_structure` learned
+to zero out a capped dimension: if a restored turn's `minRows` and `minCols`
+are both at/over `SPRITE_GRID_MAX`, the turn is unsatisfiable and is cleared
+silently (no activity line — this is load-time housekeeping, not an in-world
+event); if only one dimension is at/over cap, that dimension's minimum is
+rewritten to `0` to match what a freshly issued turn would carry. Malformed
+restored turns (non-dict, or missing fields) are dropped defensively rather
+than raising.
+
 ## Path-1 terrain grid + composable blocks
 
 Mechanics only — flag semantics (`TERRAIN_TILES_ENABLED`, `COMPOSABLE_BUILD_ENABLED`)

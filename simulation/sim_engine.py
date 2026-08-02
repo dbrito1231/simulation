@@ -887,6 +887,7 @@ LEVEL_STEP = 1              # levels gained per upgrade_structure action (1 → 
 UPGRADE_STAT_STEP = 10        # cost + produce/boost weight tier every N levels
 UPGRADE_TIERS = (1, 25, 50, 75, 100)
 UPGRADE_COST_BASE = 1       # primary material units; scales with level tier
+SPRITE_DESIGN_MAX_ATTEMPTS = 3  # give up on a rejected sprite design turn after this many tries
 # Structure footprint model (size-aware placement/overlap): mirrors the
 # client's drawn size so the engine can prevent/detect visual overlap after
 # upgrades grow a structure's renderScale.
@@ -5556,15 +5557,25 @@ class SimEngine:
         new_tier = self._visual_tier_index(new_level)
         if new_tier > old_tier:
             self._apply_visual_tier(s, new_tier)
+            sprite_max = int(self.d.get("SPRITE_GRID_MAX") or 14)
             rows, cols = self._sprite_dimensions(s.get("sprite"))
-            agent["spriteDesignTurn"] = {
-                "structureId": s["id"],
-                "tier": new_tier,
-                "minRows": rows,
-                "minCols": cols,
-                "structureName": name,
-                "structureType": s.get("type"),
-            }
+            rows_at_cap = rows >= sprite_max
+            cols_at_cap = cols >= sprite_max
+            if rows_at_cap and cols_at_cap:
+                # Already at the validator's hard cap in both dimensions: asking for
+                # a bigger sprite is unsatisfiable, and asking for a same-size redraw
+                # burns an LLM turn for no visual change. The procedural tier sprite
+                # from _apply_visual_tier stands.
+                agent["spriteDesignTurn"] = None
+            else:
+                agent["spriteDesignTurn"] = {
+                    "structureId": s["id"],
+                    "tier": new_tier,
+                    "minRows": 0 if rows_at_cap else rows,   # 0 = no growth required
+                    "minCols": 0 if cols_at_cap else cols,
+                    "structureName": name,
+                    "structureType": s.get("type"),
+                }
             # The upgrade may have grown this structure's footprint enough to
             # overlap a neighbor; the upgrader becomes the relocator.
             self._enqueue_reorg_for_overlaps(s, preferred_agent=agent)
@@ -5574,6 +5585,35 @@ class SimEngine:
         self._log_benchmark("structure_upgraded", new_level,
                             {"structure": s.get("type"), "id": s["id"]})
         return f"{agent['name']} upgraded {name} to level {new_level}"
+
+    def _count_sprite_design_failure(self, agent, structure_or_name):
+        """Count one failed think-cycle against agent['spriteDesignTurn'].
+
+        Shared by every site where a pending sprite-design turn fails to
+        produce an applied submit_structure_sprite -- an engine-side
+        validate_sprite_block/degenerate-sprite rejection (_apply_structure_sprite)
+        as well as a decision whose action never made it to
+        submit_structure_sprite at all (e.g. rejected server-side by
+        normalize_decision() and replaced with a role fallback; see
+        apply_decision). Bumps turn["attempts"], writes it back, and once
+        SPRITE_DESIGN_MAX_ATTEMPTS is reached clears the turn (the existing
+        procedural sprite stays on the structure) and logs the give-up.
+        structure_or_name may be the structure dict, a plain name string, or
+        None (e.g. the structure was deleted out from under the turn).
+        """
+        turn = agent.get("spriteDesignTurn")
+        if not turn:
+            return
+        turn["attempts"] = int(turn.get("attempts") or 0) + 1
+        agent["spriteDesignTurn"] = turn
+        if turn["attempts"] >= SPRITE_DESIGN_MAX_ATTEMPTS:
+            agent["spriteDesignTurn"] = None
+            if isinstance(structure_or_name, dict):
+                name = structure_or_name.get("name") or structure_or_name.get("type")
+            else:
+                name = structure_or_name
+            name = name or turn.get("structureName") or "structure"
+            self._push_activity(f"{agent['name']} gave up refining the sprite for the {name}")
 
     def _apply_structure_sprite(self, agent, sprite):
         turn = agent.get("spriteDesignTurn") or {}
@@ -5591,12 +5631,14 @@ class SimEngine:
             ok, reason = True, None
         if not ok:
             agent["lastSpriteRejection"] = {"reason": reason, "frame": self.frameTick}
+            self._count_sprite_design_failure(agent, s)
             return f"{agent['name']}'s sprite design was rejected ({reason})"
         if self.d.get("sprite_spec_is_degenerate", lambda sp: False)(sprite):
             agent["lastSpriteRejection"] = {
                 "reason": "sprite is too flat (use varied colors/pattern, not one solid fill)",
                 "frame": self.frameTick,
             }
+            self._count_sprite_design_failure(agent, s)
             return f"{agent['name']}'s sprite design was rejected (too flat)"
         s["sprite"] = sprite
         agent["spriteDesignTurn"] = None
@@ -14246,6 +14288,13 @@ class SimEngine:
         resource_acted = None  # set by collect_resource/contribute_resources/trade_resource
         # below; used only to honor a pending commitment (#5.4) after the fact.
         c = self.civilization
+        # Snapshot the pending sprite-design turn (if any) before dispatch so
+        # the missing-case check below can tell whether *this* turn survived
+        # untouched -- i.e. the decision's action wasn't submit_structure_sprite
+        # and nothing else (e.g. _upgrade_structure replacing it, or the
+        # voice-guidance cancel in _build_think_payload) already handled it.
+        # See _count_sprite_design_failure.
+        pending_sprite_turn = agent.get("spriteDesignTurn")
 
         is_talk = action == "talk_to_nearby"
         if is_talk and decision.get("message"):
@@ -14906,6 +14955,19 @@ class SimEngine:
             summary = self._council_vote(agent, decision)
 
         # rest / default: summary already set
+
+        # Missing-case counting: the decision's action never reached
+        # submit_structure_sprite (typically because server.py's
+        # normalize_decision() rejected the model's sprite reply and
+        # substituted a role fallback action). Only count if the pending
+        # turn is still the exact same object -- if _upgrade_structure (or
+        # anything else) already replaced/cleared spriteDesignTurn during
+        # dispatch above, don't double-count it here.
+        if pending_sprite_turn is not None and action != "submit_structure_sprite" \
+                and agent.get("spriteDesignTurn") is pending_sprite_turn:
+            sid = pending_sprite_turn.get("structureId")
+            s = next((x for x in c["structures"] if x.get("id") == sid), None)
+            self._count_sprite_design_failure(agent, s or pending_sprite_turn.get("structureName"))
 
         agent["lastAction"] = action
         agent["lastReasoning"] = decision.get("reasoning")
@@ -17200,6 +17262,30 @@ class SimEngine:
                     a.setdefault("inventionBuildContext", None)
                     a.setdefault("councilTurn", False)
                     a.setdefault("spriteDesignTurn", None)
+                    # Heals worlds saved before the fix that made
+                    # _upgrade_structure zero out a dimension already at the
+                    # sprite grid cap (SPRITE_GRID_MAX) instead of demanding
+                    # "strictly more than the cap" rows/cols -- an
+                    # unsatisfiable request the model would refuse forever.
+                    # Restored turns predating that fix can still carry
+                    # minRows/minCols == the old cap in both dimensions; without
+                    # this pass they'd loop until the attempt-counter give-up
+                    # burns SPRITE_DESIGN_MAX_ATTEMPTS LLM calls for nothing.
+                    turn = a.get("spriteDesignTurn")
+                    if isinstance(turn, dict):
+                        cap = int(self.d.get("SPRITE_GRID_MAX") or 14)
+                        min_rows = int(turn.get("minRows") or 0)
+                        min_cols = int(turn.get("minCols") or 0)
+                        if min_rows >= cap and min_cols >= cap:
+                            a["spriteDesignTurn"] = None
+                        elif min_rows >= cap:
+                            turn["minRows"] = 0
+                        elif min_cols >= cap:
+                            turn["minCols"] = 0
+                    elif turn is not None:
+                        # Malformed (non-dict) restored turn: drop it rather
+                        # than risk a crash later when it's read as a dict.
+                        a["spriteDesignTurn"] = None
                     a.setdefault("lastUpgradeRejection", None)
                     a.setdefault("lastSpriteRejection", None)
                     a.setdefault("lastBlockRejection", None)

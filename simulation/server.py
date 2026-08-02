@@ -1185,6 +1185,11 @@ DECISION_ACTIONS = [
     "council_speak", "council_propose", "council_vote",
 ]
 
+# Sprite grid bounds (also enforced post-hoc by validate_sprite_block()); defined
+# here, ahead of DECISION_SCHEMA, so the schema below can reference them directly.
+SPRITE_GRID_MIN = 4
+SPRITE_GRID_MAX = 14
+
 # Loose shape only; validate_blueprint() stays the authority on blueprint detail.
 DECISION_SCHEMA = {
     "type": "object",
@@ -1318,11 +1323,29 @@ DECISION_SCHEMA = {
         "vote": {"type": ["string", "null"]},
         "candidate": {"type": ["string", "null"]},
         "sage_decision": {"type": ["string", "null"], "enum": ["approve", "deny", None]},
+        # Bounded at the grammar level (not just post-hoc validation) because an
+        # unbounded schema lets generation run away to 30-100+ row grids and get
+        # cut off by max_tokens mid-JSON (observed: 5/5 length-truncation failures
+        # in a Phase 0 probe). Mirrors the limits validate_sprite_block() enforces.
         "sprite": {
             "type": ["object", "null"],
             "properties": {
-                "palette": {"type": "array"},
-                "grid": {"type": "array"},
+                "palette": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "items": {"type": "string"},
+                },
+                "grid": {
+                    "type": "array",
+                    "minItems": SPRITE_GRID_MIN,
+                    "maxItems": SPRITE_GRID_MAX,
+                    "items": {
+                        "type": "string",
+                        "minLength": SPRITE_GRID_MIN,
+                        "maxLength": SPRITE_GRID_MAX,
+                    },
+                },
             },
         },
         # Required on every decision turn while voice_guidance_active is true
@@ -1353,6 +1376,51 @@ _structured_output_enabled = STRUCTURED_OUTPUT_MODE != "off"
 # in run_agent_decision), so this flag no longer gates a retry; it only
 # avoids repeat-logging the same warning every subsequent call.
 _model_routing_enabled = True
+
+# Bounds the WORST CASE across every requests.post(OLLAMA_CHAT_URL, ...) call
+# site inside a single run_agent_decision() invocation (currently 3: the
+# initial call, the format-degrade retry, and the context-overflow slim
+# retry -- a later phase adds a 4th). MAX_CONCURRENT_LLM = 3 (sim_engine.py)
+# means one agent stuck making sequential calls can otherwise hold a scarce
+# worker slot for far longer than one call's timeout; this constant is the
+# hard ceiling _post_ollama() (see run_agent_decision) enforces per turn.
+LLM_CALLS_PER_TURN_MAX = 4
+
+# Phase 5: retry once (budget permitting) on an answer-quality failure --
+# unparseable JSON or normalize_decision stamping _fallback -- with a
+# concrete-reason feedback line appended to the retry's user prompt. Default
+# on. With this flag off, run_agent_decision behaves exactly as it did before
+# this phase (no retry, decision_retries always 0 in llm.jsonl). Deliberately
+# does NOT cover network-level failures (llm offline/timeout, compute_error,
+# server_error, model_not_found, llm budget exhausted) -- see
+# run_agent_decision's _request_error_tag docstring on why Ollama-side
+# orphaned generations make a network retry counterproductive there.
+DECISION_RETRY_ENABLED = True
+
+# Phase 6 (Fix 5): when DECISION_RETRY_ENABLED's retry is exhausted with no
+# usable decision AND the failure was answer-quality (not network -- see
+# _request_error_tag's docstring; llm offline/timeout, compute_error,
+# server_error, model_not_found, and llm budget exhausted all return before
+# ever reaching a fallback call site, so they can never trigger this), offer
+# the model a tiny "pick one of these safe options" choice among the role
+# ladder's candidates (role_fallback_candidates) instead of always taking the
+# highest-priority one silently. Default on. With this flag off,
+# run_agent_decision behaves exactly as it did before this phase, including
+# no fallback_* fields in llm.jsonl.
+FALLBACK_AI_CHOICE_ENABLED = True
+
+# Small, fixed timeout for the Fix 5 choice call -- it is a single-letter
+# tiebreak prompt (see _fallback_ai_choice), never the full decision schema,
+# so it does not need DEFAULT_TIMEOUT_S/THINKING_TIMEOUT_S headroom. Never
+# retried on timeout; the first (highest-priority) candidate is used instead.
+FALLBACK_AI_CHOICE_TIMEOUT_S = 10
+
+
+class LLMBudgetExhausted(Exception):
+    """Raised by _post_ollama (inside run_agent_decision) when a single turn
+    has already spent its LLM_CALLS_PER_TURN_MAX budget. Deliberately NOT a
+    requests.exceptions.RequestException subclass so it can never be mistaken
+    for a network failure (llm offline/llm timeout) at any call site."""
 
 
 def _ollama_error_parts(lm_body):
@@ -2020,12 +2088,12 @@ def validate_sprite_block(sprite, min_rows=0, min_cols=0):
         if not isinstance(color, str) or not HEX_COLOR_RE.match(color):
             return False, f"invalid sprite color: {color!r} (use #RRGGBB)"
     grid = sprite.get("grid")
-    if not isinstance(grid, list) or not (4 <= len(grid) <= 14):
-        return False, "sprite grid must be 4-14 rows"
+    if not isinstance(grid, list) or not (SPRITE_GRID_MIN <= len(grid) <= SPRITE_GRID_MAX):
+        return False, f"sprite grid must be {SPRITE_GRID_MIN}-{SPRITE_GRID_MAX} rows"
     max_col = 0
     for row in grid:
-        if not isinstance(row, str) or not (4 <= len(row) <= 14):
-            return False, "each sprite row must be a string of 4-14 cells"
+        if not isinstance(row, str) or not (SPRITE_GRID_MIN <= len(row) <= SPRITE_GRID_MAX):
+            return False, f"each sprite row must be a string of {SPRITE_GRID_MIN}-{SPRITE_GRID_MAX} cells"
         if not SPRITE_CELL_RE.match(row):
             return False, "sprite rows may only contain . (empty) and letters a-e"
         max_col = max(max_col, len(row))
@@ -2332,10 +2400,46 @@ def validate_role(role, known_resource_ids, known_role_ids, pending_role_slugs,
 
 
 def role_fallback_action(role, agent_data):
-    """Return a role-appropriate fallback decision when talk is invalid."""
+    """Return a role-appropriate fallback decision when talk is invalid.
+
+    Thin wrapper around _role_fallback_action(): that function has many return
+    points (one per role/phase branch), so rather than trust every branch to
+    remember to stamp _fallback individually, this single call site stamps it
+    once on whatever comes back -- provably covering every path. normalize_decision
+    also returns un-noted fallbacks (e.g. its non-dict guard) that
+    sprite_rejection_note/council_rejection_note sniffing would miss entirely;
+    _fallback is the one signal that always fires. apply_decision() reads named
+    fields only, so the extra key is inert there; it stays in the logged
+    decision because llm.jsonl benefits from it."""
+    decision = _role_fallback_action(role, agent_data)
+    if isinstance(decision, dict):
+        decision["_fallback"] = True
+    return decision
+
+
+def _role_fallback_candidate_checks(role, agent_data):
+    """Ordered list of zero-arg checks producing role_fallback_action's
+    ladder, one per branch, in the ladder's original priority order.
+
+    Both `_role_fallback_action` (first match wins) and
+    `role_fallback_candidates` (Phase 6 Fix 5: accumulate up to `limit`
+    matches) iterate this same list, so the branch conditions -- and their
+    priority order -- live in exactly one place instead of two copies that
+    could silently drift. Each check is a closure over the state computed
+    once up front (role, council, active_project, ...), mirroring how the
+    original single-function ladder read those locals; nothing here mutates
+    agent_data, so evaluating every check (as role_fallback_candidates does)
+    is safe and side-effect free. The final check (`default_branch`) always
+    returns a candidate, so `_role_fallback_action`'s "first match" loop is
+    guaranteed to find one -- same guarantee the original unconditional
+    trailing `return` gave."""
     role = (role or "").lower()
     council = agent_data.get("daily_council") or {}
-    if agent_data.get("council_turn") and agent_data.get("council_seated"):
+    council_turn = bool(agent_data.get("council_turn") and agent_data.get("council_seated"))
+
+    def council_branch():
+        if not council_turn:
+            return None
         phase = council.get("phase")
         agenda = council.get("agenda") or []
         topic = next((a.get("topic") for a in agenda if isinstance(a, dict)), "world_status")
@@ -2374,6 +2478,8 @@ def role_fallback_action(role, agent_data):
                 "feeling": "resolute", "topic": "verdict",
                 "reasoning": "Announcing the council's recorded ruling.",
             }
+        return None
+
     active_project = agent_data.get("active_project")
     has_project = active_project and active_project not in ("none", "null", None, "")
     role_projects = agent_data.get("role_project_map")
@@ -2383,155 +2489,281 @@ def role_fallback_action(role, agent_data):
     # Sid-parity Phase 1: when the village needs a gather role this agent can
     # fill, prefer switch_role over a generic wander/collect fallback.
     needed_role = agent_data.get("needed_role")
-    if (needed_role and needed_role != role
-            and role not in ("elder", "builder", "healer")
-            and not (primary_resources if isinstance(primary_resources, dict)
-                     else ROLE_PRIMARY_RESOURCE).get(role)):
-        return {"action": "switch_role", "target": None, "message": None,
-                "new_role": needed_role, "relationship_update": None,
-                "reasoning": f"The village needs a {needed_role}; retraining to fill the gap."}
+
+    def needed_role_branch():
+        if (needed_role and needed_role != role
+                and role not in ("elder", "builder", "healer")
+                and not (primary_resources if isinstance(primary_resources, dict)
+                         else ROLE_PRIMARY_RESOURCE).get(role)):
+            return {"action": "switch_role", "target": None, "message": None,
+                    "new_role": needed_role, "relationship_update": None,
+                    "reasoning": f"The village needs a {needed_role}; retraining to fill the gap."}
+        return None
 
     pending_ids = agent_data.get("pending_blueprint_ids") or []
-    if role == "elder" and pending_ids:
-        reviews = agent_data.get("pending_blueprint_reviews") or {}
-        ready = next((bid for bid in pending_ids if reviews.get(bid) in ("approved", "skipped")), None)
-        if ready:
-            return {"action": "approve_blueprint", "target": ready, "message": None,
-                    "new_role": None, "relationship_update": None,
-                    "reasoning": "Reviewing a pending blueprint proposal."}
-        needs_review = next((bid for bid in pending_ids if reviews.get(bid, "pending") == "pending"), None)
-        if needs_review:
-            return {"action": "sage_review_blueprint", "target": needs_review, "message": None,
-                    "sage_decision": "approve", "new_role": None, "relationship_update": None,
-                "reasoning": "Checking district geography/resources before approving."}
+
+    def pending_blueprint_ready_branch():
+        if role == "elder" and pending_ids:
+            reviews = agent_data.get("pending_blueprint_reviews") or {}
+            ready = next((bid for bid in pending_ids if reviews.get(bid) in ("approved", "skipped")), None)
+            if ready:
+                return {"action": "approve_blueprint", "target": ready, "message": None,
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "Reviewing a pending blueprint proposal."}
+        return None
+
+    def pending_blueprint_review_branch():
+        if role == "elder" and pending_ids:
+            reviews = agent_data.get("pending_blueprint_reviews") or {}
+            needs_review = next((bid for bid in pending_ids if reviews.get(bid, "pending") == "pending"), None)
+            if needs_review:
+                return {"action": "sage_review_blueprint", "target": needs_review, "message": None,
+                        "sage_decision": "approve", "new_role": None, "relationship_update": None,
+                    "reasoning": "Checking district geography/resources before approving."}
+        return None
 
     pending_roles = agent_data.get("pending_roles") or []
-    if role == "elder" and pending_roles:
-        target = next((p.get("slug") for p in pending_roles if isinstance(p, dict) and p.get("slug")), None)
-        if target:
-            return {"action": "approve_role", "target": target, "message": None,
-                    "new_role": None, "relationship_update": None,
-                    "reasoning": "Reviewing a pending role proposal."}
+
+    def pending_role_branch():
+        if role == "elder" and pending_roles:
+            target = next((p.get("slug") for p in pending_roles if isinstance(p, dict) and p.get("slug")), None)
+            if target:
+                return {"action": "approve_role", "target": target, "message": None,
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "Reviewing a pending role proposal."}
+        return None
 
     idle_agents = agent_data.get("idle_agents") or []
-    if role == "elder" and idle_agents:
-        project_progress = agent_data.get("project_progress")
-        target = pick_idle_agent_for_project(idle_agents, project_progress, gather_roles)
-        target_name = target.get("name") if target else None
-        if target_name:
-            return {"action": "assign_task", "target": target_name,
-                    "message": task_for_role(
-                        target.get("role"), active_project, project_progress,
-                        primary_resources, role_projects,
-                    ),
-                    "new_role": None, "relationship_update": None,
-                    "reasoning": "Assigning work to an idle villager."}
+
+    def assign_task_branch():
+        if role == "elder" and idle_agents:
+            project_progress = agent_data.get("project_progress")
+            target = pick_idle_agent_for_project(idle_agents, project_progress, gather_roles)
+            target_name = target.get("name") if target else None
+            if target_name:
+                return {"action": "assign_task", "target": target_name,
+                        "message": task_for_role(
+                            target.get("role"), active_project, project_progress,
+                            primary_resources, role_projects,
+                        ),
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "Assigning work to an idle villager."}
+        return None
 
     invention_required = str(agent_data.get("invention_status") or "").startswith("REQUIRED")
     upgradeable = agent_data.get("upgradeable_structures") or []
-    if upgradeable and not has_project:
-        target_u = upgradeable[0]
-        return {"action": "upgrade_structure", "target": str(target_u.get("id")), "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": f"Upgrading {target_u.get('name')} before building duplicates."}
-    if not has_project:
-        if invention_required:
-            # Mirrors sim_engine._invention_required's gate on _start_project_for:
-            # every seed structure is already built, so a role-default seed
-            # project would just be refused. Gather instead of stalling; the
-            # elder's own _maybe_invention_backstop is what actually pushes
-            # someone toward propose_blueprint.
+
+    def upgrade_branch():
+        if upgradeable and not has_project:
+            target_u = upgradeable[0]
+            return {"action": "upgrade_structure", "target": str(target_u.get("id")), "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": f"Upgrading {target_u.get('name')} before building duplicates."}
+        return None
+
+    def no_project_branch():
+        if not has_project:
+            if invention_required:
+                # Mirrors sim_engine._invention_required's gate on
+                # _start_project_for: every seed structure is already built,
+                # so a role-default seed project would just be refused.
+                # Gather instead of stalling; the elder's own
+                # _maybe_invention_backstop is what actually pushes someone
+                # toward propose_blueprint.
+                return {"action": "collect_resource", "target": None, "message": None,
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "The village needs a new invention before building again; "
+                                     "gathering resources for now."}
+            return {"action": "start_project", "target": role_default_project(role, role_projects),
+                    "message": None, "new_role": None, "relationship_update": None,
+                    "reasoning": "Starting a role-appropriate build project."}
+        return None
+
+    def held_shortfall_branch():
+        held = held_shortfall_resource(agent_data)
+        if held:
+            # Catches any role (esp. trader/guard/scout, whose branches below
+            # never contribute) sitting on a resource the build is waiting on
+            # instead of wandering past it forever.
+            return {"action": "contribute_resources", "target": held, "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Contributing a held resource the project needs."}
+        return None
+
+    def hunter_prey_branch():
+        if role == "hunter" and agent_data.get("prey_in_range"):
+            return {"action": "hunt_wildlife", "target": None, "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Hunting nearby wildlife for meat or fish."}
+        return None
+
+    def gatherer_family_branch():
+        if role in ("farmer", "fisher", "gatherer"):
+            zone = agent_data.get("world_zone", "")
+            if role == "farmer" and zone != "farm":
+                return {"action": "move_to_district", "target": "farm", "message": None,
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "Heading to a farm to gather food."}
+            if role == "gatherer" and zone != "forest":
+                return {"action": "move_to_district", "target": "forest", "message": None,
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "Heading to the forest to gather wood."}
+            if role == "fisher" and zone != "beach":
+                return {"action": "move_to_district", "target": "beach", "message": None,
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "Heading to the beach to fish."}
+            needed = first_shortfall_resource(agent_data)
+            return {"action": "collect_resource", "target": needed, "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Gathering resources for the village."}
+        return None
+
+    def miner_branch():
+        if role == "miner":
+            zone = agent_data.get("world_zone", "")
+            if zone != "cave":
+                return {"action": "move_to_district", "target": "cave", "message": None,
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "Heading to a cave to mine."}
+            needed = first_shortfall_resource(agent_data) or "gold"
+            return {"action": "collect_resource", "target": needed, "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Mining gold for civilization."}
+        return None
+
+    def hunter_role_branch():
+        if role == "hunter":
+            zone = agent_data.get("world_zone", "")
+            if zone not in ("forest", "farm", "beach"):
+                return {"action": "move_to_district", "target": "forest", "message": None,
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "Heading to hunting grounds for wildlife."}
             return {"action": "collect_resource", "target": None, "message": None,
                     "new_role": None, "relationship_update": None,
-                    "reasoning": "The village needs a new invention before building again; "
-                                 "gathering resources for now."}
-        return {"action": "start_project", "target": role_default_project(role, role_projects), "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Starting a role-appropriate build project."}
+                    "reasoning": "No prey in range; gathering while scouting for wildlife."}
+        return None
 
-    held = held_shortfall_resource(agent_data)
-    if held:
-        # Catches any role (esp. trader/guard/scout, whose fallbacks below
-        # never contribute) sitting on a resource the build is waiting on
-        # instead of wandering past it forever.
-        return {"action": "contribute_resources", "target": held, "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Contributing a held resource the project needs."}
-
-    if role == "hunter" and agent_data.get("prey_in_range"):
-        return {"action": "hunt_wildlife", "target": None, "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Hunting nearby wildlife for meat or fish."}
-
-    if role in ("farmer", "fisher", "gatherer"):
-        zone = agent_data.get("world_zone", "")
-        if role == "farmer" and zone != "farm":
-            return {"action": "move_to_district", "target": "farm", "message": None,
-                    "new_role": None, "relationship_update": None,
-                    "reasoning": "Heading to a farm to gather food."}
-        if role == "gatherer" and zone != "forest":
-            return {"action": "move_to_district", "target": "forest", "message": None,
-                    "new_role": None, "relationship_update": None,
-                    "reasoning": "Heading to the forest to gather wood."}
-        if role == "fisher" and zone != "beach":
-            return {"action": "move_to_district", "target": "beach", "message": None,
-                    "new_role": None, "relationship_update": None,
-                    "reasoning": "Heading to the beach to fish."}
-        needed = first_shortfall_resource(agent_data)
-        return {"action": "collect_resource", "target": needed, "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Gathering resources for the village."}
-
-    if role == "miner":
-        zone = agent_data.get("world_zone", "")
-        if zone != "cave":
-            return {"action": "move_to_district", "target": "cave", "message": None,
-                    "new_role": None, "relationship_update": None,
-                    "reasoning": "Heading to a cave to mine."}
-        needed = first_shortfall_resource(agent_data) or "gold"
-        return {"action": "collect_resource", "target": needed, "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Mining gold for civilization."}
-
-    if role == "hunter":
-        zone = agent_data.get("world_zone", "")
-        if zone not in ("forest", "farm", "beach"):
-            return {"action": "move_to_district", "target": "forest", "message": None,
-                    "new_role": None, "relationship_update": None,
-                    "reasoning": "Heading to hunting grounds for wildlife."}
-        return {"action": "collect_resource", "target": None, "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "No prey in range; gathering while scouting for wildlife."}
-
-    if role == "builder":
-        needed = first_shortfall_resource(agent_data) or "wood"
-        return {"action": "contribute_resources", "target": needed, "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Contributing to the active project."}
-
-    if role == "trader":
-        return {"action": "move_to_district", "target": "market", "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Heading to market to trade."}
-
-    if role in ("guard", "scout", "explorer"):
-        return {"action": "move_to_district", "target": "village", "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Patrolling the village."}
-
-    if role in ("healer", "elder", "blacksmith"):
-        if has_project:
-            needed = first_shortfall_resource(agent_data)
+    def builder_branch():
+        if role == "builder":
+            needed = first_shortfall_resource(agent_data) or "wood"
             return {"action": "contribute_resources", "target": needed, "message": None,
                     "new_role": None, "relationship_update": None,
-                    "reasoning": "Supporting the village build."}
-        return {"action": "move_to_district", "target": "village", "message": None,
-                "new_role": None, "relationship_update": None,
-                "reasoning": "Returning to the village center."}
+                    "reasoning": "Contributing to the active project."}
+        return None
 
+    def trader_branch():
+        if role == "trader":
+            return {"action": "move_to_district", "target": "market", "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Heading to market to trade."}
+        return None
+
+    def patrol_branch():
+        if role in ("guard", "scout", "explorer"):
+            return {"action": "move_to_district", "target": "village", "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Patrolling the village."}
+        return None
+
+    def support_branch():
+        if role in ("healer", "elder", "blacksmith"):
+            if has_project:
+                needed = first_shortfall_resource(agent_data)
+                return {"action": "contribute_resources", "target": needed, "message": None,
+                        "new_role": None, "relationship_update": None,
+                        "reasoning": "Supporting the village build."}
+            return {"action": "move_to_district", "target": "village", "message": None,
+                    "new_role": None, "relationship_update": None,
+                    "reasoning": "Returning to the village center."}
+        return None
+
+    def default_branch():
+        return {"action": "collect_resource", "target": None, "message": None,
+                "new_role": None, "relationship_update": None,
+                "reasoning": "Working toward civilization goals."}
+
+    return [
+        council_branch,
+        needed_role_branch,
+        pending_blueprint_ready_branch,
+        pending_blueprint_review_branch,
+        pending_role_branch,
+        assign_task_branch,
+        upgrade_branch,
+        no_project_branch,
+        held_shortfall_branch,
+        hunter_prey_branch,
+        gatherer_family_branch,
+        miner_branch,
+        hunter_role_branch,
+        builder_branch,
+        trader_branch,
+        patrol_branch,
+        support_branch,
+        default_branch,
+    ]
+
+
+def _role_fallback_action(role, agent_data):
+    """Return a role-appropriate fallback decision when talk is invalid.
+
+    First-match walk over _role_fallback_candidate_checks -- see that
+    function's docstring for why the ladder now lives there instead of
+    inline here."""
+    for check in _role_fallback_candidate_checks(role, agent_data):
+        candidate = check()
+        if candidate is not None:
+            return candidate
+    # Unreachable: default_branch (the checks list's final entry) always
+    # returns a candidate, matching the original ladder's unconditional
+    # trailing return.
     return {"action": "collect_resource", "target": None, "message": None,
             "new_role": None, "relationship_update": None,
             "reasoning": "Working toward civilization goals."}
+
+
+def role_fallback_candidates(role, agent_data, limit=3):
+    """Phase 6 (Fix 5): collect up to `limit` role-appropriate fallback
+    candidates, in the same priority order _role_fallback_action's ladder
+    would try them (both walk _role_fallback_candidate_checks, so the
+    conditions can't drift between the two). Used only by
+    run_agent_decision's terminal-fallback AI-choice tiebreak
+    (FALLBACK_AI_CHOICE_ENABLED) -- every existing role_fallback_action call
+    site is unaffected by this function's existence.
+
+    Many branches are mutually exclusive by construction: a role only
+    matches one of the per-role branches near the end of the ladder, and
+    "no active project" vs. "has an active project" branches can't both
+    fire. So in a lot of states this returns a single candidate -- that is
+    expected, not a bug, and is NOT a reason to loosen any branch's
+    condition; a candidate that the ladder itself would never produce for
+    this agent_data must never appear here.
+
+    Returned dicts are the same shape _role_fallback_action returns
+    (unstamped -- callers that want the _fallback marker still go through
+    role_fallback_action's wrapper semantics themselves)."""
+    candidates = []
+    seen = set()
+    for check in _role_fallback_candidate_checks(role, agent_data):
+        candidate = check()
+        if candidate is None:
+            continue
+        # A later branch (e.g. the unconditional trailing default_branch)
+        # can legitimately produce the exact same (action, target) an
+        # earlier, higher-priority branch already returned in this same
+        # state (e.g. two different branches both landing on a plain
+        # collect_resource). That is not a *different* safe option, just
+        # the same one reached twice, so skip the repeat instead of
+        # offering the AI two letters with an identical outcome -- this
+        # trims noise, it does not add or loosen any branch condition.
+        key = (candidate.get("action"), candidate.get("target"))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            break
+    return candidates
 
 
 def synthesize_divine_response(decision, agent_data):
@@ -2577,19 +2809,25 @@ def normalize_decision(decision, agent_data):
     if action in council_actions or council_turn:
         fallback = role_fallback_action(agent_data.get("role"), agent_data)
         phase = council.get("phase")
-        if not council_turn or action not in council_actions:
+        # Genuine "agent ignored its designated council turn" — not a timing artifact,
+        # since council_turn/council_seated were snapshotted for this agent's own turn.
+        if council_turn and action not in council_actions:
             fallback["reasoning"] = (
                 fallback.get("reasoning", "") + " (invalid council session/action)"
             ).strip()
             fallback["council_rejection_note"] = "not a seated active council turn"
             return fallback
+        # Coarse, slow-changing check: is there a council session at all? A model that
+        # spuriously emits a council action outside any session should not sail through
+        # to apply_decision only to be rejected live and waste the whole turn.
+        if action in council_actions and (not council or not phase):
+            fallback["council_rejection_note"] = "no active council session"
+            return fallback
+        # Per-turn/per-phase eligibility (council_turn, phase gates) is deliberately NOT
+        # re-checked here: council_turn/phase were snapshotted before the LLM call and can
+        # go stale while the model thinks. apply_decision()'s _daily_council_actor() is the
+        # live authority and re-checks phase/turn eligibility, rejecting non-fatally if stale.
         if action == "council_speak":
-            elder_verdict = phase == "verdict" and (
-                agent_data.get("role") or ""
-            ).lower() == "elder"
-            if phase != "discussion" and not elder_verdict:
-                fallback["council_rejection_note"] = "council_speak is not valid in this phase"
-                return fallback
             message = decision.get("message")
             feeling = decision.get("feeling")
             topic = decision.get("topic")
@@ -2610,13 +2848,10 @@ def normalize_decision(decision, agent_data):
                 )
             else:
                 valid_vote = decision.get("vote") in ("yes", "no", "abstain")
-            if phase != "voting" or not valid_vote:
-                fallback["council_rejection_note"] = "council_vote requires an open voting phase"
+            if not valid_vote:
+                fallback["council_rejection_note"] = "council_vote requires a valid vote"
                 return fallback
             return decision
-        if phase != "proposal":
-            fallback["council_rejection_note"] = "council_propose requires the proposal phase"
-            return fallback
         kind = decision.get("kind")
         if kind == "idea":
             title, detail = decision.get("title"), decision.get("detail")
@@ -3466,14 +3701,14 @@ RULES:
 1. action MUST be submit_structure_sprite.
 2. sprite.palette: 2-5 hex colors (#RRGGBB).
 3. sprite.grid: 4-14 rows, each row 4-14 characters, only . (empty) and letters a-e for palette indices.
-4. The new grid MUST be STRICTLY BIGGER than the minimum dimensions given (more rows AND more columns).
+4. Grow the grid on whichever dimension(s) have a minimum given (strictly more rows if a row minimum is given, strictly more columns if a column minimum is given). Regardless, the grid must always stay within 4-14 rows and 4-14 columns.
 5. Keep the same building identity (roof, walls, door) but expand detail — it is a grown-up version of the same structure.
 6. Do NOT invent random unrelated shapes; evolve the existing building bigger."""
 
 SPRITE_UPGRADE_USER_PROMPT = """You are {agent_name}, the village {role}.
 
 Structure to redraw: {structure_name} (type {structure_type}, visual tier {tier})
-Minimum size to beat: strictly more than {min_rows} rows AND strictly more than {min_cols} columns.
+Minimum size to beat: {size_requirement}
 
 {feedback}
 {sprite_example}
@@ -3505,23 +3740,47 @@ def format_sprite_example(frame_tick):
             f'{ex["note"]}): {body}')
 
 
-def build_sprite_upgrade_prompt(data):
+def _sprite_upgrade_size_requirement(min_rows, min_cols):
+    """Render the per-dimension growth requirement for a sprite upgrade turn.
+    min_rows/min_cols of 0 means "no growth requirement" for that dimension
+    (see validate_sprite_block's `if min_rows and ...` semantics) — never
+    collapse 0 into a fake floor. The 4-14 grid bound is always stated."""
+    bound = (f"grid must stay within {SPRITE_GRID_MIN}-{SPRITE_GRID_MAX} rows "
+             f"and {SPRITE_GRID_MIN}-{SPRITE_GRID_MAX} columns")
+    if min_rows and min_cols:
+        growth = f"strictly more than {min_rows} rows AND strictly more than {min_cols} columns"
+    elif min_rows:
+        growth = f"strictly more than {min_rows} rows (no minimum on columns)"
+    elif min_cols:
+        growth = f"strictly more than {min_cols} columns (no minimum on rows)"
+    else:
+        growth = "no minimum size requirement this turn"
+    return f"{growth} ({bound})."
+
+
+def build_sprite_upgrade_prompt(data, retry_feedback=None):
     ctx = data.get("sprite_design_context") or {}
     feedback = data.get("behavior_nudge") or ""
+    # Phase 5: the decision retry's concrete-reason line takes priority over
+    # the ordinary behavior_nudge -- it's a same-turn "your last reply on
+    # THIS call failed, here's exactly why" signal, not a rolling nudge.
+    if retry_feedback:
+        feedback = f"{retry_feedback} {feedback}".strip()
+    min_rows = int(ctx.get("minRows") or 0)
+    min_cols = int(ctx.get("minCols") or 0)
     return SPRITE_UPGRADE_USER_PROMPT.format(
         agent_name=data.get("agent_name"),
         role=data.get("role"),
         structure_name=ctx.get("structureName") or ctx.get("structureType") or "structure",
         structure_type=ctx.get("structureType") or "unknown",
         tier=(ctx.get("tier") or 0) + 1,
-        min_rows=int(ctx.get("minRows") or 4),
-        min_cols=int(ctx.get("minCols") or 4),
+        size_requirement=_sprite_upgrade_size_requirement(min_rows, min_cols),
         feedback=feedback,
         sprite_example=format_sprite_example(data.get("frame_tick")),
     )
 
 
-def build_invention_prompt(data):
+def build_invention_prompt(data, retry_feedback=None):
     """Slim, single-purpose user prompt for a dedicated invention turn (set by
     the engine's _maybe_invention_backstop). Strips every competing nudge and
     state section so the model's whole budget goes into authoring a valid,
@@ -3546,6 +3805,10 @@ def build_invention_prompt(data):
         build_line = (f"You were trying to build: {build_ctx['typeName']}. Your invention should "
                       f"plausibly satisfy that need or unlock a path to it.")
         feedback = f"{build_line} {feedback}".strip()
+    # Phase 5: prepend the decision retry's concrete-reason line (same-turn
+    # "your last reply failed, here's exactly why") ahead of the rolling nudge.
+    if retry_feedback:
+        feedback = f"{retry_feedback} {feedback}".strip()
     new_resources_line = (
         'You may introduce up to 3 brand-new resources via "new_resources", each '
         'with a gather_zone of farm, forest, village, market, beach, cave, or ocean '
@@ -3581,16 +3844,22 @@ def _format_voice_guidance_line(kind, text):
     return f"{label}: {text} State whether you follow or continue in divine_response.\n"
 
 
-def build_user_prompt(data, slim=False):
+def build_user_prompt(data, slim=False, retry_feedback=None):
     """Fill in USER_PROMPT_TEMPLATE from the agent/civilization state. When
     slim=True (the context-overflow retry, see run_agent_decision), drop the
     memory line and recent conversations -- the two most compressible,
     highest-variance-size fields -- to shrink the prompt. invention_only
-    turns get the dedicated proposal-only prompt instead."""
+    turns get the dedicated proposal-only prompt instead.
+
+    retry_feedback (Phase 5, see run_agent_decision's answer-quality retry):
+    an optional concrete-reason string folded into behavior_nudge (routine
+    turns) or the sprite/invention prompt's own feedback field, ahead of the
+    ordinary rolling nudge -- a same-turn "your last reply on THIS call
+    failed, here's exactly why" signal."""
     if data.get("sprite_design_only"):
-        return build_sprite_upgrade_prompt(data)
+        return build_sprite_upgrade_prompt(data, retry_feedback=retry_feedback)
     if data.get("invention_only"):
-        return build_invention_prompt(data)
+        return build_invention_prompt(data, retry_feedback=retry_feedback)
     nearby_formatted = format_nearby_agents(data.get("nearby_agents"))
     known_resources = data.get("known_resources") or []
     pending_blueprints = data.get("pending_blueprints") or []
@@ -3603,6 +3872,8 @@ def build_user_prompt(data, slim=False):
     idle_agents = data.get("idle_agents") or []
     pending_roles = data.get("pending_roles") or []
     behavior_nudge = data.get("behavior_nudge") or ""
+    if retry_feedback:
+        behavior_nudge = f"{retry_feedback} {behavior_nudge}".strip()
     # Phase C: one short season line, rendered ONLY when the engine sends a
     # season (GOODS_ENABLED) so flag-off prompts stay byte-identical.
     season = data.get("season")
@@ -3810,7 +4081,7 @@ def _check_system_prompt_stability(system_content):
     _last_routine_system_prompt = system_content
 
 
-def build_decision_payload(data, self_prompt, response_format, slim=False):
+def build_decision_payload(data, self_prompt, response_format, slim=False, retry_feedback=None):
     """Assemble the internal chat-completion-shaped payload for a decision
     call (converted to Ollama's /api/chat wire body by to_ollama_body() at
     the actual POST site). slim=True builds the reduced-context retry payload (see
@@ -3821,6 +4092,15 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     ~20-rule village rulebook is irrelevant to authoring a blueprint and
     slim/full made almost no size difference for these calls -- see its
     docstring), regardless of the slim flag.
+
+    retry_feedback (Phase 5, DECISION_RETRY_ENABLED): an optional
+    concrete-reason string for the single answer-quality retry in
+    run_agent_decision (unparseable JSON or a _fallback-stamped
+    normalize_decision result). Threaded into build_user_prompt() for
+    routine/high-stakes turns and into the sprite/invention prompt builders;
+    build_council_user_prompt() (prompts.py) takes no such parameter, so for
+    council turns the feedback is prefixed onto its returned user_content
+    below instead -- same effect, no change to prompts.py's signature.
 
     SYSTEM_PROMPT_AT_LOAD_TIME (Phase 6, dark by default): when True, the
     primary (non-slim) routine/high-stakes dispatch -- i.e. everything that
@@ -3860,10 +4140,12 @@ def build_decision_payload(data, self_prompt, response_format, slim=False):
     # per-agent text inside the system message forced full prompt
     # reprocessing (~5k tokens) on every agent rotation. With the system
     # prompt byte-identical across agents it becomes a shared cached prefix.
-    user_content = (
-        _prompts.build_council_user_prompt(data)
-        if data.get("council_turn") else build_user_prompt(data, slim=slim)
-    )
+    if data.get("council_turn"):
+        user_content = _prompts.build_council_user_prompt(data)
+        if retry_feedback:
+            user_content = f"RETRY (previous reply rejected): {retry_feedback}\n\n" + user_content
+    else:
+        user_content = build_user_prompt(data, slim=slim, retry_feedback=retry_feedback)
     if self_prompt:
         user_content = (f"YOUR PERSONA (act in character): {self_prompt}\n\n"
                         + user_content)
@@ -3970,6 +4252,62 @@ def score_belief_pitch_decision(decision, data):
     return decision
 
 
+# Every *_rejection_note key normalize_decision can stamp onto a fallback
+# decision (see its rejection branches) -- checked in this order by
+# _rejection_feedback_text (Phase 5) to build the decision retry's concrete
+# feedback line. Kept as one tuple so a future rejection-note key only needs
+# adding here, not at every call site.
+_REJECTION_NOTE_KEYS = (
+    "sprite_rejection_note",
+    "council_rejection_note",
+    "terraform_rejection_note",
+    "upgrade_rejection_note",
+    "rejection_note",
+)
+
+
+def _rejection_feedback_text(decision):
+    """Pull the concrete reason off a normalize_decision fallback (Phase 5
+    decision retry), preferring whichever *_rejection_note key is present --
+    see _REJECTION_NOTE_KEYS. Returns None if the fallback carries no note
+    (e.g. an invalid talk_to_nearby, which is redirected without a note)."""
+    if not isinstance(decision, dict):
+        return None
+    for key in _REJECTION_NOTE_KEYS:
+        note = decision.get(key)
+        if note:
+            return str(note)
+    return None
+
+
+def _truncation_retry_feedback(sprite_turn):
+    """Shared wording for the Phase 5 decision retry whenever the prior
+    response's done_reason was "length" (Ollama's max_tokens cut generation
+    off mid-object -- the Phase 0 probe's dominant real-world failure mode).
+    Used at BOTH retry trigger points in run_agent_decision, factored here so
+    they cannot drift into two different strings: extract_json_decision's
+    truncated-JSON salvager (deliberately NOT changed by this fix -- it is
+    load-bearing elsewhere) can turn a cut-off reply into a
+    syntactically-parseable-but-incomplete decision that skips the
+    unparseable-JSON trigger point and lands on the _fallback trigger point
+    instead (e.g. a sprite turn missing its grid, rejected by
+    normalize_decision), so both points need this exact message rather than
+    the bare *_rejection_note, which would otherwise read as a
+    malformed-answer complaint and prompt the model to re-send another
+    oversized reply.
+
+    A DECISION_SCHEMA grammar bound on sprite.grid (Phase 4) already makes
+    runaway sprite grids far rarer at generation time; this retry wording is
+    the backstop for when that bound doesn't apply (e.g. structured output
+    disabled session-wide after a format-degrade -- see
+    _structured_output_enabled)."""
+    grid_hint = " (for example, a smaller sprite grid)" if sprite_turn else ""
+    return (
+        "your previous reply was cut off before it finished (it ran out of "
+        f"output space); reply with a smaller, more compact JSON object{grid_hint}."
+    )
+
+
 def run_agent_decision(data):
     """Build the prompt, call Ollama, and return a validated decision dict.
 
@@ -4002,14 +4340,19 @@ def run_agent_decision(data):
             approved_custom_projects, rejected_blueprints,
         )
 
-        def log_lm(latency_ms, response=None, http_status=None, decision=None, error=None):
+        def log_lm(latency_ms, response=None, http_status=None, decision=None, error=None,
+                   fallback_extra=None):
             # Measure the payload actually sent -- `payload` is reassigned in
-            # place if the context-overflow retry swaps in the slim payload,
-            # so reading it here (not capturing sizes earlier) reflects that.
+            # place if the context-overflow retry (or, Phase 5, the
+            # answer-quality decision retry) swaps in a different payload, so
+            # reading it here (not capturing sizes earlier) reflects that.
+            # decision_retries is read the same way (by name, at call time)
+            # so it's always the value as-of whenever log_lm actually runs --
+            # 0 on the common path, 1 once the Phase 5 retry has fired.
             messages = payload.get("messages") or []
             system_chars = sum(len(m.get("content") or "") for m in messages if m.get("role") == "system")
             prompt_chars = sum(len(m.get("content") or "") for m in messages if m.get("role") == "user")
-            session_logger.log_lm_exchange({
+            record = {
                 "agent_name": agent_name,
                 "frame_tick": frame_tick,
                 "latency_ms": latency_ms,
@@ -4022,17 +4365,26 @@ def run_agent_decision(data):
                 "system_chars": system_chars,
                 "nudges_total": data.get("nudges_total"),
                 "nudges_dropped": data.get("nudges_dropped"),
+                "decision_retries": decision_retries,
                 "request": payload,
                 "response": response,
                 "http_status": http_status,
                 "decision": decision,
                 "error": error,
-            })
+            }
+            # Phase 6 (Fix 5): only bad_response_fallback ever passes
+            # fallback_extra, and only with FALLBACK_AI_CHOICE_ENABLED on --
+            # every ordinary turn's log_lm call leaves this None, so these
+            # keys are simply absent from the record rather than present
+            # with null/false values.
+            if fallback_extra:
+                record.update(fallback_extra)
+            session_logger.log_lm_exchange(record)
 
         def bad_response_fallback(latency_ms, response=None, http_status=None, error="bad_response"):
-            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback, fallback_extra = _terminal_fallback(agent_data.get("role"), agent_data)
             log_lm(latency_ms, response=response, http_status=http_status,
-                   decision=fallback, error=error)
+                   decision=fallback, error=error, fallback_extra=fallback_extra)
             return fallback
 
         global _structured_output_enabled, _model_routing_enabled
@@ -4048,9 +4400,183 @@ def run_agent_decision(data):
                 return "llm timeout"
             return "llm offline"
 
+        # Every requests.post(OLLAMA_CHAT_URL, ...) in this turn (initial call,
+        # format-degrade retry, context-overflow slim retry, and any future
+        # call site) routes through here so a single run_agent_decision
+        # invocation can never fire more than LLM_CALLS_PER_TURN_MAX requests
+        # -- llm_calls_made is local to this invocation, not shared/global.
+        # Raises LLMBudgetExhausted (never a RequestException) once the
+        # budget is spent so callers can refuse distinguishably from a real
+        # network failure and take their existing fallback path.
+        llm_calls_made = 0
+
+        def _post_ollama(body, timeout):
+            nonlocal llm_calls_made
+            if llm_calls_made >= LLM_CALLS_PER_TURN_MAX:
+                raise LLMBudgetExhausted()
+            llm_calls_made += 1
+            return requests.post(OLLAMA_CHAT_URL, json=body, timeout=timeout)
+
+        # Phase 6 (Fix 5, FALLBACK_AI_CHOICE_ENABLED): called only from
+        # bad_response_fallback, i.e. only once Fix 4's retry is exhausted
+        # with no usable decision at all -- unparseable JSON, a missing
+        # `message` key, or a non-recoverable error body. Every network-level
+        # failure (llm offline/timeout, compute_error, model_not_found, llm
+        # budget exhausted) returns directly from its own call site above
+        # without ever reaching bad_response_fallback, so this can never fire
+        # for those. Returns (decision, extra_log_fields); extra_log_fields
+        # is {} when the flag is off, so log_lm emits nothing extra and
+        # behavior is byte-identical to pre-Phase-6.
+        def _terminal_fallback(role, agent_data):
+            if not FALLBACK_AI_CHOICE_ENABLED:
+                return role_fallback_action(role, agent_data), {}
+
+            candidates = role_fallback_candidates(role, agent_data, limit=3)
+            if not candidates:
+                # Unreachable in practice (the ladder's final branch always
+                # yields a candidate) -- fall back to the plain ladder call
+                # rather than ever returning no decision.
+                decision = role_fallback_action(role, agent_data)
+                return decision, {
+                    "fallback_triggered": True,
+                    "fallback_candidate_count": 0,
+                    "fallback_selection_method": "priority_default",
+                    "fallback_candidates": [],
+                }
+
+            extra = {
+                "fallback_triggered": True,
+                "fallback_candidate_count": len(candidates),
+                "fallback_candidates": [
+                    {"action": c.get("action"), "target": c.get("target")} for c in candidates
+                ],
+            }
+
+            if len(candidates) < 2 or llm_calls_made >= LLM_CALLS_PER_TURN_MAX:
+                # Only one safe option, or no budget left to ask -- the
+                # highest-priority candidate is the answer either way; no
+                # call is made, so no fallback_ai_latency_ms is logged.
+                chosen = candidates[0]
+                extra["fallback_selection_method"] = (
+                    "single_candidate" if len(candidates) < 2 else "priority_default"
+                )
+                chosen["_fallback"] = True
+                return chosen, extra
+
+            # >=2 candidates and budget remains: ask the fast model to pick
+            # one letter. Minimal prompt, minimal tokens -- this is a
+            # tiebreak, not a decision turn -- and never retried; any
+            # failure/timeout/unparseable reply below falls back to the
+            # first (highest-priority) candidate.
+            labels = ["A", "B", "C", "D", "E"][:len(candidates)]
+            option_lines = []
+            for label, cand in zip(labels, candidates):
+                target = cand.get("target")
+                option_lines.append(
+                    f"{label}: {cand.get('action')}" + (f" -> {target}" if target else "")
+                )
+            choice_prompt = (
+                "Pick the best next action for your villager from these safe options:\n"
+                + "\n".join(option_lines)
+                + f"\nReply with a single letter ({', '.join(labels)}) and nothing else."
+            )
+            choice_payload = {
+                "model": MODEL_FAST,
+                "messages": [
+                    {"role": "system",
+                     "content": "You choose one lettered option. Reply with only the letter."},
+                    {"role": "user", "content": choice_prompt},
+                ],
+                "max_tokens": 5,
+                "temperature": 0.2,
+                **NON_THINKING_SAMPLING,
+            }
+            if DISABLE_THINKING_ROUTINE:
+                choice_payload["think"] = False
+
+            choice_start = datetime.now()
+            try:
+                choice_resp = _post_ollama(to_ollama_body(choice_payload), FALLBACK_AI_CHOICE_TIMEOUT_S)
+            except (LLMBudgetExhausted, requests.exceptions.RequestException):
+                extra["fallback_ai_latency_ms"] = int(
+                    (datetime.now() - choice_start).total_seconds() * 1000)
+                extra["fallback_selection_method"] = "priority_default"
+                chosen = candidates[0]
+                chosen["_fallback"] = True
+                return chosen, extra
+            extra["fallback_ai_latency_ms"] = int((datetime.now() - choice_start).total_seconds() * 1000)
+
+            picked = None
+            try:
+                choice_body = choice_resp.json()
+            except ValueError:
+                choice_body = None
+            choice_text = lm_message_text(choice_body.get("message")) if isinstance(choice_body, dict) else ""
+            first_char = (choice_text or "").strip()[:1].upper()
+            if first_char in labels:
+                picked = candidates[labels.index(first_char)]
+
+            if picked is None:
+                extra["fallback_selection_method"] = "priority_default"
+                chosen = candidates[0]
+            else:
+                extra["fallback_selection_method"] = "ai_choice"
+                chosen = picked
+            chosen["_fallback"] = True
+            return chosen, extra
+
+        # Phase 5 (DECISION_RETRY_ENABLED): 0 on the common path, set to 1 the
+        # moment (and only once) an answer-quality retry fires -- guards both
+        # retry trigger points below so a turn can retry for unparseable JSON
+        # OR for a _fallback-stamped decision, never both. log_lm reads this
+        # by name (see its docstring), so it doesn't need threading through
+        # every log_lm() call site.
+        decision_retries = 0
+
+        def _decision_retry(feedback_text, slim_used):
+            """POST the single answer-quality retry through _post_ollama (so
+            it spends from the same LLM_CALLS_PER_TURN_MAX budget as every
+            other call site) with feedback_text folded into the retry's user
+            prompt via build_decision_payload's retry_feedback kwarg. Returns
+            (lm_body, http_status, decision) where decision is None if the
+            retry itself came back unparseable/erroring -- callers then take
+            the existing fallback path per spec (no second retry). Deliberately
+            does NOT catch LLMBudgetExhausted / requests.exceptions.RequestException
+            -- those propagate to the caller, which handles them exactly like
+            every other call site in this function (immediate {"error": ...}
+            return, no fallback, no further retry)."""
+            nonlocal payload
+            retry_payload = build_decision_payload(
+                data, self_prompt, response_format, slim=slim_used, retry_feedback=feedback_text)
+            payload = retry_payload
+            resp = _post_ollama(to_ollama_body(retry_payload), request_timeout)
+            http_status2 = resp.status_code
+            try:
+                lm_body2 = resp.json()
+            except ValueError:
+                lm_body2 = None
+            decision2 = None
+            if not (lm_body2 is None or (isinstance(lm_body2, dict) and lm_body2.get("error"))):
+                try:
+                    message2 = lm_body2["message"]
+                except (TypeError, KeyError):
+                    message2 = None
+                if message2 is not None:
+                    if isinstance(message2, dict):
+                        message2.setdefault("reasoning_content", "")
+                    raw_text2 = lm_message_text(message2)
+                    decision2 = extract_json_decision(raw_text2)
+                    if not decision2 and isinstance(message2, dict):
+                        decision2 = extract_json_decision(message2.get("content") or "")
+            return lm_body2, http_status2, decision2
+
         start = datetime.now()
         try:
-            resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
+            resp = _post_ollama(to_ollama_body(payload), request_timeout)
+        except LLMBudgetExhausted:
+            latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+            log_lm(latency_ms, error="llm budget exhausted")
+            return {"error": "llm budget exhausted", "action": "rest"}
         except requests.exceptions.RequestException as exc:
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
             err = _request_error_tag(exc)
@@ -4079,7 +4605,11 @@ def run_agent_decision(data):
             response_format = None
             start = datetime.now()
             try:
-                resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
+                resp = _post_ollama(to_ollama_body(payload), request_timeout)
+            except LLMBudgetExhausted:
+                latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+                log_lm(latency_ms, error="llm budget exhausted")
+                return {"error": "llm budget exhausted", "action": "rest"}
             except requests.exceptions.RequestException as exc:
                 latency_ms = int((datetime.now() - start).total_seconds() * 1000)
                 err = _request_error_tag(exc)
@@ -4131,7 +4661,11 @@ def run_agent_decision(data):
             payload = slim_payload
             retry_start = datetime.now()
             try:
-                resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(slim_payload), timeout=request_timeout)
+                resp = _post_ollama(to_ollama_body(slim_payload), request_timeout)
+            except LLMBudgetExhausted:
+                latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
+                log_lm(latency_ms, error="llm budget exhausted")
+                return {"error": "llm budget exhausted", "action": "rest"}
             except requests.exceptions.RequestException as exc:
                 latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
                 err = _request_error_tag(exc)
@@ -4168,15 +4702,147 @@ def run_agent_decision(data):
         if not decision and isinstance(message, dict):
             decision = extract_json_decision(message.get("content") or "")
         if not decision:
-            return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
-                                          error=error_kind or "bad_response")
+            # Phase 5, failure point 1/2: unparseable JSON. Retry once
+            # (budget permitting) with a concrete-reason feedback line before
+            # falling back -- see DECISION_RETRY_ENABLED's docstring for why
+            # this never covers network-level failures.
+            if DECISION_RETRY_ENABLED and decision_retries == 0:
+                decision_retries = 1
+                # Phase 0 probe finding (see the plan): the dominant real
+                # cause of unparseable replies is generation truncation --
+                # Ollama's done_reason == "length" means max_tokens cut the
+                # JSON off mid-object, not a malformed answer. A generic
+                # "could not be parsed" message would mislead the model into
+                # re-emitting the same oversized answer, so call that out by
+                # name and ask for something smaller instead.
+                done_reason = lm_body.get("done_reason") if isinstance(lm_body, dict) else None
+                if done_reason == "length":
+                    feedback_text = _truncation_retry_feedback(data.get("sprite_design_only"))
+                else:
+                    feedback_text = (
+                        "your previous reply could not be parsed as JSON; reply with only "
+                        "the JSON decision object."
+                    )
+                retry_start = datetime.now()
+                try:
+                    lm_body, http_status, decision = _decision_retry(
+                        feedback_text, slim_used=(error_kind == "context_overflow"))
+                except LLMBudgetExhausted:
+                    latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
+                    log_lm(latency_ms, error="llm budget exhausted")
+                    return {"error": "llm budget exhausted", "action": "rest"}
+                except requests.exceptions.RequestException as exc:
+                    latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
+                    err = _request_error_tag(exc)
+                    log_lm(latency_ms, error=err)
+                    return {"error": err, "action": "rest"}
+                latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
+                if not decision:
+                    # Second attempt also failed -- existing fallback path,
+                    # no further retry.
+                    return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
+                                                  error=error_kind or "bad_response")
+            else:
+                return bad_response_fallback(latency_ms, response=lm_body, http_status=http_status,
+                                              error=error_kind or "bad_response")
+
+        # Held in its own local (rather than nested inline) so it can be
+        # inspected for the _fallback stamp (role_fallback_action) before the
+        # belief-pitch scoring / divine-response synthesis passes run over it,
+        # and so failure point 2/2 (Phase 5) below can trigger the same
+        # single answer-quality retry when normalize_decision rejects it.
+        normalized_decision = normalize_decision(decision, agent_data)
+        if (DECISION_RETRY_ENABLED and decision_retries == 0
+                and isinstance(normalized_decision, dict) and normalized_decision.get("_fallback")):
+            decision_retries = 1
+            # Bug fix (found in Phase 5 verification): extract_json_decision's
+            # truncated-JSON salvager (see _truncation_retry_feedback's
+            # docstring) can turn a done_reason == "length" reply into a
+            # decision that parses fine but is missing a required field --
+            # e.g. a sprite turn whose grid got cut off -- which skips the
+            # unparseable-JSON trigger point above and lands here instead,
+            # rejected by normalize_decision. lm_body has NOT been reassigned
+            # yet at this point (this whole block only runs when
+            # decision_retries was still 0, i.e. the unparseable-JSON retry
+            # never fired), so it is still the ORIGINAL response -- reading
+            # its done_reason here is safe. When that response was truncated,
+            # lead with the same truncation wording as the other trigger
+            # point instead of the bare *_rejection_note (which reads as a
+            # malformed-answer complaint and would prompt the model to
+            # re-send another oversized reply); keep the note as supporting
+            # detail since it still names which field was lost.
+            done_reason = lm_body.get("done_reason") if isinstance(lm_body, dict) else None
+            rejection_note = _rejection_feedback_text(normalized_decision)
+            if done_reason == "length":
+                feedback_text = _truncation_retry_feedback(data.get("sprite_design_only"))
+                if rejection_note:
+                    feedback_text = f"{feedback_text} ({rejection_note})"
+            else:
+                feedback_text = rejection_note or (
+                    "your previous reply could not be parsed as JSON; reply with only "
+                    "the JSON decision object."
+                )
+            retry_start = datetime.now()
+            try:
+                lm_body, http_status, retry_decision = _decision_retry(
+                    feedback_text, slim_used=(error_kind == "context_overflow"))
+            except LLMBudgetExhausted:
+                latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
+                log_lm(latency_ms, error="llm budget exhausted")
+                return {"error": "llm budget exhausted", "action": "rest"}
+            except requests.exceptions.RequestException as exc:
+                latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
+                err = _request_error_tag(exc)
+                log_lm(latency_ms, error=err)
+                return {"error": err, "action": "rest"}
+            latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
+            if retry_decision:
+                normalized_decision = normalize_decision(retry_decision, agent_data)
+            # else: retry itself came back unparseable/erroring -- the
+            # existing fallback path IS normalized_decision as already
+            # computed above (already a role_fallback_action dict), so there
+            # is nothing further to do; fall through and log/return it.
+
+        # Phase 6 (Fix 5): this is the motivating case for the whole plan --
+        # normalize_decision rejected a syntactically valid decision and
+        # Fix 4's retry is exhausted, whether it fired just above and still
+        # landed on a fallback, or never fired at all (DECISION_RETRY_ENABLED
+        # off, or decision_retries already spent by the unparseable-JSON
+        # failure point earlier in this function). Never reached for a
+        # network failure -- this whole function body only gets here once
+        # Ollama has actually responded with something normalize_decision
+        # could evaluate. With FALLBACK_AI_CHOICE_ENABLED off this block is
+        # skipped entirely, so normalized_decision (and its baked
+        # *_rejection_note/reasoning) is returned exactly as
+        # normalize_decision produced it -- byte-identical to pre-Phase-6
+        # behavior, no fallback_* log fields, no extra call.
+        fallback_extra = None
+        if (FALLBACK_AI_CHOICE_ENABLED and isinstance(normalized_decision, dict)
+                and normalized_decision.get("_fallback")):
+            # Carry the specific *_rejection_note/reasoning normalize_decision
+            # already baked onto the rejected fallback (this is what makes
+            # llm.jsonl greppable and feeds the cross-turn behavior_nudge --
+            # see _rejection_feedback_text/_REJECTION_NOTE_KEYS) onto
+            # whatever _terminal_fallback returns, so swapping in the
+            # AI-choice tiebreak doesn't silently drop that diagnostic.
+            carried_notes = {
+                key: normalized_decision[key]
+                for key in _REJECTION_NOTE_KEYS if normalized_decision.get(key)
+            }
+            carried_reasoning = normalized_decision.get("reasoning")
+            normalized_decision, fallback_extra = _terminal_fallback(agent_data.get("role"), agent_data)
+            if carried_notes:
+                normalized_decision.update(carried_notes)
+            if carried_reasoning:
+                normalized_decision["reasoning"] = carried_reasoning
 
         decision = synthesize_divine_response(
-            score_belief_pitch_decision(normalize_decision(decision, agent_data), data),
+            score_belief_pitch_decision(normalized_decision, data),
             agent_data,
         )
 
-        log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=error_kind)
+        log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=error_kind,
+               fallback_extra=fallback_extra)
         return decision
 
     except Exception:
@@ -4257,6 +4923,8 @@ _ENGINE_DEPS = {
     "validate_blueprint": validate_blueprint,
     "validate_sprite_block": validate_sprite_block,
     "sprite_spec_is_degenerate": sprite_spec_is_degenerate,
+    "SPRITE_GRID_MIN": SPRITE_GRID_MIN,
+    "SPRITE_GRID_MAX": SPRITE_GRID_MAX,
     "canonical_effect_vector": canonical_effect_vector,
     "run_piano_module": run_piano_module,
     "run_meta_update": run_meta_update,
