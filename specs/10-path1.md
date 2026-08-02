@@ -144,7 +144,9 @@ arrival, `_caravan_trade_bundle` + `_deliver_caravan` debit the traveler's
 trade goods, credit the destination `settlementStores`, apply treaty
 tariffs, call `_emit_shipment` per transferred resource, and append an
 enriched `caravanLog` entry (`goods`, `from`, `to`, `frame`) plus an
-`inter_village_trades` benchmark. The LLM may also start a caravan run via
+`inter_village_trades` benchmark. Live persisted `civilization["caravanLog"]`
+is capped at `CARAVAN_LOG_CAP = 20` (oldest entries drop on each append);
+`/state` projects the same bounded tail. The LLM may also start a caravan run via
 the `deliver_caravan` action ([07-actions.md](07-actions.md)); the goal
 still completes authoritative delivery on arrival. `_border_settlement_agent`
 flags an agent within 150px of an agent from a different settlement (used

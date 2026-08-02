@@ -26,7 +26,7 @@ import threading
 import time
 import unicodedata
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 
 # Full-state persistence (Contract 3), backed by a SQLite database. Resolved
@@ -35,8 +35,14 @@ from datetime import datetime, timezone
 # STATE_VERSION was bumped 1 -> 2 for the world-expansion plan
 # (civilization.activeProject -> districtProjects, new
 # districts/roadNodes/roadEdges/frontierPlots); v1 saves are no longer
-# supported.
-STATE_VERSION = 2
+# supported. v2 -> 3 splits structure sprite grids out of the civ JSON blob
+# into a structure_sprites table (restore still accepts v2 with embedded
+# sprites once, then re-saves as v3).
+STATE_VERSION = 3
+# Restore accepts these versions; v2 DBs may still embed sprites in civ JSON.
+RESTORE_STATE_VERSIONS = (2, 3)
+# Max frame gap for GET /state?since= before the server returns a full snapshot.
+STATE_DELTA_MAX_GAP = 90  # ~3s at 30Hz
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.db")
 AUTOSAVE_SECONDS = 10
 # Sets on the civilization that serialize to JSON arrays and back.
@@ -53,7 +59,12 @@ CREATE TABLE IF NOT EXISTS memory (
 CREATE TABLE IF NOT EXISTS council_transcript (
     rowid_pk INTEGER PRIMARY KEY, meeting_id INTEGER, who TEXT, type TEXT, text TEXT,
     feeling TEXT, frame_tick INTEGER, ts TEXT);
+CREATE TABLE IF NOT EXISTS structure_sprites (
+    structure_id TEXT PRIMARY KEY, sprite_json TEXT NOT NULL, updated_frame INTEGER NOT NULL);
 """
+
+# Payload keys used only for save I/O and hashing — never written to meta/civ.
+_STATE_HASH_SKIP_KEYS = frozenset({"savedAt", "_sprite_upserts", "_sprite_removals"})
 
 
 def _connect_db(path):
@@ -64,11 +75,53 @@ def _connect_db(path):
     return conn
 
 
+def _json_safe_copy(value):
+    """Deep-copy a value into JSON-serializable form (sets -> sorted lists)."""
+    if isinstance(value, set):
+        return sorted(_json_safe_copy(v) for v in value)
+    if isinstance(value, dict):
+        return {k: _json_safe_copy(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_copy(v) for v in value]
+    if isinstance(value, tuple):
+        return [_json_safe_copy(v) for v in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _structure_sprites_fingerprint(civilization):
+    """Stable digest of all in-memory structure sprites (for autosave hash)."""
+    sprites = {}
+    for s in (civilization or {}).get("structures") or []:
+        sid = s.get("id")
+        sp = s.get("sprite")
+        if sid and sp:
+            sprites[sid] = sp
+    if not sprites:
+        return None
+    blob = json.dumps(
+        _json_safe_copy(sprites), sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _state_content_hash(payload):
+    """Stable SHA-256 of a save payload, excluding ephemeral save keys."""
+    canonical = {k: v for k, v in payload.items() if k not in _STATE_HASH_SKIP_KEYS}
+    blob = json.dumps(
+        canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def _write_state_db(path, payload):
     """Atomically persist a Contract-3 payload dict into the SQLite state
     database at `path`. All table rewrites happen in a single transaction so
     a crash mid-write can never leave the DB half-updated. May raise; callers
     (SimEngine.save_state) swallow exceptions."""
+    sprite_upserts = payload.get("_sprite_upserts") or {}
+    sprite_removals = payload.get("_sprite_removals") or []
     conn = _connect_db(path)
     try:
         civ = payload.get("civilization") or {}
@@ -120,6 +173,21 @@ def _write_state_db(path, payload):
                   r.get("feeling"), r.get("frame_tick"), r.get("ts"))
                  for r in council_transcript],
             )
+            for sid in sprite_removals:
+                conn.execute(
+                    "DELETE FROM structure_sprites WHERE structure_id = ?",
+                    (sid,),
+                )
+            for sid, row in sprite_upserts.items():
+                sprite = row.get("sprite") if isinstance(row, dict) else row
+                frame = row.get("updated_frame", 0) if isinstance(row, dict) else 0
+                if not sprite:
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO structure_sprites "
+                    "(structure_id, sprite_json, updated_frame) VALUES (?, ?, ?)",
+                    (sid, json.dumps(sprite, ensure_ascii=False), int(frame)),
+                )
         try:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception:
@@ -179,6 +247,14 @@ def _read_state_db(path):
                 "FROM council_transcript ORDER BY rowid_pk"
             ).fetchall()
         ]
+        structure_sprites = {}
+        try:
+            for sid, sprite_json in conn.execute(
+                "SELECT structure_id, sprite_json FROM structure_sprites"
+            ).fetchall():
+                structure_sprites[sid] = json.loads(sprite_json)
+        except sqlite3.OperationalError:
+            pass
         return {
             "version": version,
             "frameTick": frame_tick,
@@ -188,6 +264,7 @@ def _read_state_db(path):
             "agents": agents,
             "memory": memory,
             "council_transcript": council_transcript,
+            "structureSprites": structure_sprites,
         }
     except Exception:
         return None
@@ -1071,6 +1148,12 @@ MODULE_REFRESH_TIMEOUT_S = 60
 # PIANO_MODULE_TIMEOUT_S (15s) HTTP timeout so that timeout, not this one,
 # is what fires and gets logged/counted as a drop in the normal case.
 PIANO_MODULE_TIMEOUT_WAIT_S = 18
+# Orphaned Ollama timeouts (client gave up but server-side generation continues)
+# share the sim-smart/sim-fast parallel budget. After this many decision or
+# PIANO module timeouts in a row, pause new decision dispatches briefly so
+# in-flight orphans can drain -- see _record_llm_orphan_timeout / _schedule_think.
+LLM_ORPHAN_TIMEOUT_THRESHOLD = 3
+LLM_ORPHAN_COOLDOWN_S = 30.0
 LLM_MIN_GAP_MS = 250
 # When _schedule_think can't dispatch (worker pool full, cooldown, min-gap),
 # the agent retries this soon instead of waiting a full thinkInterval (up to
@@ -1744,6 +1827,7 @@ WILDLIFE_GUARD_RADIUS = 120
 SETTLEMENT_STRUCT_THRESHOLD = 5
 SETTLEMENT_POP_THRESHOLD = 6
 CARAVAN_CARRY_MIN = 3
+CARAVAN_LOG_CAP = 20              # bounded ring -- oldest caravan deliveries drop first
 CARAVAN_VEHICLE_RESOURCES = frozenset({"cart", "wagon"})
 TREATY_TARIFF_MAX = 0.25
 PATH1_GRID_COLS = 8
@@ -2050,6 +2134,7 @@ class SimEngine:
         self.paused = False
         self.lmStatus = "offline"
         self.llm_cooldown_until = 0.0
+        self._llm_orphan_timeouts = 0
         self.last_llm_dispatch_ms = 0.0
         self.activityLog = []      # most-recent-first, capped 30
         self.conversationLog = []  # most-recent-first, capped 100
@@ -2113,6 +2198,14 @@ class SimEngine:
         # GOD_COMPILER_SESSION_CAP for this process's lifetime (bumped even
         # on a rejected/failed compile -- see god_compile_prose).
         self._god_compiler_state = {"lastCompileWallTime": 0.0, "compileCount": 0}
+        # Autosave skip-if-unchanged: last successful write hash + last tick
+        # the saver considered a write (even when skipped).
+        self._last_saved_hash = None
+        self._last_save_considered_at = 0.0
+        # Persistence: structure sprite rows upserted only when dirty (separate
+        # from HTTP delta last-mod maps, which are pruned not cleared per poll).
+        self._persist_dirty_structure_sprites = set()
+        self._persist_sprite_removals = set()
         self._reset_world(roster_size)
 
     # --- roster + cold start ---
@@ -2252,6 +2345,7 @@ class SimEngine:
         return agents
 
     def _reset_world(self, roster_size):
+        self._init_state_delta_sets()
         self.RECIPES = {k: {"name": v["name"], "inputs": dict(v["inputs"]), "station": v["station"],
                             **({"tier": v.get("tier", 1)} if TECH_TREE_ENABLED else {})}
                         for k, v in SEED_RECIPES.items()}
@@ -2445,11 +2539,131 @@ class SimEngine:
         self._seed_beliefs()
         if WILDLIFE_ENABLED:
             self._seed_wildlife_population()
+        self.districtsEpoch = 1
+        self._on_world_replaced()
+
+    # --- /state delta dirty tracking (Contract 2) ---
+    def _init_state_delta_sets(self):
+        """Ensure last-mod frame maps exist (safe during _reset_world before bump)."""
+        self._dirty_agents = {}
+        self._dirty_civ_keys = {}
+        self._dirty_structure_upserts = {}
+        self._dirty_structure_removals = {}
+        self._dirty_structure_sprites = {}
+        self._dirty_top_keys = {}
+        self._paused_mod_frame = None
+        self._config_mod_frame = None
+        self._dirty_this_frame = set()
+
+    def _on_world_replaced(self):
+        """Bump generation and reset dirty maps after reset/restore/cold start."""
+        self.stateGeneration = getattr(self, "stateGeneration", 0) + 1
+        self._init_state_delta_sets()
+        self._paused_mod_frame = self.frameTick
+        self._dirty_this_frame.add("paused")
+        self._last_reset_frame = self.frameTick
+
+    def _delta_include_mod(self, last_mod, since_int, frame_tag=None):
+        """Whether a last-mod stamp should appear in a delta for *since_int*."""
+        if last_mod > since_int:
+            return True
+        if (frame_tag and since_int == self.frameTick
+                and frame_tag in self._dirty_this_frame):
+            return True
+        return False
+
+    def _discard_frame_tags(self, since_int, *tags):
+        """Drop same-frame pending tags once a client has caught up to *last_mod*."""
+        if since_int >= self.frameTick:
+            for tag in tags:
+                self._dirty_this_frame.discard(tag)
+
+    def _has_state_dirty(self, since=0):
+        """True when any tracked key was modified after frame *since*."""
+        if since == self.frameTick and self._dirty_this_frame:
+            return True
+        if any(v > since for v in self._dirty_agents.values()):
+            return True
+        if any(v > since for v in self._dirty_civ_keys.values()):
+            return True
+        if any(v > since for v in self._dirty_structure_upserts.values()):
+            return True
+        if any(v > since for v in self._dirty_structure_removals.values()):
+            return True
+        if any(v > since for v in self._dirty_top_keys.values()):
+            return True
+        if self._paused_mod_frame is not None and self._paused_mod_frame > since:
+            return True
+        if self._config_mod_frame is not None and self._config_mod_frame > since:
+            return True
+        return False
+
+    def _prune_state_dirty(self, ft):
+        """Drop last-mod entries older than the delta gap window."""
+        cutoff = ft - STATE_DELTA_MAX_GAP
+
+        def _prune_map(m):
+            for k in list(m.keys()):
+                if m[k] <= cutoff:
+                    del m[k]
+
+        _prune_map(self._dirty_agents)
+        _prune_map(self._dirty_civ_keys)
+        _prune_map(self._dirty_structure_upserts)
+        _prune_map(self._dirty_structure_removals)
+        _prune_map(self._dirty_structure_sprites)
+        _prune_map(self._dirty_top_keys)
+        if self._paused_mod_frame is not None and self._paused_mod_frame <= cutoff:
+            self._paused_mod_frame = None
+        if self._config_mod_frame is not None and self._config_mod_frame <= cutoff:
+            self._config_mod_frame = None
+
+    def _mark_agent_dirty(self, agent_or_id):
+        aid = agent_or_id["id"] if isinstance(agent_or_id, dict) else agent_or_id
+        self._dirty_agents[aid] = self.frameTick
+        self._dirty_this_frame.add(f"a:{aid}")
+
+    def _mark_civ_dirty(self, *keys):
+        ft = self.frameTick
+        for key in keys:
+            self._dirty_civ_keys[key] = ft
+            self._dirty_this_frame.add(f"c:{key}")
+
+    def _mark_structure_dirty(self, structure, sprite_changed=False):
+        sid = structure["id"] if isinstance(structure, dict) else structure
+        ft = self.frameTick
+        self._dirty_structure_upserts[sid] = ft
+        self._dirty_civ_keys["structures"] = ft
+        self._dirty_this_frame.add(f"su:{sid}")
+        self._dirty_this_frame.add("c:structures")
+        if sprite_changed:
+            self._dirty_structure_sprites[sid] = ft
+            self._dirty_this_frame.add(f"sp:{sid}")
+            self._persist_dirty_structure_sprites.add(sid)
+
+    def _mark_structure_removed(self, structure_id):
+        sid = structure_id["id"] if isinstance(structure_id, dict) else structure_id
+        ft = self.frameTick
+        self._dirty_structure_removals[sid] = ft
+        self._dirty_structure_upserts.pop(sid, None)
+        self._dirty_structure_sprites.pop(sid, None)
+        self._persist_dirty_structure_sprites.discard(sid)
+        self._persist_sprite_removals.add(sid)
+        self._dirty_civ_keys["structures"] = ft
+        self._dirty_this_frame.add(f"sr:{sid}")
+        self._dirty_this_frame.add("c:structures")
+
+    def _mark_top_dirty(self, *keys):
+        ft = self.frameTick
+        for key in keys:
+            self._dirty_top_keys[key] = ft
+            self._dirty_this_frame.add(f"t:{key}")
 
     # --- logging helpers (mirror pushActivity / pushCommunication) ---
     def _push_activity(self, line):
         self.activityLog.insert(0, line)
         del self.activityLog[30:]
+        self._mark_top_dirty("activity")
         try:
             self.d["log_activity"](line, self.frameTick)
         except Exception:
@@ -2467,6 +2681,7 @@ class SimEngine:
             entry["source"] = source
         self.conversationLog.insert(0, entry)
         del self.conversationLog[100:]
+        self._mark_top_dirty("conversation")
         try:
             log_outcome = outcome
             if source:
@@ -2767,6 +2982,10 @@ class SimEngine:
         return _dist(a["x"], a["y"], b["x"], b["y"])
 
     # --- districts + roads ---
+    def _bump_districts_epoch(self):
+        """Content revision for GET /districts.js ?since= polls."""
+        self.districtsEpoch = getattr(self, "districtsEpoch", 0) + 1
+
     def _districts_of_kind(self, kind):
         return [did for did, d in self.civilization["districts"].items() if d["kind"] == kind]
 
@@ -2986,6 +3205,8 @@ class SimEngine:
         agent["currentDistrict"] = get_district(self.civilization["districts"], agent["x"], agent["y"])
         if agent.get("currentDistrict") != prior_district:
             self._mark_context_dirty(agent)
+        if agent["x"] != prior_x or agent["y"] != prior_y:
+            self._mark_agent_dirty(agent)
 
     # --- survival ---
     def _first_edible(self, agent):
@@ -3067,6 +3288,8 @@ class SimEngine:
         if any((old_hunger > t) != (agent["hunger"] > t) for t in thresholds) \
                 or any((old_health > t) != (agent["health"] > t) for t in (60, SAGE_CRITICAL_HEALTH, 0)):
             self._mark_context_dirty(agent)
+        if old_hunger != agent["hunger"] or old_health != agent["health"]:
+            self._mark_agent_dirty(agent)
 
     def _neediest_nearby(self, agent):
         nearby = [self._find_agent(n) for n in self._get_nearby_agents(agent)]
@@ -4681,6 +4904,8 @@ class SimEngine:
         self._maybe_disaster()
         self._tick_comfort_consumption()
         self._prune_shipments()
+        self._mark_civ_dirty("stockpile", "season")
+        self._mark_top_dirty("weather")
 
     def _tick_comfort_consumption(self):
         if not ECONOMY_SINKS_ENABLED:
@@ -4776,6 +5001,8 @@ class SimEngine:
                     owner["homeStructureId"] = None
                 self._push_activity(f"{s['homeOf']} is left homeless — the {name} they lived in is a ruin")
                 s["homeOf"] = None
+        if new_cond != cond:
+            self._mark_structure_dirty(s)
         return new_cond
 
     def _tick_structure_decay(self):
@@ -5341,6 +5568,7 @@ class SimEngine:
             # The upgrade may have grown this structure's footprint enough to
             # overlap a neighbor; the upgrader becomes the relocator.
             self._enqueue_reorg_for_overlaps(s, preferred_agent=agent)
+        self._mark_structure_dirty(s, sprite_changed=(new_tier > old_tier))
         agent["lastUpgradeRejection"] = None
         self._push_activity(f"{agent['name']} upgraded the {name} to level {new_level}")
         self._log_benchmark("structure_upgraded", new_level,
@@ -5374,6 +5602,7 @@ class SimEngine:
         agent["spriteDesignTurn"] = None
         agent["lastSpriteRejection"] = None
         name = s.get("name") or s.get("type")
+        self._mark_structure_dirty(s, sprite_changed=True)
         self._push_activity(f"{agent['name']} refined the sprite for the {name}")
         # An agent-refined sprite can also grow the drawn footprint enough to
         # overlap a neighbor -- same reorg trigger as a tier upgrade.
@@ -5507,6 +5736,9 @@ class SimEngine:
         }
         c["structures"].append(new_structure)
         c["nextStructureId"] += 1
+        self._mark_structure_dirty(new_structure, sprite_changed=bool(new_structure.get("sprite")))
+        self._mark_civ_dirty("districtProjects", "completedProjects", "level", "builtTypes")
+        self._mark_agent_dirty(agent)
         built_name = project["name"]
         c["districtProjects"][district_id] = None
         c["completedProjects"] += 1
@@ -5779,6 +6011,7 @@ class SimEngine:
         for res, n in bt["cost"].items():
             agent["resources"][res] -= n
         tiles[key] = block_type
+        self._bump_districts_epoch()
         agent["lastBlockRejection"] = None
         c = self.civilization
         c["path1Placements"] = c.get("path1Placements", 0) + 1
@@ -5801,6 +6034,7 @@ class SimEngine:
         if not block_type:
             agent["lastBlockRejection"] = {"reason": "no block here", "frame": self.frameTick}
             return f"{agent['name']} found no block to remove"
+        self._bump_districts_epoch()
         bt = BLOCK_TYPES.get(block_type, {})
         for res, n in bt.get("cost", {}).items():
             refund = max(0, int(n * BLOCK_REFUND_RATIO)) or 1
@@ -5836,8 +6070,10 @@ class SimEngine:
         gained = None
         if current == "grove":
             d["terrain"][key] = "soil"
+            self._bump_districts_epoch()
         elif current == "soil":
             d["terrain"][key] = "rock"
+            self._bump_districts_epoch()
             gained = "stone"
         else:
             # This tile is exhausted (rock/sand/water) -- relocate to the
@@ -5906,6 +6142,7 @@ class SimEngine:
             return f"{agent['name']} cannot plant on {current}"
         agent["resources"]["wood"] -= 1
         d["terrain"][key] = "grove"
+        self._bump_districts_epoch()
         c = self.civilization
         c["path1TerrainMutations"] = c.get("path1TerrainMutations", 0) + 1
         self._log_benchmark("terrain_mutations", c["path1TerrainMutations"], {"action": "plant", "district": did})
@@ -6101,6 +6338,7 @@ class SimEngine:
             "frame": self.frameTick,
             "agent": agent["name"],
         })
+        c["caravanLog"] = c["caravanLog"][-CARAVAN_LOG_CAP:]
         self._log_benchmark("inter_village_trades", len(c["caravanLog"]),
                             {"agent": agent["name"], "dest": dest_settlement_id, "goods": goods})
         dest_name = (dest_settlement or {}).get("name") or dest_settlement_id
@@ -6379,6 +6617,7 @@ class SimEngine:
         })
         if len(self.shipments) > SHIPMENT_RING_CAP:
             del self.shipments[: len(self.shipments) - SHIPMENT_RING_CAP]
+        self._mark_top_dirty("shipments")
 
     def _prune_shipments(self):
         """Age out expired shipments. Called from the existing goods tick
@@ -6387,6 +6626,7 @@ class SimEngine:
         so this is hygiene, not a correctness requirement."""
         if self.shipments:
             self.shipments = [s for s in self.shipments if s["endFrame"] >= self.frameTick]
+            self._mark_top_dirty("shipments")
 
     def _shipment_snapshot(self):
         """Read-only /state projection: only still-live shipments."""
@@ -6909,6 +7149,7 @@ class SimEngine:
             if not cre.get("migrateDest") and cre.get("districtId") and kind:
                 cre["x"], cre["y"] = self._wildlife_clamp_pos(
                     cre["districtId"], kind, cre["x"], cre["y"])
+        self._mark_top_dirty("wildlife")
 
     def _tick_huntable_wildlife(self):
         """Slower cadence: respawn, spawn to stage target, cull excess, migrate."""
@@ -7982,6 +8223,8 @@ class SimEngine:
             key = self._tile_key(gx, gy)
             snap[key] = terrain.get(key, "soil")
             terrain[key] = paint_terrain
+        if snap:
+            self._bump_districts_epoch()
         return snap
 
     def _architect_revert_paint(self, zone):
@@ -7997,6 +8240,7 @@ class SimEngine:
         for key, value in snap.items():
             if isinstance(key, str) and isinstance(value, str):
                 terrain[key] = value
+        self._bump_districts_epoch()
 
     def _park_agent_in_limbo(self, agent, zone):
         limbo_x, limbo_y = GOD_LIMBO_STATION
@@ -8370,7 +8614,7 @@ class SimEngine:
 
         was_paused = self.paused
         self.paused = True
-        self.save_state()
+        self.save_state(force=True)
         ms = self.d.get("memory_store")
         if ms is not None:
             try:
@@ -9541,16 +9785,22 @@ class SimEngine:
             return
         c = self.civilization
         starter = STARTER_DISTRICTS["cemetery_grounds"]
+        mutated = False
         if "cemetery_grounds" not in c["districts"]:
             c["districts"]["cemetery_grounds"] = json.loads(json.dumps(starter))
             c["districtProjects"].setdefault("cemetery_grounds", None)
             c["districtLastContribution"].setdefault("cemetery_grounds", 0)
+            mutated = True
         if "cemetery_gate" not in c["roadNodes"]:
             c["roadNodes"]["cemetery_gate"] = dict(STARTER_ROAD_NODES["cemetery_gate"])
+            mutated = True
         edge = ["beach_gate", "cemetery_gate"]
         if edge not in c["roadEdges"] and list(reversed(edge)) not in c["roadEdges"]:
             c["roadEdges"].append(edge)
             self._recompute_road_paths()
+            mutated = True
+        if mutated:
+            self._bump_districts_epoch()
 
     def _migrate_cemetery_structure(self):
         """Move the cemetery chapel onto the burial district's build grid."""
@@ -13451,6 +13701,7 @@ class SimEngine:
             self._ensure_district_stocks()
             new_stocks = self._init_district_stocks({did: c["districts"][did]}, c["resourceRegistry"])
             c["districtStocks"].update(new_stocks)
+        self._bump_districts_epoch()
 
     def _maybe_found_district(self):
         """Deterministic, tick-gated backstop (same shape as
@@ -13717,6 +13968,7 @@ class SimEngine:
             "roleRebalanceLatency": self.civilization.get("lastRoleRebalanceLatency"),
             "ruleKindDiversity": len(self.civilization.get("ruleKindsEverEnacted") or []),
         }
+        self._mark_top_dirty("benchmarks")
         if TECH_TREE_ENABLED:
             self.lastBenchmarks["era"] = self._current_era_name()
             self.lastBenchmarks["techTier"] = self._village_tech_tier()
@@ -13859,6 +14111,12 @@ class SimEngine:
                 {"intervened": bool(god.get("intervened")),
                  "active_effects": len(god.get("activeEvents") or []),
                  "rejected_commands": self._god_rejected_count})
+        try:
+            flush = self.d.get("flush_benchmarks")
+            if flush:
+                flush()
+        except Exception:
+            pass
 
     def _run_wiki_memory_merge(self, agent, ms, joined):
         """WIKI_MEMORY path for _run_memory_maintenance. Replaces the plain
@@ -14667,6 +14925,8 @@ class SimEngine:
         ru = decision.get("relationship_update")
         if isinstance(ru, dict):
             agent["relationships"].update(ru)
+            if ru:
+                self._mark_top_dirty("socialTies")
 
         self._push_activity(summary)
         # A successful action can change the actor's material context, role,
@@ -14681,6 +14941,13 @@ class SimEngine:
                       "council_speak", "council_propose", "council_vote"}:
             self._mark_all_context_dirty()
         self._capture_burning_bush_reply(agent, decision)
+        self._mark_agent_dirty(agent)
+        if action in ("collect_resource", "contribute_resources", "trade_resource", "craft_item",
+                      "repair_structure", "upgrade_structure", "build_structure", "start_project",
+                      "propose_rule", "vote_rule", "repeal_rule", "propose_blueprint",
+                      "approve_blueprint", "reject_blueprint", "sage_review_blueprint"):
+            self._mark_civ_dirty("stockpile", "districtProjects", "rules", "pendingRules",
+                                 "pendingBlueprints", "level")
         return summary
 
     def _resolve_talk_target(self, agent, decision):
@@ -15799,6 +16066,28 @@ class SimEngine:
             self._module_note_ages.extend(ages)
         return " | ".join(reports) if reports else "none"
 
+    def _piano_free_slots(self):
+        """Shared PIANO pool budget for decision fan-out and always-on refresh."""
+        return max(0, PIANO_CONCURRENT_LLM - len(self._piano_refresh_inflight))
+
+    def _run_decision_piano_module(self, runner, agent_name, module, context, frame_tick):
+        """Decision-path module call; releases unified inflight slot on completion."""
+        try:
+            return runner(module, agent_name, context, frame_tick=frame_tick)
+        finally:
+            with self.lock:
+                self._piano_refresh_inflight.discard((agent_name, module))
+
+    def _fill_piano_report_from_cache(self, module, cache, tick, report_by_module):
+        """Serve a throttled/off-tick module from cache when still within TTL."""
+        cached = cache.get(module)
+        if cached and (tick - cached["tick"]) <= PIANO_MODULE_CACHE_TTL:
+            age = tick - cached["tick"]
+            report_by_module[module] = (
+                f"{module} ({age} turns ago): {cached['text']}")
+            return True
+        return False
+
     def _always_on_module_done(self, agent_name, module, dirty_since, text, started):
         """Store one background refresh after reacquiring the engine lock."""
         with self.lock:
@@ -15867,7 +16156,7 @@ class SimEngine:
                     # the legacy 1/1/2/3 cadence preference as a tie-breaker.
                     due.append((0 if dirty else 1, -age, priority, agent, module, dirty_since))
         due.sort(key=lambda item: item[:3])
-        free = max(0, PIANO_CONCURRENT_LLM - len(self._piano_refresh_inflight))
+        free = self._piano_free_slots()
         selected = due[:min(MODULE_PULSE_MAX_BATCH, free)]
         self._module_pulse_work.append(len(selected))
         for _, _, _, agent, module, dirty_since in selected:
@@ -15889,13 +16178,16 @@ class SimEngine:
             self.piano_workers.submit(self._run_always_on_module, runner, agent["name"],
                                       module, context, dirty_since)
 
-    def _run_piano_modules(self, agent_name, modules, module_tick, context):
+    def _run_piano_modules(self, agent_name, modules, module_tick, context, *,
+                          force_cache_only=False):
         """Sid-parity Phase 1/5: run staggered PIANO modules on the dedicated
         piano_workers pool (never the decision pool), so a module backlog can
         never starve the Cognitive Controller decision call. Stagger:
         perception+desire every turn; social every 2nd; reflection every 3rd.
         Modules not due this turn are served from the module-report cache
         (PIANO_MODULE_CACHE_TTL module-ticks) instead of an empty slot.
+        Decision-path dispatches share `_piano_refresh_inflight` with the
+        always-on pulse and never submit more work than free PIANO slots.
         Returns (report_string, new_module_tick, runs)."""
         runner = self.d.get("run_piano_module")
         if not runner or not PIANO_MODULES:
@@ -15927,7 +16219,21 @@ class SimEngine:
                 ordered.append(module)
         report_by_module = {}
         runs = 0
-        if to_run:
+
+        def _throttle_modules(modules_to_skip):
+            for module in modules_to_skip:
+                if not self._fill_piano_report_from_cache(
+                        module, cache, tick, report_by_module):
+                    self._piano_module_drops += 1
+
+        if to_run and not force_cache_only:
+            with self.lock:
+                if self._piano_free_slots() == 0:
+                    force_cache_only = True
+
+        if to_run and force_cache_only:
+            _throttle_modules(to_run)
+        elif to_run:
             # Cross-module visibility (working-memory half-step): build one
             # shared "last_reports=" suffix from every cached report still
             # within PIANO_CROSS_CONTEXT_TTL module-ticks, and give it to
@@ -15944,33 +16250,67 @@ class SimEngine:
                 suffix = "last_reports=" + " | ".join(
                     f"{mod_name}({age} ago): {text}" for age, mod_name, text in fresh)
                 dispatch_context = context + "; " + suffix
-            futures = {}
-            dispatch_started = {}
-            for module in to_run:
-                start_ts = time.time()
-                dispatch_started[module] = start_ts
-                futures[module] = self.piano_workers.submit(
-                    runner, module, agent_name, dispatch_context, frame_tick=self.frameTick)
-            for module, fut in futures.items():
-                try:
-                    text = fut.result(timeout=PIANO_MODULE_TIMEOUT_WAIT_S)
-                except Exception:
-                    text = None
-                latency_ms = (time.time() - dispatch_started[module]) * 1000.0
-                totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
-                totals[0] += latency_ms
-                totals[1] += 1
-                if text:
-                    cache[module] = {"tick": tick, "text": text}
-                    report_by_module[module] = f"{module}: {text}"
-                    runs += 1
-                else:
-                    self._piano_module_drops += 1
+            pending = list(to_run)
+            active = {}
+            while pending or active:
+                with self.lock:
+                    while pending and self._piano_free_slots() > 0:
+                        module = pending.pop(0)
+                        if (agent_name, module) in self._piano_refresh_inflight:
+                            if not self._fill_piano_report_from_cache(
+                                    module, cache, tick, report_by_module):
+                                self._piano_module_drops += 1
+                            continue
+                        self._piano_refresh_inflight.add((agent_name, module))
+                        start_ts = time.time()
+                        active[module] = (
+                            self.piano_workers.submit(
+                                self._run_decision_piano_module, runner,
+                                agent_name, module, dispatch_context,
+                                self.frameTick),
+                            start_ts,
+                        )
+                if not active:
+                    _throttle_modules(pending)
+                    pending.clear()
+                    break
+                done, _ = wait(
+                    [fut for fut, _ in active.values()],
+                    timeout=PIANO_MODULE_TIMEOUT_WAIT_S,
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    for module, (fut, start_ts) in list(active.items()):
+                        latency_ms = (time.time() - start_ts) * 1000.0
+                        totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
+                        totals[0] += latency_ms
+                        totals[1] += 1
+                        self._piano_module_drops += 1
+                        with self.lock:
+                            self._piano_refresh_inflight.discard((agent_name, module))
+                        del active[module]
+                    continue
+                for module, (fut, start_ts) in list(active.items()):
+                    if fut not in done:
+                        continue
+                    try:
+                        text = fut.result(timeout=0)
+                    except Exception:
+                        text = None
+                    latency_ms = (time.time() - start_ts) * 1000.0
+                    totals = self._piano_latency_ms.setdefault(module, [0.0, 0])
+                    totals[0] += latency_ms
+                    totals[1] += 1
+                    if text:
+                        cache[module] = {"tick": tick, "text": text}
+                        report_by_module[module] = f"{module}: {text}"
+                        runs += 1
+                    else:
+                        self._piano_module_drops += 1
+                    del active[module]
         for module in off_tick:
-            cached = cache.get(module)
-            if cached and (tick - cached["tick"]) <= PIANO_MODULE_CACHE_TTL:
-                age = tick - cached["tick"]
-                report_by_module[module] = f"{module} ({age} turns ago): {cached['text']}"
+            self._fill_piano_report_from_cache(
+                module, cache, tick, report_by_module)
         reports = [report_by_module[m] for m in ordered if m in report_by_module]
         return (" | ".join(reports) if reports else "none"), tick, runs
 
@@ -16010,6 +16350,14 @@ class SimEngine:
         if agent is not None:
             self._advance_identity_forge_on_think(agent)
 
+    def _record_llm_orphan_timeout(self):
+        """Count orphaned client-side timeouts toward decision-dispatch pause."""
+        with self.lock:
+            self._llm_orphan_timeouts += 1
+            if self._llm_orphan_timeouts >= LLM_ORPHAN_TIMEOUT_THRESHOLD:
+                self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
+                self._llm_orphan_timeouts = 0
+
     def _think_job(self, agent_name):
         """Runs in the worker pool. Build payload under lock, do the network
         call OUTSIDE the lock, then apply the result UNDER the lock."""
@@ -16030,10 +16378,13 @@ class SimEngine:
                 piano_context = None
                 piano_modules = None
                 piano_tick = 0
+                piano_force_cache_only = False
                 if PIANO_MODULES:
                     piano_context = self._piano_module_context(agent, payload)
                     piano_modules = dict(agent.get("modules") or {})
                     piano_tick = int(agent.get("moduleTick") or 0)
+                    if not ALWAYS_ON_MODULES and self._piano_free_slots() == 0:
+                        piano_force_cache_only = True
             if possession_skip:
                 with self.lock:
                     agent = self._find_agent(agent_name)
@@ -16067,7 +16418,8 @@ class SimEngine:
                 # lock so this worker-pool thread can block waiting on it
                 # without freezing the tick.
                 reports, new_tick, runs = self._run_piano_modules(
-                    agent_name, piano_modules, piano_tick, piano_context)
+                    agent_name, piano_modules, piano_tick, piano_context,
+                    force_cache_only=piano_force_cache_only)
                 payload["module_reports"] = reports
             else:
                 new_tick, runs = 0, 0
@@ -16105,9 +16457,14 @@ class SimEngine:
                     self.lmStatus = "offline"
                     self._apply_rule_based_fallback(agent)
                     self._finish_think_identity_forge(agent)
+                elif decision.get("error") == "llm timeout":
+                    self.lmStatus = "offline"
+                    self._record_llm_orphan_timeout()
+                    self._apply_rule_based_fallback(agent)
+                    self._finish_think_identity_forge(agent)
                 elif decision.get("error") == "compute_error":
                     self.lmStatus = "compute_error"
-                    self.llm_cooldown_until = time.time() + 30.0
+                    self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
                     self._apply_rule_based_fallback(agent)
                     self._finish_think_identity_forge(agent)
                 elif decision.get("error"):
@@ -16117,6 +16474,7 @@ class SimEngine:
                 else:
                     self.lmStatus = "online"
                     self.llm_cooldown_until = 0.0
+                    self._llm_orphan_timeouts = 0
                     if decision.get("terraform_rejection_note"):
                         agent["lastTerraformRejection"] = {
                             "reason": decision["terraform_rejection_note"],
@@ -16188,6 +16546,7 @@ class SimEngine:
                 a = self._find_agent(agent_name)
                 if a:
                     a["isThinking"] = False
+                    self._mark_agent_dirty(a)
                 self._inflight.discard(agent_name)
 
     def _schedule_think(self, agent):
@@ -16214,6 +16573,7 @@ class SimEngine:
         self.last_llm_dispatch_ms = now_ms
         self._inflight.add(agent["name"])
         agent["isThinking"] = True
+        self._mark_agent_dirty(agent)
         self._executor.submit(self._think_job, agent["name"])
         return True
 
@@ -16347,6 +16707,7 @@ class SimEngine:
                     a["messageTimer"] -= 1
                     if a["messageTimer"] == 0:
                         a["message"] = None
+                        self._mark_agent_dirty(a)
                 if a["incapacitated"]:
                     continue
                 if a.get("divineHold"):
@@ -16432,15 +16793,19 @@ class SimEngine:
         """Build the Contract-3 payload. Caller must hold self.lock."""
         c = self.civilization
         civ = {k: v for k, v in c.items() if k not in _CIV_SET_KEYS}
-        # Deep-ish copy of nested mutables so the JSON dump can't race a mutation
-        # after the lock is released; sets -> sorted arrays.
-        civ = json.loads(json.dumps(civ, default=str))
+        # Deep copy into JSON-safe form so the DB write can't race a mutation
+        # after the lock is released; known set keys are sorted arrays.
+        civ = _json_safe_copy(civ)
         for key in _CIV_SET_KEYS:
             civ[key] = sorted(c.get(key, set()))
+        # Structure sprite grids are stored in structure_sprites, not civ JSON.
+        for s in civ.get("structures") or []:
+            if isinstance(s, dict):
+                s.pop("sprite", None)
         agents = []
         for a in self.agents:
             ad = {k: v for k, v in a.items() if k not in ("beliefs", "godKeys", "isThinking")}
-            ad = json.loads(json.dumps(ad, default=str))
+            ad = _json_safe_copy(ad)
             ad["beliefs"] = sorted(a.get("beliefs", set()))
             ad["godKeys"] = sorted(a.get("godKeys", set()))
             agents.append(ad)
@@ -16451,7 +16816,7 @@ class SimEngine:
                 memory = ms.export_entries()
             except Exception:
                 memory = []
-        return {
+        payload = {
             "version": STATE_VERSION,
             "frameTick": self.frameTick,
             "savedAt": datetime.now(timezone.utc).isoformat(),
@@ -16459,16 +16824,47 @@ class SimEngine:
             "civilization": civ,
             "agents": agents,
             "memory": memory,
-            "council_transcript": json.loads(json.dumps(
-                self.council_transcript_rows, default=str)),
+            "council_transcript": _json_safe_copy(self.council_transcript_rows),
         }
+        fp = _structure_sprites_fingerprint(self.civilization)
+        if fp:
+            payload["structureSpritesFingerprint"] = fp
+        sprite_upserts = {}
+        for sid in self._persist_dirty_structure_sprites:
+            live = next(
+                (x for x in self.civilization["structures"] if x.get("id") == sid), None,
+            )
+            if live and live.get("sprite"):
+                sprite_upserts[sid] = {
+                    "sprite": _json_safe_copy(live["sprite"]),
+                    "updated_frame": self.frameTick,
+                }
+        if sprite_upserts:
+            payload["_sprite_upserts"] = sprite_upserts
+        if self._persist_sprite_removals:
+            payload["_sprite_removals"] = sorted(self._persist_sprite_removals)
+        return payload
 
-    def save_state(self):
-        """Atomically write the complete world to state.db. Never raises."""
+    def save_state(self, force=False):
+        """Atomically write the complete world to state.db. Never raises.
+
+        Periodic autosave passes force=False and skips the SQLite rewrite when
+        the content hash (excluding savedAt) matches the last successful write.
+        Graceful shutdown, reset, and checkpoint paths pass force=True so
+        savedAt and on-disk bytes always refresh."""
         try:
+            content_hash = None
             with self.lock:
                 payload = self._serialize_state()
+                content_hash = _state_content_hash(payload)
+                self._last_save_considered_at = time.time()
+                if not force and content_hash == self._last_saved_hash:
+                    return True
             _write_state_db(DB_PATH, payload)
+            self._last_saved_hash = content_hash
+            with self.lock:
+                self._persist_dirty_structure_sprites.clear()
+                self._persist_sprite_removals.clear()
             return True
         except Exception:
             # Persistence must never crash the sim.
@@ -16510,11 +16906,20 @@ class SimEngine:
         """If a valid state.db exists, rehydrate the world from it instead of
         the cold-start roster. Returns True on a successful restore."""
         data = _read_state_db(DB_PATH)
-        if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+        version = data.get("version") if isinstance(data, dict) else None
+        if not isinstance(data, dict) or version not in RESTORE_STATE_VERSIONS:
             return False
         try:
             with self.lock:
                 civ = dict(data.get("civilization") or {})
+                table_sprites = data.get("structureSprites") or {}
+                for s in civ.get("structures") or []:
+                    sid = s.get("id")
+                    if sid and sid in table_sprites:
+                        s["sprite"] = table_sprites[sid]
+                    elif version == 2 and sid and s.get("sprite"):
+                        # v2 migration: embedded sprites split out on next save.
+                        self._persist_dirty_structure_sprites.add(sid)
                 for key in _CIV_SET_KEYS:
                     civ[key] = set(civ.get(key) or [])
                 # builtTypes backfill: a save from before #5.1 has no record of
@@ -16917,6 +17322,7 @@ class SimEngine:
                     self._relayout_cemetery_graves()
                 _validate_districts(self.civilization["districts"])
                 _validate_road_graph(self.civilization["roadNodes"], self.civilization["roadEdges"])
+                self._bump_districts_epoch()
                 # Rebuild the MemoryStore by re-embedding each entry's text.
                 ms = self.d.get("memory_store")
                 if ms is not None:
@@ -16924,6 +17330,7 @@ class SimEngine:
                         ms.import_entries(data.get("memory") or [])
                     except Exception:
                         pass
+                self._on_world_replaced()
             return True
         except Exception:
             return False
@@ -23243,10 +23650,14 @@ class SimEngine:
     def pause(self):
         with self.lock:
             self.paused = True
+            self._paused_mod_frame = self.frameTick
+            self._dirty_this_frame.add("paused")
 
     def resume(self):
         with self.lock:
             self.paused = False
+            self._paused_mod_frame = self.frameTick
+            self._dirty_this_frame.add("paused")
 
     def reset(self, roster_size=None):
         with self.lock:
@@ -23279,7 +23690,7 @@ class SimEngine:
         # Replace the on-disk save so a reset truly starts fresh: clear the old
         # snapshot, then immediately persist the fresh cold-started world.
         self.clear_state()
-        self.save_state()
+        self.save_state(force=True)
 
     def _social_ties_snapshot(self):
         """Return compact non-neutral ties between living agents for the viewer.
@@ -23315,250 +23726,390 @@ class SimEngine:
             if (kind := entry.get("kind")) in CHRONICLE_MILESTONE_KINDS
         ][-CHRONICLE_CAP:]
 
-    def snapshot(self):
-        """Consistent /state snapshot per Contract 2 (copied under lock)."""
-        with self.lock:
-            c = self.civilization
-            district_projects = {}
-            for did, ap in c["districtProjects"].items():
-                if not ap:
-                    district_projects[did] = None
-                    continue
-                total = sum(ap["needs"].values())
-                done = sum(min(ap["contributed"].get(r, 0), n) for r, n in ap["needs"].items())
-                pct = round(done / total * 100) if total else 0
-                progress_text = ", ".join(f"{r} {ap['contributed'].get(r, 0)}/{n}"
-                                          for r, n in ap["needs"].items())
-                district_projects[did] = {"name": ap["name"], "type": ap["type"],
-                                          "progressText": progress_text, "progressPercent": pct}
-            agents = [{
-                "id": a["id"], "name": a["name"], "role": a["role"], "color": a["color"],
-                "x": a["x"], "y": a["y"], "currentZone": a["currentZone"],
-                "currentDistrict": a.get("currentDistrict"),
-                "waypoints": len(a.get("waypoints") or []),
-                "resources": dict(a["resources"]), "hunger": a["hunger"], "health": a["health"],
-                "incapacitated": a["incapacitated"], "message": a["message"],
-                "isThinking": a["isThinking"],
-                "beliefs": [self._belief_text(b) for b in a["beliefs"]],
-                "beliefIds": sorted(a["beliefs"]) if MEMES_ENABLED else [],
-                "lastAction": a["lastAction"], "assignedTask": a["assignedTask"],
-                "age": round(a["age"], 1) if LIFECYCLE_ENABLED and a.get("age") is not None else None,
-                "lifeStage": self._life_stage(a) if LIFECYCLE_ENABLED else None,
-                "skills": {k: round(v, 1) for k, v in a["skills"].items()} if CULTURE_ENABLED else None,
-                "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
-                # Cemetery/burial (viewer-only booleans, not the raw frame --
-                # same discipline as councilActive's "frame" omission): lets
-                # the renderer tell a permanent death (tombstone sprite) apart
-                # from a temporary survival collapse (grey overlay, same body).
-                "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
-                "buried": bool(CEMETERY_ENABLED and a.get("buried")),
-                # Non-neutral social ties only, to keep the payload small.
-                "relationships": {k: v for k, v in (a.get("relationships") or {}).items() if v != "neutral"},
-                # Capped preview of the model's last decision justification.
-                "lastReasoning": (a.get("lastReasoning") or "")[:160] or None,
-            } for a in self.agents]
-            env_lit_types = self._env_lit_types() if ENV_EFFECTS_ENABLED else set()
-            civ = {
-                "level": c["level"],
-                "structures": [{"id": s["id"], "type": s["type"], "x": s["x"], "y": s["y"],
-                                "visualStyle": s.get("visualStyle"), "name": s.get("name"),
-                                "sprite": s.get("sprite"),
-                                "districtId": s.get("districtId"),
-                                "condition": s.get("condition", 100),
-                                "isRuin": bool(s.get("isRuin")),
-                                "conditionTier": structure_condition_tier(s),
-                                "homeOf": s.get("homeOf"),
-                                "level": s.get("level", 1),
-                                "visualTier": s.get("visualTier", 1),
-                                "renderScale": s.get("renderScale", 1.0),
-                                "light": bool(
-                                    ENV_EFFECTS_ENABLED and s["type"] in env_lit_types
-                                    and not s.get("isRuin")
-                                    and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)}
-                               for s in c["structures"]],
-                "districtProjects": district_projects,
-                "completedProjects": c["completedProjects"],
-                "resourceRegistry": {rid: dict(d) for rid, d in c["resourceRegistry"].items()},
-                "projectRegistry": {pid: dict(p) for pid, p in c["projectRegistry"].items()},
-                "pendingBlueprints": [dict(b) for b in c["pendingBlueprints"]],
-                "pendingRecipes": [dict(r) for r in c["pendingRecipes"]],
-                # The viewer's Recipes sidebar row reads civ.recipes; it was
-                # dead (always empty) because the snapshot never included the
-                # live RECIPES registry (C5 cleanup, 2026-07-06).
-                "recipes": {rid: {"name": r["name"], "inputs": dict(r["inputs"]),
-                                  "station": r.get("station")}
-                            for rid, r in self.RECIPES.items()} if CRAFTING_ENABLED else {},
-                "rules": [dict(r) for r in c["rules"]],
-                "pendingRules": [dict(r) for r in c["pendingRules"]],
-                "constitution": [dict(p) for p in self._ensure_constitution()],
-                "directive": self._current_directive(),
-                "season": self._current_season(),
-                "stockpile": dict(c["stockpile"]),
-                "taxDue": c["taxDue"], "taxPaid": c["taxPaid"],
-                "collectAttempts": c["collectAttempts"], "collectSuccesses": c["collectSuccesses"],
-            }
-            if CULTURE_ENABLED:
-                # Phase G: chronicle + library knowledge for the viewer (thin,
-                # read-only -- no simulation logic moves to the browser).
-                civ["chronicle"] = list((c.get("chronicle") or [])[-CHRONICLE_CAP:])
-                civ["libraryKnowledge"] = list(c.get("libraryKnowledge") or [])
-                civ["memeMutations"] = c.get("memeMutations", 0)
-                civ["beliefRegistry"] = json.loads(json.dumps(self._belief_registry(), default=str))
-                civ["beliefPitchCalls"] = c.get("beliefPitchCalls", 0)
-            if DAILY_COUNCIL_ENABLED:
-                # Full live projection is intentionally engine-authored: the
-                # later viewer phase consumes these persisted seats, agenda,
-                # transcript, ballot, and verdict without deriving mechanics.
-                civ["dailyCouncil"] = json.loads(json.dumps(
-                    c.get("dailyCouncil"), default=str))
-                civ["councilDigests"] = json.loads(json.dumps(
-                    (c.get("councilDigests") or [])[:DAILY_COUNCIL_DIGEST_CAP],
-                    default=str))
-                if not TECH_TREE_ENABLED:
-                    civ["councilLog"] = json.loads(json.dumps(
-                        (c.get("councilLog") or [])[:DAILY_COUNCIL_LOG_CAP],
-                        default=str))
-            if TECH_TREE_ENABLED:
-                # Phase D: era chip, council banner, and the persisted debate
-                # records for the viewer's Council panel.
-                civ["era"] = self._current_era_name()
-                civ["techTier"] = self._village_tech_tier()
-                council = c.get("councilActive")
-                civ["councilActive"] = ({
-                    "active": True,
-                    "trigger": council.get("trigger"),
-                    "proposers": list(council.get("proposers") or []),
-                    "proposals": len(council.get("proposals") or []),
-                } if council else None)
+    def _agent_snapshot_row(self, a):
+        """One agent row for /state (lock held)."""
+        return {
+            "id": a["id"], "name": a["name"], "role": a["role"], "color": a["color"],
+            "x": a["x"], "y": a["y"], "currentZone": a["currentZone"],
+            "currentDistrict": a.get("currentDistrict"),
+            "waypoints": len(a.get("waypoints") or []),
+            "resources": dict(a["resources"]), "hunger": a["hunger"], "health": a["health"],
+            "incapacitated": a["incapacitated"], "message": a["message"],
+            "isThinking": a["isThinking"],
+            "beliefs": [self._belief_text(b) for b in a["beliefs"]],
+            "beliefIds": sorted(a["beliefs"]) if MEMES_ENABLED else [],
+            "lastAction": a["lastAction"], "assignedTask": a["assignedTask"],
+            "age": round(a["age"], 1) if LIFECYCLE_ENABLED and a.get("age") is not None else None,
+            "lifeStage": self._life_stage(a) if LIFECYCLE_ENABLED else None,
+            "skills": {k: round(v, 1) for k, v in a["skills"].items()} if CULTURE_ENABLED else None,
+            "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
+            "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
+            "buried": bool(CEMETERY_ENABLED and a.get("buried")),
+            "relationships": {k: v for k, v in (a.get("relationships") or {}).items() if v != "neutral"},
+            "lastReasoning": (a.get("lastReasoning") or "")[:160] or None,
+        }
+
+    def _structure_snapshot_row(self, s, env_lit_types, include_sprite=True):
+        """One structure row for /state (lock held)."""
+        row = {
+            "id": s["id"], "type": s["type"], "x": s["x"], "y": s["y"],
+            "visualStyle": s.get("visualStyle"), "name": s.get("name"),
+            "districtId": s.get("districtId"),
+            "condition": s.get("condition", 100),
+            "isRuin": bool(s.get("isRuin")),
+            "conditionTier": structure_condition_tier(s),
+            "homeOf": s.get("homeOf"),
+            "level": s.get("level", 1),
+            "visualTier": s.get("visualTier", 1),
+            "renderScale": s.get("renderScale", 1.0),
+            "light": bool(
+                ENV_EFFECTS_ENABLED and s["type"] in env_lit_types
+                and not s.get("isRuin")
+                and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD),
+        }
+        if include_sprite:
+            row["sprite"] = s.get("sprite")
+        return row
+
+    def _build_district_projects_snapshot(self):
+        c = self.civilization
+        district_projects = {}
+        for did, ap in c["districtProjects"].items():
+            if not ap:
+                district_projects[did] = None
+                continue
+            total = sum(ap["needs"].values())
+            done = sum(min(ap["contributed"].get(r, 0), n) for r, n in ap["needs"].items())
+            pct = round(done / total * 100) if total else 0
+            progress_text = ", ".join(f"{r} {ap['contributed'].get(r, 0)}/{n}"
+                                      for r, n in ap["needs"].items())
+            district_projects[did] = {"name": ap["name"], "type": ap["type"],
+                                      "progressText": progress_text, "progressPercent": pct}
+        return district_projects
+
+    def _build_civ_snapshot(self):
+        """Full civilization projection for /state (lock held)."""
+        c = self.civilization
+        env_lit_types = self._env_lit_types() if ENV_EFFECTS_ENABLED else set()
+        civ = {
+            "level": c["level"],
+            "structures": [self._structure_snapshot_row(s, env_lit_types, include_sprite=True)
+                           for s in c["structures"]],
+            "districtProjects": self._build_district_projects_snapshot(),
+            "completedProjects": c["completedProjects"],
+            "resourceRegistry": {rid: dict(d) for rid, d in c["resourceRegistry"].items()},
+            "projectRegistry": {pid: dict(p) for pid, p in c["projectRegistry"].items()},
+            "pendingBlueprints": [dict(b) for b in c["pendingBlueprints"]],
+            "pendingRecipes": [dict(r) for r in c["pendingRecipes"]],
+            "recipes": {rid: {"name": r["name"], "inputs": dict(r["inputs"]),
+                              "station": r.get("station")}
+                        for rid, r in self.RECIPES.items()} if CRAFTING_ENABLED else {},
+            "rules": [dict(r) for r in c["rules"]],
+            "pendingRules": [dict(r) for r in c["pendingRules"]],
+            "constitution": [dict(p) for p in self._ensure_constitution()],
+            "directive": self._current_directive(),
+            "season": self._current_season(),
+            "stockpile": dict(c["stockpile"]),
+            "taxDue": c["taxDue"], "taxPaid": c["taxPaid"],
+            "collectAttempts": c["collectAttempts"], "collectSuccesses": c["collectSuccesses"],
+        }
+        if CULTURE_ENABLED:
+            civ["chronicle"] = list((c.get("chronicle") or [])[-CHRONICLE_CAP:])
+            civ["libraryKnowledge"] = list(c.get("libraryKnowledge") or [])
+            civ["memeMutations"] = c.get("memeMutations", 0)
+            civ["beliefRegistry"] = json.loads(json.dumps(self._belief_registry(), default=str))
+            civ["beliefPitchCalls"] = c.get("beliefPitchCalls", 0)
+        if DAILY_COUNCIL_ENABLED:
+            civ["dailyCouncil"] = json.loads(json.dumps(c.get("dailyCouncil"), default=str))
+            civ["councilDigests"] = json.loads(json.dumps(
+                (c.get("councilDigests") or [])[:DAILY_COUNCIL_DIGEST_CAP], default=str))
+            if not TECH_TREE_ENABLED:
                 civ["councilLog"] = json.loads(json.dumps(
-                    (c.get("councilLog") or [])[:COUNCIL_LOG_CAP], default=str))
-            if ECONOMY_ENABLED:
-                # Phase E: market status + a live prices dict for the viewer
-                # (thin-viewer-only rendering -- no simulation logic moves).
-                civ["marketActive"] = self._market_active()
-                civ["prices"] = ({rid: self._resource_price(rid)
-                                  for rid in c["resourceRegistry"] if rid != "gold"}
-                                 if civ["marketActive"] else {})
-            if path1_on():
-                civ["settlements"] = list(c.get("settlements") or [])
-                civ["treaties"] = list(c.get("treaties") or [])
-                civ["settlementStores"] = {
-                    sid: dict(bucket or {})
-                    for sid, bucket in (c.get("settlementStores") or {}).items()
-                }
-                civ["caravanLog"] = list(c.get("caravanLog") or [])[-20:]
-                civ["isNight"] = self._is_night()
-            if ENV_EFFECTS_ENABLED:
-                civ["litDistricts"] = list(c.get("litDistricts") or [])
-            if TRANSIT_ENABLED:
-                boat_count = int(c.get("stockpile", {}).get("boat", 0))
-                civ["physicalProps"] = ([{"resource": "boat", "count": min(3, boat_count)}]
-                                        if boat_count >= 3 else [])
-            benchmarks = dict(self.lastBenchmarks)
-            activity = list(self.activityLog)
-            conversation = list(self.conversationLog[:30])
-            snapshot = {
-                "frameTick": self.frameTick,
-                "paused": self.paused,
-                "uptimeSeconds": time.time() - self.processStartTime,
-                "calendar": self._calendar(),
-                "lmStatus": self.lmStatus,
-                "agents": agents,
-                "civilization": civ,
-                "benchmarks": benchmarks,
-                "activity": activity,
-                "conversation": conversation,
-                "config": {
-                    "WORLD_W": WORLD_W, "WORLD_H": WORLD_H,
-                    "flags": {
-                        "SURVIVAL_ENABLED": SURVIVAL_ENABLED, "USE_GOALS": USE_GOALS,
-                        "EMERGENT_ROLES": EMERGENT_ROLES, "RULES_ENABLED": RULES_ENABLED,
-                        "MEMES_ENABLED": MEMES_ENABLED, "CRAFTING_ENABLED": CRAFTING_ENABLED,
-                        "META_SYSTEM": META_SYSTEM, "PIANO_MODULES": PIANO_MODULES,
-                        "ROADS_ENABLED": ROADS_ENABLED,
-                        "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
-                        "GOODS_ENABLED": GOODS_ENABLED,
-                        "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
-                        "ECONOMY_ENABLED": ECONOMY_ENABLED,
-                        "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
-                        "CULTURE_ENABLED": CULTURE_ENABLED,
-                        "CEMETERY_ENABLED": CEMETERY_ENABLED,
-                        "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
-                        "STRUCTURE_WEAR_ENABLED": STRUCTURE_WEAR_ENABLED,
-                        "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
-                        "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
-                        "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
-                        "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
-                        "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
-                        "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
-                        "PATH1_ENABLED": PATH1_ENABLED,
-                        "INDUSTRY_ENABLED": path1_on("INDUSTRY_ENABLED"),
-                        "TOOL_TIERS_ENABLED": path1_on("TOOL_TIERS_ENABLED"),
-                        "COMPOSABLE_BUILD_ENABLED": path1_on("COMPOSABLE_BUILD_ENABLED"),
-                        "TERRAIN_TILES_ENABLED": path1_on("TERRAIN_TILES_ENABLED"),
-                        "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
-                        "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
-                        "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
-                        "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
-                        "LIBRARY_SCALING_ENABLED": LIBRARY_SCALING_ENABLED,
-                        "TRANSIT_ENABLED": TRANSIT_ENABLED,
-                        "ECONOMY_SINKS_ENABLED": ECONOMY_SINKS_ENABLED,
-                        "WIKI_MEMORY": WIKI_MEMORY,
-                        "CROP_GROWTH_ENABLED": CROP_GROWTH_ENABLED,
-                        "WILDLIFE_ENABLED": WILDLIFE_ENABLED,
-                        "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
-                        "WEATHER_ENABLED": WEATHER_ENABLED,
-                        "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
-                        # Sovereign God mode (Phase 2): ALWAYS echoed, flag-off
-                        # or on, so the viewer/clients can detect the dark
-                        # default without a private route. The "god" key
-                        # below, by contrast, is opt-in ONLY when enabled.
-                        "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
-                        "GOD_AUTH_REQUIRED": GOD_AUTH_REQUIRED,
-                        "GOD_DEJA_VU_REPLAY": GOD_DEJA_VU_REPLAY,
-                    },
-                },
+                    (c.get("councilLog") or [])[:DAILY_COUNCIL_LOG_CAP], default=str))
+        if TECH_TREE_ENABLED:
+            civ["era"] = self._current_era_name()
+            civ["techTier"] = self._village_tech_tier()
+            council = c.get("councilActive")
+            civ["councilActive"] = ({
+                "active": True,
+                "trigger": council.get("trigger"),
+                "proposers": list(council.get("proposers") or []),
+                "proposals": len(council.get("proposals") or []),
+            } if council else None)
+            civ["councilLog"] = json.loads(json.dumps(
+                (c.get("councilLog") or [])[:COUNCIL_LOG_CAP], default=str))
+        if ECONOMY_ENABLED:
+            civ["marketActive"] = self._market_active()
+            civ["prices"] = ({rid: self._resource_price(rid)
+                              for rid in c["resourceRegistry"] if rid != "gold"}
+                             if civ["marketActive"] else {})
+        if path1_on():
+            civ["settlements"] = list(c.get("settlements") or [])
+            civ["treaties"] = list(c.get("treaties") or [])
+            civ["settlementStores"] = {
+                sid: dict(bucket or {})
+                for sid, bucket in (c.get("settlementStores") or {}).items()
             }
-            if SOCIAL_LAYER_ENABLED:
-                snapshot["socialTies"] = self._social_ties_snapshot()
-            if CHRONICLE_ENABLED and CULTURE_ENABLED:
-                snapshot["chronicle"] = self._chronicle_snapshot()
-            if CROP_GROWTH_ENABLED or WILDLIFE_ENABLED:
-                # Shared prerequisite for both consumers (2A) -- omitted
-                # entirely when neither viewer feature is on.
-                snapshot["districtEcology"] = self._district_ecology_snapshot()
-            if WILDLIFE_ENABLED:
-                snapshot["wildlife"] = self._wildlife_snapshot()
-            else:
-                snapshot["wildlife"] = []
-            if CARAVAN_VISUALS_ENABLED:
-                snapshot["shipments"] = self._shipment_snapshot()
-            if WEATHER_ENABLED:
-                snapshot["weather"] = self._weather_snapshot()
-            if GOD_MODE_ENABLED:
-                # snapshot() builds civ as an explicit allowlist dict (not a
-                # wholesale civilization copy), so this key is opt-in by
-                # construction -- privateOmens/recentRequests/the token
-                # cannot leak by forgetting to filter them; they are simply
-                # never read here. Phase 3: "providence" is included below
-                # (public per docs/plan Visibility), but recentInterventions
-                # is filtered to `public: True` entries ONLY -- this is the
-                # load-bearing guard against a private_omen apply/expire/
-                # revoke record leaking into public /state; every Phase 3
-                # recentInterventions record MUST set "public" explicitly
-                # (see _god_record_intervention).
-                god = c.get("godState") or self._default_god_state()
-                snapshot["god"] = {
-                    "intervened": bool(god.get("intervened")),
-                    "providence": god.get("providence"),
-                    "activePublicEvents": [
-                        e for e in (god.get("activeEvents") or [])[:GOD_ACTIVE_EVENTS_CAP]
-                        if isinstance(e, dict) and e.get("status") == "active"
-                        and e.get("visibility", "public") == "public"
-                    ],
-                    "recentPublicInterventions": [
-                        r for r in (god.get("recentInterventions") or [])[-GOD_RECENT_INTERVENTIONS_CAP:]
-                        if isinstance(r, dict) and r.get("public", True)
-                    ],
-                }
-            return snapshot
+            civ["caravanLog"] = list(c.get("caravanLog") or [])[-CARAVAN_LOG_CAP:]
+            civ["isNight"] = self._is_night()
+        if ENV_EFFECTS_ENABLED:
+            civ["litDistricts"] = list(c.get("litDistricts") or [])
+        if TRANSIT_ENABLED:
+            boat_count = int(c.get("stockpile", {}).get("boat", 0))
+            civ["physicalProps"] = ([{"resource": "boat", "count": min(3, boat_count)}]
+                                    if boat_count >= 3 else [])
+        return civ
+
+    def _build_snapshot_config(self):
+        return {
+            "WORLD_W": WORLD_W, "WORLD_H": WORLD_H,
+            "flags": {
+                "SURVIVAL_ENABLED": SURVIVAL_ENABLED, "USE_GOALS": USE_GOALS,
+                "EMERGENT_ROLES": EMERGENT_ROLES, "RULES_ENABLED": RULES_ENABLED,
+                "MEMES_ENABLED": MEMES_ENABLED, "CRAFTING_ENABLED": CRAFTING_ENABLED,
+                "META_SYSTEM": META_SYSTEM, "PIANO_MODULES": PIANO_MODULES,
+                "ROADS_ENABLED": ROADS_ENABLED,
+                "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
+                "GOODS_ENABLED": GOODS_ENABLED,
+                "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
+                "ECONOMY_ENABLED": ECONOMY_ENABLED,
+                "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
+                "CULTURE_ENABLED": CULTURE_ENABLED,
+                "CEMETERY_ENABLED": CEMETERY_ENABLED,
+                "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
+                "STRUCTURE_WEAR_ENABLED": STRUCTURE_WEAR_ENABLED,
+                "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
+                "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
+                "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
+                "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
+                "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
+                "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
+                "PATH1_ENABLED": PATH1_ENABLED,
+                "INDUSTRY_ENABLED": path1_on("INDUSTRY_ENABLED"),
+                "TOOL_TIERS_ENABLED": path1_on("TOOL_TIERS_ENABLED"),
+                "COMPOSABLE_BUILD_ENABLED": path1_on("COMPOSABLE_BUILD_ENABLED"),
+                "TERRAIN_TILES_ENABLED": path1_on("TERRAIN_TILES_ENABLED"),
+                "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
+                "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
+                "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
+                "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
+                "LIBRARY_SCALING_ENABLED": LIBRARY_SCALING_ENABLED,
+                "TRANSIT_ENABLED": TRANSIT_ENABLED,
+                "ECONOMY_SINKS_ENABLED": ECONOMY_SINKS_ENABLED,
+                "WIKI_MEMORY": WIKI_MEMORY,
+                "CROP_GROWTH_ENABLED": CROP_GROWTH_ENABLED,
+                "WILDLIFE_ENABLED": WILDLIFE_ENABLED,
+                "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
+                "WEATHER_ENABLED": WEATHER_ENABLED,
+                "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
+                "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
+                "GOD_AUTH_REQUIRED": GOD_AUTH_REQUIRED,
+                "GOD_DEJA_VU_REPLAY": GOD_DEJA_VU_REPLAY,
+            },
+        }
+
+    def _build_god_snapshot(self):
+        c = self.civilization
+        god = c.get("godState") or self._default_god_state()
+        return {
+            "intervened": bool(god.get("intervened")),
+            "providence": god.get("providence"),
+            "activePublicEvents": [
+                e for e in (god.get("activeEvents") or [])[:GOD_ACTIVE_EVENTS_CAP]
+                if isinstance(e, dict) and e.get("status") == "active"
+                and e.get("visibility", "public") == "public"
+            ],
+            "recentPublicInterventions": [
+                r for r in (god.get("recentInterventions") or [])[-GOD_RECENT_INTERVENTIONS_CAP:]
+                if isinstance(r, dict) and r.get("public", True)
+            ],
+        }
+
+    def _build_snapshot_core(self):
+        """Full /state body. Must be called under self.lock."""
+        snapshot = {
+            "frameTick": self.frameTick,
+            "paused": self.paused,
+            "uptimeSeconds": time.time() - self.processStartTime,
+            "calendar": self._calendar(),
+            "lmStatus": self.lmStatus,
+            "agents": [self._agent_snapshot_row(a) for a in self.agents],
+            "civilization": self._build_civ_snapshot(),
+            "benchmarks": dict(self.lastBenchmarks),
+            "activity": list(self.activityLog),
+            "conversation": list(self.conversationLog[:30]),
+            "config": self._build_snapshot_config(),
+        }
+        if SOCIAL_LAYER_ENABLED:
+            snapshot["socialTies"] = self._social_ties_snapshot()
+        if CHRONICLE_ENABLED and CULTURE_ENABLED:
+            snapshot["chronicle"] = self._chronicle_snapshot()
+        if CROP_GROWTH_ENABLED or WILDLIFE_ENABLED:
+            snapshot["districtEcology"] = self._district_ecology_snapshot()
+        if WILDLIFE_ENABLED:
+            snapshot["wildlife"] = self._wildlife_snapshot()
+        else:
+            snapshot["wildlife"] = []
+        if CARAVAN_VISUALS_ENABLED:
+            snapshot["shipments"] = self._shipment_snapshot()
+        if WEATHER_ENABLED:
+            snapshot["weather"] = self._weather_snapshot()
+        if GOD_MODE_ENABLED:
+            snapshot["god"] = self._build_god_snapshot()
+        return snapshot
+
+    def _snapshot_delta_top_key(self, key):
+        """Project one optional top-level /state key (lock held)."""
+        if key == "activity":
+            return "activity", list(self.activityLog)
+        if key == "conversation":
+            return "conversation", list(self.conversationLog[:30])
+        if key == "benchmarks":
+            return "benchmarks", dict(self.lastBenchmarks)
+        if key == "lmStatus":
+            return "lmStatus", self.lmStatus
+        if key == "wildlife":
+            return "wildlife", self._wildlife_snapshot() if WILDLIFE_ENABLED else []
+        if key == "shipments" and CARAVAN_VISUALS_ENABLED:
+            return "shipments", self._shipment_snapshot()
+        if key == "weather" and WEATHER_ENABLED:
+            return "weather", self._weather_snapshot()
+        if key == "socialTies" and SOCIAL_LAYER_ENABLED:
+            return "socialTies", self._social_ties_snapshot()
+        if key == "chronicle" and CHRONICLE_ENABLED and CULTURE_ENABLED:
+            return "chronicle", self._chronicle_snapshot()
+        if key == "districtEcology" and (CROP_GROWTH_ENABLED or WILDLIFE_ENABLED):
+            return "districtEcology", self._district_ecology_snapshot()
+        if key == "god" and GOD_MODE_ENABLED:
+            return "god", self._build_god_snapshot()
+        if key == "config":
+            return "config", self._build_snapshot_config()
+        return None, None
+
+    def snapshot(self):
+        """Consistent full /state snapshot per Contract 2 (copied under lock)."""
+        with self.lock:
+            snap = self._build_snapshot_core()
+            snap["stateGeneration"] = self.stateGeneration
+            snap["full"] = True
+            self._dirty_this_frame.clear()
+            self._prune_state_dirty(self.frameTick)
+            return snap
+
+    def snapshot_delta(self, since):
+        """Incremental /state for GET /state?since=<frameTick> (lock held for copy)."""
+        with self.lock:
+            ft = self.frameTick
+            gen = self.stateGeneration
+            try:
+                since_int = int(since) if since is not None else 0
+            except (TypeError, ValueError):
+                since_int = 0
+
+            def _full_and_prune():
+                snap = self._build_snapshot_core()
+                snap["stateGeneration"] = gen
+                snap["full"] = True
+                self._dirty_this_frame.clear()
+                self._prune_state_dirty(ft)
+                return snap
+
+            if since is None or since_int <= 0:
+                return _full_and_prune()
+            if since_int > ft or since_int < self._last_reset_frame:
+                return _full_and_prune()
+            if ft - since_int > STATE_DELTA_MAX_GAP:
+                return _full_and_prune()
+            if since_int == ft and not self._has_state_dirty(since_int):
+                self._prune_state_dirty(ft)
+                return {"frameTick": ft, "stateGeneration": gen, "unchanged": True}
+
+            payload = {
+                "frameTick": ft,
+                "baseFrame": since_int,
+                "stateGeneration": gen,
+                "calendar": self._calendar(),
+                "uptimeSeconds": time.time() - self.processStartTime,
+            }
+            if (self._paused_mod_frame is not None
+                    and self._delta_include_mod(
+                        self._paused_mod_frame, since_int, "paused")):
+                payload["paused"] = self.paused
+                self._discard_frame_tags(since_int, "paused")
+
+            dirty_agents = [
+                aid for aid, mod in self._dirty_agents.items()
+                if self._delta_include_mod(mod, since_int, f"a:{aid}")
+            ]
+            if dirty_agents:
+                by_id = {a["id"]: a for a in self.agents}
+                payload["agents"] = [
+                    self._agent_snapshot_row(by_id[aid])
+                    for aid in sorted(dirty_agents) if aid in by_id
+                ]
+                self._discard_frame_tags(
+                    since_int, *(f"a:{aid}" for aid in dirty_agents))
+
+            dirty_civ_keys = [
+                k for k, mod in self._dirty_civ_keys.items()
+                if self._delta_include_mod(mod, since_int, f"c:{k}")
+            ]
+            dirty_upserts = [
+                sid for sid, mod in self._dirty_structure_upserts.items()
+                if self._delta_include_mod(mod, since_int, f"su:{sid}")
+            ]
+            dirty_removals = [
+                sid for sid, mod in self._dirty_structure_removals.items()
+                if self._delta_include_mod(mod, since_int, f"sr:{sid}")
+            ]
+            if dirty_civ_keys or dirty_upserts or dirty_removals:
+                full_civ = self._build_civ_snapshot()
+                civ_partial = {}
+                for key in dirty_civ_keys:
+                    if key == "structures":
+                        continue
+                    if key in full_civ:
+                        civ_partial[key] = full_civ[key]
+                if dirty_upserts or dirty_removals:
+                    env_lit_types = self._env_lit_types() if ENV_EFFECTS_ENABLED else set()
+                    by_struct = {s["id"]: s for s in self.civilization["structures"]}
+                    upserts = []
+                    for sid in sorted(dirty_upserts):
+                        s = by_struct.get(sid)
+                        if s:
+                            sprite_mod = self._dirty_structure_sprites.get(sid, 0)
+                            include_sprite = self._delta_include_mod(
+                                sprite_mod, since_int, f"sp:{sid}")
+                            upserts.append(self._structure_snapshot_row(
+                                s, env_lit_types, include_sprite=include_sprite))
+                    if upserts:
+                        civ_partial["structures"] = upserts
+                    if dirty_removals:
+                        civ_partial["structuresRemoved"] = sorted(dirty_removals)
+                if civ_partial:
+                    payload["civilization"] = civ_partial
+                self._discard_frame_tags(
+                    since_int,
+                    *(f"c:{k}" for k in dirty_civ_keys),
+                    *(f"su:{sid}" for sid in dirty_upserts),
+                    *(f"sp:{sid}" for sid in dirty_upserts),
+                    *(f"sr:{sid}" for sid in dirty_removals),
+                )
+
+            dirty_top_keys = [
+                k for k, mod in self._dirty_top_keys.items()
+                if self._delta_include_mod(mod, since_int, f"t:{k}")
+            ]
+            for key in sorted(dirty_top_keys):
+                k, val = self._snapshot_delta_top_key(key)
+                if k is not None:
+                    payload[k] = val
+            if dirty_top_keys:
+                self._discard_frame_tags(
+                    since_int, *(f"t:{k}" for k in dirty_top_keys))
+            if self._config_mod_frame is not None and self._config_mod_frame > since_int:
+                payload["config"] = self._build_snapshot_config()
+                self._discard_frame_tags(since_int, "config")
+
+            self._prune_state_dirty(ft)
+            return payload

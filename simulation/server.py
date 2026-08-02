@@ -382,6 +382,36 @@ try:
     LOG_RETENTION_SESSIONS = int(os.environ.get("SIM_LOG_RETENTION", "20") or 20)
 except (TypeError, ValueError):
     LOG_RETENTION_SESSIONS = 20
+# Buffered benchmarks.jsonl writes: _sample_benchmarks emits many records per
+# burst; cap prevents unbounded memory if flush is delayed.
+BENCHMARK_BUFFER_MAX = 256
+# SIM_LLM_LOG_FULL: when true, llm.jsonl records include full request/response
+# bodies (legacy default). Default off — slim records omit them to cut disk I/O.
+LLM_LOG_FULL = str(os.environ.get("SIM_LLM_LOG_FULL", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+_LLM_RESPONSE_PREVIEW_MAX = 240
+
+
+def _llm_response_preview(response):
+    """Short excerpt from an Ollama response body for slim llm.jsonl records."""
+    if response is None:
+        return None
+    text = None
+    if isinstance(response, dict):
+        msg = response.get("message")
+        if isinstance(msg, dict):
+            text = msg.get("content") or msg.get("reasoning_content")
+        if text is None and response.get("error"):
+            text = str(response.get("error"))
+    elif isinstance(response, str):
+        text = response
+    if not text:
+        return None
+    text = str(text).strip()
+    if len(text) <= _LLM_RESPONSE_PREVIEW_MAX:
+        return text
+    return text[:_LLM_RESPONSE_PREVIEW_MAX] + "…"
 
 
 class SessionLogger:
@@ -414,6 +444,8 @@ class SessionLogger:
         # (world-affecting audit) on purpose -- a compile is neither. Never
         # receives SIM_GOD_TOKEN -- see log_compiler below.
         self.compiler_path = os.path.join(self.dir, "compiler.jsonl")
+        self._benchmark_buffer = []
+        self._benchmark_lock = threading.Lock()
         for path in [self.activity_path, self.conversation_path, self.llm_path,
                      self.benchmark_path, self.divine_path, self.compiler_path]:
             open(path, "a", encoding="utf-8").close()
@@ -485,8 +517,22 @@ class SessionLogger:
         self._append(self.conversation_path, record)
 
     def log_lm_exchange(self, record):
+        record = dict(record)
+        if not LLM_LOG_FULL:
+            record.pop("request", None)
+            response = record.pop("response", None)
+            preview = _llm_response_preview(response)
+            if preview is not None:
+                record["response_preview"] = preview
         record = {"type": "llm", **record}
         self._append(self.llm_path, record)
+
+    def _stamp_record(self, record):
+        return {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "session_id": self.session_id,
+            **record,
+        }
 
     def log_benchmark(self, metric, value, frame_tick=None, detail=None):
         record = {
@@ -497,7 +543,29 @@ class SessionLogger:
         }
         if detail is not None:
             record["detail"] = detail
-        self._append(self.benchmark_path, record)
+        with self._benchmark_lock:
+            self._benchmark_buffer.append(record)
+            if len(self._benchmark_buffer) >= BENCHMARK_BUFFER_MAX:
+                self._flush_benchmark_buffer_unlocked()
+
+    def flush_benchmarks(self):
+        """Write all buffered benchmark records in one file append."""
+        with self._benchmark_lock:
+            self._flush_benchmark_buffer_unlocked()
+
+    def _flush_benchmark_buffer_unlocked(self):
+        if not self._benchmark_buffer:
+            return
+        lines = [
+            json.dumps(self._stamp_record(record), ensure_ascii=False) + "\n"
+            for record in self._benchmark_buffer
+        ]
+        self._benchmark_buffer.clear()
+        try:
+            with open(self.benchmark_path, "a", encoding="utf-8") as fh:
+                fh.write("".join(lines))
+        except OSError:
+            pass
 
     def log_divine(self, intervention_id=None, request_id=None, frame_tick=None,
                    kind=None, normalized_command=None, outcome=None,
@@ -538,6 +606,7 @@ class SessionLogger:
 
 
 session_logger = SessionLogger(os.path.dirname(os.path.abspath(__file__)))
+atexit.register(session_logger.flush_benchmarks)
 print(f"[server] Logging session to: {session_logger.dir}")
 
 
@@ -3020,6 +3089,9 @@ def run_piano_module(module, agent_name, context, frame_tick=None, timeout_s=Non
             "error": "piano_module_timeout",
             "timeout_s": timeout_s,
         })
+        eng = globals().get("engine")
+        if eng is not None:
+            eng._record_llm_orphan_timeout()
         return None
     except Exception:
         return None
@@ -3971,13 +4043,19 @@ def run_agent_decision(data):
         # consuming a queue slot. Do not add a retry-on-timeout loop here;
         # every requests.exceptions.RequestException path below (including
         # Timeout) returns immediately instead of firing a second request.
+        def _request_error_tag(exc):
+            if isinstance(exc, requests.exceptions.Timeout):
+                return "llm timeout"
+            return "llm offline"
+
         start = datetime.now()
         try:
             resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as exc:
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-            log_lm(latency_ms, error="llm offline")
-            return {"error": "llm offline", "action": "rest"}
+            err = _request_error_tag(exc)
+            log_lm(latency_ms, error=err)
+            return {"error": err, "action": "rest"}
 
         latency_ms = int((datetime.now() - start).total_seconds() * 1000)
         http_status = resp.status_code
@@ -4002,10 +4080,11 @@ def run_agent_decision(data):
             start = datetime.now()
             try:
                 resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(payload), timeout=request_timeout)
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as exc:
                 latency_ms = int((datetime.now() - start).total_seconds() * 1000)
-                log_lm(latency_ms, error="llm offline")
-                return {"error": "llm offline", "action": "rest"}
+                err = _request_error_tag(exc)
+                log_lm(latency_ms, error=err)
+                return {"error": err, "action": "rest"}
             latency_ms = int((datetime.now() - start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -4053,10 +4132,11 @@ def run_agent_decision(data):
             retry_start = datetime.now()
             try:
                 resp = requests.post(OLLAMA_CHAT_URL, json=to_ollama_body(slim_payload), timeout=request_timeout)
-            except requests.exceptions.RequestException:
+            except requests.exceptions.RequestException as exc:
                 latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
-                log_lm(latency_ms, error=error_kind)
-                return {"error": "llm offline", "action": "rest"}
+                err = _request_error_tag(exc)
+                log_lm(latency_ms, error=err)
+                return {"error": err, "action": "rest"}
             latency_ms += int((datetime.now() - retry_start).total_seconds() * 1000)
             http_status = resp.status_code
             try:
@@ -4171,6 +4251,7 @@ _ENGINE_DEPS = {
     "log_activity": session_logger.log_activity,
     "log_conversation": session_logger.log_conversation,
     "log_benchmark": session_logger.log_benchmark,
+    "flush_benchmarks": session_logger.flush_benchmarks,
     "log_divine": session_logger.log_divine,
     "log_compiler": session_logger.log_compiler,
     "validate_blueprint": validate_blueprint,
@@ -4204,13 +4285,39 @@ else:
     print("[server] cold start (no valid state.db)")
 
 
-def _council_llm_entries_from_file(path, start_frame, end_frame, agent_set):
-    """Return slim decision records from one llm.jsonl matching a council
-    frame window. Shared by /council-llm-log across every retained session
-    directory -- see that route's docstring for the filtering rules."""
+# Per-file (min_frame, max_frame) for llm.jsonl — keyed by absolute path,
+# invalidated by mtime+size so /council-llm-log can skip out-of-range files
+# without a full council-filter parse.
+_COUNCIL_LLM_FRAME_BOUNDS_CACHE = {}
+
+
+def _cache_llm_jsonl_frame_bounds(path, min_frame, max_frame):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    _COUNCIL_LLM_FRAME_BOUNDS_CACHE[path] = {
+        "mtime": st.st_mtime,
+        "size": st.st_size,
+        "min_frame": min_frame,
+        "max_frame": max_frame,
+    }
+
+
+def _llm_jsonl_frame_bounds(path):
+    """Return (min_frame, max_frame) for type=llm records, or (None, None)."""
     if not os.path.isfile(path):
-        return []
-    entries = []
+        return None, None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None
+    cached = _COUNCIL_LLM_FRAME_BOUNDS_CACHE.get(path)
+    if (cached
+            and cached["mtime"] == st.st_mtime
+            and cached["size"] == st.st_size):
+        return cached["min_frame"], cached["max_frame"]
+    min_frame, max_frame = None, None
     try:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
@@ -4224,6 +4331,56 @@ def _council_llm_entries_from_file(path, start_frame, end_frame, agent_set):
                 if rec.get("type") != "llm":
                     continue
                 ft = rec.get("frame_tick")
+                if ft is None:
+                    continue
+                if min_frame is None or ft < min_frame:
+                    min_frame = ft
+                if max_frame is None or ft > max_frame:
+                    max_frame = ft
+    except OSError:
+        return None, None
+    _cache_llm_jsonl_frame_bounds(path, min_frame, max_frame)
+    return min_frame, max_frame
+
+
+def _llm_frame_window_fully_covered(min_frame, max_frame, start_frame, end_frame):
+    if min_frame is None or max_frame is None:
+        return False
+    return min_frame <= start_frame and end_frame <= max_frame
+
+
+def _council_llm_entries_from_file(path, start_frame, end_frame, agent_set):
+    """Return slim decision records from one llm.jsonl matching a council
+    frame window. Shared by /council-llm-log -- see that route's docstring
+    for the filtering rules."""
+    entries, _, _ = _scan_council_llm_file(path, start_frame, end_frame, agent_set)
+    return entries
+
+
+def _scan_council_llm_file(path, start_frame, end_frame, agent_set):
+    """One pass over llm.jsonl: council-filtered entries plus file bounds."""
+    if not os.path.isfile(path):
+        return [], None, None
+    entries = []
+    min_frame, max_frame = None, None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("type") != "llm":
+                    continue
+                ft = rec.get("frame_tick")
+                if ft is not None:
+                    if min_frame is None or ft < min_frame:
+                        min_frame = ft
+                    if max_frame is None or ft > max_frame:
+                        max_frame = ft
                 if ft is None or ft < start_frame or ft > end_frame:
                     continue
                 name = rec.get("agent_name")
@@ -4261,8 +4418,9 @@ def _council_llm_entries_from_file(path, start_frame, end_frame, agent_set):
                     "error": rec.get("error"),
                 })
     except OSError:
-        return []
-    return entries
+        return [], None, None
+    _cache_llm_jsonl_frame_bounds(path, min_frame, max_frame)
+    return entries, min_frame, max_frame
 
 
 @app.route("/council-llm-log")
@@ -4272,12 +4430,13 @@ def council_llm_log():
     Only blueprint-pitch and verdict turns are included — routine gather/talk
     decisions from the same agents during the council window are omitted.
 
-    Searches every retained session directory under logs/ (not just the
-    live one), since a past council meeting's frame window may fall inside
-    an older server session's llm.jsonl (frame_tick is monotonic and never
-    resets across restarts, but each session only covers the frame range it
-    was alive for). Session dirs are pruned by SessionLogger._prune_old_sessions
-    to LOG_RETENTION_SESSIONS newest, so this scan is bounded and cheap."""
+    Scans the live session's llm.jsonl first; only reads older retained
+    session directories when the requested frame window is not fully covered
+    by the live file's frame range (frame_tick is monotonic across restarts,
+    but each session only spans the frames recorded while that server run was
+    alive). Out-of-range files are skipped using cached per-file bounds when
+    possible. Session dirs are pruned by SessionLogger._prune_old_sessions to
+    LOG_RETENTION_SESSIONS newest."""
     try:
         start_frame = int(request.args.get("start_frame", 0))
         end_frame = int(request.args.get("end_frame", 0))
@@ -4286,18 +4445,29 @@ def council_llm_log():
     agents_raw = request.args.get("agents") or ""
     agent_set = {a.strip() for a in agents_raw.split(",") if a.strip()}
     logs_root = os.path.dirname(session_logger.dir)
-    try:
-        session_dirs = sorted(
-            name for name in os.listdir(logs_root)
-            if SESSION_DIR_RE.match(name)
-            and os.path.isdir(os.path.join(logs_root, name))
-        )  # ISO session-id names sort lexicographically == chronologically
-    except OSError:
-        session_dirs = []
-    entries = []
-    for name in session_dirs:
-        path = os.path.join(logs_root, name, "llm.jsonl")
-        entries.extend(_council_llm_entries_from_file(path, start_frame, end_frame, agent_set))
+    live_path = session_logger.llm_path
+    entries, live_min, live_max = _scan_council_llm_file(
+        live_path, start_frame, end_frame, agent_set)
+    if not _llm_frame_window_fully_covered(
+            live_min, live_max, start_frame, end_frame):
+        try:
+            session_dirs = sorted(
+                name for name in os.listdir(logs_root)
+                if SESSION_DIR_RE.match(name)
+                and os.path.isdir(os.path.join(logs_root, name))
+            )  # ISO session-id names sort lexicographically == chronologically
+        except OSError:
+            session_dirs = []
+        for name in session_dirs:
+            if name == session_logger.session_id:
+                continue
+            path = os.path.join(logs_root, name, "llm.jsonl")
+            fmin, fmax = _llm_jsonl_frame_bounds(path)
+            if fmin is not None and fmax is not None:
+                if fmax < start_frame or fmin > end_frame:
+                    continue
+            entries.extend(_council_llm_entries_from_file(
+                path, start_frame, end_frame, agent_set))
     entries.sort(key=lambda e: e.get("frame_tick") or 0)
     return jsonify({"entries": entries})
 
@@ -4305,32 +4475,59 @@ def council_llm_log():
 @app.route("/state")
 def state():
     """Consistent world snapshot for the thin viewer (Contract 2)."""
-    return jsonify(engine.snapshot())
+    since_raw = request.args.get("since")
+    since = None
+    if since_raw is not None:
+        try:
+            since = int(since_raw)
+        except (TypeError, ValueError):
+            since = None
+    if since is None:
+        return jsonify(engine.snapshot())
+    return jsonify(engine.snapshot_delta(since))
 
 
 @app.route("/districts.js")
 def districts_js():
-    """Live districts/roads for the viewer (world-expansion plan). Unlike the
-    static /roles.js precedent, this reads the engine's LIVE civilization
-    state under its lock -- like /state does -- so a district founded mid-session
-    shows up to a connected viewer on its next poll, no reload needed. Despite
-    the ".js" name (matching the plan's route naming), the body is plain JSON;
-    the viewer fetch()-polls it rather than re-injecting a <script> tag, which
-    would otherwise throw on re-declaring `const` globals every poll."""
+    """Live districts/roads for the viewer (world-expansion plan). Despite the
+    ".js" name (matching the plan's route naming), the body is plain JSON;
+    the viewer fetch()-polls it rather than re-injecting a <script> tag.
+
+    Under the engine lock, read districtsEpoch and either return a tiny
+    unchanged body when ?since= matches, or shallow-copy district/road data
+    into plain dicts/lists. JSON assembly happens after the lock is released."""
+    since_raw = request.args.get("since")
+    since = None
+    if since_raw is not None:
+        try:
+            since = int(since_raw)
+        except (TypeError, ValueError):
+            since = None
+
     with engine.lock:
-        c = engine.civilization
-        districts = [
-            {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
-             "bounds": dict(d["bounds"]),
-             "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
-             "tiles": dict(d.get("tiles") or {}),
-             "terrain": dict(d.get("terrain") or {}),
-             "settlementId": d.get("settlementId")}
-            for did, d in c["districts"].items()
-        ]
-        road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
-        road_edges = [list(e) for e in c["roadEdges"]]
-    return jsonify({"districts": districts, "roadNodes": road_nodes, "roadEdges": road_edges})
+        epoch = engine.districtsEpoch
+        if since is not None and since == epoch:
+            payload = {"unchanged": True, "epoch": epoch}
+        else:
+            c = engine.civilization
+            districts = [
+                {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
+                 "bounds": dict(d["bounds"]),
+                 "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
+                 "tiles": dict(d.get("tiles") or {}),
+                 "terrain": dict(d.get("terrain") or {}),
+                 "settlementId": d.get("settlementId")}
+                for did, d in c["districts"].items()
+            ]
+            road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
+            road_edges = [list(e) for e in c["roadEdges"]]
+            payload = {
+                "districts": districts,
+                "roadNodes": road_nodes,
+                "roadEdges": road_edges,
+                "epoch": epoch,
+            }
+    return jsonify(payload)
 
 
 @app.route("/control/pause", methods=["POST"])
@@ -5205,8 +5402,9 @@ if __name__ == "__main__":
         if _saved_once.is_set():
             return
         _saved_once.set()
+        session_logger.flush_benchmarks()
         engine.stop()
-        engine.save_state()
+        engine.save_state(force=True)
 
     atexit.register(_flush_on_exit)
 

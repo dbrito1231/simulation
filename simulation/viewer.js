@@ -364,6 +364,58 @@ const prevPos = {};
 // until the first fetch resolves.
 let districtsData = { districts: [], roadNodes: {}, roadEdges: [] };
 let districtsKey = "";
+let districtsEpoch = 0;
+
+// /state delta protocol: after the first full snapshot, poll with ?since=lastFrameTick.
+let lastFrameTick = 0;
+let stateGeneration = 0;
+let statePollFull = true;
+
+/** Merge a partial /state delta into the cached world (omitted key = unchanged). */
+function mergeStateDelta(prev, delta) {
+  if (!prev || delta.full) return delta;
+  if (delta.unchanged) return prev;
+  const next = Object.assign({}, prev);
+  if (delta.frameTick != null) next.frameTick = delta.frameTick;
+  if (delta.stateGeneration != null) next.stateGeneration = delta.stateGeneration;
+  if (delta.paused !== undefined) next.paused = delta.paused;
+  if (delta.uptimeSeconds !== undefined) next.uptimeSeconds = delta.uptimeSeconds;
+  if (delta.calendar) next.calendar = delta.calendar;
+  if (delta.lmStatus !== undefined) next.lmStatus = delta.lmStatus;
+  if (delta.agents && delta.agents.length) {
+    const byId = Object.create(null);
+    for (const a of prev.agents || []) byId[a.id] = a;
+    for (const a of delta.agents) byId[a.id] = a;
+    next.agents = Object.values(byId);
+  }
+  if (delta.civilization) {
+    const civ = Object.assign({}, prev.civilization || {});
+    const patch = delta.civilization;
+    if (patch.structures && patch.structures.length) {
+      const byId = Object.create(null);
+      for (const s of civ.structures || []) byId[s.id] = s;
+      for (const s of patch.structures) {
+        const prior = byId[s.id] || {};
+        byId[s.id] = s.sprite !== undefined ? s : Object.assign({}, prior, s);
+      }
+      civ.structures = Object.values(byId);
+    }
+    if (patch.structuresRemoved && patch.structuresRemoved.length) {
+      const removed = new Set(patch.structuresRemoved);
+      civ.structures = (civ.structures || []).filter((s) => !removed.has(s.id));
+    }
+    for (const key of Object.keys(patch)) {
+      if (key === "structures" || key === "structuresRemoved") continue;
+      civ[key] = patch[key];
+    }
+    next.civilization = civ;
+  }
+  for (const key of ["benchmarks", "activity", "conversation", "config", "god",
+    "socialTies", "chronicle", "districtEcology", "wildlife", "shipments", "weather"]) {
+    if (delta[key] !== undefined) next[key] = delta[key];
+  }
+  return next;
+}
 
 function getDistricts() {
   return (districtsData.districts && districtsData.districts.length)
@@ -730,17 +782,21 @@ function drawWorld(ctx, frameTick) {
 }
 
 // Poll GET /districts.js on a slow interval -- districts/roads are
-// mostly-static and only change when _maybe_found_district() fires
-// server-side (a rare, deterministic event), so this doesn't need /state's
-// ~10Hz cadence. Rebuilds the terrain cache only when the served list
-// actually changed (a district was founded), not on every poll.
+// mostly-static and only change when district/tile/terrain/road data
+// mutates server-side, so this doesn't need /state's ~10Hz cadence.
+// Sends ?since=<districtsEpoch>; unchanged polls keep the last payload.
 const DISTRICTS_POLL_MS = 3000;
 let districtsJsResolvedLogged = false;
 async function pollDistricts() {
   try {
-    const res = await fetch("/districts.js", { cache: "no-store" });
+    const sinceParam = districtsEpoch > 0 ? `?since=${districtsEpoch}` : "";
+    const res = await fetch(`/districts.js${sinceParam}`, { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
+    if (data.unchanged) {
+      if (data.epoch != null) districtsEpoch = data.epoch;
+      return;
+    }
     if (!districtsJsResolvedLogged) {
       districtsJsResolvedLogged = true;
       if (VIEWER_LOAD_DEBUG) {
@@ -750,15 +806,19 @@ async function pollDistricts() {
         });
       }
     }
+    const newEpoch = data.epoch;
     const key = JSON.stringify((data.districts || []).map((d) => d.id));
-    if (key !== districtsKey) {
+    const epochChanged = newEpoch != null && newEpoch !== districtsEpoch;
+    if (key !== districtsKey || epochChanged) {
       districtsKey = key;
+      if (newEpoch != null) districtsEpoch = newEpoch;
       districtsData = data;
-      terrainCanvas = null; // force rebuild with the new district list
+      terrainCanvas = null; // force rebuild when district list or content revision changes
       terrainBuildScheduled = false;
       scheduleTerrainCacheBuild();
     } else {
-      districtsData = data; // road graph could still have grown even if district ids didn't
+      districtsData = data;
+      if (newEpoch != null) districtsEpoch = newEpoch;
     }
   } catch (err) { /* keep last known districts; /state polling surfaces connectivity issues */ }
 }
@@ -2668,9 +2728,32 @@ async function pollState() {
   if (polling) return;
   polling = true;
   try {
-    const res = await fetch("/state", { cache: "no-store" });
+    const url = statePollFull || lastFrameTick <= 0
+      ? "/state"
+      : `/state?since=${lastFrameTick}`;
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const snapshot = await res.json();
+    const payload = await res.json();
+    if (payload.frameTick != null && payload.frameTick < lastFrameTick && !payload.full) {
+      return;
+    }
+    if (payload.unchanged) {
+      if (payload.stateGeneration != null) stateGeneration = payload.stateGeneration;
+      return;
+    }
+    let snapshot;
+    if (payload.full || statePollFull || !world || !world.agents) {
+      snapshot = payload;
+      statePollFull = false;
+    } else if (payload.stateGeneration != null && stateGeneration > 0
+        && payload.stateGeneration !== stateGeneration) {
+      statePollFull = true;
+      return;
+    } else {
+      snapshot = mergeStateDelta(world, payload);
+    }
+    if (payload.stateGeneration != null) stateGeneration = payload.stateGeneration;
+    if (payload.frameTick != null) lastFrameTick = payload.frameTick;
     world = snapshot;
     setSpriteSeason(snapshot.calendar && snapshot.calendar.season);
     // Season changed since the terrain cache was last tinted: rebuild it
@@ -2709,6 +2792,7 @@ async function pollState() {
     syncPauseButton();
     if (terrainCanvas) hideWorldLoading();
   } catch (err) {
+    statePollFull = true;
     // Keep last frame; surface a disconnected status (but not over a real
     // server status we already have — only mark disconnected on fetch failure).
     if (world && world.lmStatus !== "disconnected") {
@@ -2754,11 +2838,13 @@ function doReset() {
   if (!window.confirm("Reset the simulation? This restarts the village.")) return;
   const password = window.prompt("Type the reset password to wipe the world:");
   if (password === null || password === "") return;
-  postControl("/control/reset", { password }).then(async (res) => {
+    postControl("/control/reset", { password }).then(async (res) => {
     if (res && res.status === 401) {
       window.alert("Reset refused — wrong password (SIM_RESET_PASSWORD).");
       return;
     }
+    statePollFull = true;
+    lastFrameTick = 0;
     pollState();
   });
 }

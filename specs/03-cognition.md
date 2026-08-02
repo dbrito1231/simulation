@@ -847,13 +847,15 @@ healer/elder/blacksmith → contribute or return to village); (8) generic
 
 **Error paths surfaced by `run_agent_decision`** (not normalized, returned
 directly to the engine as `{"error": ..., "action": "rest"}`): `"llm
-offline"` (request exception on every attempt including retries, or a
-detected missing-model setup failure — see Routing), `"compute_error"`
-(an Ollama compute-error body), `"server_error"` (any uncaught exception).
-Anything else that fails JSON decoding or schema extraction becomes a
-`role_fallback_action` result tagged with error `"bad_response"` (or
-`"context_overflow"` if the slim retry still failed) — the engine never sees
-a raw error for these, only a normal-looking decision.
+offline"` (non-timeout `RequestException` on every attempt including retries,
+or a detected missing-model setup failure — see Routing), `"llm timeout"`
+(`requests.exceptions.Timeout` only — distinct from offline so the engine can
+apply orphan backpressure; never retried), `"compute_error"` (an Ollama
+compute-error body), `"server_error"` (any uncaught exception). Anything else
+that fails JSON decoding or schema extraction becomes a `role_fallback_action`
+result tagged with error `"bad_response"` (or `"context_overflow"` if the slim
+retry still failed) — the engine never sees a raw error for these, only a
+normal-looking decision.
 
 ## Retries & degradation
 
@@ -862,8 +864,21 @@ All in `run_agent_decision()` (server.py), each a single retry (no loops).
 server-side generation when a client aborts/times out a `stream:false`
 request — an orphaned timed-out request keeps consuming a queue slot. None of
 the paths below retry on a `requests.exceptions.RequestException` (including
-`Timeout`); every one returns the offline fallback immediately instead, so
-this code never compounds queue depth with a naive retry-on-timeout loop.
+`Timeout`); every one returns immediately instead, so this code never
+compounds queue depth with a naive retry-on-timeout loop. Timeouts are tagged
+`"llm timeout"` (not `"llm offline"`) so the engine can distinguish orphan
+pressure from a dead endpoint.
+
+**Orphan timeout backpressure (engine):** `_think_job` increments
+`_llm_orphan_timeouts` on `"llm timeout"`; `run_piano_module` HTTP timeouts
+(`"piano_module_timeout"`) also call `_record_llm_orphan_timeout()` because
+they occupy the same Ollama parallel budget. When the counter reaches
+`LLM_ORPHAN_TIMEOUT_THRESHOLD` (3), the engine sets `llm_cooldown_until` for
+`LLM_ORPHAN_COOLDOWN_S` (30s) and resets the counter — `_schedule_think`
+already skips dispatch while `time.time() < llm_cooldown_until`, pausing new
+decision calls so in-flight orphans can drain. A successful decision (no
+error) clears both `llm_cooldown_until` and `_llm_orphan_timeouts`.
+`compute_error` uses the same cooldown duration constant.
 
 1. **format-rejected retry**: on `looks_like_response_format_error`, disable
    `_structured_output_enabled` session-wide, drop `response_format`, retry
@@ -925,7 +940,9 @@ overflow retry) that must all agree without re-consuming the budget.
 `MAX_CONCURRENT_LLM = 3` (sim_engine.py, `ThreadPoolExecutor` bound on the
 engine's decision-think worker pool, `self._executor`) — matches
 `OLLAMA_NUM_PARALLEL=3` (ollama_config.md). `LLM_MIN_GAP_MS = 250` (minimum
-spacing between decision dispatches). Context formula under Ollama is
+spacing between decision dispatches). `LLM_ORPHAN_TIMEOUT_THRESHOLD = 3` and
+`LLM_ORPHAN_COOLDOWN_S = 30.0` gate new decision dispatches after repeated
+client-side timeouts (see Retries & degradation). Context formula under Ollama is
 **per-model**, not a shared token-budget-divided-by-slots formula like LM
 Studio's: each model (`sim-smart`, `sim-fast`) has its own fixed `num_ctx`
 baked into its Modelfile (20480 / 4096 respectively — see
@@ -945,7 +962,18 @@ path, not experimental. Module calls run on their own pool,
 `self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`), bounded independently of
 `MAX_CONCURRENT_LLM` so a module backlog can never starve the decision path —
 `_run_piano_modules` submits to `piano_workers` and waits on the futures, it
-never dispatches into `self._executor`. Every module call routes to
+never dispatches into `self._executor`. Decision-path fan-out and the gated
+always-on pulse share one inflight set, `_piano_refresh_inflight` (keyed by
+`(agent_name, module)`): before each submit wave `_run_piano_modules` checks
+`_piano_free_slots()` and never queues more work than
+`PIANO_CONCURRENT_LLM - len(_piano_refresh_inflight)` — the executor therefore
+cannot grow an unbounded backlog when several think jobs overlap. Within one
+turn it submits in waves (wait for a slot, then dispatch the next due module)
+so a single agent still completes its stagger when no other PIANO work holds
+the pool. When the pool is saturated at think snapshot time (`free slots == 0`),
+`_think_job` passes `force_cache_only=True` and the fan-out assembles reports
+from cache only. Modules skipped for saturation (no fresh cache) increment
+`piano_module_drops` alongside timeouts/failures. Every module call routes to
 `MODEL_FAST` with a hard, non-blocking `PIANO_MODULE_TIMEOUT_S = 15s` timeout
 (server.py `run_piano_module`); a timeout is dropped, never retried (per the
 orphan caveat in Retries), logged to `llm.jsonl` with `"error":
@@ -991,8 +1019,9 @@ optional night backstop has not been attempted.
 
 The pulse orders dirty work before old work and retains the legacy
 perception/desire, social x2, reflection x3 cadence as priority weights. It
-submits at most `MODULE_PULSE_MAX_BATCH = 2` and the currently free
-`PIANO_CONCURRENT_LLM` slots to `piano_workers`; only these always-on refresh
+submits at most `MODULE_PULSE_MAX_BATCH = 2` and the currently free slots from
+`_piano_free_slots()` (same `_piano_refresh_inflight` budget as decision-path
+fan-out) to `piano_workers`; only these always-on refresh
 calls pass `MODULE_REFRESH_TIMEOUT_S = 60` to `run_piano_module`. The legacy
 per-decision fan-out retains its 15-second HTTP / 18-second future-wait
 behavior. Completions re-acquire the engine lock and write `{tick, text,

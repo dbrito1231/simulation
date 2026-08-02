@@ -32,22 +32,37 @@ world state beyond a cached palette/season key.
 
 ## Polling and render loop
 
-- `STATE_POLL_MS = 100` (`viewer.js`, `pollState()`) drives polling: fetches
-  `GET /state`, replaces `world` wholesale, and on fetch failure patches
-  `world.lmStatus = "disconnected"` while keeping the last-known snapshot.
+- `STATE_POLL_MS = 100` (`viewer.js`, `pollState()`) drives polling: the first
+  successful fetch uses `GET /state` (full snapshot); thereafter
+  `GET /state?since=<lastFrameTick>` unless an error or `stateGeneration`
+  mismatch forces another full fetch. The client merges deltas into module-level
+  `world` (`mergeStateDelta()`): full/`full: true` replaces wholesale;
+  `unchanged: true` keeps `world`; partial payloads replace agents by `id`,
+  deep-merge allowlisted `civilization` keys (structure upserts by `id`,
+  `structuresRemoved` tombstones), and replace any other included top-level keys.
+  The server emits only fields whose `lastMod` frame is greater than the
+  client's `since` (within `STATE_DELTA_MAX_GAP`); multiple tabs with different
+  `since` cursors each receive the same one-time updates.
+  Responses with `frameTick` older than the last applied frame are ignored
+  (stale poll race). On fetch failure, patches `world.lmStatus = "disconnected"`
+  while keeping the last-known snapshot and sets `statePollFull` so the next
+  poll retries with a full snapshot.
   **Offline behavior**: the last good frame stays on
   screen and the sidebar status dot goes gray (`#9E9E9E`, `renderSidebar()`)
   with the hint "Showing last frame; retrying /state…"
   — distinct from `lmStatus: "offline"` (Ollama
   unreachable, Flask up) and `"compute_error"` (GPU memory error), each with
   its own dot color/label in `renderSidebar()`.
-- `DISTRICTS_POLL_MS = 3000` drives `pollDistricts()` (`GET /districts.js`)
-  on a slower cadence since districts/roads change only when a district is
-  founded server-side. The first terrain-cache build starts immediately at page
-  kickoff (via `scheduleTerrainCacheBuild`) using `STARTER_DISTRICTS_JS` as a
-  fallback — it does **not** wait for `/districts.js`. When the served
-  district-id list later differs, `pollDistricts()` nulls `terrainCanvas` and
-  rebuilds.
+- `DISTRICTS_POLL_MS = 3000` drives `pollDistricts()` (`GET /districts.js`
+  with optional `?since=<districtsEpoch>`) on a slower cadence since
+  districts/roads change only when district/tile/terrain/road data mutates
+  server-side. The viewer tracks `districtsEpoch` from each full response;
+  when the server returns `{unchanged: true, epoch}`, the last payload is
+  kept (no parse/merge of district tiles/terrain). The first terrain-cache
+  build starts immediately at page kickoff (via `scheduleTerrainCacheBuild`)
+  using `STARTER_DISTRICTS_JS` as a fallback — it does **not** wait for
+  `/districts.js`. When the served district-id list or `districtsEpoch`
+  changes, `pollDistricts()` nulls `terrainCanvas` and rebuilds.
 - The render loop is **decoupled from polling** via `requestAnimationFrame`:
   `tick()` (`viewer.js`) redraws every animation frame from
   whatever `world` currently holds, keeping ~60fps even though network polls

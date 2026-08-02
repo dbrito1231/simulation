@@ -262,39 +262,61 @@ over a stale in-flight decision.
 World state is persisted to a SQLite database at `DB_PATH` (`<module dir>/
 state.db`), replacing the earlier monolithic `state.json` file. `_serialize_state()`
 (sim_engine.py:9531) still builds the save payload under the lock, with the
-same shape as before: top-level keys `version` (`STATE_VERSION = 2`,
-sim_engine.py:31), `frameTick`, `savedAt` (UTC ISO timestamp), `roster_size`,
+same shape as before: top-level keys `version` (`STATE_VERSION = 3`,
+sim_engine.py:39; restore also accepts `2` once for embedded-sprite migration),
+`frameTick`, `savedAt` (UTC ISO timestamp), `roster_size`,
 `civilization`, `agents`, `memory`, `council_transcript` (sets are serialized as sorted arrays,
 `isThinking` is dropped, memory rows are vec-stripped for storage and
-re-embedded on import).
+re-embedded on import). Structure `sprite` grids are **not** stored inside
+`civilization["structures"]` in the DB — they live in the `structure_sprites`
+table and are merged back onto structures in memory on `restore_state()`.
+Saves upsert only dirty sprite rows (`_persist_dirty_structure_sprites`); a
+`structureSpritesFingerprint` field in the serialized payload (not written to
+`meta`) keeps autosave hashing correct when only sprites change.
 
 `_connect_db(path)` opens a SQLite connection in WAL mode
 (`synchronous=NORMAL`) and idempotently runs the schema DDL. The schema has
 four tables: `meta(key, value)` (one row each for `version`, `frameTick`,
 `savedAt`, `roster_size`); `civ(key, value)` (one row per top-level
-`civilization` key, value JSON-encoded); `agents(name PK, ord, data)` (one row
-per agent, `data` JSON-encoded, `ord` preserving roster order on load); and
-`memory(rowid_pk, id, agent, text, salience, kind, tier, frame_tick, ts)`; and
+`civilization` key, value JSON-encoded — structure instances omit embedded
+`sprite` grids); `agents(name PK, ord, data)` (one row
+per agent, `data` JSON-encoded, `ord` preserving roster order on load);
+`memory(rowid_pk, id, agent, text, salience, kind, tier, frame_tick, ts)`;
 `council_transcript(rowid_pk, meeting_id, who, type, text, feeling, frame_tick,
-ts)`. The latter is the full human/audit record for Daily Council events, not
+ts)`; and `structure_sprites(structure_id PK, sprite_json, updated_frame)`
+(one row per structure that has a custom/stored sprite grid). The council
+transcript table is the full human/audit record for Daily Council events, not
 prompt context.
 
-`_write_state_db(path, payload)` performs a full rewrite on every save: it
-upserts `meta`, then deletes and re-inserts all `civ`/`agents`/`memory`/
-`council_transcript` rows, all inside a single transaction, followed by a
-`wal_checkpoint`. `save_state()`
-serializes the payload under the lock, then writes it outside the lock via a
-per-call connection (`_write_state_db`) and never raises — the single-
-transaction commit gives crash safety without the old tmp-file-plus-rename
-trick. A dedicated `SimSaver` daemon thread calls `save_state()` every
-`AUTOSAVE_SECONDS = 10` s (sim_engine.py:33, 9523-9529), unchanged. `atexit`
-and signal handlers in server.py additionally flush a final save on graceful
-shutdown (server.py:3420-3439).
+`_write_state_db(path, payload)` performs a full rewrite on every save that
+actually reaches disk: it upserts `meta`, then deletes and re-inserts all
+`civ`/`agents`/`memory`/`council_transcript` rows, upserts dirty
+`structure_sprites` rows (and deletes removed structure ids), all inside a
+single transaction, followed by a `wal_checkpoint`. `save_state(force=False)`
+serializes the payload under the lock, computes a stable SHA-256 content hash
+via `_state_content_hash()` over the payload **excluding** `savedAt`, updates
+an in-memory `_last_save_considered_at` timestamp, and **skips** the SQLite
+rewrite when the hash matches `_last_saved_hash` (typical for a paused/idle
+world). A successful write updates `_last_saved_hash`. Pass `force=True` to
+always rewrite — used by graceful shutdown, `reset()`, and God checkpoint
+snapshots so `savedAt` and on-disk bytes refresh even when gameplay state is
+unchanged. Serialization uses `_json_safe_copy()` (explicit set→sorted-list
+conversion) instead of a redundant `json.loads(json.dumps(...))` round-trip.
+The write itself happens outside the lock via a per-call connection
+(`_write_state_db`) and never raises — the single-transaction commit gives
+crash safety without the old tmp-file-plus-rename trick. A dedicated `SimSaver`
+daemon thread calls `save_state()` (default `force=False`) every
+`AUTOSAVE_SECONDS = 10` s, unchanged. `atexit` and signal handlers in
+server.py additionally flush a final `save_state(force=True)` on graceful
+shutdown.
 
 `_read_state_db(path)` checks the file exists, connects, and returns the same
 payload dict shape as `_serialize_state()` produced, or `None` if the file is
 missing or `meta.version` isn't present. `restore_state()` (sim_engine.py:9613)
-accepts only `STATE_VERSION = 2` — the old v1→v2 migration
+accepts `STATE_VERSION` `3` and still accepts `2` once — v2 DBs may embed
+sprites inside `civilization["structures"]`; restore merges those into memory
+and marks them persist-dirty so the next save splits them into
+`structure_sprites` and rewrites as v3. The old v1→v2 migration
 (`_migrate_v1_to_v2`, which seeded `districts`/`roadNodes`/`roadEdges`/
 `frontierPlots`/`districtProjects` from the starter blueprint for pre-districts
 saves) has been removed. The `setdefault`/flag-gated backfill chain for
