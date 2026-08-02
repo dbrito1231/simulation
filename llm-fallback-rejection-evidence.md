@@ -7,6 +7,8 @@ Read-only gather of local `simulation/logs/` evidence for two patterns:
 
 **Choices used for this gather:** evidence at repo root; scan `llm.jsonl` + `lm_studio.jsonl` + related `activity.jsonl` / `conversation.jsonl` hints; Pattern 1 reported explicitly even if empty; every Pattern 2 match included in full; branch+push only (no PR); no code changes.
 
+**Companion:** fallback action catalog + observed defaults → [`llm-fallback-default-actions.md`](llm-fallback-default-actions.md).
+
 ## Method
 
 - Scanned all **20** session folders under `simulation/logs/`.
