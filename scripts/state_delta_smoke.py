@@ -5,7 +5,9 @@ Run: uv run python scripts/state_delta_smoke.py
 from __future__ import annotations
 
 import re
+import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +50,127 @@ def make_engine(roster_size=4):
     return se.SimEngine(deps, roster_size=roster_size)
 
 
+def _sample_sprite():
+    return {"palette": ["#112233", "#445566"], "grid": ["ab", "ba"]}
+
+
+def test_sprite_delta_and_persistence():
+    eng = make_engine()
+    eng.pause()
+    sprite = _sample_sprite()
+
+    with eng.lock:
+        struct = {
+            "id": "smoke_house_1",
+            "type": "house",
+            "x": 120.0,
+            "y": 200.0,
+            "visualStyle": "generic",
+            "sprite": sprite,
+            "name": "Smoke House",
+            "districtId": "village",
+            "condition": 100.0,
+            "isRuin": False,
+            "homeOf": None,
+            "level": 1,
+            "visualTier": 1,
+            "renderScale": 1.0,
+        }
+        eng.civilization["structures"].append(struct)
+        eng._mark_structure_dirty(struct, sprite_changed=True)
+        eng.frameTick = max(eng.frameTick, 5)
+
+    full = eng.snapshot()
+    structs = (full.get("civilization") or {}).get("structures") or []
+    row = next((s for s in structs if s.get("id") == "smoke_house_1"), None)
+    assert row and row.get("sprite") == sprite, "full snapshot must include sprite"
+
+    ft = eng.frameTick
+    with eng.lock:
+        struct["condition"] = 88.0
+        eng._mark_structure_dirty(struct, sprite_changed=False)
+
+    delta = eng.snapshot_delta(ft)
+    upsert = next(
+        (s for s in (delta.get("civilization") or {}).get("structures") or []
+         if s.get("id") == "smoke_house_1"),
+        None,
+    )
+    assert upsert is not None, delta
+    assert "sprite" not in upsert, "non-sprite structure delta must omit sprite"
+    assert upsert.get("condition") == 88.0
+
+    old_db = se.DB_PATH
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_db = str(Path(tmpdir) / "state.db")
+        se.DB_PATH = tmp_db
+        try:
+            assert eng.save_state(force=True)
+            conn = sqlite3.connect(tmp_db)
+            try:
+                civ_structs = conn.execute(
+                    "SELECT value FROM civ WHERE key = 'structures'"
+                ).fetchone()
+                assert civ_structs, "structures row missing"
+                import json
+                stored = json.loads(civ_structs[0])
+                stored_row = next(s for s in stored if s.get("id") == "smoke_house_1")
+                assert "sprite" not in stored_row, "civ JSON must omit sprite grids"
+                sprite_rows = conn.execute(
+                    "SELECT sprite_json FROM structure_sprites WHERE structure_id = ?",
+                    ("smoke_house_1",),
+                ).fetchall()
+                assert len(sprite_rows) == 1, "dirty sprite row must be persisted"
+                assert json.loads(sprite_rows[0][0]) == sprite
+            finally:
+                conn.close()
+
+            eng2 = make_engine()
+            eng2.pause()
+            assert eng2.restore_state(), "restore from v3 split DB"
+            restored = next(
+                s for s in eng2.civilization["structures"] if s.get("id") == "smoke_house_1"
+            )
+            assert restored.get("sprite") == sprite, "restore must merge sprites"
+
+            # v2 migration: embedded sprites accepted once, then split on save.
+            with eng2.lock:
+                v2_payload = eng2._serialize_state()
+            v2_payload["version"] = 2
+            v2_payload.pop("_sprite_upserts", None)
+            v2_payload.pop("_sprite_removals", None)
+            for s in v2_payload["civilization"]["structures"]:
+                if s.get("id") == "smoke_house_1":
+                    s["sprite"] = sprite
+            conn = sqlite3.connect(tmp_db)
+            try:
+                conn.execute("DELETE FROM structure_sprites")
+                conn.commit()
+            finally:
+                conn.close()
+            se._write_state_db(tmp_db, v2_payload)
+
+            eng3 = make_engine()
+            eng3.pause()
+            assert eng3.restore_state(), "restore from v2 embedded sprites"
+            migrated = next(
+                s for s in eng3.civilization["structures"] if s.get("id") == "smoke_house_1"
+            )
+            assert migrated.get("sprite") == sprite
+            assert "smoke_house_1" in eng3._persist_dirty_structure_sprites
+            assert eng3.save_state(force=True)
+            conn = sqlite3.connect(tmp_db)
+            try:
+                version = conn.execute(
+                    "SELECT value FROM meta WHERE key = 'version'"
+                ).fetchone()[0]
+                assert int(version) == se.STATE_VERSION
+            finally:
+                conn.close()
+        finally:
+            se.DB_PATH = old_db
+
+
 def main():
     eng = make_engine()
     eng.pause()
@@ -80,6 +203,8 @@ def main():
     # Gap too large → full resync
     huge = eng.snapshot_delta(max(0, ft - se.STATE_DELTA_MAX_GAP - 1))
     assert huge.get("full") is True
+
+    test_sprite_delta_and_persistence()
 
     print("state_delta_smoke: OK")
 

@@ -35,8 +35,12 @@ from datetime import datetime, timezone
 # STATE_VERSION was bumped 1 -> 2 for the world-expansion plan
 # (civilization.activeProject -> districtProjects, new
 # districts/roadNodes/roadEdges/frontierPlots); v1 saves are no longer
-# supported.
-STATE_VERSION = 2
+# supported. v2 -> 3 splits structure sprite grids out of the civ JSON blob
+# into a structure_sprites table (restore still accepts v2 with embedded
+# sprites once, then re-saves as v3).
+STATE_VERSION = 3
+# Restore accepts these versions; v2 DBs may still embed sprites in civ JSON.
+RESTORE_STATE_VERSIONS = (2, 3)
 # Max frame gap for GET /state?since= before the server returns a full snapshot.
 STATE_DELTA_MAX_GAP = 90  # ~3s at 30Hz
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.db")
@@ -55,7 +59,12 @@ CREATE TABLE IF NOT EXISTS memory (
 CREATE TABLE IF NOT EXISTS council_transcript (
     rowid_pk INTEGER PRIMARY KEY, meeting_id INTEGER, who TEXT, type TEXT, text TEXT,
     feeling TEXT, frame_tick INTEGER, ts TEXT);
+CREATE TABLE IF NOT EXISTS structure_sprites (
+    structure_id TEXT PRIMARY KEY, sprite_json TEXT NOT NULL, updated_frame INTEGER NOT NULL);
 """
+
+# Payload keys used only for save I/O and hashing — never written to meta/civ.
+_STATE_HASH_SKIP_KEYS = frozenset({"savedAt", "_sprite_upserts", "_sprite_removals"})
 
 
 def _connect_db(path):
@@ -81,9 +90,25 @@ def _json_safe_copy(value):
     return str(value)
 
 
+def _structure_sprites_fingerprint(civilization):
+    """Stable digest of all in-memory structure sprites (for autosave hash)."""
+    sprites = {}
+    for s in (civilization or {}).get("structures") or []:
+        sid = s.get("id")
+        sp = s.get("sprite")
+        if sid and sp:
+            sprites[sid] = sp
+    if not sprites:
+        return None
+    blob = json.dumps(
+        _json_safe_copy(sprites), sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def _state_content_hash(payload):
-    """Stable SHA-256 of a save payload, excluding the savedAt timestamp."""
-    canonical = {k: v for k, v in payload.items() if k != "savedAt"}
+    """Stable SHA-256 of a save payload, excluding ephemeral save keys."""
+    canonical = {k: v for k, v in payload.items() if k not in _STATE_HASH_SKIP_KEYS}
     blob = json.dumps(
         canonical, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
     )
@@ -95,6 +120,8 @@ def _write_state_db(path, payload):
     database at `path`. All table rewrites happen in a single transaction so
     a crash mid-write can never leave the DB half-updated. May raise; callers
     (SimEngine.save_state) swallow exceptions."""
+    sprite_upserts = payload.get("_sprite_upserts") or {}
+    sprite_removals = payload.get("_sprite_removals") or []
     conn = _connect_db(path)
     try:
         civ = payload.get("civilization") or {}
@@ -146,6 +173,21 @@ def _write_state_db(path, payload):
                   r.get("feeling"), r.get("frame_tick"), r.get("ts"))
                  for r in council_transcript],
             )
+            for sid in sprite_removals:
+                conn.execute(
+                    "DELETE FROM structure_sprites WHERE structure_id = ?",
+                    (sid,),
+                )
+            for sid, row in sprite_upserts.items():
+                sprite = row.get("sprite") if isinstance(row, dict) else row
+                frame = row.get("updated_frame", 0) if isinstance(row, dict) else 0
+                if not sprite:
+                    continue
+                conn.execute(
+                    "INSERT OR REPLACE INTO structure_sprites "
+                    "(structure_id, sprite_json, updated_frame) VALUES (?, ?, ?)",
+                    (sid, json.dumps(sprite, ensure_ascii=False), int(frame)),
+                )
         try:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except Exception:
@@ -205,6 +247,14 @@ def _read_state_db(path):
                 "FROM council_transcript ORDER BY rowid_pk"
             ).fetchall()
         ]
+        structure_sprites = {}
+        try:
+            for sid, sprite_json in conn.execute(
+                "SELECT structure_id, sprite_json FROM structure_sprites"
+            ).fetchall():
+                structure_sprites[sid] = json.loads(sprite_json)
+        except sqlite3.OperationalError:
+            pass
         return {
             "version": version,
             "frameTick": frame_tick,
@@ -214,6 +264,7 @@ def _read_state_db(path):
             "agents": agents,
             "memory": memory,
             "council_transcript": council_transcript,
+            "structureSprites": structure_sprites,
         }
     except Exception:
         return None
@@ -2151,6 +2202,10 @@ class SimEngine:
         # the saver considered a write (even when skipped).
         self._last_saved_hash = None
         self._last_save_considered_at = 0.0
+        # Persistence: structure sprite rows upserted only when dirty (separate
+        # from HTTP delta _dirty_structure_sprites, which clears each poll).
+        self._persist_dirty_structure_sprites = set()
+        self._persist_sprite_removals = set()
         self._reset_world(roster_size)
 
     # --- roster + cold start ---
@@ -2536,12 +2591,15 @@ class SimEngine:
         self._dirty_civ_keys.add("structures")
         if sprite_changed:
             self._dirty_structure_sprites.add(sid)
+            self._persist_dirty_structure_sprites.add(sid)
 
     def _mark_structure_removed(self, structure_id):
         sid = structure_id["id"] if isinstance(structure_id, dict) else structure_id
         self._dirty_structure_removals.add(sid)
         self._dirty_structure_upserts.discard(sid)
         self._dirty_structure_sprites.discard(sid)
+        self._persist_dirty_structure_sprites.discard(sid)
+        self._persist_sprite_removals.add(sid)
         self._dirty_civ_keys.add("structures")
 
     def _mark_top_dirty(self, *keys):
@@ -5456,6 +5514,7 @@ class SimEngine:
             # The upgrade may have grown this structure's footprint enough to
             # overlap a neighbor; the upgrader becomes the relocator.
             self._enqueue_reorg_for_overlaps(s, preferred_agent=agent)
+        self._mark_structure_dirty(s, sprite_changed=(new_tier > old_tier))
         agent["lastUpgradeRejection"] = None
         self._push_activity(f"{agent['name']} upgraded the {name} to level {new_level}")
         self._log_benchmark("structure_upgraded", new_level,
@@ -5489,6 +5548,7 @@ class SimEngine:
         agent["spriteDesignTurn"] = None
         agent["lastSpriteRejection"] = None
         name = s.get("name") or s.get("type")
+        self._mark_structure_dirty(s, sprite_changed=True)
         self._push_activity(f"{agent['name']} refined the sprite for the {name}")
         # An agent-refined sprite can also grow the drawn footprint enough to
         # overlap a neighbor -- same reorg trigger as a tier upgrade.
@@ -16684,6 +16744,10 @@ class SimEngine:
         civ = _json_safe_copy(civ)
         for key in _CIV_SET_KEYS:
             civ[key] = sorted(c.get(key, set()))
+        # Structure sprite grids are stored in structure_sprites, not civ JSON.
+        for s in civ.get("structures") or []:
+            if isinstance(s, dict):
+                s.pop("sprite", None)
         agents = []
         for a in self.agents:
             ad = {k: v for k, v in a.items() if k not in ("beliefs", "godKeys", "isThinking")}
@@ -16698,7 +16762,7 @@ class SimEngine:
                 memory = ms.export_entries()
             except Exception:
                 memory = []
-        return {
+        payload = {
             "version": STATE_VERSION,
             "frameTick": self.frameTick,
             "savedAt": datetime.now(timezone.utc).isoformat(),
@@ -16708,6 +16772,24 @@ class SimEngine:
             "memory": memory,
             "council_transcript": _json_safe_copy(self.council_transcript_rows),
         }
+        fp = _structure_sprites_fingerprint(self.civilization)
+        if fp:
+            payload["structureSpritesFingerprint"] = fp
+        sprite_upserts = {}
+        for sid in self._persist_dirty_structure_sprites:
+            live = next(
+                (x for x in self.civilization["structures"] if x.get("id") == sid), None,
+            )
+            if live and live.get("sprite"):
+                sprite_upserts[sid] = {
+                    "sprite": _json_safe_copy(live["sprite"]),
+                    "updated_frame": self.frameTick,
+                }
+        if sprite_upserts:
+            payload["_sprite_upserts"] = sprite_upserts
+        if self._persist_sprite_removals:
+            payload["_sprite_removals"] = sorted(self._persist_sprite_removals)
+        return payload
 
     def save_state(self, force=False):
         """Atomically write the complete world to state.db. Never raises.
@@ -16726,6 +16808,9 @@ class SimEngine:
                     return True
             _write_state_db(DB_PATH, payload)
             self._last_saved_hash = content_hash
+            with self.lock:
+                self._persist_dirty_structure_sprites.clear()
+                self._persist_sprite_removals.clear()
             return True
         except Exception:
             # Persistence must never crash the sim.
@@ -16767,11 +16852,20 @@ class SimEngine:
         """If a valid state.db exists, rehydrate the world from it instead of
         the cold-start roster. Returns True on a successful restore."""
         data = _read_state_db(DB_PATH)
-        if not isinstance(data, dict) or data.get("version") != STATE_VERSION:
+        version = data.get("version") if isinstance(data, dict) else None
+        if not isinstance(data, dict) or version not in RESTORE_STATE_VERSIONS:
             return False
         try:
             with self.lock:
                 civ = dict(data.get("civilization") or {})
+                table_sprites = data.get("structureSprites") or {}
+                for s in civ.get("structures") or []:
+                    sid = s.get("id")
+                    if sid and sid in table_sprites:
+                        s["sprite"] = table_sprites[sid]
+                    elif version == 2 and sid and s.get("sprite"):
+                        # v2 migration: embedded sprites split out on next save.
+                        self._persist_dirty_structure_sprites.add(sid)
                 for key in _CIV_SET_KEYS:
                     civ[key] = set(civ.get(key) or [])
                 # builtTypes backfill: a save from before #5.1 has no record of

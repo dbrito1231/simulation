@@ -88,7 +88,7 @@ responses.
 | `GET /state?since=<N>` contiguous (`since < frameTick`, gap ≤ `STATE_DELTA_MAX_GAP` ≈ 90 frames) | `{frameTick, baseFrame: N, stateGeneration, calendar, uptimeSeconds, paused? (if changed), ...partial}` — omitted key = unchanged on the client |
 | Gap > 90 frames / reset / `since > frameTick` / `since < last_reset_frame` | Full snapshot + `full: true`; `stateGeneration` bumps on reset/restore |
 
-Partial rules: dirty agents only in `agents[]`; dirty civ subkeys only (structure upserts may omit `sprite` unless create/upgrade/sprite-submit — `structuresRemoved` lists deletions); `config` only on full or when flags change. Lock discipline: copy/dirty under lock; JSON assembly after release where practical.
+Partial rules: dirty agents only in `agents[]`; dirty civ subkeys only (structure upserts may omit `sprite` unless create/upgrade/sprite-submit — full snapshots and the first poll always include `sprite` when present; the viewer keeps prior sprites when a delta upsert omits the field — `structuresRemoved` lists deletions); `config` only on full or when flags change. Lock discipline: copy/dirty under lock; JSON assembly after release where practical.
 
 ## `/state` payload — top-level keys
 
