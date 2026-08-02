@@ -1,9 +1,38 @@
 # Plan: Server performance degradation — 10-issue fix
 
-**Status:** Planned (not yet implemented)  
+**Status:** Implemented (2026-08-01)  
 **Date:** 2026-08-01  
-**Branch (intended):** `cursor/perf-degradation-fixes-7755`  
+**Branch:** `cursor/perf-degradation-fixes-7755` (PR against `feature/divine-console-improvements`)  
 **Orchestration:** Grok plans/dispatches/reviews; each issue → one Composer 2.5 implementer. Specs update with code (SDD).
+
+## Issue → fix summary (plain English)
+
+| # | Issue | How it was fixed |
+|---|-------|------------------|
+| 1 | Browser asked for the whole world 10×/sec; that got slower as the village grew | `/state` now sends deltas (`?since=frameTick`): full once, then only what changed; idle same-tick polls return a tiny `unchanged` |
+| 2 | Disk rewrite of the entire save every 10 seconds even when nothing changed | Autosave hashes the world (ignoring timestamp) and skips the SQLite rewrite when the hash matches; exit/reset still force a write |
+| 3 | Huge building sprite grids lived inside every save and every poll | Sprites live in a `structure_sprites` table (only rewritten when dirty); polls send sprites on first paint / when a sprite changes, not every tick |
+| 4 | `llm.jsonl` logged every full LLM request and response | Logs slim metadata by default; set `SIM_LLM_LOG_FULL=1` only when you need full bodies |
+| 5 | Caravan trade log grew forever in live/saved state | Live `caravanLog` is trimmed to the last 20 entries on every append |
+| 6 | PIANO cognition could pile up unbounded work on the worker queue | Modules only submit into free PIANO slots; excess uses cache / counts as drops |
+| 7 | Timed-out Ollama calls kept eating GPU slots while the sim kept dispatching | Timeouts are tagged `"llm timeout"`; after a few orphans the engine cools down new thinks for ~30s |
+| 8 | Benchmark sampling wrote many tiny disk appends every ~20s | Benchmarks buffer in memory and flush in one multi-line write per sample burst |
+| 9 | District map was fully recopied under the lock every 3 seconds | `districtsEpoch` + `?since=`; unchanged polls return ~30 bytes without copying tiles |
+| 10 | Council LLM log viewer scanned every retained session file every time | Prefers the live session; older sessions only if the frame window isn’t covered; skips files by frame bounds cache |
+
+## Implementation checklist
+
+- [x] Agent 5: trim `caravanLog` on append + specs/10
+- [x] Agent 4: slim `llm.jsonl` by default + specs/12
+- [x] Agent 8: buffer/flush `benchmarks.jsonl` + specs/12
+- [x] Agent 10: narrow `/council-llm-log` session scan + specs/04+12
+- [x] Agent 9: `districts.js` epoch/unchanged + lock hygiene + specs/04+11
+- [x] Agent 2: autosave skip-if-unchanged hash + specs/02
+- [x] Agent 6: PIANO free-slot backpressure + specs/03
+- [x] Agent 7: orphan timeout distinguish + cooldown + specs/03
+- [x] Agent 1: delta `/state?since=` protocol + viewer merge + specs/01+04+11
+- [x] Agent 3: sprite send-once + `structure_sprites` table + specs/02+05
+- [x] Publish plain-language issue→fix summary for all 10
 
 ## Locked decisions
 
@@ -252,26 +281,4 @@ No change to module list size or `MEMORY_TICK_FRAMES`.
 
 ## Final deliverable
 
-After all agents land, orchestrator publishes a **simple summary** (user-facing), one line per issue:
-
-| # | Issue (plain English) | How it was fixed |
-|---|----------------------|------------------|
-| 1 | … | … |
-| … | … | … |
-| 10 | … | … |
-
-No jargon dump — each row: what hurt, what changed.
-
-## Implementation checklist
-
-- [ ] Agent 5: trim `caravanLog` on append + specs/10
-- [ ] Agent 4: slim `llm.jsonl` by default + specs/12
-- [ ] Agent 8: buffer/flush `benchmarks.jsonl` + specs/12
-- [ ] Agent 10: narrow `/council-llm-log` session scan + specs/04+12
-- [ ] Agent 9: `districts.js` epoch/unchanged + lock hygiene + specs/04+11
-- [ ] Agent 2: autosave skip-if-unchanged hash + specs/02
-- [ ] Agent 6: PIANO free-slot backpressure + specs/03
-- [ ] Agent 7: orphan timeout distinguish + cooldown + specs/03
-- [ ] Agent 1: delta `/state?since=` protocol + viewer merge + specs/01+04+11
-- [ ] Agent 3: sprite send-once + `structure_sprites` table + specs/02+05
-- [ ] Publish plain-language issue→fix summary for all 10
+See **Issue → fix summary** at the top of this document (filled in when implementation completed).
