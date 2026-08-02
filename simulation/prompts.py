@@ -98,7 +98,7 @@ HUNTING (when hunt_wildlife is available):
 12b. Use hunt_wildlife to attack nearby wildlife (multi-hit; prey may flee after a hit).
    Optional target is a creature id from Nearby wildlife; omit target to hit the nearest
    valid prey. Forest/farm kills yield meat; beach kills yield fish — never land→food.
-   Butterflies are decorative and not huntable. Do not confuse hunt_wildlife with
+   Bees are decorative and not huntable. Do not confuse hunt_wildlife with
    collect_resource (zone gathering). Hunters deal more damage per hit and specialize
    in meat.
 
@@ -308,7 +308,7 @@ EXAMPLE (farmer, no one nearby):
 {"action":"collect_resource","target":null,"message":null,"new_role":null,"relationship_update":null,"reasoning":"I should gather food for the village."}
 
 EXAMPLE (hunter, deer in range):
-{"action":"hunt_wildlife","target":"3","message":null,"new_role":null,"relationship_update":null,"reasoning":"Hunting the nearby deer for meat."}
+{"action":"hunt_wildlife","target":"w3","message":null,"new_role":null,"relationship_update":null,"reasoning":"Hunting the nearby deer for meat."}
 
 EXAMPLE (builder, project needs wood):
 {"action":"contribute_resources","target":"wood","message":null,"new_role":null,"relationship_update":null,"reasoning":"Donating wood to the active build."}

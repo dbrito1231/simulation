@@ -15,12 +15,15 @@ deep mechanics.
 
 - Not a game or shippable product — no win condition or scoring. Player input is
   limited to observation and admin controls (pause/resume/reset/roster size),
-  plus the optional, default-off intervention mode described below.
-- **Optional intervention mode (God mode).** `GOD_MODE_ENABLED` is off unless the
-  operator sets both `SIM_GOD_MODE=1` and a non-empty `SIM_GOD_TOKEN` at startup.
-  When off — the default — the simulation is exactly as autonomous as it was
-  before the flag existed. When on, an authenticated operator may observe private
-  state and author bounded, typed interventions. This is a deliberate departure
+  plus the optional intervention mode described below.
+- **Optional intervention mode (God mode).** `GOD_MODE_ENABLED` (`SIM_GOD_MODE`) is
+  **on by default**; disable with `0`/`false`/`no`/`off` at startup. When off,
+  the simulation is exactly as autonomous as it was before the flag existed.
+  When on, an operator may observe private state and author bounded, typed
+  interventions. Token auth is a separate optional gate: `GOD_AUTH_REQUIRED`
+  (`SIM_GOD_AUTH`) defaults **off**; when auth is on, a non-empty
+  `SIM_GOD_TOKEN` must also be configured or routes stay disabled until restart.
+  This is a deliberate departure
   from the pure-observer stance of earlier drafts, and it is stated here rather
   than hidden behind an "admin tool" label: a god-enabled run is partly
   interactive. Divine influence must never masquerade as emergent agent behavior,

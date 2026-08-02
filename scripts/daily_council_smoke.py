@@ -613,7 +613,7 @@ def exercise_digest_prompt_and_sync(checks):
             action_names = ast.literal_eval(node.value)
             break
     actions = {"council_speak", "council_propose", "council_vote"}
-    checks.check(action_names is not None and len(action_names) == 43
+    checks.check(action_names is not None and len(action_names) == 45
                  and actions.issubset(action_names),
                  "action_sync_decision_actions_and_count", len(action_names or []))
     checks.check(all(action in prompts.SYSTEM_PROMPT and action in prompts.COUNCIL_SYSTEM_PROMPT
