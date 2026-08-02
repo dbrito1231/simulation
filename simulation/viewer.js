@@ -364,6 +364,58 @@ const prevPos = {};
 // until the first fetch resolves.
 let districtsData = { districts: [], roadNodes: {}, roadEdges: [] };
 let districtsKey = "";
+let districtsEpoch = 0;
+
+// /state delta protocol: after the first full snapshot, poll with ?since=lastFrameTick.
+let lastFrameTick = 0;
+let stateGeneration = 0;
+let statePollFull = true;
+
+/** Merge a partial /state delta into the cached world (omitted key = unchanged). */
+function mergeStateDelta(prev, delta) {
+  if (!prev || delta.full) return delta;
+  if (delta.unchanged) return prev;
+  const next = Object.assign({}, prev);
+  if (delta.frameTick != null) next.frameTick = delta.frameTick;
+  if (delta.stateGeneration != null) next.stateGeneration = delta.stateGeneration;
+  if (delta.paused !== undefined) next.paused = delta.paused;
+  if (delta.uptimeSeconds !== undefined) next.uptimeSeconds = delta.uptimeSeconds;
+  if (delta.calendar) next.calendar = delta.calendar;
+  if (delta.lmStatus !== undefined) next.lmStatus = delta.lmStatus;
+  if (delta.agents && delta.agents.length) {
+    const byId = Object.create(null);
+    for (const a of prev.agents || []) byId[a.id] = a;
+    for (const a of delta.agents) byId[a.id] = a;
+    next.agents = Object.values(byId);
+  }
+  if (delta.civilization) {
+    const civ = Object.assign({}, prev.civilization || {});
+    const patch = delta.civilization;
+    if (patch.structures && patch.structures.length) {
+      const byId = Object.create(null);
+      for (const s of civ.structures || []) byId[s.id] = s;
+      for (const s of patch.structures) {
+        const prior = byId[s.id] || {};
+        byId[s.id] = s.sprite !== undefined ? s : Object.assign({}, prior, s);
+      }
+      civ.structures = Object.values(byId);
+    }
+    if (patch.structuresRemoved && patch.structuresRemoved.length) {
+      const removed = new Set(patch.structuresRemoved);
+      civ.structures = (civ.structures || []).filter((s) => !removed.has(s.id));
+    }
+    for (const key of Object.keys(patch)) {
+      if (key === "structures" || key === "structuresRemoved") continue;
+      civ[key] = patch[key];
+    }
+    next.civilization = civ;
+  }
+  for (const key of ["benchmarks", "activity", "conversation", "config", "god",
+    "socialTies", "chronicle", "districtEcology", "wildlife", "shipments", "weather"]) {
+    if (delta[key] !== undefined) next[key] = delta[key];
+  }
+  return next;
+}
 
 function getDistricts() {
   return (districtsData.districts && districtsData.districts.length)
@@ -730,17 +782,21 @@ function drawWorld(ctx, frameTick) {
 }
 
 // Poll GET /districts.js on a slow interval -- districts/roads are
-// mostly-static and only change when _maybe_found_district() fires
-// server-side (a rare, deterministic event), so this doesn't need /state's
-// ~10Hz cadence. Rebuilds the terrain cache only when the served list
-// actually changed (a district was founded), not on every poll.
+// mostly-static and only change when district/tile/terrain/road data
+// mutates server-side, so this doesn't need /state's ~10Hz cadence.
+// Sends ?since=<districtsEpoch>; unchanged polls keep the last payload.
 const DISTRICTS_POLL_MS = 3000;
 let districtsJsResolvedLogged = false;
 async function pollDistricts() {
   try {
-    const res = await fetch("/districts.js", { cache: "no-store" });
+    const sinceParam = districtsEpoch > 0 ? `?since=${districtsEpoch}` : "";
+    const res = await fetch(`/districts.js${sinceParam}`, { cache: "no-store" });
     if (!res.ok) return;
     const data = await res.json();
+    if (data.unchanged) {
+      if (data.epoch != null) districtsEpoch = data.epoch;
+      return;
+    }
     if (!districtsJsResolvedLogged) {
       districtsJsResolvedLogged = true;
       if (VIEWER_LOAD_DEBUG) {
@@ -750,15 +806,19 @@ async function pollDistricts() {
         });
       }
     }
+    const newEpoch = data.epoch;
     const key = JSON.stringify((data.districts || []).map((d) => d.id));
-    if (key !== districtsKey) {
+    const epochChanged = newEpoch != null && newEpoch !== districtsEpoch;
+    if (key !== districtsKey || epochChanged) {
       districtsKey = key;
+      if (newEpoch != null) districtsEpoch = newEpoch;
       districtsData = data;
-      terrainCanvas = null; // force rebuild with the new district list
+      terrainCanvas = null; // force rebuild when district list or content revision changes
       terrainBuildScheduled = false;
       scheduleTerrainCacheBuild();
     } else {
-      districtsData = data; // road graph could still have grown even if district ids didn't
+      districtsData = data;
+      if (newEpoch != null) districtsEpoch = newEpoch;
     }
   } catch (err) { /* keep last known districts; /state polling surfaces connectivity issues */ }
 }
@@ -928,6 +988,7 @@ const deadAgentsModal = document.getElementById("deadAgentsModal");
 const deadAgentsListEl = document.getElementById("deadAgentsList");
 const deadAgentsCloseBtn = document.getElementById("deadAgentsCloseBtn");
 let selectedAgentId = null;
+let godFocusAgentId = null;
 let hoveredAgentId = null;
 let followAgentId = null;
 const AGENT_HIT_RADIUS = 28;
@@ -960,6 +1021,48 @@ function agentAtWorldPoint(wx, wy) {
     }
   }
   return best;
+}
+
+function structureAtWorldPoint(wx, wy) {
+  const structures = (getCiv().structures || []).filter(
+    (s) => !s.isRuin && (s.condition == null || s.condition > 0)
+  );
+  let best = null;
+  let bestArea = Infinity;
+  for (const s of structures) {
+    const size = getStructureRenderSize(s, STRUCTURE_WEAR_ENABLED);
+    const x0 = s.x;
+    const y0 = s.y;
+    const x1 = x0 + size.width;
+    const y1 = y0 + size.height;
+    if (wx >= x0 && wx <= x1 && wy >= y0 && wy <= y1) {
+      const area = size.width * size.height;
+      if (area < bestArea) {
+        bestArea = area;
+        best = s;
+      }
+    }
+  }
+  return best;
+}
+
+function godSetStructureTargetFromCanvas(structureId) {
+  const idStr = String(structureId);
+  if (godActiveTab === "miracles") {
+    const sel = document.getElementById("godStructureSelect");
+    if (sel && Array.from(sel.options).some((o) => o.value === idStr)) {
+      sel.value = idStr;
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    return;
+  }
+  if (godActiveTab === "story") {
+    document.querySelectorAll(".godPrimStructure").forEach((sel) => {
+      if (Array.from(sel.options).some((o) => o.value === idStr)) sel.value = idStr;
+    });
+    const fieldset = document.getElementById("godStoryFieldset");
+    if (fieldset) fieldset.dispatchEvent(new Event("input", { bubbles: true }));
+  }
 }
 
 function isAgentInventoryVisible(agent) {
@@ -1503,6 +1606,7 @@ function renderAgentRollup(living) {
 function renderAgentPanel() {
   if (selectedAgentId != null && !getLivingAgents().some((a) => a.id === selectedAgentId)) {
     selectedAgentId = null;
+    godFocusAgentId = null;
   }
   recordAgentHistory();
   renderAgentDetail();
@@ -1569,6 +1673,7 @@ agentListEl.addEventListener("click", (event) => {
   const id = Number(li.dataset.agentId);
   const wasSelected = selectedAgentId === id;
   selectedAgentId = wasSelected ? null : id;
+  godFocusAgentId = selectedAgentId;
   if (wasSelected) {
     // Deselecting releases any active follow-cam lock on this agent.
     if (followAgentId === id) followAgentId = null;
@@ -1587,6 +1692,26 @@ canvasWrapEl.addEventListener("mousemove", (event) => {
 });
 canvasWrapEl.addEventListener("mouseleave", () => {
   hoveredAgentId = null;
+});
+canvasWrapEl.addEventListener("click", (event) => {
+  if (!GOD_MODE_ENABLED_FLAG) return;
+  const { x, y } = clientToWorld(event.clientX, event.clientY);
+  const agentHit = agentAtWorldPoint(x, y);
+  if (agentHit) {
+    selectedAgentId = agentHit.id;
+    godFocusAgentId = agentHit.id;
+    syncAgentListSelection();
+    renderAgentDetail();
+    centerCameraOnAgent(agentHit);
+    populateGodAgentSelects();
+    return;
+  }
+  const modalOpen = divineModalScrimEl && divineModalScrimEl.classList.contains("open");
+  const structurePickMode = modalOpen && (godActiveTab === "miracles" || godActiveTab === "story");
+  if (structurePickMode) {
+    const structHit = structureAtWorldPoint(x, y);
+    if (structHit) godSetStructureTargetFromCanvas(structHit.id);
+  }
 });
 deadAgentsModal.addEventListener("click", (event) => {
   if (event.target === deadAgentsModal) closeDeadAgentsModal();
@@ -1798,7 +1923,7 @@ function renderSidebar() {
         const kind = String(entry.kind || "event").replace(/_/g, " ");
         const frame = entry.frame != null ? `frame ${entry.frame}` : "";
         return `<li><span class="chronicle-kind">${escapeHtml(kind)}</span> ` +
-          `${escapeHtml(entry.text || "")}` +
+          `<span class="${entry.presentation === "thunder" ? "chronicle-presentation-thunder" : ""}">${escapeHtml(entry.text || "")}</span>` +
           (frame ? ` <span class="chronicle-frame">${escapeHtml(frame)}</span>` : "") +
           `</li>`;
       }).join("") || `<li class="civ-label">No village milestones yet</li>`;
@@ -2479,8 +2604,18 @@ function applyFlags(flags) {
   if ("WEATHER_ENABLED" in flags) WEATHER_ENABLED = !!flags.WEATHER_ENABLED;
   if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
   if ("GOD_AUTH_REQUIRED" in flags) GOD_AUTH_REQUIRED_FLAG = !!flags.GOD_AUTH_REQUIRED;
+  applyGodDejaVuAvailability();
+}
+
+function applyGodDejaVuAvailability() {
   const dejaVuEl = document.getElementById("godDejaVuFieldset");
-  if (dejaVuEl) dejaVuEl.disabled = !flags.GOD_DEJA_VU_REPLAY;
+  if (!dejaVuEl) return;
+  const kind = godCapabilities && godCapabilities.kinds && godCapabilities.kinds.deja_vu_replay;
+  if (kind) {
+    dejaVuEl.disabled = !kind.applyable;
+  } else {
+    dejaVuEl.disabled = true;
+  }
 }
 
 // Bounded viewer-only social pass. The engine has already filtered and
@@ -2593,9 +2728,32 @@ async function pollState() {
   if (polling) return;
   polling = true;
   try {
-    const res = await fetch("/state", { cache: "no-store" });
+    const url = statePollFull || lastFrameTick <= 0
+      ? "/state"
+      : `/state?since=${lastFrameTick}`;
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const snapshot = await res.json();
+    const payload = await res.json();
+    if (payload.frameTick != null && payload.frameTick < lastFrameTick && !payload.full) {
+      return;
+    }
+    if (payload.unchanged) {
+      if (payload.stateGeneration != null) stateGeneration = payload.stateGeneration;
+      return;
+    }
+    let snapshot;
+    if (payload.full || statePollFull || !world || !world.agents) {
+      snapshot = payload;
+      statePollFull = false;
+    } else if (payload.stateGeneration != null && stateGeneration > 0
+        && payload.stateGeneration !== stateGeneration) {
+      statePollFull = true;
+      return;
+    } else {
+      snapshot = mergeStateDelta(world, payload);
+    }
+    if (payload.stateGeneration != null) stateGeneration = payload.stateGeneration;
+    if (payload.frameTick != null) lastFrameTick = payload.frameTick;
     world = snapshot;
     setSpriteSeason(snapshot.calendar && snapshot.calendar.season);
     // Season changed since the terrain cache was last tinted: rebuild it
@@ -2634,6 +2792,7 @@ async function pollState() {
     syncPauseButton();
     if (terrainCanvas) hideWorldLoading();
   } catch (err) {
+    statePollFull = true;
     // Keep last frame; surface a disconnected status (but not over a real
     // server status we already have — only mark disconnected on fetch failure).
     if (world && world.lmStatus !== "disconnected") {
@@ -2679,11 +2838,13 @@ function doReset() {
   if (!window.confirm("Reset the simulation? This restarts the village.")) return;
   const password = window.prompt("Type the reset password to wipe the world:");
   if (password === null || password === "") return;
-  postControl("/control/reset", { password }).then(async (res) => {
+    postControl("/control/reset", { password }).then(async (res) => {
     if (res && res.status === 401) {
       window.alert("Reset refused — wrong password (SIM_RESET_PASSWORD).");
       return;
     }
+    statePollFull = true;
+    lastFrameTick = 0;
     pollState();
   });
 }
@@ -2752,6 +2913,7 @@ function tickBody() {
     if (item.type === "structure") drawStructureWithShadow(item.structure);
     else drawAgent(ctx, item.agent, renderFrame);
   }
+  drawDivineSightOverlays(ctx, renderFrame);
   if (ACTIVITY_CUES_ENABLED) {
     // Pure frame-derived accents: no activity state is retained in the viewer.
     for (const structure of structures) drawStructureSmoke(ctx, structure, renderFrame);
@@ -2866,6 +3028,11 @@ let godActiveTab = "unlock";
 let godLastStateKey = null;        // change-detect for world.god (History/Laws/banner)
 let godSeenInterventionIds = null; // Set of ids already shown in the public banner (edge-detected, like foundingFramesSeen)
 let godBannerTimer = null;
+let godBarPulseTimer = null;
+let godLastSightFetchedAt = 0;
+let godSightBarRefreshInFlight = false;
+const GOD_SIGHT_BAR_REFRESH_MS = 30000;
+const GOD_SIGHT_MODAL_REFRESH_MS = 1500;
 
 const godTokenInput = document.getElementById("godTokenInput");
 const godRememberCheckbox = document.getElementById("godRememberCheckbox");
@@ -2874,12 +3041,17 @@ const godAuthStatusEl = document.getElementById("godAuthStatus");
 const divineBarEl = document.getElementById("divineBar");
 const divineBarBrandStateEl = document.getElementById("divineBarBrandState");
 const divineBarInterventionCountEl = document.getElementById("divineBarInterventionCount");
+const divineBarEffectsEl = document.getElementById("divineBarEffects");
+const divineVoicePipEl = document.getElementById("divineVoicePip");
+const divineLawsPipEl = document.getElementById("divineLawsPip");
+const divineMatrixPipEl = document.getElementById("divineMatrixPip");
 const divinePreviewStripEl = document.getElementById("divinePreviewStrip");
 const divinePreviewStripLabelEl = document.getElementById("divinePreviewStripLabel");
 const divinePreviewApplyBtnEl = document.getElementById("divinePreviewApplyBtn");
 const divinePreviewDiscardBtnEl = document.getElementById("divinePreviewDiscardBtn");
 const divineUnlockPipEl = document.getElementById("divineUnlockPip");
 const divineModalScrimEl = document.getElementById("divineModalScrim");
+const divineModalEl = document.getElementById("divineModal");
 const divineModalBodyEl = document.getElementById("divineModalBody");
 const divineModalIconEl = document.getElementById("divineModalIcon");
 const divineModalTitleEl = document.getElementById("divineModalTitle");
@@ -2891,7 +3063,12 @@ const godHistoryListEl = document.getElementById("godHistoryList");
 const godLawsActiveEl = document.getElementById("godLawsActive");
 const godSightOutputEl = document.getElementById("godSightOutput");
 const godSightAgentSelectEl = document.getElementById("godSightAgentSelect");
-const godVoiceAdherenceListEl = document.getElementById("godVoiceAdherenceList");
+const godVoiceAdherenceTimelineEl = document.getElementById("godVoiceAdherenceTimeline");
+const godVoiceReplyInboxEl = document.getElementById("godVoiceReplyInbox");
+const DIVINE_VOICE_PRESETS_KEY = "divineVoicePresets";
+const GOD_VOICE_ADHERENCE_CAP = 30;
+const GOD_VOICE_REPLY_SNIPPET = 80;
+const GOD_VOICE_REPLY_MAX = 200;
 
 const DIVINE_FEATURE_ICONS = {
   unlock:  '<svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 7.5-2"/></svg>',
@@ -2904,20 +3081,215 @@ const DIVINE_FEATURE_ICONS = {
   history: '<svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>',
   compile: '<svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>',
 };
-const DIVINE_FEATURES = {
-  unlock:  { title: "Unlock the Divine Console", sub: "Authenticate with the God token to enable every other tool.", gated: false },
-  sight:   { title: "Sight — private inspection", sub: "See what agents never expose publicly: vitals, ties, omens, active effects.", gated: true },
-  voice:   { title: "Voice — proclamations & omens", sub: "Speak to the village, or whisper a private omen to one agent.", gated: true },
-  matrix:  { title: "Matrix — brain & world interventions", sub: "Override agent brains, memories, perception, possession, identity, zones, and checkpoints — mostly private; Preview validates, Apply commits.", gated: true },
-  miracles:{ title: "Miracles — direct intervention", sub: "Heal, grant resources, or repair/damage a structure. Irreversible once applied.", gated: true },
-  story:   { title: "Story — timed narrative events", sub: "Compose a titled event from validated effect primitives.", gated: true },
-  laws:    { title: "Laws — temporary world modifiers", sub: "Bend gather yield, hunger, spoilage and more for a bounded time.", gated: true },
-  history: { title: "History — intervention log", sub: "Every applied intervention, public and private, most recent first.", gated: true },
-  compile: { title: "Compile — prose to event", sub: "Turn narrative prose into a typed draft. Dark until contention is measured.", gated: true },
+const DIVINE_PREVIEW_TIP = {
+  t: "Preview",
+  d: "Check that this is allowed without changing the village yet.",
 };
+const DIVINE_APPLY_TIP = {
+  t: "Apply",
+  d: "Make it real (uses the last successful check).",
+};
+const DIVINE_APPLY_IRREVERSIBLE_TIP = {
+  t: "Apply",
+  d: "Make it real — cannot be undone.",
+};
+
+function divineTipAttr(tip) {
+  return JSON.stringify(tip).replace(/'/g, "&#39;");
+}
+
+const DIVINE_FEATURES = {
+  unlock: {
+    title: "Unlock",
+    sub: "Enter your secret token to use Divine tools.",
+    guide: [
+      "Sign in with the secret password set when the server starts.",
+      "Only you see this console — villagers never know you are here.",
+      "Remember saves the token until you close this browser tab.",
+      "You can use every other tool after a successful connect.",
+    ],
+    gated: false,
+  },
+  sight: {
+    title: "Sight",
+    sub: "Look at private details villagers do not show each other.",
+    guide: [
+      "Pick a villager to see health, ties, active whispers, and hidden effects.",
+      "This view is for you only — nothing here is announced to the village.",
+      "Refresh updates the panel; it does not change the world.",
+      "Use the quick buttons to jump into Voice, Miracles, or Matrix for that villager.",
+    ],
+    gated: true,
+  },
+  voice: {
+    title: "Voice",
+    sub: "Speak to the whole village, set ongoing guidance, or whisper to one or many.",
+    guide: [
+      "Proclamations and Providence are public — everyone sees them and must respond.",
+      "Omens and whisper campaigns are private — only the targeted villager hears their line.",
+      "Most Voice effects can be cancelled early from History or the bar.",
+      "Check Adherence below to see who followed your guidance and why.",
+    ],
+    gated: true,
+  },
+  matrix: {
+    title: "Matrix",
+    sub: "Change how villagers think, remember, perceive, and move — mostly in secret.",
+    guide: [
+      "These tools nudge minds, memories, perception, identity, and the map.",
+      "Villagers usually cannot tell you intervened; some map changes are visible.",
+      "Preview checks the action; Apply makes it real.",
+      "Timed effects expire on their own — many can also be cancelled.",
+    ],
+    gated: true,
+  },
+  miracles: {
+    title: "Miracles",
+    sub: "Directly change health, goods, or buildings.",
+    guide: [
+      "Heal or hurt a villager, grant resources, or repair or damage structures.",
+      "Effects apply immediately and are permanent — there is no undo.",
+      "Preview shows what will happen; Apply commits it forever.",
+      "Undoing a miracle means issuing the opposite change as a new action.",
+    ],
+    gated: true,
+  },
+  story: {
+    title: "Story",
+    sub: "Run a timed story event with optional world effects.",
+    guide: [
+      "Title and narration can be public for the whole village or private for one villager.",
+      "Timed modifiers bend hunger, gathering, and more while the event runs.",
+      "Adding instant effects makes the story consequential — past changes stay even if you cancel the timer.",
+      "You can cancel an active story event early; that stops future effects, not what already happened.",
+    ],
+    gated: true,
+  },
+  laws: {
+    title: "Laws",
+    sub: "Temporary world rules that change how the village works.",
+    guide: [
+      "Laws scale hunger, gathering, spoilage, and similar rules for a set time.",
+      "A value of 1.0 means normal — the law does nothing.",
+      "Active laws appear above the form; cancel ends one early.",
+      "Laws are cancellable while running; they do not roll back time.",
+    ],
+    gated: true,
+  },
+  history: {
+    title: "History",
+    sub: "A log of what you have done, newest first.",
+    guide: [
+      "Every applied action appears here — public village events and your private moves.",
+      "Filter by kind, villager, or time; export a Markdown summary for notes.",
+      "Re-run fills a form from a past entry — you must Preview again before Apply.",
+      "Revoke last cancellable undoes the newest effect that still allows cancel.",
+    ],
+    gated: true,
+  },
+  compile: {
+    title: "Compile",
+    sub: "Turn a written story idea into a Story draft (optional advanced tool).",
+    guide: [
+      "Paste prose and the compiler suggests a Story event draft.",
+      "Nothing changes until you review in Story and Apply yourself.",
+      "Experimental — your server admin must enable the compiler.",
+      "Compile never applies directly; it only fills the Story form for you.",
+    ],
+    gated: true,
+  },
+};
+
+let divineFeatureGuideEl = null;
+
+function clearDivineFeatureGuide() {
+  if (divineFeatureGuideEl) {
+    divineFeatureGuideEl.remove();
+    divineFeatureGuideEl = null;
+  }
+}
+
+function renderDivineFeatureGuide(name) {
+  clearDivineFeatureGuide();
+  if (!divineModalBodyEl) return;
+  const feature = DIVINE_FEATURES[name];
+  if (!feature || !feature.guide || !feature.guide.length) return;
+  divineFeatureGuideEl = document.createElement("div");
+  divineFeatureGuideEl.id = "divineFeatureGuide";
+  divineFeatureGuideEl.className = "divine-feature-guide";
+  const titleEl = document.createElement("div");
+  titleEl.className = "divine-feature-guide-title";
+  titleEl.textContent = feature.title;
+  divineFeatureGuideEl.appendChild(titleEl);
+  const bodyEl = document.createElement("p");
+  bodyEl.className = "divine-feature-guide-body";
+  bodyEl.textContent = feature.guide.join(" ");
+  divineFeatureGuideEl.appendChild(bodyEl);
+  divineModalBodyEl.insertBefore(divineFeatureGuideEl, divineModalBodyEl.firstChild);
+}
+
+function syncDivineBarTooltips() {
+  if (!divineBarEl) return;
+  divineBarEl.querySelectorAll(".gbtn[data-feature]").forEach((btn) => {
+    const key = btn.dataset.feature;
+    const feature = DIVINE_FEATURES[key];
+    if (!feature) return;
+    btn.setAttribute("data-tip", JSON.stringify({ t: feature.title, d: feature.sub }));
+  });
+}
+
+function reorderDivineModalBodyChildren() {
+  if (!divineModalBodyEl) return;
+  const guide = document.getElementById("divineFeatureGuide");
+  const pin = document.getElementById("divinePinRow");
+  const panel = divineModalOpenFeature
+    ? document.getElementById("divineTab-" + divineModalOpenFeature)
+    : null;
+  if (guide) divineModalBodyEl.insertBefore(guide, divineModalBodyEl.firstChild);
+  if (pin) {
+    const after = guide || divineModalBodyEl.firstChild;
+    if (after === pin) return;
+    divineModalBodyEl.insertBefore(pin, guide ? guide.nextSibling : divineModalBodyEl.firstChild);
+  }
+  if (panel && panel.parentElement === divineModalBodyEl) {
+    divineModalBodyEl.appendChild(panel);
+  }
+}
 
 function godFramesToSeconds(frames) {
   return Math.round((Number(frames) || 0) / 30);
+}
+
+function godSecondsToFrames(secRaw) {
+  if (secRaw === "" || secRaw == null) return null;
+  const sec = Number(secRaw);
+  if (!Number.isFinite(sec)) return null;
+  return Math.round(sec * 30);
+}
+
+function godPreferredAgentId() {
+  const living = getLivingAgents();
+  if (godFocusAgentId != null && living.some((a) => a.id === godFocusAgentId)) return godFocusAgentId;
+  if (selectedAgentId != null && living.some((a) => a.id === selectedAgentId)) return selectedAgentId;
+  return null;
+}
+
+function setGodFocusAgent(id, opts) {
+  opts = opts || {};
+  godFocusAgentId = id;
+  if (opts.mirrorSelection !== false && id != null) {
+    selectedAgentId = id;
+    syncAgentListSelection();
+    renderAgentDetail();
+    const agent = getLivingAgents().find((a) => a.id === id);
+    if (agent && opts.centerCamera) centerCameraOnAgent(agent);
+  }
+  populateGodAgentSelects();
+}
+
+function godAgentFilterText() {
+  const el = document.getElementById("godAgentFilter");
+  return el ? el.value.trim().toLowerCase() : "";
 }
 
 // Both simulation time AND raw frames, per docs/plan UX requirement.
@@ -2931,14 +3303,35 @@ function godCountdownLabel(expiresFrame) {
   return remaining > 0 ? `expires in ${godDurationLabel(remaining)}` : "expired (awaiting cleanup)";
 }
 
-function godAgentOptionsHtml(selectedId) {
-  return getLivingAgents().map((a) =>
+function godAgentOptionsHtml(selectedId, filterText) {
+  const q = filterText != null ? String(filterText).trim().toLowerCase() : godAgentFilterText();
+  let agents = getLivingAgents();
+  if (q) {
+    agents = agents.filter((a) =>
+      String(a.name || "").toLowerCase().includes(q)
+      || String(a.role || "").toLowerCase().includes(q)
+      || String(a.id).includes(q)
+    );
+  }
+  return agents.map((a) =>
     `<option value="${a.id}"${a.id === selectedId ? " selected" : ""}>${escapeHtml(a.name)} (#${a.id}, ${escapeHtml(a.role)})</option>`
-  ).join("") || `<option value="">(no living agents)</option>`;
+  ).join("") || `<option value="">(no matching agents)</option>`;
+}
+
+function godFillAgentSelect(el, preferredId) {
+  if (!el) return;
+  const prior = el.value;
+  const priorNum = prior ? Number(prior) : null;
+  const pick = (priorNum != null && getLivingAgents().some((a) => a.id === priorNum))
+    ? priorNum
+    : preferredId;
+  el.innerHTML = godAgentOptionsHtml(pick);
+  if (prior && Array.from(el.options).some((o) => o.value === prior)) el.value = prior;
+  else if (pick != null && Array.from(el.options).some((o) => Number(o.value) === pick)) el.value = String(pick);
 }
 
 function populateGodAgentSelects() {
-  const html = godAgentOptionsHtml(null);
+  const preferred = godPreferredAgentId();
   [godSightAgentSelectEl, document.getElementById("godOmenAgentSelect"),
    document.getElementById("godVitalsAgentSelect"), document.getElementById("godGrantAgentSelect"),
    document.getElementById("godStoryTargetSelect"),
@@ -2962,11 +3355,9 @@ function populateGodAgentSelects() {
    document.getElementById("godIdentityEditAgentSelect"),
    document.getElementById("godIdentityCopyTargetSelect"),
    document.getElementById("godIdentityCopySourceSelect"),
-   document.getElementById("godIdentityCancelAgentSelect")].forEach((el) => {
-    if (!el) return;
-    const prior = el.value;
-    el.innerHTML = html;
-    if (prior && Array.from(el.options).some((o) => o.value === prior)) el.value = prior;
+   document.getElementById("godIdentityCancelAgentSelect"),
+   document.getElementById("godDejaVuAgentSelect")].forEach((el) => {
+    godFillAgentSelect(el, preferred);
   });
   const resourceSelect = document.getElementById("godGrantResourceSelect");
   if (resourceSelect) {
@@ -2996,7 +3387,16 @@ function populateGodAgentSelects() {
     const el = document.getElementById(id);
     if (!el) return;
     const selected = new Set(Array.from(el.selectedOptions || []).map((o) => o.value));
-    el.innerHTML = getLivingAgents().map((a) =>
+    const q = godAgentFilterText();
+    let agents = getLivingAgents();
+    if (q) {
+      agents = agents.filter((a) =>
+        String(a.name || "").toLowerCase().includes(q)
+        || String(a.role || "").toLowerCase().includes(q)
+        || String(a.id).includes(q)
+      );
+    }
+    el.innerHTML = agents.map((a) =>
       `<option value="${a.id}">${escapeHtml(a.name)} (#${a.id})</option>`
     ).join("") || "";
     Array.from(el.options).forEach((o) => { o.selected = selected.has(o.value); });
@@ -3007,10 +3407,43 @@ function populateGodAgentSelects() {
     if (!sel) return;
     const prior = sel.value;
     const priorId = prior ? parseInt(prior, 10) : null;
-    sel.innerHTML = godAgentOptionsHtml(priorId);
+    const pick = (priorId != null && getLivingAgents().some((a) => a.id === priorId))
+      ? priorId
+      : preferred;
+    sel.innerHTML = godAgentOptionsHtml(pick);
     if (prior && Array.from(sel.options).some((o) => o.value === prior)) sel.value = prior;
   });
   if (!whisperRows.length) initGodWhisperRows();
+  const crowdRows = document.querySelectorAll("#godCrowdRows .god-crowd-row");
+  crowdRows.forEach((row) => {
+    const sel = row.querySelector(".god-crowd-agent");
+    if (!sel) return;
+    const prior = sel.value;
+    const priorId = prior ? parseInt(prior, 10) : null;
+    const pick = (priorId != null && getLivingAgents().some((a) => a.id === priorId))
+      ? priorId
+      : preferred;
+    sel.innerHTML = godAgentOptionsHtml(pick);
+    if (prior && Array.from(sel.options).some((o) => o.value === prior)) sel.value = prior;
+  });
+  if (!crowdRows.length) initGodCrowdRows();
+  const dreamAgentsEl = document.getElementById("godDreamBroadcastAgents");
+  if (dreamAgentsEl) {
+    const selected = new Set(Array.from(dreamAgentsEl.selectedOptions || []).map((o) => o.value));
+    const q = godAgentFilterText();
+    let agents = getLivingAgents();
+    if (q) {
+      agents = agents.filter((a) =>
+        String(a.name || "").toLowerCase().includes(q)
+        || String(a.role || "").toLowerCase().includes(q)
+        || String(a.id).includes(q)
+      );
+    }
+    dreamAgentsEl.innerHTML = agents.map((a) =>
+      `<option value="${a.id}">${escapeHtml(a.name)} (#${a.id})</option>`
+    ).join("") || "";
+    Array.from(dreamAgentsEl.options).forEach((o) => { o.selected = selected.has(o.value); });
+  }
   populateGodPinActionSelects();
 }
 
@@ -3026,6 +3459,11 @@ function populateGodPinActionSelects() {
   ["godCompulsionAction", "godPossessionAction", "godVetoRewriteAction"].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
+    const prior = el.value;
+    el.innerHTML = html;
+    if (prior && Array.from(el.options).some((o) => o.value === prior)) el.value = prior;
+  });
+  document.querySelectorAll("#godCrowdRows .god-crowd-action").forEach((el) => {
     const prior = el.value;
     el.innerHTML = html;
     if (prior && Array.from(el.options).some((o) => o.value === prior)) el.value = prior;
@@ -3052,7 +3490,7 @@ async function godApiFetch(path, opts) {
   let data = null;
   try { data = await res.json(); } catch (err) { data = null; }
   if (res.status === 401) {
-    godLockConsole("Authorization failed — token cleared. Re-enter it to continue.");
+    godLockConsole("Sign-in failed — token cleared. Enter your secret token again.");
   }
   return { ok: res.ok, status: res.status, data: data || { ok: false, reason: `HTTP ${res.status}` } };
 }
@@ -3079,40 +3517,742 @@ function godInterventionCount() {
   return gs.length;
 }
 
+function godVoiceGuidanceInWindow(record) {
+  if (!record || typeof record !== "object") return false;
+  const now = world.frameTick || 0;
+  const exp = Number(record.expiresFrame);
+  if (Number.isFinite(exp) && now >= exp) return false;
+  const created = Number(record.createdFrame);
+  if (Number.isFinite(created) && now < created) return false;
+  return true;
+}
+
+function godProvidenceIsActive() {
+  const prov = (godLastSight && godLastSight.providence) || (world.god && world.god.providence);
+  return godVoiceGuidanceInWindow(prov);
+}
+
+function godActiveEventsList() {
+  if (godEffectivelyAuthorized() && godLastSight && godLastSight.activeEvents) {
+    return (godLastSight.activeEvents || []).filter((e) => e && e.status === "active");
+  }
+  return ((world.god && world.god.activePublicEvents) || []).filter((e) => e && e.status === "active");
+}
+
+function godLawEventsList() {
+  return godActiveEventsList().filter((e) => e.modifiers && Object.keys(e.modifiers).length);
+}
+
+function godBarPrivateCounts() {
+  if (!godEffectivelyAuthorized() || !godLastSight) return null;
+  const agents = godLastSight.agents || [];
+  return {
+    omenCount: agents.filter((a) => a.omen).length,
+    gateCount: agents.filter((a) => a.decisionGate || a.divineHold).length,
+    samplingCount: agents.filter((a) => a.sampling).length,
+    zoneCount: (godLastSight.architectZones || []).length,
+  };
+}
+
+function godBarSituationalSnapshot() {
+  const privateCounts = godBarPrivateCounts();
+  const activeEvents = godActiveEventsList();
+  const lawEvents = godLawEventsList();
+  const providenceOn = godProvidenceIsActive();
+  const voiceActivity = providenceOn
+    ? 1 + (privateCounts ? privateCounts.omenCount : 0)
+    : (privateCounts ? privateCounts.omenCount : 0);
+  const matrixAggregate = privateCounts
+    ? privateCounts.gateCount + privateCounts.samplingCount + privateCounts.zoneCount
+    : 0;
+  return {
+    providenceOn,
+    privateCounts,
+    activeEventCount: activeEvents.length,
+    lawEventCount: lawEvents.length,
+    voiceActivity,
+    matrixAggregate,
+  };
+}
+
+function openDivineBarEffectTarget(feature, scrollTargetId) {
+  if (!feature) return;
+  openDivineModal(feature);
+  godScrollDivineFieldset(scrollTargetId);
+}
+
+function godScrollDivineFieldset(fieldsetId) {
+  if (!fieldsetId) return;
+  requestAnimationFrame(() => {
+    const el = document.getElementById(fieldsetId);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+function godSightIntervene(agentId, feature, fieldsetId) {
+  if (agentId != null) {
+    setGodFocusAgent(agentId, { mirrorSelection: true, centerCamera: true });
+  }
+  openDivineModal(feature);
+  godScrollDivineFieldset(fieldsetId);
+  if (feature === "miracles" && fieldsetId === "godVitalsFieldset") {
+    const agent = (godLastSight && (godLastSight.agents || []).find((a) => a.id === agentId))
+      || getLivingAgents().find((a) => a.id === agentId);
+    const healthEl = document.getElementById("godVitalsHealth");
+    if (agent && healthEl && Number(agent.health) < 80) {
+      healthEl.value = String(Math.min(30, Math.max(5, Math.ceil((80 - Number(agent.health)) / 5) * 5)));
+    }
+  }
+}
+
+function godSightInterveneButtonsHtml(agentId) {
+  const id = Number(agentId);
+  if (!Number.isFinite(id)) return "";
+  return (
+    `<div class="god-sight-intervene-row">` +
+    `<button type="button" class="god-sight-intervene-btn" data-agent-id="${id}" data-feature="voice" data-fieldset="godOmenFieldset">Omen</button>` +
+    `<button type="button" class="god-sight-intervene-btn" data-agent-id="${id}" data-feature="miracles" data-fieldset="godVitalsFieldset">Heal</button>` +
+    `<button type="button" class="god-sight-intervene-btn" data-agent-id="${id}" data-feature="matrix" data-fieldset="godPossessionFieldset">Possess</button>` +
+    `<button type="button" class="god-sight-intervene-btn" data-agent-id="${id}" data-feature="matrix" data-fieldset="godSamplingFieldset">Sampling</button>` +
+    `</div>`
+  );
+}
+
+function godSightGateSummary(gate) {
+  if (!gate) return "none";
+  const parts = [gate.mode || "?", gate.status || "active"];
+  if (gate.armed) parts.push("armed");
+  if (gate.pinnedAction) parts.push(`pin=${gate.pinnedAction}`);
+  return parts.join(", ");
+}
+
+function godSightAgentDiffFields(agent) {
+  return {
+    health: agent.health,
+    hunger: agent.hunger,
+    lastAction: agent.lastAction || null,
+    divineHold: !!agent.divineHold,
+    decisionGate: agent.decisionGate
+      ? {
+        mode: agent.decisionGate.mode || null,
+        status: agent.decisionGate.status || null,
+        armed: !!agent.decisionGate.armed,
+        pinnedAction: agent.decisionGate.pinnedAction || null,
+      }
+      : null,
+  };
+}
+
+function godSightAgentChangeLines(prevAgent, nextAgent) {
+  const lines = [];
+  if (prevAgent.health !== nextAgent.health) {
+    lines.push(`health ${prevAgent.health}→${nextAgent.health}`);
+  }
+  if (prevAgent.hunger !== nextAgent.hunger) {
+    lines.push(`hunger ${prevAgent.hunger}→${nextAgent.hunger}`);
+  }
+  if ((prevAgent.lastAction || null) !== (nextAgent.lastAction || null)) {
+    lines.push(`lastAction ${prevAgent.lastAction || "—"}→${nextAgent.lastAction || "—"}`);
+  }
+  if (!!prevAgent.divineHold !== !!nextAgent.divineHold) {
+    lines.push(`divineHold ${prevAgent.divineHold ? "on" : "off"}→${nextAgent.divineHold ? "on" : "off"}`);
+  }
+  const pg = godSightGateSummary(prevAgent.decisionGate);
+  const ng = godSightGateSummary(nextAgent.decisionGate);
+  if (pg !== ng) lines.push(`gate ${pg}→${ng}`);
+  return lines;
+}
+
+function godSightPulseCardHtml(pulse) {
+  if (!pulse || typeof pulse !== "object") return "";
+  const crisis = (pulse.crisisAgents || []).slice(0, 8);
+  const crisisHtml = crisis.length
+    ? crisis.map((c) =>
+      `<span class="god-sight-pulse-crisis">${escapeHtml(c.name)} (${escapeHtml(c.reason)})</span>`
+    ).join(", ")
+    : "none";
+  const stock = Object.entries(pulse.stockpileTotals || {})
+    .map(([k, v]) => `${escapeHtml(k)} ${escapeHtml(String(v))}`)
+    .join(", ") || "empty";
+  const sage = pulse.sageStatus || {};
+  const sageLine = sage.present
+    ? `${escapeHtml(sage.name || "Elder")} (${escapeHtml(sage.role || "elder")}) — ${escapeHtml(sage.status || "?")}, H${escapeHtml(String(sage.health ?? "?"))} / hunger ${escapeHtml(String(sage.hunger ?? "?"))}`
+    : escapeHtml(sage.status || "absent");
+  const weather = pulse.weather || {};
+  const weatherLine = `${escapeHtml(String(weather.state || "clear"))}${(weather.districts || []).length ? ` (${escapeHtml((weather.districts || []).join(", "))})` : ""}`;
+  const events = (pulse.activeEventTitles || [])
+    .map((t) => escapeHtml(String(t))).join(", ") || "none";
+  const prov = pulse.providence || {};
+  const provLine = prov.active
+    ? `active${prov.expiresFrame != null ? `, ${escapeHtml(godCountdownLabel(prov.expiresFrame))}` : ""}`
+    : "off";
+  return (
+    `<div class="god-sight-pulse-card">` +
+    `<div class="god-sight-pulse-title">Village pulse</div>` +
+    `<div class="god-sight-pulse-row"><span class="divine-kv-key">Crisis:</span> ${crisisHtml}</div>` +
+    `<div class="god-sight-pulse-row"><span class="divine-kv-key">Stockpile:</span> ${stock}</div>` +
+    `<div class="god-sight-pulse-row"><span class="divine-kv-key">Open projects:</span> ${escapeHtml(String(pulse.openProjectsCount ?? 0))}</div>` +
+    `<div class="god-sight-pulse-row"><span class="divine-kv-key">Sage:</span> ${sageLine}</div>` +
+    `<div class="god-sight-pulse-row"><span class="divine-kv-key">Weather:</span> ${weatherLine}</div>` +
+    `<div class="god-sight-pulse-row"><span class="divine-kv-key">Active events:</span> ${events}</div>` +
+    `<div class="god-sight-pulse-row"><span class="divine-kv-key">Providence:</span> ${provLine}</div>` +
+    `</div>`
+  );
+}
+
+function godSightDiffStripHtml(prevSight, nextSight, focusId) {
+  if (prevSight === undefined) return "";
+  if (!prevSight || !nextSight) {
+    return `<div class="god-sight-diff-strip god-sight-diff-first">First look — no prior snapshot to diff.</div>`;
+  }
+  const prevMap = new Map((prevSight.agents || []).map((a) => [a.id, a]));
+  const focusLines = [];
+  const otherLines = [];
+  for (const agent of (nextSight.agents || [])) {
+    const prev = prevMap.get(agent.id);
+    if (!prev) continue;
+    const changes = godSightAgentChangeLines(prev, agent);
+    if (!changes.length) continue;
+    const text = changes.join("; ");
+    const row = `<span class="god-sight-diff-entry">${escapeHtml(agent.name)}: ${escapeHtml(text)}</span>`;
+    if (agent.id === focusId) focusLines.push(row);
+    else otherLines.push(row);
+  }
+  if (!focusLines.length && !otherLines.length) {
+    return `<div class="god-sight-diff-strip god-sight-diff-none">No changes since last look.</div>`;
+  }
+  const compactOthers = otherLines.slice(0, 5);
+  const overflow = otherLines.length > 5
+    ? `<span class="god-sight-diff-more">+${otherLines.length - 5} more agents</span>`
+    : "";
+  return (
+    `<div class="god-sight-diff-strip">` +
+    `<div class="god-sight-diff-title">Changed since last look</div>` +
+    (focusLines.length ? `<div class="god-sight-diff-focus">${focusLines.join("")}</div>` : "") +
+    (compactOthers.length ? `<div class="god-sight-diff-others">${compactOthers.join("")}${overflow}</div>` : "") +
+    `</div>`
+  );
+}
+
+function godCloneSightForDiff(sight) {
+  if (!sight) return null;
+  return {
+    agents: (sight.agents || []).map((a) => ({
+      id: a.id,
+      name: a.name,
+      ...godSightAgentDiffFields(a),
+    })),
+  };
+}
+
+function renderDivineBarEffects() {
+  if (!divineBarEffectsEl || !GOD_MODE_ENABLED_FLAG) return;
+  if (!godEffectivelyAuthorized()) {
+    divineBarEffectsEl.innerHTML = "";
+    return;
+  }
+  const snap = godBarSituationalSnapshot();
+  const chips = [];
+  chips.push({
+    key: "providence",
+    label: snap.providenceOn ? "Providence on" : "Providence off",
+    cls: snap.providenceOn ? "active" : "inactive",
+    feature: "voice",
+    scroll: "godProvidenceFieldset",
+  });
+  if (snap.privateCounts) {
+    if (snap.privateCounts.omenCount > 0) {
+      chips.push({
+        key: "omens",
+        label: `Omens ${snap.privateCounts.omenCount}`,
+        cls: "active",
+        feature: "voice",
+        scroll: "godOmenFieldset",
+      });
+    }
+    if (snap.privateCounts.gateCount > 0) {
+      chips.push({
+        key: "gates",
+        label: `Gates ${snap.privateCounts.gateCount}`,
+        cls: "active",
+        feature: "matrix",
+        scroll: "matrix-sec-will",
+      });
+    }
+    if (snap.privateCounts.zoneCount > 0) {
+      chips.push({
+        key: "zones",
+        label: `Zones ${snap.privateCounts.zoneCount}`,
+        cls: "active",
+        feature: "matrix",
+        scroll: "matrix-sec-place",
+      });
+    }
+    if (snap.privateCounts.samplingCount > 0) {
+      chips.push({
+        key: "sampling",
+        label: `Sampling ${snap.privateCounts.samplingCount}`,
+        cls: "active",
+        feature: "matrix",
+        scroll: "matrix-sec-mind",
+      });
+    }
+  }
+  if (snap.activeEventCount > 0) {
+    chips.push({
+      key: "events",
+      label: `Events ${snap.activeEventCount}`,
+      cls: "active",
+      feature: "laws",
+      scroll: "godLawsActive",
+    });
+  }
+  divineBarEffectsEl.innerHTML = chips.map((c) =>
+    `<button type="button" class="divine-effect-chip ${c.cls}" data-effect="${escapeHtml(c.key)}" ` +
+    `data-feature="${escapeHtml(c.feature)}" data-scroll="${escapeHtml(c.scroll || "")}" ` +
+    `title="${escapeHtml(c.label)}">${escapeHtml(c.label)}</button>`
+  ).join("");
+}
+
+function updateDivineBarPips() {
+  if (!GOD_MODE_ENABLED_FLAG || !godEffectivelyAuthorized()) {
+    [divineVoicePipEl, divineLawsPipEl, divineMatrixPipEl].forEach((el) => {
+      if (!el) return;
+      el.hidden = true;
+      el.textContent = "";
+      el.setAttribute("aria-hidden", "true");
+    });
+    return;
+  }
+  const snap = godBarSituationalSnapshot();
+  if (divineVoicePipEl) {
+    if (snap.voiceActivity > 0) {
+      divineVoicePipEl.hidden = false;
+      divineVoicePipEl.textContent = String(snap.voiceActivity);
+      divineVoicePipEl.setAttribute("aria-hidden", "false");
+    } else {
+      divineVoicePipEl.hidden = true;
+      divineVoicePipEl.textContent = "";
+      divineVoicePipEl.setAttribute("aria-hidden", "true");
+    }
+  }
+  if (divineLawsPipEl) {
+    const n = snap.lawEventCount || snap.activeEventCount;
+    if (n > 0) {
+      divineLawsPipEl.hidden = false;
+      divineLawsPipEl.textContent = String(n);
+      divineLawsPipEl.setAttribute("aria-hidden", "false");
+    } else {
+      divineLawsPipEl.hidden = true;
+      divineLawsPipEl.textContent = "";
+      divineLawsPipEl.setAttribute("aria-hidden", "true");
+    }
+  }
+  if (divineMatrixPipEl) {
+    if (snap.matrixAggregate > 0) {
+      divineMatrixPipEl.hidden = false;
+      divineMatrixPipEl.textContent = String(snap.matrixAggregate);
+      divineMatrixPipEl.setAttribute("aria-hidden", "false");
+    } else {
+      divineMatrixPipEl.hidden = true;
+      divineMatrixPipEl.textContent = "";
+      divineMatrixPipEl.setAttribute("aria-hidden", "true");
+    }
+  }
+}
+
+function updateDivineBarSituational() {
+  renderDivineBarEffects();
+  updateDivineBarPips();
+}
+
+function pulseDivineBar() {
+  if (!divineBarEl) return;
+  divineBarEl.classList.remove("divine-bar-pulse");
+  void divineBarEl.offsetWidth;
+  divineBarEl.classList.add("divine-bar-pulse");
+  if (godBarPulseTimer) clearTimeout(godBarPulseTimer);
+  godBarPulseTimer = setTimeout(() => {
+    if (divineBarEl) divineBarEl.classList.remove("divine-bar-pulse");
+    godBarPulseTimer = null;
+  }, 950);
+}
+
+function divineModalIsOpen() {
+  return !!(divineModalScrimEl && divineModalScrimEl.classList.contains("open"));
+}
+
+function godSightEagerRefreshModal() {
+  const feat = divineModalOpenFeature;
+  return feat === "sight" || feat === "voice";
+}
+
+async function maybeRefreshGodSight() {
+  if (!GOD_MODE_ENABLED_FLAG || !godEffectivelyAuthorized()) return;
+  const modalOpen = divineModalOpenFeature;
+  if (modalOpen && !godSightEagerRefreshModal()) return;
+  const throttleMs = godSightEagerRefreshModal()
+    ? GOD_SIGHT_MODAL_REFRESH_MS
+    : GOD_SIGHT_BAR_REFRESH_MS;
+  const stale = !godLastSight || (Date.now() - godLastSightFetchedAt > throttleMs);
+  if (!stale || godSightBarRefreshInFlight) return;
+  godSightBarRefreshInFlight = true;
+  try {
+    await refreshGodSight();
+  } finally {
+    godSightBarRefreshInFlight = false;
+  }
+}
+
+const GOD_ARCHITECT_ZONE_OVERLAY_COLORS = {
+  paint: "rgba(255, 193, 58, 0.72)",
+  door: "rgba(80, 220, 240, 0.72)",
+  limbo: "rgba(180, 120, 255, 0.78)",
+};
+
+function drawDivineAgentRing(ctx, x, y, radius, stroke, lineWidth, dash) {
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y - 8, radius, 0, Math.PI * 2);
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = lineWidth;
+  if (dash && dash.length) ctx.setLineDash(dash);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawDivineSightOverlays(ctx, frameTick) {
+  if (!GOD_MODE_ENABLED_FLAG || !divineModalIsOpen()) return;
+
+  const focusId = godFocusAgentId != null ? godFocusAgentId : selectedAgentId;
+  const worldAgents = getAgents();
+  if (focusId != null) {
+    const focusAgent = worldAgents.find((a) => a.id === focusId && !a.deceased);
+    if (focusAgent) {
+      const pulse = 0.85 + 0.15 * Math.sin((frameTick || 0) * 0.14);
+      drawDivineAgentRing(
+        ctx, focusAgent.x, focusAgent.y, 22 * pulse,
+        "rgba(255, 210, 90, 0.95)", 2.5, null
+      );
+    }
+  }
+
+  if (!godEffectivelyAuthorized() || !godLastSight) return;
+
+  const zones = godLastSight.architectZones || [];
+  for (const zone of zones) {
+    const bounds = zone.districtId ? getDistrictBounds(zone.districtId) : null;
+    if (!bounds) continue;
+    const color = GOD_ARCHITECT_ZONE_OVERLAY_COLORS[zone.kind] || "rgba(200, 200, 200, 0.55)";
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = zone.kind === "limbo" ? 3 : 2;
+    ctx.setLineDash(zone.kind === "paint" ? [10, 6] : [6, 4]);
+    ctx.strokeRect(
+      bounds.x1, bounds.y1,
+      bounds.x2 - bounds.x1, bounds.y2 - bounds.y1
+    );
+    ctx.restore();
+  }
+
+  const sightAgents = godLastSight.agents || [];
+  for (const sa of sightAgents) {
+    const agent = worldAgents.find((a) => a.id === sa.id);
+    if (!agent || agent.deceased) continue;
+    const limboHold = sa.divineHold || (sa.architectLimbo && sa.architectLimbo.active);
+    if (limboHold) {
+      const pulse = 0.9 + 0.1 * Math.sin((frameTick || 0) * 0.18 + sa.id);
+      drawDivineAgentRing(
+        ctx, agent.x, agent.y, 26 * pulse,
+        "rgba(160, 90, 255, 0.88)", 2, [4, 3]
+      );
+    }
+    if (sa.anointment && sa.anointment.active) {
+      const pulse = 0.92 + 0.08 * Math.sin((frameTick || 0) * 0.12 + sa.id * 0.7);
+      drawDivineAgentRing(
+        ctx, agent.x, agent.y, 30 * pulse,
+        "rgba(255, 170, 90, 0.75)", 1.5, null
+      );
+    }
+  }
+}
+
 let divinePreviewController = null;
 let divinePreviewOwnerForm = null;
 let godLastAppliedPin = null;
+
+const DIVINE_FAVORITES_KEY = "divineFavorites";
+const DIVINE_FAVORITES_MAX = 4;
+
+function godFormIsIrreversible(formEl) {
+  return !!(formEl && formEl.classList.contains("divine-fieldset-irreversible"));
+}
+
+function godFormTargetAgentName(formEl) {
+  if (!formEl) return null;
+  const sel = formEl.querySelector("select[id*='Agent']");
+  if (sel && sel.value) {
+    const id = Number(sel.value);
+    const agent = getLivingAgents().find((a) => a.id === id);
+    if (agent) return agent.name;
+  }
+  const pref = godPreferredAgentId();
+  if (pref != null) {
+    const agent = getLivingAgents().find((a) => a.id === pref);
+    if (agent) return agent.name;
+  }
+  return null;
+}
+
+function godIrreversibleConfirmTextMatches(formEl) {
+  const expected = godFormTargetAgentName(formEl);
+  if (!expected) return false;
+  const input = document.getElementById("divineIrreversibleConfirmInput");
+  if (!input) return false;
+  return input.value.trim().toLowerCase() === expected.trim().toLowerCase();
+}
+
+function godResolveIrreversibleForm(formEl, getOwnerForm) {
+  if (formEl) return formEl;
+  if (typeof getOwnerForm === "function") return getOwnerForm();
+  return divinePreviewOwnerForm;
+}
+
+function godBindIrreversibleApply(btn, formEl, applyFn, hintEl, getOwnerForm) {
+  if (!btn) return;
+  let holdTimer = null;
+  let appliedViaHold = false;
+
+  function ownerForm() {
+    return godResolveIrreversibleForm(formEl, getOwnerForm);
+  }
+
+  function clearHold() {
+    if (holdTimer) {
+      clearTimeout(holdTimer);
+      holdTimer = null;
+    }
+    btn.classList.remove("divine-apply-holding");
+  }
+
+  function showHint() {
+    if (!hintEl) return;
+    const name = godFormTargetAgentName(ownerForm());
+    renderGodError(hintEl, name
+      ? `Irreversible: hold Apply ~0.4s or type "${name}" in the confirm field.`
+      : "Irreversible: hold Apply ~0.4s to confirm.");
+  }
+
+  function guardedApply(fromHold) {
+    const owner = ownerForm();
+    if (!godFormIsIrreversible(owner)) {
+      applyFn();
+      return;
+    }
+    if (fromHold || godIrreversibleConfirmTextMatches(owner)) {
+      clearHold();
+      applyFn();
+      return;
+    }
+    showHint();
+  }
+
+  btn.addEventListener("mousedown", (e) => {
+    if (e.button !== 0 || btn.disabled) return;
+    const owner = ownerForm();
+    if (!godFormIsIrreversible(owner)) return;
+    if (godIrreversibleConfirmTextMatches(owner)) return;
+    appliedViaHold = false;
+    btn.classList.add("divine-apply-holding");
+    holdTimer = setTimeout(() => {
+      holdTimer = null;
+      appliedViaHold = true;
+      btn.classList.remove("divine-apply-holding");
+      if (!btn.disabled) applyFn();
+    }, 400);
+  });
+  btn.addEventListener("mouseup", clearHold);
+  btn.addEventListener("mouseleave", clearHold);
+  btn.addEventListener("click", (e) => {
+    if (btn.disabled) return;
+    const owner = ownerForm();
+    if (!godFormIsIrreversible(owner)) {
+      applyFn();
+      return;
+    }
+    if (appliedViaHold) {
+      appliedViaHold = false;
+      e.preventDefault();
+      return;
+    }
+    if (godIrreversibleConfirmTextMatches(owner)) {
+      applyFn();
+      return;
+    }
+    e.preventDefault();
+    showHint();
+  });
+}
+
+function loadDivineFavorites() {
+  try {
+    const raw = sessionStorage.getItem(DIVINE_FAVORITES_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.slice(0, DIVINE_FAVORITES_MAX) : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function saveDivineFavorites(favs) {
+  try {
+    sessionStorage.setItem(DIVINE_FAVORITES_KEY, JSON.stringify(favs.slice(0, DIVINE_FAVORITES_MAX)));
+  } catch (err) { /* ignore */ }
+  renderDivineFavoritesBar();
+}
+
+function renderDivineFavoritesBar() {
+  const el = document.getElementById("divineBarFavorites");
+  if (!el) return;
+  const favs = loadDivineFavorites();
+  if (!favs.length) {
+    el.innerHTML = "";
+    return;
+  }
+  el.innerHTML = favs.map((f, i) =>
+    `<button type="button" class="divine-fav-chip" data-fav-index="${i}" title="${escapeHtml(f.label || f.feature)}">${escapeHtml(f.label || f.feature)}</button>`
+  ).join("");
+}
+
+function godDetectModalScrollTarget() {
+  if (!divineModalBodyEl) return { fieldsetId: null, sectionId: null, label: null };
+  const scrollRoot = divineModalBodyEl;
+  const rootRect = scrollRoot.getBoundingClientRect();
+  const candidates = scrollRoot.querySelectorAll(".divine-fieldset[id], .divine-matrix-section[id], .divine-voice-adherence-section");
+  let best = null;
+  let bestTop = Infinity;
+  candidates.forEach((node) => {
+    const r = node.getBoundingClientRect();
+    if (r.bottom < rootRect.top + 40 || r.top > rootRect.bottom) return;
+    if (r.top < bestTop) {
+      bestTop = r.top;
+      best = node;
+    }
+  });
+  if (!best) return { fieldsetId: null, sectionId: null, label: DIVINE_FEATURES[divineModalOpenFeature]?.title || divineModalOpenFeature };
+  const fieldsetId = best.classList.contains("divine-fieldset") ? best.id : null;
+  const sectionId = best.classList.contains("divine-matrix-section") ? best.id : null;
+  let label = best.querySelector("legend")?.textContent?.trim()
+    || best.querySelector(".divine-section-title")?.textContent?.trim();
+  if (!label) label = DIVINE_FEATURES[divineModalOpenFeature]?.title || divineModalOpenFeature;
+  return {
+    fieldsetId: fieldsetId || (best.closest(".divine-fieldset") && best.closest(".divine-fieldset").id) || null,
+    sectionId,
+    label: String(label).slice(0, 48),
+  };
+}
+
+function pinDivineFavoriteFromModal() {
+  if (!divineModalOpenFeature) return;
+  const target = godDetectModalScrollTarget();
+  const fav = {
+    feature: divineModalOpenFeature,
+    label: target.label || DIVINE_FEATURES[divineModalOpenFeature]?.title || divineModalOpenFeature,
+  };
+  if (target.fieldsetId) fav.fieldsetId = target.fieldsetId;
+  else if (target.sectionId) fav.fieldsetId = target.sectionId;
+  const favs = loadDivineFavorites().filter((f) =>
+    !(f.feature === fav.feature && f.fieldsetId === fav.fieldsetId)
+  );
+  favs.unshift(fav);
+  saveDivineFavorites(favs.slice(0, DIVINE_FAVORITES_MAX));
+}
+
+function openDivineFavorite(fav) {
+  if (!fav || !fav.feature) return;
+  openDivineModal(fav.feature);
+  godScrollDivineFieldset(fav.fieldsetId);
+}
+
+function godVisibleBarFeatures() {
+  if (!divineBarEl) return [];
+  return Array.from(divineBarEl.querySelectorAll(".gbtn")).filter((btn) => {
+    if (btn.style.display === "none") return false;
+    if (btn.classList.contains("unlock") && !GOD_AUTH_REQUIRED_FLAG) return false;
+    if (btn.classList.contains("compile") && btn.id === "godCompileTabBtn" && btn.style.display === "none") return false;
+    return true;
+  }).map((btn) => btn.dataset.feature).filter(Boolean);
+}
+
+function divineModalTypingTarget() {
+  const ae = document.activeElement;
+  if (!ae) return false;
+  const tag = ae.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
 
 function clearDivinePreviewStrip() {
   divinePreviewController = null;
   divinePreviewOwnerForm = null;
   if (divinePreviewStripEl) divinePreviewStripEl.classList.remove("visible");
+  const confirmWrap = document.getElementById("divineIrreversibleConfirmWrap");
+  const confirmInput = document.getElementById("divineIrreversibleConfirmInput");
+  if (confirmWrap) confirmWrap.hidden = true;
+  if (confirmInput) confirmInput.value = "";
 }
 
-function showDivinePreviewStrip(label, data, applyFn, discardFn) {
+function updateDivineIrreversibleConfirmUi(formEl) {
+  const wrap = document.getElementById("divineIrreversibleConfirmWrap");
+  const input = document.getElementById("divineIrreversibleConfirmInput");
+  if (!wrap || !input) return;
+  const irreversible = formEl && formEl.classList.contains("divine-fieldset-irreversible");
+  const name = irreversible ? godFormTargetAgentName(formEl) : null;
+  wrap.hidden = !irreversible;
+  input.placeholder = name ? `Type "${name}" to apply` : "Hold Apply ~0.4s";
+  if (!irreversible) input.value = "";
+}
+
+function showDivinePreviewStrip(label, data, applyFn, discardFn, ownerForm) {
   if (!divinePreviewStripEl) return;
   divinePreviewController = { label, data, applyFn, discardFn };
+  divinePreviewOwnerForm = ownerForm || null;
+  updateDivineIrreversibleConfirmUi(ownerForm);
   if (divinePreviewStripLabelEl) {
     const kind = data.normalizedCommand && data.normalizedCommand.kind;
-    divinePreviewStripLabelEl.innerHTML =
-      godReversibilityBadge(data.reversibilityClass) +
+    let html = godReversibilityBadge(data.reversibilityClass) +
       `<span>${escapeHtml(label || kind || "command")} — preview ready</span>`;
+    html += renderGodPreviewWarningsHtml(data.warnings);
+    divinePreviewStripLabelEl.innerHTML = html;
   }
   divinePreviewStripEl.classList.add("visible");
 }
 
 function renderGodPinRow() {
-  if (!divineModalBodyEl || !godLastAppliedPin) return;
+  if (!divineModalBodyEl) return;
   let pin = document.getElementById("divinePinRow");
+  if (!godLastAppliedPin && !godFindRevokeTarget()) {
+    if (pin) pin.remove();
+    return;
+  }
   if (!pin) {
     pin = document.createElement("div");
     pin.id = "divinePinRow";
     pin.className = "divine-pin-row";
-    divineModalBodyEl.insertBefore(pin, divineModalBodyEl.firstChild);
+    const guide = document.getElementById("divineFeatureGuide");
+    divineModalBodyEl.insertBefore(pin, guide ? guide.nextSibling : divineModalBodyEl.firstChild);
   }
-  const p = godLastAppliedPin;
-  pin.innerHTML = `Last applied: <strong>${escapeHtml(p.label)}</strong> (id ${escapeHtml(String(p.id))}) — ` +
-    `<a href="#" id="divinePinHistoryLink">View in History</a>`;
+  let html = "";
+  if (godLastAppliedPin) {
+    const p = godLastAppliedPin;
+    html += `Last applied: <strong>${escapeHtml(p.label)}</strong> (id ${escapeHtml(String(p.id))}) — ` +
+      `<a href="#" id="divinePinHistoryLink">View in History</a>`;
+  }
+  const revokeTarget = godFindRevokeTarget();
+  if (revokeTarget) {
+    html += ` <button type="button" class="divine-pin-revoke" id="divinePinRevokeBtn" ` +
+      `data-id="${escapeHtml(String(revokeTarget.id))}">Revoke last cancellable</button>`;
+  }
+  pin.innerHTML = html;
   const link = document.getElementById("divinePinHistoryLink");
   if (link) {
     link.addEventListener("click", (e) => {
@@ -3120,12 +4260,28 @@ function renderGodPinRow() {
       openDivineModal("history");
     });
   }
+  const revokeBtn = document.getElementById("divinePinRevokeBtn");
+  if (revokeBtn) {
+    revokeBtn.addEventListener("click", async () => {
+      revokeBtn.disabled = true;
+      const resp = await godCancelEffect(revokeBtn.dataset.id);
+      if (!resp.data || !resp.data.cancelled) {
+        revokeBtn.disabled = false;
+        const reason = (resp.data && resp.data.reason) || "nothing to cancel";
+        window.alert(`Revoke failed: ${reason}`);
+      } else {
+        renderGodPinRow();
+        if (godActiveTab === "history") renderGodHistory();
+        if (godActiveTab === "laws") renderGodLawsActive();
+      }
+    });
+  }
 }
 
 if (divinePreviewApplyBtnEl) {
-  divinePreviewApplyBtnEl.addEventListener("click", () => {
+  godBindIrreversibleApply(divinePreviewApplyBtnEl, null, () => {
     if (divinePreviewController && divinePreviewController.applyFn) divinePreviewController.applyFn();
-  });
+  }, null, () => divinePreviewOwnerForm);
 }
 if (divinePreviewDiscardBtnEl) {
   divinePreviewDiscardBtnEl.addEventListener("click", () => {
@@ -3178,6 +4334,7 @@ function updateDivineBarAuthUi() {
     // Compile stays dual-gated by capabilities display; still lock-disable when unauthorized.
     btn.disabled = !effective;
   });
+  updateDivineBarSituational();
 }
 
 function godLockConsole(message) {
@@ -3189,8 +4346,9 @@ function godLockConsole(message) {
   godAuthorized = false;
   godCapabilities = null;
   godLastSight = null;
+  godLastSightFetchedAt = 0;
   try { sessionStorage.removeItem("godToken"); } catch (err) { /* ignore */ }
-  updateGodAuthStatus(message || "Locked.", "divine-status-locked");
+  updateGodAuthStatus(message || "Locked — enter your secret token.", "divine-status-locked");
   updateDivineBarAuthUi();
   if (GOD_MODE_ENABLED_FLAG) openDivineModal("unlock");
   else {
@@ -3215,7 +4373,7 @@ async function godOpenModeBootstrap() {
 
 async function godConnect(tokenValue) {
   if (!tokenValue) {
-    updateGodAuthStatus("Enter a token first.", "divine-status-locked");
+    updateGodAuthStatus("Enter your secret token first.", "divine-status-locked");
     return;
   }
   godToken = tokenValue;
@@ -3223,7 +4381,7 @@ async function godConnect(tokenValue) {
   if (resp.ok && resp.data && resp.data.ok) {
     godAuthorized = true;
     godCapabilities = resp.data;
-    updateGodAuthStatus("Authorized.", "divine-status-ok");
+    updateGodAuthStatus("Connected — Divine tools unlocked.", "divine-status-ok");
     updateDivineBarAuthUi();
     applyGodCapabilitiesToForms();
     populateGodAgentSelects();
@@ -3232,7 +4390,7 @@ async function godConnect(tokenValue) {
     godToken = null;
     godAuthorized = false;
     updateDivineBarAuthUi();
-    updateGodAuthStatus("Unauthorized — check the token (or god mode may be disabled).", "divine-status-locked");
+    updateGodAuthStatus("Could not connect — check your token.", "divine-status-locked");
   }
 }
 
@@ -3251,11 +4409,19 @@ function applyGodCapabilitiesToForms() {
     if (field.default != null && !el.value) el.value = field.default;
     if (field.maxChars != null) el.maxLength = field.maxChars;
   };
+  const setDurationBounds = (id, framesField) => {
+    if (!framesField) return;
+    setBounds(id, {
+      min: framesField.min != null ? godFramesToSeconds(framesField.min) : undefined,
+      max: framesField.max != null ? godFramesToSeconds(framesField.max) : undefined,
+      default: framesField.default != null ? godFramesToSeconds(framesField.default) : undefined,
+    });
+  };
   const prov = (kinds.providence || {}).payload || {};
-  setBounds("godProvDuration", prov.durationFrames);
+  setDurationBounds("godProvDuration", prov.durationFrames);
   setBounds("godProvText", prov.text);
   const omen = (kinds.private_omen || {}).payload || {};
-  setBounds("godOmenDuration", omen.durationFrames);
+  setDurationBounds("godOmenDuration", omen.durationFrames);
   setBounds("godOmenText", omen.text);
   const proc = (kinds.proclamation || {}).payload || {};
   setBounds("godProcText", proc.text);
@@ -3269,10 +4435,10 @@ function applyGodCapabilitiesToForms() {
   const story = (kinds.story_event || {}).payload || {};
   setBounds("godStoryTitle", story.title);
   setBounds("godStoryNarration", story.narration);
-  setBounds("godStoryDuration", story.durationFrames);
-  setBounds("godLawDuration", story.durationFrames);
+  setDurationBounds("godStoryDuration", story.durationFrames);
+  setDurationBounds("godLawDuration", story.durationFrames);
   const sampling = (kinds.agent_sampling || {}).payload || {};
-  setBounds("godSamplingDuration", sampling.durationFrames);
+  setDurationBounds("godSamplingDuration", sampling.durationFrames);
   if (sampling.temperature) {
     setBounds("godSamplingTemp", sampling.temperature);
     const tempEl = document.getElementById("godSamplingTemp");
@@ -3284,10 +4450,12 @@ function applyGodCapabilitiesToForms() {
   if (sampling.min_p) setBounds("godSamplingMinP", sampling.min_p);
   renderGodModifierEditor("godStoryModifiers", "gs");
   renderGodModifierEditor("godLawModifiers", "gl");
-  // Sovereign God mode Optional Phase 8: the Compile tab is dual-gated --
-  // only shown when the server reports GOD_MODE_ENABLED AND the separate
-  // GOD_COMPILER_ENABLED dark flag both on (capabilities.compiler.enabled
-  // already folds both together server-side).
+  godInitStoryRecipeSelect();
+  applyGodDejaVuAvailability();
+  const dejaVu = (kinds.deja_vu_replay || {}).payload || {};
+  setBounds("godDejaVuMaxSteps", dejaVu.maxSteps);
+  // Sovereign God mode Optional Phase 8: Compile tab dual-gated via
+  // capabilities.compiler.enabled (GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED).
   const compiler = godCapabilities.compiler || {};
   const compileTabBtn = document.getElementById("godCompileTabBtn");
   if (compileTabBtn) compileTabBtn.style.display = compiler.enabled ? "" : "none";
@@ -3328,15 +4496,133 @@ if (GOD_AUTH_REQUIRED_FLAG) {
 
 // --- Bottom bar + modal (relocated from sidebar tabs) --------------------
 const GOD_TABS = ["unlock", "sight", "voice", "matrix", "miracles", "story", "laws", "history", "compile"];
+const DIVINE_WIDE_MODAL_FEATURES = new Set(["matrix", "story", "laws", "compile"]);
 const godBarButtons = Array.from(document.querySelectorAll("#divineBar .gbtn"));
 let divineModalOpenFeature = null;
 
+function applyDivinePlainTips() {
+  syncDivineBarTooltips();
+  const hold = document.getElementById("divineTabHold");
+  const previewJson = JSON.stringify(DIVINE_PREVIEW_TIP);
+  const applyJson = JSON.stringify(DIVINE_APPLY_TIP);
+  const applyIrrevJson = JSON.stringify(DIVINE_APPLY_IRREVERSIBLE_TIP);
+  const irrevApplyFieldsets = new Set([
+    "godVitalsFieldset", "godGrantFieldset", "godStructureFieldset",
+    "godMassRepairFieldset", "godClearRuinsFieldset",
+  ]);
+  if (hold) {
+    hold.querySelectorAll("[id$='PreviewBtn']").forEach((btn) => btn.setAttribute("data-tip", previewJson));
+    hold.querySelectorAll("[id$='ApplyBtn']").forEach((btn) => {
+      const fs = btn.closest("fieldset");
+      const irrev = fs && (fs.classList.contains("divine-fieldset-irreversible") || irrevApplyFieldsets.has(fs.id));
+      btn.setAttribute("data-tip", irrev ? applyIrrevJson : applyJson);
+    });
+  }
+  const agentFilter = document.getElementById("godAgentFilterWrap");
+  if (agentFilter) {
+    agentFilter.setAttribute("data-tip", JSON.stringify({
+      t: "Villager filter",
+      d: "Narrows villager dropdowns by name or role. Press / while the modal is open to focus.",
+    }));
+  }
+  const pinBtn = document.getElementById("divinePinSectionBtn");
+  if (pinBtn) {
+    pinBtn.setAttribute("data-tip", JSON.stringify({
+      t: "Pin this section",
+      d: "Save a shortcut to this tool (max 4, remembered until you close this browser tab).",
+    }));
+  }
+  const matrixPin = document.getElementById("divineMatrixPinBtn");
+  if (matrixPin) {
+    matrixPin.setAttribute("data-tip", JSON.stringify({
+      t: "Pin Matrix section",
+      d: "Pin the Matrix section currently near the top of the scroll area.",
+    }));
+  }
+  const stripApply = document.getElementById("divinePreviewApplyBtn");
+  if (stripApply) {
+    stripApply.setAttribute("data-tip", JSON.stringify({
+      t: "Apply",
+      d: "Make it real (uses the last successful check).",
+    }));
+  }
+  const stripDiscard = document.getElementById("divinePreviewDiscardBtn");
+  if (stripDiscard) {
+    stripDiscard.setAttribute("data-tip", JSON.stringify({
+      t: "Discard",
+      d: "Clear the last successful check without changing the village.",
+    }));
+  }
+}
+applyDivinePlainTips();
+
+function wireDivineMatrixNav() {
+  const nav = document.querySelector("#divineTab-matrix .divine-matrix-nav");
+  if (!nav || nav.dataset.wired) return;
+  nav.dataset.wired = "1";
+  nav.addEventListener("click", (e) => {
+    const chip = e.target.closest(".divine-matrix-chip");
+    if (!chip) return;
+    const sec = document.getElementById(chip.dataset.matrixSection || "");
+    if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+wireDivineMatrixNav();
+
+const divineBarFavoritesEl = document.getElementById("divineBarFavorites");
+if (divineBarFavoritesEl) {
+  divineBarFavoritesEl.addEventListener("click", (e) => {
+    const chip = e.target.closest(".divine-fav-chip");
+    if (!chip) return;
+    const idx = Number(chip.dataset.favIndex);
+    const favs = loadDivineFavorites();
+    if (favs[idx]) openDivineFavorite(favs[idx]);
+  });
+}
+if (divineBarEffectsEl) {
+  divineBarEffectsEl.addEventListener("click", (e) => {
+    const chip = e.target.closest(".divine-effect-chip");
+    if (!chip) return;
+    openDivineBarEffectTarget(chip.dataset.feature, chip.dataset.scroll || null);
+  });
+}
+const divinePinSectionBtn = document.getElementById("divinePinSectionBtn");
+if (divinePinSectionBtn) divinePinSectionBtn.addEventListener("click", pinDivineFavoriteFromModal);
+const divineMatrixPinBtn = document.getElementById("divineMatrixPinBtn");
+if (divineMatrixPinBtn) divineMatrixPinBtn.addEventListener("click", pinDivineFavoriteFromModal);
+const godAgentFilterEl = document.getElementById("godAgentFilter");
+if (godAgentFilterEl) {
+  godAgentFilterEl.addEventListener("input", () => populateGodAgentSelects());
+}
+document.addEventListener("dblclick", (e) => {
+  const legend = e.target.closest(".divine-fieldset legend[data-fav]");
+  if (!legend) return;
+  const fieldset = legend.closest(".divine-fieldset");
+  if (!fieldset || !divineModalOpenFeature) return;
+  const fav = {
+    feature: divineModalOpenFeature,
+    fieldsetId: fieldset.id || undefined,
+    label: (legend.textContent || "").trim().slice(0, 48) || fieldset.id,
+  };
+  const favs = loadDivineFavorites().filter((f) =>
+    !(f.feature === fav.feature && f.fieldsetId === fav.fieldsetId)
+  );
+  favs.unshift(fav);
+  saveDivineFavorites(favs.slice(0, DIVINE_FAVORITES_MAX));
+});
+document.querySelectorAll(".divine-fieldset legend").forEach((lg) => {
+  if (!lg.hasAttribute("data-fav")) lg.setAttribute("data-fav", "1");
+});
+renderDivineFavoritesBar();
+
 function closeDivineModal() {
+  clearDivineFeatureGuide();
   if (divineModalOpenFeature) {
     const panel = document.getElementById("divineTab-" + divineModalOpenFeature);
     if (panel && divineTabHoldEl) divineTabHoldEl.appendChild(panel);
     divineModalOpenFeature = null;
   }
+  if (divineModalEl) divineModalEl.classList.remove("wide");
   if (divineModalScrimEl) divineModalScrimEl.classList.remove("open");
   godBarButtons.forEach((btn) => btn.classList.remove("active"));
   hideDivineTip();
@@ -3371,7 +4657,9 @@ function openDivineModal(name) {
     if (el && el.parentElement === divineTabHoldEl) el.style.display = "none";
   });
   divineModalOpenFeature = name;
+  if (divineModalEl) divineModalEl.classList.toggle("wide", DIVINE_WIDE_MODAL_FEATURES.has(name));
   if (divineModalScrimEl) divineModalScrimEl.classList.add("open");
+  renderDivineFeatureGuide(name);
   if (name === "sight" && godEffectivelyAuthorized()) refreshGodSight();
   if (name === "voice" && godEffectivelyAuthorized()) {
     if (godLastSight) renderGodVoiceAdherence();
@@ -3380,6 +4668,7 @@ function openDivineModal(name) {
   if (name === "laws") renderGodLawsActive();
   if (name === "history") renderGodHistory();
   renderGodPinRow();
+  reorderDivineModalBodyChildren();
 }
 
 // Thin alias: existing callers (connect→sight, lock→unlock, compile→story) open the modal.
@@ -3405,11 +4694,38 @@ document.addEventListener("keydown", (e) => {
     closeDivineModal();
     return;
   }
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter"
-      && divineModalScrimEl && divineModalScrimEl.classList.contains("open")
-      && divinePreviewController) {
+  const modalOpen = divineModalScrimEl && divineModalScrimEl.classList.contains("open");
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && modalOpen && divinePreviewController) {
     e.preventDefault();
+    const owner = divinePreviewOwnerForm;
+    if (godFormIsIrreversible(owner) && !godIrreversibleConfirmTextMatches(owner)) {
+      return;
+    }
     divinePreviewController.applyFn();
+    return;
+  }
+  if (!modalOpen) return;
+  if (divineModalTypingTarget()) return;
+  if (e.key === "/") {
+    e.preventDefault();
+    const filter = document.getElementById("godAgentFilter");
+    if (filter) filter.focus();
+    return;
+  }
+  if ((e.key === "s" || e.key === "S") && godEffectivelyAuthorized()) {
+    e.preventDefault();
+    refreshGodSight();
+    return;
+  }
+  const digit = parseInt(e.key, 10);
+  if (digit >= 1 && digit <= 9) {
+    const features = godVisibleBarFeatures();
+    const feature = features[digit - 1];
+    if (feature) {
+      e.preventDefault();
+      const btn = divineBarEl && divineBarEl.querySelector(`.gbtn[data-feature="${feature}"]`);
+      if (btn && !btn.disabled) openDivineModal(feature);
+    }
   }
 });
 
@@ -3475,6 +4791,8 @@ updateDivineBarAuthUi();
 // successful preview; any field edit invalidates it"). `resultEl` renders
 // via escapeHtml()-composed HTML fragments only -- normalizedCommand itself
 // is never inserted into innerHTML (rule: stored-content safety).
+const godDivineFormControllers = {};
+
 function wireDivineForm(formSelector, opts) {
   const formEl = document.querySelector(formSelector);
   const previewBtn = document.getElementById(opts.previewBtnId);
@@ -3516,6 +4834,17 @@ function wireDivineForm(formSelector, opts) {
     refreshGodSightIfOpen();
   }
 
+  function acceptServerPreview(data) {
+    if (!data || !data.previewId) return;
+    previewState = data;
+    resultEl.innerHTML = renderGodPreviewHtml(previewState, opts.label);
+    applyBtn.disabled = false;
+    divinePreviewOwnerForm = formEl;
+    showDivinePreviewStrip(opts.label, previewState, doApply, invalidate, formEl);
+  }
+
+  godDivineFormControllers[formSelector] = { invalidate, acceptServerPreview };
+
   previewBtn.addEventListener("click", async () => {
     invalidate();
     const built = opts.buildEnvelope();
@@ -3533,10 +4862,10 @@ function wireDivineForm(formSelector, opts) {
     resultEl.innerHTML = renderGodPreviewHtml(resp.data, opts.label);
     applyBtn.disabled = false;
     divinePreviewOwnerForm = formEl;
-    showDivinePreviewStrip(opts.label, resp.data, doApply, invalidate);
+    showDivinePreviewStrip(opts.label, resp.data, doApply, invalidate, formEl);
   });
 
-  applyBtn.addEventListener("click", doApply);
+  godBindIrreversibleApply(applyBtn, formEl, doApply, resultEl);
 }
 
 function refreshGodSightIfOpen() {
@@ -3612,11 +4941,19 @@ function renderGodPreviewOutcomeHtml(kind, outcome) {
   return rows.map((r) => `<div>${r}</div>`).join("");
 }
 
+function renderGodPreviewWarningsHtml(warnings) {
+  if (!warnings || !warnings.length) return "";
+  return warnings.map((w) =>
+    `<div class="divine-warning">${escapeHtml(String(w))}</div>`
+  ).join("");
+}
+
 function renderGodPreviewHtml(data, label) {
   let html = godReversibilityBadge(data.reversibilityClass);
   if (data.fingerprint && data.fingerprint.outgoingId) {
     html += `<div class="divine-warning">This will REPLACE the active ${escapeHtml(label || "guidance")} (id ${escapeHtml(String(data.fingerprint.outgoingId))}).</div>`;
   }
+  html += renderGodPreviewWarningsHtml(data.warnings);
   const kind = data.normalizedCommand && data.normalizedCommand.kind;
   html += renderGodPreviewOutcomeHtml(kind, data.previewOutcome);
   const secsLeft = Math.max(0, Math.round((data.expiresAt || 0) - Date.now() / 1000));
@@ -3675,6 +5012,24 @@ function godFilterDivineResponsesForAgent(responses, agent) {
 
 const GOD_VOICE_ADHERENCE_SIGHT_CAP = 20;
 
+function godVoiceReasonSnippet(text, maxLen) {
+  const s = String(text || "—");
+  if (s.length <= maxLen) return s;
+  return `${s.slice(0, maxLen - 1)}…`;
+}
+
+function godReadVoicePresentation(radioName) {
+  const picked = document.querySelector(`input[name="${radioName}"]:checked`);
+  const val = picked ? String(picked.value || "soft").toLowerCase() : "soft";
+  return val === "thunder" ? "thunder" : "soft";
+}
+
+function godVoicePresentationPayload(radioName) {
+  return godReadVoicePresentation(radioName) === "thunder"
+    ? { presentation: "thunder" }
+    : {};
+}
+
 function godRenderDivineResponseRows(entries, opts) {
   const showAgent = !(opts && opts.hideAgent);
   if (!entries.length) {
@@ -3699,46 +5054,115 @@ function godRenderDivineResponseRows(entries, opts) {
   return `<table class="divine-voice-adherence-table"><thead>${head}</thead><tbody>${rows}</tbody></table>`;
 }
 
+function godRenderVoiceAdherenceTimeline(entries, opts) {
+  const cap = (opts && opts.cap) || GOD_VOICE_ADHERENCE_CAP;
+  const list = (entries || []).slice(0, cap);
+  if (!list.length) {
+    return `<div class="divine-note">${escapeHtml((opts && opts.emptyText) || "No adherence records yet.")}</div>`;
+  }
+  return list.map((r) => {
+    const synthetic = r.synthetic
+      ? ' <span class="divine-voice-synthetic" title="Server synthesized missing divine_response">synthetic</span>'
+      : "";
+    const agent = escapeHtml(String(r.agentName || r.agentId || "—"));
+    const snippet = escapeHtml(godVoiceReasonSnippet(r.reason, GOD_VOICE_REPLY_SNIPPET));
+    const frame = escapeHtml(String(r.frameTick ?? "—"));
+    return `<div class="divine-voice-timeline-entry">` +
+      `<span class="divine-voice-timeline-agent">${agent}</span>` +
+      `${godStanceBadgeHtml(r.stance)}${synthetic}` +
+      `<span class="divine-voice-timeline-snippet">${snippet}</span>` +
+      `<span class="divine-voice-timeline-meta">f${frame}</span>` +
+      `</div>`;
+  }).join("");
+}
+
+function godRenderVoiceReplyInbox(entries, opts) {
+  const cap = (opts && opts.cap) || GOD_VOICE_ADHERENCE_CAP;
+  const list = (entries || []).slice(0, cap);
+  if (!list.length) {
+    return `<div class="divine-note">${escapeHtml((opts && opts.emptyText) || "No agent replies yet.")}</div>`;
+  }
+  return list.map((r) => {
+    const agent = escapeHtml(String(r.agentName || r.agentId || "—"));
+    const reason = escapeHtml(godVoiceReasonSnippet(r.reason, GOD_VOICE_REPLY_MAX));
+    const stance = String(r.stance || "").toLowerCase() === "follow" ? "follow" : "continue";
+    const frame = escapeHtml(String(r.frameTick ?? "—"));
+    const synthetic = r.synthetic ? " · synthetic" : "";
+    return `<div class="divine-voice-reply-item">` +
+      `<div class="divine-voice-reply-from">${agent}</div>` +
+      `<div class="divine-voice-reply-body">${reason}</div>` +
+      `<div class="divine-voice-reply-meta">${escapeHtml(stance)} · frame ${frame}${escapeHtml(synthetic)}</div>` +
+      `</div>`;
+  }).join("");
+}
+
 function renderGodVoiceAdherence() {
-  if (!godVoiceAdherenceListEl) return;
+  const emptyNote = `<div class="divine-note">Refresh Sight first (or click Refresh above).</div>`;
+  if (!godVoiceAdherenceTimelineEl && !godVoiceReplyInboxEl) return;
   if (!godLastSight) {
-    godVoiceAdherenceListEl.innerHTML = `<div class="divine-note">Refresh Sight first (or click Refresh above).</div>`;
+    if (godVoiceAdherenceTimelineEl) godVoiceAdherenceTimelineEl.innerHTML = emptyNote;
+    if (godVoiceReplyInboxEl) godVoiceReplyInboxEl.innerHTML = emptyNote;
     return;
   }
   const entries = (godLastSight.recentDivineResponses || []).slice();
-  godVoiceAdherenceListEl.innerHTML = godRenderDivineResponseRows(entries, {
-    emptyText: "No village adherence records yet.",
-  });
+  const timelineOpts = { emptyText: "No village adherence records yet.", cap: GOD_VOICE_ADHERENCE_CAP };
+  const inboxOpts = { emptyText: "No agent replies yet.", cap: GOD_VOICE_ADHERENCE_CAP };
+  if (godVoiceAdherenceTimelineEl) {
+    godVoiceAdherenceTimelineEl.innerHTML = godRenderVoiceAdherenceTimeline(entries, timelineOpts);
+  }
+  if (godVoiceReplyInboxEl) {
+    godVoiceReplyInboxEl.innerHTML = godRenderVoiceReplyInbox(entries, inboxOpts);
+  }
 }
 
 // --- Sight ---------------------------------------------------------------
 async function refreshGodSight() {
+  const prevSightForDiff = godCloneSightForDiff(godLastSight);
   const resp = await godApiFetch("/control/god/sight");
   if (!resp.data || !resp.data.ok) {
     godLastSight = null;
     renderGodError(godSightOutputEl, (resp.data && resp.data.reason) || "sight unavailable");
-    if (godVoiceAdherenceListEl) {
-      godVoiceAdherenceListEl.innerHTML = `<div class="divine-note">Sight unavailable — refresh failed.</div>`;
-    }
+    const sightFailNote = `<div class="divine-note">Sight unavailable — refresh failed.</div>`;
+    if (godVoiceAdherenceTimelineEl) godVoiceAdherenceTimelineEl.innerHTML = sightFailNote;
+    if (godVoiceReplyInboxEl) godVoiceReplyInboxEl.innerHTML = sightFailNote;
     return;
   }
   godLastSight = resp.data;
-  renderGodSight();
+  godLastSightFetchedAt = Date.now();
+  renderGodSight(prevSightForDiff);
   renderGodVoiceAdherence();
   populateGodCheckpointRestoreSelect();
   if (godActiveTab === "laws") renderGodLawsActive();
+  updateDivineBarSituational();
+  updateGodHistorySightToggle();
+  if (godActiveTab === "history") renderGodHistory();
+  renderGodPinRow();
 }
 document.getElementById("godSightRefreshBtn").addEventListener("click", refreshGodSight);
+if (godSightOutputEl) {
+  godSightOutputEl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".god-sight-intervene-btn");
+    if (!btn) return;
+    godSightIntervene(
+      Number(btn.dataset.agentId),
+      btn.dataset.feature,
+      btn.dataset.fieldset || null
+    );
+  });
+}
 const godVoiceAdherenceRefreshBtn = document.getElementById("godVoiceAdherenceRefreshBtn");
 if (godVoiceAdherenceRefreshBtn) {
   godVoiceAdherenceRefreshBtn.addEventListener("click", refreshGodSight);
 }
 
-function renderGodSight() {
+function renderGodSight(prevSightForDiff) {
   if (!godLastSight) { godSightOutputEl.innerHTML = ""; return; }
   const selectedId = godSightAgentSelectEl.value ? Number(godSightAgentSelectEl.value) : null;
+  const focusId = godPreferredAgentId() ?? selectedId;
   const agent = (godLastSight.agents || []).find((a) => a.id === selectedId) || (godLastSight.agents || [])[0];
   if (!agent) { godSightOutputEl.innerHTML = `<div class="divine-note">No agents.</div>`; return; }
+  const diffHtml = godSightDiffStripHtml(prevSightForDiff, godLastSight, focusId);
+  const pulseHtml = godSightPulseCardHtml(godLastSight.pulse);
   const resourceRows = Object.entries(agent.resources || {})
     .map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(String(v))}`).join(", ") || "(none)";
   const omenUnacked = agent.omen && agent.omen.unacked
@@ -3757,9 +5181,27 @@ function renderGodSight() {
   const contextMask = agent.contextMask
     ? `active, ${escapeHtml(agent.contextMask.mode || "?")}, ${escapeHtml(godCountdownLabel(agent.contextMask.expiresFrame))}`
     : "none";
+  const decisionGate = agent.decisionGate
+    ? `${escapeHtml(godSightGateSummary(agent.decisionGate))}${agent.decisionGate.expiresFrame ? `, ${escapeHtml(godCountdownLabel(agent.decisionGate.expiresFrame))}` : ""}`
+    : "none";
+  const divineHold = agent.divineHold ? "yes" : "no";
+  const architectLimbo = agent.architectLimbo && agent.architectLimbo.active
+    ? `yes (zone ${escapeHtml(String(agent.architectLimbo.zoneId || "?"))})`
+    : "no";
+  const anointment = agent.anointment && agent.anointment.active
+    ? `active, ${escapeHtml(String(agent.anointment.tagCount || 0))} tags, ${escapeHtml(godCountdownLabel(agent.anointment.expiresFrame))}`
+    : "none";
   const active = (godLastSight.activeEvents || [])
     .filter((e) => e.status === "active")
-    .map((e) => `<li>${escapeHtml(e.kind === "story_event" ? (e.title || e.kind) : e.kind)} — ${escapeHtml(godCountdownLabel(e.expiresFrame))}${e.visibility === "private" ? " <span class=\"divine-history-badge divine-history-private\">private</span>" : ""}</li>`)
+    .map((e) => {
+      const label = escapeHtml(e.kind === "story_event" ? (e.title || e.kind) : e.kind);
+      const priv = e.visibility === "private"
+        ? " <span class=\"divine-history-badge divine-history-private\">private</span>" : "";
+      return `<li>${label} — ${escapeHtml(godCountdownLabel(e.expiresFrame))}${priv}</li>`;
+    })
+    .join("") || "<li>(none)</li>";
+  const zoneSummaries = (godLastSight.architectZones || [])
+    .map((z) => `<li>${escapeHtml(String(z.kind || "?"))} in ${escapeHtml(String(z.districtId || "?"))} — ${escapeHtml(String(z.cellCount || 0))} cells, ${escapeHtml(godCountdownLabel(z.expiresFrame))}</li>`)
     .join("") || "<li>(none)</li>";
   const agentResponses = godFilterDivineResponsesForAgent(
     godLastSight.recentDivineResponses, agent
@@ -3768,11 +5210,15 @@ function renderGodSight() {
     hideAgent: true,
     emptyText: "No adherence records for this agent yet.",
   });
-  godSightOutputEl.innerHTML =
+  godSightOutputEl.innerHTML = diffHtml + pulseHtml +
+    godSightInterveneButtonsHtml(agent.id) +
     `<div><span class="divine-kv-key">Health:</span> ${escapeHtml(String(agent.health))} &nbsp; <span class="divine-kv-key">Hunger:</span> ${escapeHtml(String(agent.hunger))}</div>` +
     `<div><span class="divine-kv-key">Incapacitated:</span> ${escapeHtml(String(!!agent.incapacitated))} &nbsp; <span class="divine-kv-key">District:</span> ${escapeHtml(String(agent.currentDistrict || "—"))}</div>` +
     `<div><span class="divine-kv-key">Resources:</span> ${resourceRows}</div>` +
     `<div><span class="divine-kv-key">Last action:</span> ${escapeHtml(String(agent.lastAction || "—"))}</div>` +
+    `<div><span class="divine-kv-key">Decision gate:</span> ${decisionGate}</div>` +
+    `<div><span class="divine-kv-key">Divine hold:</span> ${escapeHtml(divineHold)} &nbsp; <span class="divine-kv-key">Architect limbo:</span> ${architectLimbo}</div>` +
+    `<div><span class="divine-kv-key">Anointment:</span> ${anointment}</div>` +
     `<div><span class="divine-kv-key">Private omen:</span> ${omen}</div>` +
     `<div><span class="divine-kv-key">Providence:</span> ${providence}</div>` +
     `<div><span class="divine-kv-key">Sampling override:</span> ${sampling}</div>` +
@@ -3780,15 +5226,27 @@ function renderGodSight() {
     `<div><span class="divine-kv-key">Memory tiers:</span> working ${escapeHtml(String((agent.memoryCounts || {}).working ?? 0))}, shortTerm ${escapeHtml(String((agent.memoryCounts || {}).shortTerm ?? 0))}</div>` +
     `<div><span class="divine-kv-key">Beliefs held:</span> ${escapeHtml(String(agent.beliefCount ?? 0))}</div>` +
     `<div><span class="divine-kv-key">Active effects (village-wide, this authenticated view):</span><ul>${active}</ul></div>` +
+    `<div><span class="divine-kv-key">Architect zones (district outlines on map while modal open):</span><ul>${zoneSummaries}</ul></div>` +
     `<div class="divine-voice-adherence-sight"><span class="divine-kv-key">Voice adherence:</span>${adherenceHtml}` +
     `<p class="divine-note divine-voice-adherence-xlink">See Voice → Adherence for the full village feed.</p></div>`;
   const checkpoints = (godLastSight.checkpoints || [])
     .map((c) => `<li>${escapeHtml(String(c.label || c.id))} — frame ${escapeHtml(String(c.frameTick))} (${escapeHtml(String(c.id))})</li>`)
     .join("") || "<li>(none)</li>";
+  const digestRows = (godLastSight.decisionDigests || [])
+    .filter((d) => !selectedId || d.agentId === selectedId)
+    .slice(-8)
+    .map((d) => `<li>frame ${escapeHtml(String(d.frameTick))} — ${escapeHtml(String(d.action))}${d.reasoningHash ? ` <span class="divine-note">#${escapeHtml(String(d.reasoningHash))}</span>` : ""}</li>`)
+    .join("") || "<li>(none — natural decisions populate the digest ring)</li>";
+  const replayRows = (godLastSight.dejaVuReplays || [])
+    .filter((r) => !selectedId || r.targetId === selectedId)
+    .map((r) => `<li>${escapeHtml(String(r.id))} — ${escapeHtml(String(r.currentIndex ?? 0))}/${escapeHtml(String(r.stepCount ?? 0))} (${escapeHtml(String(r.status || "?"))})</li>`)
+    .join("") || "<li>(none)</li>";
   godSightOutputEl.innerHTML +=
+    `<div><span class="divine-kv-key">Decision digests (operator):</span><ul>${digestRows}</ul></div>` +
+    `<div><span class="divine-kv-key">Déjà Vu replays:</span><ul>${replayRows}</ul></div>` +
     `<div><span class="divine-kv-key">Checkpoints:</span><ul>${checkpoints}</ul></div>`;
 }
-godSightAgentSelectEl.addEventListener("change", renderGodSight);
+godSightAgentSelectEl.addEventListener("change", () => renderGodSight(undefined));
 
 function populateGodCheckpointRestoreSelect() {
   const sel = document.getElementById("godCheckpointRestoreSelect");
@@ -3803,6 +5261,143 @@ function populateGodCheckpointRestoreSelect() {
   if (prev && list.some((c) => c.id === prev)) sel.value = prev;
 }
 
+// --- Voice presets (sessionStorage) --------------------------------------
+function loadDivineVoicePresets() {
+  try {
+    const raw = sessionStorage.getItem(DIVINE_VOICE_PRESETS_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function saveDivineVoicePresets(presets) {
+  try {
+    sessionStorage.setItem(DIVINE_VOICE_PRESETS_KEY, JSON.stringify(presets));
+  } catch (err) { /* ignore */ }
+  populateGodVoicePresetSelect();
+}
+
+function populateGodVoicePresetSelect() {
+  const sel = document.getElementById("godVoicePresetSelect");
+  if (!sel) return;
+  const prev = sel.value;
+  const presets = loadDivineVoicePresets();
+  const opts = presets.map((p) =>
+    `<option value="${escapeHtml(String(p.id))}">${escapeHtml(String(p.name || p.kind || "preset"))} (${escapeHtml(String(p.kind || "?"))})</option>`
+  );
+  sel.innerHTML = `<option value="">— none —</option>${opts.join("")}`;
+  if (prev && presets.some((p) => p.id === prev)) sel.value = prev;
+}
+
+function godDetectActiveVoicePresetKind() {
+  const procText = (document.getElementById("godProcText") && document.getElementById("godProcText").value.trim()) || "";
+  const provText = (document.getElementById("godProvText") && document.getElementById("godProvText").value.trim()) || "";
+  const omenText = (document.getElementById("godOmenText") && document.getElementById("godOmenText").value.trim()) || "";
+  if (procText) return "proclamation";
+  if (provText) return "providence";
+  if (omenText) return "private_omen";
+  return null;
+}
+
+function godCaptureVoicePresetFields(kind) {
+  if (kind === "proclamation") {
+    return {
+      kind,
+      text: document.getElementById("godProcText").value,
+      presentation: godReadVoicePresentation("godProcPresentation"),
+    };
+  }
+  if (kind === "providence") {
+    return {
+      kind,
+      text: document.getElementById("godProvText").value,
+      durationSeconds: document.getElementById("godProvDuration").value,
+      presentation: godReadVoicePresentation("godProvPresentation"),
+    };
+  }
+  if (kind === "private_omen") {
+    return {
+      kind,
+      text: document.getElementById("godOmenText").value,
+      durationSeconds: document.getElementById("godOmenDuration").value,
+      targetId: document.getElementById("godOmenAgentSelect").value,
+    };
+  }
+  return null;
+}
+
+function godApplyVoicePreset(preset) {
+  if (!preset || !preset.kind) return;
+  if (preset.kind === "proclamation") {
+    document.getElementById("godProcText").value = preset.text || "";
+    const pres = preset.presentation === "thunder" ? "thunder" : "soft";
+    const radio = document.querySelector(`input[name="godProcPresentation"][value="${pres}"]`);
+    if (radio) radio.checked = true;
+    document.getElementById("godProclamationFieldset").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  if (preset.kind === "providence") {
+    document.getElementById("godProvText").value = preset.text || "";
+    document.getElementById("godProvDuration").value = preset.durationSeconds != null ? String(preset.durationSeconds) : "";
+    const pres = preset.presentation === "thunder" ? "thunder" : "soft";
+    const radio = document.querySelector(`input[name="godProvPresentation"][value="${pres}"]`);
+    if (radio) radio.checked = true;
+    document.getElementById("godProvidenceFieldset").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  if (preset.kind === "private_omen") {
+    if (preset.targetId != null && document.getElementById("godOmenAgentSelect")) {
+      document.getElementById("godOmenAgentSelect").value = String(preset.targetId);
+    }
+    document.getElementById("godOmenText").value = preset.text || "";
+    document.getElementById("godOmenDuration").value = preset.durationSeconds != null ? String(preset.durationSeconds) : "";
+    document.getElementById("godOmenFieldset").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
+function wireGodVoicePresetControls() {
+  populateGodVoicePresetSelect();
+  const loadBtn = document.getElementById("godVoicePresetLoadBtn");
+  const saveBtn = document.getElementById("godVoicePresetSaveBtn");
+  const delBtn = document.getElementById("godVoicePresetDeleteBtn");
+  const sel = document.getElementById("godVoicePresetSelect");
+  if (loadBtn && sel) {
+    loadBtn.addEventListener("click", () => {
+      const id = sel.value;
+      if (!id) return;
+      const preset = loadDivineVoicePresets().find((p) => p.id === id);
+      if (preset) godApplyVoicePreset(preset);
+    });
+  }
+  if (saveBtn) {
+    saveBtn.addEventListener("click", () => {
+      const kind = godDetectActiveVoicePresetKind();
+      if (!kind) {
+        window.alert("Fill in a proclamation, providence, or omen form first.");
+        return;
+      }
+      const fields = godCaptureVoicePresetFields(kind);
+      const name = window.prompt("Preset name:", `${kind} preset`);
+      if (!name || !name.trim()) return;
+      const presets = loadDivineVoicePresets();
+      const id = `vp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      presets.unshift({ id, name: name.trim(), ...fields });
+      saveDivineVoicePresets(presets.slice(0, 32));
+      if (sel) sel.value = id;
+    });
+  }
+  if (delBtn && sel) {
+    delBtn.addEventListener("click", () => {
+      const id = sel.value;
+      if (!id) return;
+      saveDivineVoicePresets(loadDivineVoicePresets().filter((p) => p.id !== id));
+    });
+  }
+}
+wireGodVoicePresetControls();
+
 // --- Voice: proclamation / providence / private omen ---------------------
 wireDivineForm("#godProclamationFieldset", {
   previewBtnId: "godProcPreviewBtn", applyBtnId: "godProcApplyBtn", resultElId: "godProcResult",
@@ -3810,7 +5405,12 @@ wireDivineForm("#godProclamationFieldset", {
   buildEnvelope: () => {
     const text = document.getElementById("godProcText").value;
     if (!text.trim()) return { error: "text is required" };
-    return { envelope: { kind: "proclamation", payload: { text } } };
+    return {
+      envelope: {
+        kind: "proclamation",
+        payload: { text, ...godVoicePresentationPayload("godProcPresentation") },
+      },
+    };
   },
 });
 
@@ -3821,8 +5421,8 @@ wireDivineForm("#godProvidenceFieldset", {
     const text = document.getElementById("godProvText").value;
     if (!text.trim()) return { error: "text is required" };
     const durationRaw = document.getElementById("godProvDuration").value;
-    const payload = { text };
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const payload = { text, ...godVoicePresentationPayload("godProvPresentation") };
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     return { envelope: { kind: "providence", payload } };
   },
 });
@@ -3837,7 +5437,7 @@ wireDivineForm("#godOmenFieldset", {
     if (!text.trim()) return { error: "text is required" };
     const durationRaw = document.getElementById("godOmenDuration").value;
     const payload = { targetId: parseInt(targetId, 10), text };
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     return { envelope: { kind: "private_omen", payload } };
   },
 });
@@ -3906,7 +5506,7 @@ wireDivineForm("#godWhisperCampaignFieldset", {
     }
     const payload = { theme, whispers };
     const durationRaw = document.getElementById("godWhisperDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     return { envelope: { kind: "whisper_campaign", payload } };
   },
 });
@@ -3933,7 +5533,7 @@ wireDivineForm("#godSamplingFieldset", {
       temperature,
     };
     const durationRaw = document.getElementById("godSamplingDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     const topP = document.getElementById("godSamplingTopP").value;
     if (topP) payload.top_p = parseFloat(topP);
     const topK = document.getElementById("godSamplingTopK").value;
@@ -4033,6 +5633,9 @@ document.querySelectorAll('input[name="godDistortionMode"]').forEach((el) => {
 });
 syncGodDistortionModeFields();
 
+const GOD_CROWD_COMPULSION_MAX_TARGETS = 12;
+const GOD_DREAM_BROADCAST_MAX_TARGETS = 12;
+
 wireDivineForm("#godDistortionFieldset", {
   previewBtnId: "godDistortionPreviewBtn", applyBtnId: "godDistortionApplyBtn",
   resultElId: "godDistortionResult",
@@ -4044,7 +5647,7 @@ wireDivineForm("#godDistortionFieldset", {
     if (!mode) return { error: "select a mask mode" };
     const payload = { targetId: parseInt(targetId, 10), mode };
     const durationRaw = document.getElementById("godDistortionDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     if (mode === "dream") {
       const raw = document.getElementById("godDistortionDreamJson").value.trim();
       if (!raw) return { error: "dream snapshot JSON is required for dream mode" };
@@ -4067,6 +5670,39 @@ wireDivineForm("#godDistortionFieldset", {
   },
 });
 
+wireDivineForm("#godDreamBroadcastFieldset", {
+  previewBtnId: "godDreamBroadcastPreviewBtn", applyBtnId: "godDreamBroadcastApplyBtn",
+  resultElId: "godDreamBroadcastResult", label: "dream broadcast",
+  buildEnvelope: () => {
+    const durationRaw = document.getElementById("godDreamBroadcastDuration").value;
+    const _df = godSecondsToFrames(durationRaw);
+    if (_df == null) return { error: "duration (seconds) is required" };
+    const raw = document.getElementById("godDreamBroadcastJson").value.trim();
+    if (!raw) return { error: "dream snapshot JSON is required" };
+    let dreamSnapshot;
+    try {
+      dreamSnapshot = JSON.parse(raw);
+    } catch (err) {
+      return { error: "dream snapshot must be valid JSON" };
+    }
+    const agentsEl = document.getElementById("godDreamBroadcastAgents");
+    const selected = Array.from(agentsEl ? agentsEl.selectedOptions : [])
+      .map((o) => parseInt(o.value, 10))
+      .filter((id) => Number.isFinite(id));
+    if (!selected.length) return { error: "select at least one target agent" };
+    if (selected.length > GOD_DREAM_BROADCAST_MAX_TARGETS) {
+      return { error: `targetIds may include at most ${GOD_DREAM_BROADCAST_MAX_TARGETS} agents` };
+    }
+    if (new Set(selected).size !== selected.length) return { error: "duplicate target agents" };
+    return {
+      envelope: {
+        kind: "dream_broadcast",
+        payload: { durationFrames: _df, dreamSnapshot, targetIds: selected },
+      },
+    };
+  },
+});
+
 function syncGodVetoResolveFields() {
   const mode = document.getElementById("godVetoResolveMode")?.value;
   const row = document.getElementById("godVetoRewriteRow");
@@ -4077,6 +5713,81 @@ if (godVetoResolveModeEl) {
   godVetoResolveModeEl.addEventListener("change", syncGodVetoResolveFields);
   syncGodVetoResolveFields();
 }
+
+function addGodCrowdRow(selectedId, action) {
+  const container = document.getElementById("godCrowdRows");
+  if (!container) return;
+  const rows = container.querySelectorAll(".god-crowd-row");
+  if (rows.length >= GOD_CROWD_COMPULSION_MAX_TARGETS) return;
+  const row = document.createElement("div");
+  row.className = "divine-row god-crowd-row";
+  row.innerHTML =
+    `<label>Agent <select class="god-crowd-agent">${godAgentOptionsHtml(selectedId)}</select></label>` +
+    `<label>Action <select class="god-crowd-action"><option value="rest">rest</option></select></label>` +
+    `<button type="button" class="god-crowd-remove">Remove</button>`;
+  const actionEl = row.querySelector(".god-crowd-action");
+  if (actionEl && action) actionEl.value = action;
+  populateGodPinActionSelects();
+  row.querySelector(".god-crowd-remove").addEventListener("click", () => {
+    row.remove();
+    document.getElementById("godCrowdCompulsionFieldset").dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  container.appendChild(row);
+}
+
+function initGodCrowdRows() {
+  const container = document.getElementById("godCrowdRows");
+  if (!container || container.querySelector(".god-crowd-row")) return;
+  const agents = getLivingAgents();
+  if (agents.length >= 2) {
+    addGodCrowdRow(agents[0].id, "rest");
+    addGodCrowdRow(agents[1].id, "rest");
+  } else if (agents.length === 1) {
+    addGodCrowdRow(agents[0].id, "rest");
+  }
+}
+
+const godCrowdAddRowBtn = document.getElementById("godCrowdAddRow");
+if (godCrowdAddRowBtn) {
+  godCrowdAddRowBtn.addEventListener("click", () => addGodCrowdRow(null, "rest"));
+}
+
+wireDivineForm("#godCrowdCompulsionFieldset", {
+  previewBtnId: "godCrowdPreviewBtn", applyBtnId: "godCrowdApplyBtn", resultElId: "godCrowdResult",
+  label: "crowd compulsion",
+  buildEnvelope: () => {
+    const themeRaw = document.getElementById("godCrowdTheme").value;
+    const rows = document.querySelectorAll("#godCrowdRows .god-crowd-row");
+    if (!rows.length) return { error: "add at least one target row" };
+    if (rows.length > GOD_CROWD_COMPULSION_MAX_TARGETS) {
+      return { error: `targets may include at most ${GOD_CROWD_COMPULSION_MAX_TARGETS} agents` };
+    }
+    const targets = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const targetId = row.querySelector(".god-crowd-agent").value;
+      if (!targetId) return { error: "select an agent for each target row" };
+      const tid = parseInt(targetId, 10);
+      if (seen.has(tid)) return { error: "duplicate agent in crowd rows" };
+      seen.add(tid);
+      const action = row.querySelector(".god-crowd-action").value || "rest";
+      targets.push({
+        targetId: tid,
+        pinnedDecision: { action, reasoning: "Divine crowd compulsion." },
+      });
+    }
+    const payload = { targets };
+    if (themeRaw.trim()) payload.theme = themeRaw.trim();
+    const durationRaw = document.getElementById("godCrowdDuration").value;
+    const turnsRaw = document.getElementById("godCrowdTurns").value;
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
+    if (turnsRaw) payload.remainingTurns = parseInt(turnsRaw, 10);
+    if (!payload.durationFrames && !payload.remainingTurns) {
+      return { error: "set duration (seconds) or remaining turns" };
+    }
+    return { envelope: { kind: "crowd_compulsion", payload } };
+  },
+});
 
 wireDivineForm("#godCompulsionFieldset", {
   previewBtnId: "godCompulsionPreviewBtn", applyBtnId: "godCompulsionApplyBtn",
@@ -4091,10 +5802,10 @@ wireDivineForm("#godCompulsionFieldset", {
     };
     const durationRaw = document.getElementById("godCompulsionDuration").value;
     const turnsRaw = document.getElementById("godCompulsionTurns").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     if (turnsRaw) payload.remainingTurns = parseInt(turnsRaw, 10);
     if (!payload.durationFrames && !payload.remainingTurns) {
-      return { error: "set duration (frames) or remaining turns" };
+      return { error: "set duration (seconds) or remaining turns" };
     }
     return { envelope: { kind: "decision_compulsion", payload } };
   },
@@ -4108,7 +5819,7 @@ wireDivineForm("#godVetoArmFieldset", {
     if (!targetId) return { error: "select an agent" };
     const payload = { targetId: parseInt(targetId, 10) };
     const durationRaw = document.getElementById("godVetoArmDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     return { envelope: { kind: "decision_veto_arm", payload } };
   },
 });
@@ -4141,7 +5852,7 @@ wireDivineForm("#godPossessionFieldset", {
       pinnedDecision: { action, reasoning: "Divine possession." },
     };
     const durationRaw = document.getElementById("godPossessionDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     return { envelope: { kind: "agent_possession", payload } };
   },
 });
@@ -4229,7 +5940,7 @@ wireDivineForm("#godBargainFieldset", {
       successPredicate: succBuilt.predicate,
     };
     const durationRaw = document.getElementById("godBargainDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     const rewardKind = document.getElementById("godBargainRewardKind").value;
     if (rewardKind === "grant_resource") {
       const resourceId = (document.getElementById("godBargainRewardResource").value || "").trim();
@@ -4306,7 +6017,7 @@ wireDivineForm("#godAnointFieldset", {
     if (oracleParsed.error) return oracleParsed;
     if (oracleParsed.hints.length) payload.oracleHints = oracleParsed.hints;
     const durationRaw = document.getElementById("godAnointDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     return { envelope: { kind: "anoint", payload } };
   },
 });
@@ -4338,7 +6049,7 @@ wireDivineForm("#godIdentityEditFieldset", {
       return { error: "enter at least one of persona, personality, or role" };
     }
     const durationRaw = document.getElementById("godIdentityEditDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     return { envelope: { kind: "identity_edit", payload } };
   },
 });
@@ -4362,7 +6073,7 @@ wireDivineForm("#godIdentityCopyFieldset", {
       syncMemories: document.getElementById("godIdentityCopySyncMemories").checked,
     };
     const durationRaw = document.getElementById("godIdentityCopyDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     return { envelope: { kind: "identity_copy_overwrite", payload } };
   },
 });
@@ -4416,7 +6127,7 @@ wireDivineForm("#godArchitectZoneFieldset", {
     const payload = { zoneKind, cells: parsed.cells };
     if (districtId) payload.districtId = districtId;
     const durationRaw = document.getElementById("godArchitectDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     if (zoneKind === "paint") {
       if (!districtId) return { error: "district is required for paint zones" };
       payload.paintTerrain = document.getElementById("godArchitectPaintTerrain").value;
@@ -4484,6 +6195,20 @@ wireDivineForm("#godCheckpointRestoreFieldset", {
     const checkpointId = (document.getElementById("godCheckpointRestoreSelect").value || "").trim();
     if (!checkpointId) return { error: "select a checkpoint" };
     return { envelope: { kind: "checkpoint_restore", payload: { checkpointId } } };
+  },
+  onApplied: () => refreshGodSight(),
+});
+
+wireDivineForm("#godDejaVuFieldset", {
+  previewBtnId: "godDejaVuPreviewBtn", applyBtnId: "godDejaVuApplyBtn",
+  resultElId: "godDejaVuResult", label: "deja vu replay",
+  buildEnvelope: () => {
+    const targetId = document.getElementById("godDejaVuAgentSelect").value;
+    if (!targetId) return { error: "select an agent" };
+    const payload = { targetId: parseInt(targetId, 10) };
+    const maxRaw = document.getElementById("godDejaVuMaxSteps").value;
+    if (maxRaw) payload.maxSteps = parseInt(maxRaw, 10);
+    return { envelope: { kind: "deja_vu_replay", payload } };
   },
   onApplied: () => refreshGodSight(),
 });
@@ -4628,6 +6353,96 @@ function godReadModifiers(prefix) {
   return modifiers;
 }
 
+function godWriteModifiers(prefix, modifiers, clearOthers) {
+  document.querySelectorAll(`.${prefix}-mod-enable`).forEach((cb) => {
+    const key = cb.dataset.key;
+    const valueInput = document.querySelector(`.${prefix}-mod-value[data-key="${key}"]`);
+    const val = modifiers && Object.prototype.hasOwnProperty.call(modifiers, key)
+      ? modifiers[key]
+      : null;
+    if (val != null) {
+      cb.checked = true;
+      if (valueInput) valueInput.value = String(val);
+    } else if (clearOthers) {
+      cb.checked = false;
+      if (valueInput) valueInput.value = "1.0";
+    }
+  });
+}
+
+const GOD_STORY_RECIPES = {
+  festival: {
+    label: "Festival",
+    title: "Village Festival",
+    narration: "Music and feast fill the square; the harvest feels blessed.",
+    durationSeconds: 120,
+    modifiers: { gather_yield_multiplier: 2.0, hunger_drain_multiplier: 0.5 },
+  },
+  famine_week: {
+    label: "Famine week",
+    title: "Lean Season",
+    narration: "Stores dwindle and every meal feels insufficient.",
+    durationSeconds: 180,
+    modifiers: {
+      gather_yield_multiplier: 0.5,
+      hunger_drain_multiplier: 2.0,
+      starvation_damage_multiplier: 1.5,
+    },
+  },
+  plague_scare: {
+    label: "Plague scare",
+    title: "Whispers of Pestilence",
+    narration: "A cough travels faster than comfort; healers work through the night.",
+    durationSeconds: 90,
+    modifiers: { health_regen_multiplier: 0.5, starvation_damage_multiplier: 2.0 },
+  },
+  harsh_winter: {
+    label: "Harsh winter",
+    title: "Bitter Cold",
+    narration: "Frost claims stores and timbers alike; warmth is rationed.",
+    durationSeconds: 150,
+    modifiers: { spoilage_multiplier: 2.0, structure_decay_multiplier: 2.0 },
+  },
+  bountiful_seas: {
+    label: "Bountiful seas",
+    title: "Calm Waters",
+    narration: "The tide brings fish in abundance; bellies stay full longer.",
+    durationSeconds: 120,
+    modifiers: { fish_yield_multiplier: 2.5, hunger_drain_multiplier: 0.75 },
+  },
+};
+
+function godApplyStoryRecipe(recipeKey) {
+  const recipe = GOD_STORY_RECIPES[recipeKey];
+  if (!recipe) return;
+  document.getElementById("godStoryTitle").value = recipe.title || "";
+  document.getElementById("godStoryNarration").value = recipe.narration || "";
+  if (recipe.durationSeconds != null) {
+    document.getElementById("godStoryDuration").value = String(recipe.durationSeconds);
+  }
+  godWriteModifiers("gs", recipe.modifiers || {}, true);
+  const primContainer = document.getElementById("godStoryPrimitives");
+  if (primContainer) {
+    primContainer.innerHTML = "";
+    godStoryPrimitiveCount = 0;
+  }
+  document.getElementById("godStoryProvidenceCheckbox").checked = false;
+  document.getElementById("godStoryProvidenceText").value = "";
+  document.getElementById("godStoryReplaceCheckbox").checked = false;
+  document.getElementById("godStoryReplaceCheckbox").disabled = true;
+  document.getElementById("godStoryReplaceId").value = "";
+  document.getElementById("godStoryFieldset").dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function godInitStoryRecipeSelect() {
+  const sel = document.getElementById("godStoryRecipeSelect");
+  if (!sel || sel.options.length > 1) return;
+  sel.innerHTML = `<option value="">(choose a recipe)</option>` +
+    Object.entries(GOD_STORY_RECIPES).map(([key, r]) =>
+      `<option value="${escapeHtml(key)}">${escapeHtml(r.label || key)}</option>`
+    ).join("");
+}
+
 // --- Story primitives editor (bounded, up to GOD_STORY_EVENT_MAX_PRIMITIVES) ---
 let godStoryPrimitiveCount = 0;
 function godPrimitiveFieldsHtml(kind, index) {
@@ -4716,6 +6531,17 @@ function godReadStoryPrimitives() {
   return { primitives };
 }
 
+const godStoryRecipeApplyBtn = document.getElementById("godStoryRecipeApplyBtn");
+if (godStoryRecipeApplyBtn) {
+  godStoryRecipeApplyBtn.addEventListener("click", () => {
+    const sel = document.getElementById("godStoryRecipeSelect");
+    const key = sel ? sel.value : "";
+    if (!key) return;
+    godApplyStoryRecipe(key);
+  });
+}
+godInitStoryRecipeSelect();
+
 // --- Story tab ------------------------------------------------------------
 wireDivineForm("#godStoryFieldset", {
   previewBtnId: "godStoryPreviewBtn", applyBtnId: "godStoryApplyBtn", resultElId: "godStoryResult",
@@ -4732,7 +6558,7 @@ wireDivineForm("#godStoryFieldset", {
       payload.targetId = parseInt(targetId, 10);
     }
     const durationRaw = document.getElementById("godStoryDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     const modifiers = godReadModifiers("gs");
     if (Object.keys(modifiers).length) payload.modifiers = modifiers;
     const primResult = godReadStoryPrimitives();
@@ -4781,11 +6607,9 @@ wireDivineForm("#godStoryFieldset", {
 let godCompilerMinIntervalSec = 5;
 
 // Populates the Story tab's own fields from a compiled draft's
-// normalizedCommand, then invalidates any stale Story preview (any field
-// edit already invalidates a preview per the standard contract) so the
-// operator must re-Preview before Applying -- matching how every other
-// Voice/Miracle/Law/Story action already works.
-function godPopulateStoryFromCompiled(normalizedCommand) {
+// normalizedCommand. When skipPreviewInvalidate is true (compile handoff),
+// leaves any server preview intact so acceptServerPreview can wire the strip.
+function godPopulateStoryFromCompiled(normalizedCommand, opts = {}) {
   const payload = (normalizedCommand && normalizedCommand.payload) || {};
   document.getElementById("godStoryTitle").value = payload.title || "";
   document.getElementById("godStoryNarration").value = payload.narration || "";
@@ -4794,7 +6618,8 @@ function godPopulateStoryFromCompiled(normalizedCommand) {
   if (payload.visibility === "private" && payload.targetId != null) {
     document.getElementById("godStoryTargetSelect").value = String(payload.targetId);
   }
-  document.getElementById("godStoryDuration").value = payload.durationFrames || "";
+  document.getElementById("godStoryDuration").value = payload.durationFrames != null
+    ? godFramesToSeconds(payload.durationFrames) : "";
 
   document.querySelectorAll(".gs-mod-enable").forEach((cb) => { cb.checked = false; });
   const modifiers = payload.modifiers || {};
@@ -4845,11 +6670,23 @@ function godPopulateStoryFromCompiled(normalizedCommand) {
   document.getElementById("godStoryReplaceCheckbox").disabled = true;
   document.getElementById("godStoryReplaceId").value = "";
 
-  // Any field edit invalidates a stale preview per the standard contract
-  // (wireDivineForm's invalidate() listens for "input"/"change" directly on
-  // the fieldset) -- fire one so a leftover Story preview from before this
-  // compile can never be Applied unreviewed.
-  document.getElementById("godStoryFieldset").dispatchEvent(new Event("input"));
+  if (!opts.skipPreviewInvalidate) {
+    // Any field edit invalidates a stale preview per the standard contract.
+    document.getElementById("godStoryFieldset").dispatchEvent(new Event("input"));
+  }
+}
+
+function godNormalizeCompilePreviewHandoff(data) {
+  return {
+    ok: true,
+    previewId: data.previewId,
+    commandDigest: data.commandDigest,
+    previewOutcome: data.previewOutcome,
+    normalizedCommand: data.normalizedCommand,
+    reversibilityClass: data.reversibilityClass,
+    expiresAt: data.expiresAt,
+    warnings: data.warnings,
+  };
 }
 
 const godCompileBtnEl = document.getElementById("godCompileBtn");
@@ -4867,9 +6704,11 @@ if (godCompileBtnEl) {
     const resp = await godApiFetch("/control/god/compile", { method: "POST", body: { prose } });
     const data = resp.data || {};
     if (data.compileOk) {
-      godCompileResultEl.textContent = "Compiled -- review and Apply from the Story tab.";
-      godPopulateStoryFromCompiled(data.normalizedCommand);
-      showGodTab("story");
+      godCompileResultEl.textContent = "Compiled — Story fields filled; preview ready in the strip.";
+      godPopulateStoryFromCompiled(data.normalizedCommand, { skipPreviewInvalidate: true });
+      const storyCtrl = godDivineFormControllers["#godStoryFieldset"];
+      if (storyCtrl) storyCtrl.acceptServerPreview(godNormalizeCompilePreviewHandoff(data));
+      openDivineModal("story");
     } else {
       // Rejection or error -- render the reason as plain text only (rule:
       // stored-content safety -- never innerHTML for anything the compiler
@@ -4898,7 +6737,7 @@ wireDivineForm("#godLawFieldset", {
     }
     const payload = { title, narration, visibility: "public", modifiers };
     const durationRaw = document.getElementById("godLawDuration").value;
-    if (durationRaw) payload.durationFrames = parseInt(durationRaw, 10);
+    const _df = godSecondsToFrames(durationRaw); if (_df != null) payload.durationFrames = _df;
     const replaceCheckbox = document.getElementById("godLawReplaceCheckbox");
     const replaceId = document.getElementById("godLawReplaceId").value;
     if (replaceCheckbox.checked && replaceId) payload.replaceEffectId = replaceId;
@@ -4953,7 +6792,7 @@ function renderGodLawsActive() {
   godLawsActiveEl.querySelectorAll(".godCancelLawBtn").forEach((btn) => {
     btn.setAttribute("data-tip", JSON.stringify({
       t: "Cancel law",
-      d: "End this timed modifier early. Does not roll back past effects.",
+      d: "End this temporary rule early. Does not undo what already happened.",
     }));
     btn.addEventListener("click", async () => {
       btn.disabled = true;
@@ -4963,19 +6802,473 @@ function renderGodLawsActive() {
   });
 }
 
-// --- History (public interventions only; private history is Sight-only) --
-function renderGodHistory() {
-  const records = ((world.god && world.god.recentPublicInterventions) || []).slice().reverse().slice(0, 50);
+// --- History power tools (Phase 6) ---------------------------------------
+const GOD_HISTORY_DISPLAY_CAP = 50;
+const GOD_CANCELABLE_KINDS = new Set([
+  "providence", "private_omen", "whisper_campaign", "crowd_compulsion", "dream_broadcast",
+  "agent_sampling",
+  "context_mask", "decision_compulsion", "decision_veto_arm", "agent_possession",
+  "anoint", "identity_edit", "identity_copy_overwrite", "architect_zone",
+  "story_event", "weather_override", "merovingian_bargain",
+]);
+let godHistoryFilter = {
+  kind: "",
+  agent: "",
+  publicOnly: true,
+  includePrivate: false,
+  frameFrom: "",
+  frameTo: "",
+};
+
+const godHistoryKindFilterEl = document.getElementById("godHistoryKindFilter");
+const godHistoryAgentFilterEl = document.getElementById("godHistoryAgentFilter");
+const godHistoryPublicOnlyEl = document.getElementById("godHistoryPublicOnly");
+const godHistoryIncludePrivateEl = document.getElementById("godHistoryIncludePrivate");
+const godHistoryIncludePrivateWrapEl = document.getElementById("godHistoryIncludePrivateWrap");
+const godHistoryFrameFromEl = document.getElementById("godHistoryFrameFrom");
+const godHistoryFrameToEl = document.getElementById("godHistoryFrameTo");
+const godHistoryFilterStatusEl = document.getElementById("godHistoryFilterStatus");
+const godHistoryKindListEl = document.getElementById("godHistoryKindList");
+
+function godHistoryPublicRecords() {
+  return ((world.god && world.god.recentPublicInterventions) || []).slice();
+}
+
+function godHistoryMergedRecords(includePrivate) {
+  const byId = new Map();
+  godHistoryPublicRecords().forEach((r) => {
+    if (r && r.id) byId.set(r.id, r);
+  });
+  if (includePrivate && godEffectivelyAuthorized() && godLastSight) {
+    (godLastSight.recentInterventions || []).forEach((r) => {
+      if (r && r.id) byId.set(r.id, r);
+    });
+  }
+  return Array.from(byId.values()).sort((a, b) => (b.frameTick || 0) - (a.frameTick || 0));
+}
+
+function godHistoryRecordById(id) {
+  if (!id) return null;
+  return godHistoryMergedRecords(true).find((r) => r.id === id) || null;
+}
+
+function godHistoryRecordAgentHaystack(record) {
+  const parts = [];
+  const ids = [];
+  if (record.targetId != null) ids.push(record.targetId);
+  if (record.targetAgentId != null) ids.push(record.targetAgentId);
+  if (Array.isArray(record.targetIds)) record.targetIds.forEach((id) => ids.push(id));
+  ids.forEach((id) => {
+    parts.push(String(id));
+    const living = getLivingAgents().find((a) => a.id === id);
+    const anyAgent = living || (world.agents || []).find((a) => a.id === id);
+    if (anyAgent) {
+      parts.push(anyAgent.name || "");
+      parts.push(anyAgent.role || "");
+    }
+  });
+  return parts.join(" ").toLowerCase();
+}
+
+function godHistoryFilteredRecords() {
+  const includePrivate = !!(godHistoryFilter.includePrivate
+    && godEffectivelyAuthorized()
+    && godLastSight
+    && (godLastSight.recentInterventions || []).length);
+  let records = godHistoryMergedRecords(includePrivate);
+  if (godHistoryFilter.publicOnly) {
+    records = records.filter((r) => r.public === true);
+  }
+  const kindNeedle = (godHistoryFilter.kind || "").trim().toLowerCase();
+  if (kindNeedle) {
+    records = records.filter((r) => String(r.kind || "").toLowerCase().includes(kindNeedle));
+  }
+  const agentNeedle = (godHistoryFilter.agent || "").trim().toLowerCase();
+  if (agentNeedle) {
+    records = records.filter((r) => godHistoryRecordAgentHaystack(r).includes(agentNeedle));
+  }
+  const frameFrom = godHistoryFilter.frameFrom !== "" ? parseInt(godHistoryFilter.frameFrom, 10) : null;
+  if (frameFrom != null && Number.isFinite(frameFrom)) {
+    records = records.filter((r) => (r.frameTick || 0) >= frameFrom);
+  }
+  const frameTo = godHistoryFilter.frameTo !== "" ? parseInt(godHistoryFilter.frameTo, 10) : null;
+  if (frameTo != null && Number.isFinite(frameTo)) {
+    records = records.filter((r) => (r.frameTick || 0) <= frameTo);
+  }
+  return records.slice(0, GOD_HISTORY_DISPLAY_CAP);
+}
+
+function godHistorySyncFilterFromUi() {
+  godHistoryFilter.kind = godHistoryKindFilterEl ? godHistoryKindFilterEl.value : "";
+  godHistoryFilter.agent = godHistoryAgentFilterEl ? godHistoryAgentFilterEl.value : "";
+  godHistoryFilter.publicOnly = godHistoryPublicOnlyEl ? godHistoryPublicOnlyEl.checked : true;
+  godHistoryFilter.includePrivate = godHistoryIncludePrivateEl ? godHistoryIncludePrivateEl.checked : false;
+  godHistoryFilter.frameFrom = godHistoryFrameFromEl ? godHistoryFrameFromEl.value : "";
+  godHistoryFilter.frameTo = godHistoryFrameToEl ? godHistoryFrameToEl.value : "";
+}
+
+function godHistoryPopulateKindDatalist() {
+  if (!godHistoryKindListEl) return;
+  const kinds = new Set();
+  godHistoryMergedRecords(true).forEach((r) => {
+    if (r && r.kind) kinds.add(r.kind);
+  });
+  godHistoryKindListEl.innerHTML = Array.from(kinds).sort().map((k) =>
+    `<option value="${escapeHtml(k)}"></option>`).join("");
+}
+
+function updateGodHistorySightToggle() {
+  const canInclude = godEffectivelyAuthorized()
+    && godLastSight
+    && (godLastSight.recentInterventions || []).length;
+  if (godHistoryIncludePrivateWrapEl) {
+    godHistoryIncludePrivateWrapEl.style.display = canInclude ? "" : "none";
+  }
+  if (!canInclude && godHistoryIncludePrivateEl) {
+    godHistoryIncludePrivateEl.checked = false;
+    godHistoryFilter.includePrivate = false;
+  }
+}
+
+function godHistoryFilterStatusText(filtered, total) {
+  const bits = [`Showing ${filtered.length} of ${total} intervention${total === 1 ? "" : "s"}`];
+  if (godHistoryFilter.publicOnly) bits.push("public only");
+  if (godHistoryFilter.includePrivate && godEffectivelyAuthorized() && godLastSight) {
+    bits.push("Sight private merged");
+  }
+  return bits.join(" · ");
+}
+
+function godDurationSecondsFromRecord(record) {
+  if (record.expiresFrame == null || record.frameTick == null) return "";
+  const frames = Number(record.expiresFrame) - Number(record.frameTick);
+  if (!Number.isFinite(frames) || frames <= 0) return "";
+  return godFramesToSeconds(frames);
+}
+
+function godSetVoicePresentation(radioName, presentation) {
+  const val = presentation === "thunder" ? "thunder" : "soft";
+  document.querySelectorAll(`input[name="${radioName}"]`).forEach((el) => {
+    el.checked = el.value === val;
+  });
+}
+
+function godInvalidateDivineFieldset(fieldsetId) {
+  const fs = document.getElementById(fieldsetId);
+  if (fs) fs.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function godCancelKindAllowed(kind) {
+  return GOD_CANCELABLE_KINDS.has(kind);
+}
+
+function godInterventionLikelyActive(record) {
+  if (!record || !record.id || !godCancelKindAllowed(record.kind)) return false;
+  const ft = world.frameTick || 0;
+  const exp = record.expiresFrame;
+  if (typeof exp === "number" && ft >= exp) return false;
+  if (!godLastSight) {
+    return typeof exp === "number" && ft < exp;
+  }
+  if (record.kind === "providence") {
+    return !!(godLastSight.providence && godLastSight.providence.id === record.id
+      && godVoiceGuidanceInWindow(godLastSight.providence));
+  }
+  if (record.kind === "story_event" || record.kind === "weather_override") {
+    return (godLastSight.activeEvents || []).some((e) =>
+      e && e.id === record.id && e.status === "active");
+  }
+  if (record.kind === "architect_zone") {
+    return (godLastSight.architectZones || []).some((z) => z && z.id === record.id);
+  }
+  if (record.kind === "whisper_campaign" || record.kind === "crowd_compulsion"
+      || record.kind === "dream_broadcast") {
+    return typeof exp === "number" && ft < exp;
+  }
+  if (typeof exp === "number") return ft < exp;
+  return false;
+}
+
+function godFindRevokeTarget() {
+  const candidates = [];
+  if (godLastAppliedPin && godLastAppliedPin.id) {
+    const rec = godHistoryRecordById(godLastAppliedPin.id);
+    if (rec) candidates.push(rec);
+  }
+  if (godLastSight && godLastSight.recentInterventions) {
+    for (let i = godLastSight.recentInterventions.length - 1; i >= 0; i--) {
+      const rec = godLastSight.recentInterventions[i];
+      if (!rec || !rec.id) continue;
+      if (candidates.some((c) => c.id === rec.id)) continue;
+      if (godCancelKindAllowed(rec.kind)) candidates.push(rec);
+    }
+  }
+  for (const rec of candidates) {
+    if (godInterventionLikelyActive(rec)) return rec;
+  }
+  return null;
+}
+
+function godHistoryRerunAssessment(record) {
+  const kind = record.kind;
+  if (kind === "proclamation") {
+    if (!record.text) return { ok: false, reason: "text not stored" };
+    return { ok: true, feature: "voice", fieldsetId: "godProclamationFieldset" };
+  }
+  if (kind === "providence") {
+    if (!record.text) return { ok: false, reason: "text not stored" };
+    return { ok: true, feature: "voice", fieldsetId: "godProvidenceFieldset" };
+  }
+  if (kind === "private_omen") {
+    if (record.targetId == null || !record.text) return { ok: false, reason: "target/text not stored" };
+    return { ok: true, feature: "voice", fieldsetId: "godOmenFieldset" };
+  }
+  if (kind === "agent_vitals") {
+    if (record.targetId == null) return { ok: false, reason: "target not stored" };
+    if (!record.healthDelta && !record.hungerDelta) return { ok: false, reason: "deltas not stored" };
+    return { ok: true, feature: "miracles", fieldsetId: "godVitalsFieldset" };
+  }
+  if (kind === "grant_resource") {
+    if (!record.resourceId || !record.amount) return { ok: false, reason: "grant fields not stored" };
+    return { ok: true, feature: "miracles", fieldsetId: "godGrantFieldset" };
+  }
+  if (kind === "structure_condition") {
+    if (record.structureId == null || record.delta == null) {
+      return { ok: false, reason: "structure/delta not stored" };
+    }
+    return { ok: true, feature: "miracles", fieldsetId: "godStructureFieldset" };
+  }
+  if (kind === "agent_sampling") {
+    if (record.targetId == null || record.temperature == null) {
+      return { ok: false, reason: "sampling fields not stored" };
+    }
+    return { ok: true, feature: "matrix", fieldsetId: "godSamplingFieldset" };
+  }
+  if (kind === "context_mask") {
+    if (record.targetId == null || !record.mode) return { ok: false, reason: "mask fields not stored" };
+    if (record.mode === "dream" || record.mode === "whisper_chain") {
+      return { ok: false, reason: "dream/whisper JSON not stored in history" };
+    }
+    return { ok: true, feature: "matrix", fieldsetId: "godDistortionFieldset" };
+  }
+  if (kind === "decision_veto_arm") {
+    if (record.targetId == null) return { ok: false, reason: "target not stored" };
+    return { ok: true, feature: "matrix", fieldsetId: "godVetoArmFieldset" };
+  }
+  if (kind === "story_event") {
+    if ((record.modifierKeys && record.modifierKeys.length)
+      || (record.primitiveInterventionIds && record.primitiveInterventionIds.length)) {
+      return { ok: false, reason: "modifier/primitive values not stored" };
+    }
+    if (!record.title && !record.narration) return { ok: false, reason: "title/narration not stored" };
+    return { ok: true, feature: "story", fieldsetId: "godStoryFieldset" };
+  }
+  if (kind === "whisper_campaign" || kind === "crowd_compulsion" || kind === "dream_broadcast") {
+    return { ok: false, reason: "batch payload details not stored in history" };
+  }
+  return { ok: false, reason: "kind not rehydratable from history" };
+}
+
+function godRerunFromHistory(record) {
+  const assessment = godHistoryRerunAssessment(record);
+  if (!assessment.ok) return assessment;
+  const kind = record.kind;
+  if (kind === "proclamation") {
+    document.getElementById("godProcText").value = record.text || "";
+    godSetVoicePresentation("godProcPresentation", record.presentation);
+    godInvalidateDivineFieldset("godProclamationFieldset");
+  } else if (kind === "providence") {
+    document.getElementById("godProvText").value = record.text || "";
+    document.getElementById("godProvDuration").value = godDurationSecondsFromRecord(record);
+    godSetVoicePresentation("godProvPresentation", record.presentation);
+    godInvalidateDivineFieldset("godProvidenceFieldset");
+  } else if (kind === "private_omen") {
+    document.getElementById("godOmenAgentSelect").value = String(record.targetId);
+    document.getElementById("godOmenText").value = record.text || "";
+    document.getElementById("godOmenDuration").value = godDurationSecondsFromRecord(record);
+    if (record.targetId != null) setGodFocusAgent(record.targetId, { mirrorSelection: false });
+    godInvalidateDivineFieldset("godOmenFieldset");
+  } else if (kind === "agent_vitals") {
+    document.getElementById("godVitalsAgentSelect").value = String(record.targetId);
+    document.getElementById("godVitalsHealth").value = record.healthDelta != null ? record.healthDelta : "0";
+    document.getElementById("godVitalsHunger").value = record.hungerDelta != null ? record.hungerDelta : "0";
+    if (record.targetId != null) setGodFocusAgent(record.targetId, { mirrorSelection: false });
+    godInvalidateDivineFieldset("godVitalsFieldset");
+  } else if (kind === "grant_resource") {
+    document.getElementById("godGrantResourceSelect").value = record.resourceId || "";
+    document.getElementById("godGrantAmount").value = record.amount != null ? String(record.amount) : "";
+    if (record.targetKind === "agent" && record.targetAgentId != null) {
+      document.getElementById("godGrantTargetKind").value = "agent";
+      document.getElementById("godGrantAgentSelect").value = String(record.targetAgentId);
+      setGodFocusAgent(record.targetAgentId, { mirrorSelection: false });
+    } else {
+      document.getElementById("godGrantTargetKind").value = "stockpile";
+    }
+    document.getElementById("godGrantTargetKind").dispatchEvent(new Event("change"));
+    godInvalidateDivineFieldset("godGrantFieldset");
+  } else if (kind === "structure_condition") {
+    document.getElementById("godStructureSelect").value = String(record.structureId);
+    document.getElementById("godStructureDelta").value = record.delta != null ? String(record.delta) : "";
+    godInvalidateDivineFieldset("godStructureFieldset");
+  } else if (kind === "agent_sampling") {
+    document.getElementById("godSamplingAgentSelect").value = String(record.targetId);
+    if (record.model) document.getElementById("godSamplingModel").value = record.model;
+    document.getElementById("godSamplingTemp").value = record.temperature;
+    document.getElementById("godSamplingDuration").value = godDurationSecondsFromRecord(record);
+    if (godSamplingTempOutEl) godSamplingTempOutEl.textContent = String(record.temperature);
+    if (record.targetId != null) setGodFocusAgent(record.targetId, { mirrorSelection: false });
+    godInvalidateDivineFieldset("godSamplingFieldset");
+  } else if (kind === "context_mask") {
+    document.getElementById("godDistortionAgentSelect").value = String(record.targetId);
+    const modeEl = document.querySelector(`#godDistortionFieldset input[name="godDistortionMode"][value="${record.mode}"]`);
+    if (modeEl) modeEl.checked = true;
+    document.getElementById("godDistortionDuration").value = godDurationSecondsFromRecord(record);
+    if (record.targetId != null) setGodFocusAgent(record.targetId, { mirrorSelection: false });
+    godInvalidateDivineFieldset("godDistortionFieldset");
+  } else if (kind === "decision_veto_arm") {
+    document.getElementById("godVetoArmAgentSelect").value = String(record.targetId);
+    document.getElementById("godVetoArmDuration").value = godDurationSecondsFromRecord(record);
+    if (record.targetId != null) setGodFocusAgent(record.targetId, { mirrorSelection: false });
+    godInvalidateDivineFieldset("godVetoArmFieldset");
+  } else if (kind === "story_event") {
+    document.getElementById("godStoryTitle").value = record.title || "";
+    document.getElementById("godStoryNarration").value = record.narration || "";
+    const vis = record.visibility === "private" ? "private" : "public";
+    document.getElementById("godStoryVisibility").value = vis;
+    if (vis === "private" && record.targetId != null) {
+      document.getElementById("godStoryTargetSelect").value = String(record.targetId);
+    }
+    document.getElementById("godStoryDuration").value = godDurationSecondsFromRecord(record);
+    document.querySelectorAll(".gs-mod-enable").forEach((cb) => { cb.checked = false; });
+    document.getElementById("godStoryProvidenceCheckbox").checked = false;
+    document.getElementById("godStoryProvidenceText").value = "";
+    godInvalidateDivineFieldset("godStoryFieldset");
+  }
+  openDivineModal(assessment.feature);
+  godScrollDivineFieldset(assessment.fieldsetId);
+  return { ok: true };
+}
+
+function godExportHistoryMarkdown() {
+  godHistorySyncFilterFromUi();
+  const records = godHistoryFilteredRecords();
+  const lines = [
+    "# Divine intervention history",
+    "",
+    `Exported at frame ${world.frameTick || 0}.`,
+    "",
+  ];
   if (!records.length) {
-    godHistoryListEl.innerHTML = `<li class="divine-note">No public interventions yet.</li>`;
+    lines.push("_No interventions match the current filter._");
+  }
+  records.forEach((r) => {
+    lines.push(`## ${r.kind || "intervention"} (${r.id})`);
+    lines.push(`- **Frame:** ${r.frameTick ?? "—"}`);
+    lines.push(`- **Public:** ${r.public ? "yes" : "no"}`);
+    if (r.title) lines.push(`- **Title:** ${r.title}`);
+    if (r.text) lines.push(`- **Text:** ${r.text}`);
+    if (r.narration) lines.push(`- **Narration:** ${r.narration}`);
+    if (r.targetId != null) lines.push(`- **Target agent:** ${r.targetId}`);
+    if (r.expiresFrame != null) lines.push(`- **Expires frame:** ${r.expiresFrame}`);
+    lines.push("");
+  });
+  const blob = new Blob([lines.join("\n")], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `divine-history-${world.frameTick || 0}.md`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function wireGodHistoryControls() {
+  const rerender = () => {
+    godHistorySyncFilterFromUi();
+    godHistoryPopulateKindDatalist();
+    renderGodHistory();
+  };
+  [
+    godHistoryKindFilterEl,
+    godHistoryAgentFilterEl,
+    godHistoryPublicOnlyEl,
+    godHistoryIncludePrivateEl,
+    godHistoryFrameFromEl,
+    godHistoryFrameToEl,
+  ].forEach((el) => {
+    if (!el) return;
+    el.addEventListener("input", rerender);
+    el.addEventListener("change", rerender);
+  });
+  const clearBtn = document.getElementById("godHistoryClearFiltersBtn");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      if (godHistoryKindFilterEl) godHistoryKindFilterEl.value = "";
+      if (godHistoryAgentFilterEl) godHistoryAgentFilterEl.value = "";
+      if (godHistoryPublicOnlyEl) godHistoryPublicOnlyEl.checked = true;
+      if (godHistoryIncludePrivateEl) godHistoryIncludePrivateEl.checked = false;
+      if (godHistoryFrameFromEl) godHistoryFrameFromEl.value = "";
+      if (godHistoryFrameToEl) godHistoryFrameToEl.value = "";
+      godHistoryFilter = {
+        kind: "", agent: "", publicOnly: true, includePrivate: false, frameFrom: "", frameTo: "",
+      };
+      rerender();
+    });
+  }
+  const exportBtn = document.getElementById("godHistoryExportBtn");
+  if (exportBtn) exportBtn.addEventListener("click", godExportHistoryMarkdown);
+  if (godHistoryListEl) {
+    godHistoryListEl.addEventListener("click", (e) => {
+      const btn = e.target.closest(".god-history-rerun");
+      if (!btn || btn.disabled) return;
+      const id = btn.dataset.id;
+      const record = godHistoryRecordById(id);
+      if (!record) return;
+      const result = godRerunFromHistory(record);
+      if (!result.ok && godHistoryFilterStatusEl) {
+        godHistoryFilterStatusEl.textContent = `Re-run failed: ${result.reason || "unknown"}`;
+      }
+    });
+  }
+}
+wireGodHistoryControls();
+
+function renderGodHistory() {
+  godHistorySyncFilterFromUi();
+  updateGodHistorySightToggle();
+  godHistoryPopulateKindDatalist();
+  const includePrivate = !!(godHistoryFilter.includePrivate
+    && godEffectivelyAuthorized()
+    && godLastSight);
+  const total = godHistoryMergedRecords(includePrivate).length;
+  const records = godHistoryFilteredRecords();
+  if (godHistoryFilterStatusEl) {
+    godHistoryFilterStatusEl.textContent = godHistoryFilterStatusText(records, total);
+  }
+  if (!records.length) {
+    godHistoryListEl.innerHTML = `<li class="divine-note">No interventions match the current filter.</li>`;
     return;
   }
   godHistoryListEl.innerHTML = records.map((r) => {
-    const badge = `<span class="divine-history-badge divine-history-public">public</span>`;
-    const label = escapeHtml(String(r.title || r.text || r.kind || "intervention"));
+    const badgeClass = r.public ? "divine-history-public" : "divine-history-private";
+    const badgeLabel = r.public ? "public" : "private";
+    const badge = `<span class="divine-history-badge ${badgeClass}">${escapeHtml(badgeLabel)}</span>`;
+    const label = escapeHtml(String(r.title || r.text || r.narration || r.kind || "intervention"));
+    const assessment = godHistoryRerunAssessment(r);
+    const rerunBtn = assessment.ok
+      ? `<button type="button" class="god-history-rerun" data-id="${escapeHtml(String(r.id))}" ` +
+        `data-tip='{"t":"Re-run","d":"Fill the form from this log entry — you must Preview again before Apply."}'>Re-run</button>`
+      : `<button type="button" class="god-history-rerun" disabled ` +
+        `data-tip='{"t":"Re-run unavailable","d":"${escapeHtml(assessment.reason || "details not saved")}"}'>Re-run</button>` +
+        `<span class="divine-history-rerun-note">${escapeHtml(assessment.reason || "")}</span>`;
+    let agentMeta = "";
+    if (r.targetId != null) agentMeta = `, agent ${escapeHtml(String(r.targetId))}`;
+    else if (r.targetAgentId != null) agentMeta = `, agent ${escapeHtml(String(r.targetAgentId))}`;
     return `<li class="divine-history-item">${badge}` +
       `<span class="divine-kv-key">${escapeHtml(String(r.kind || ""))}</span> — ${label}` +
-      `<div class="divine-meta">frame ${escapeHtml(String(r.frameTick))}, id ${escapeHtml(String(r.id))}</div></li>`;
+      `<div class="divine-meta">frame ${escapeHtml(String(r.frameTick))}, id ${escapeHtml(String(r.id))}${agentMeta}</div>` +
+      `<div class="divine-history-actions-row">${rerunBtn}</div></li>`;
   }).join("");
 }
 
@@ -5017,6 +7310,8 @@ function updateGodModeGate() {
     godLastAgentListKey = agentKey;
     populateGodAgentSelects();
   }
+  updateDivineBarSituational();
+  maybeRefreshGodSight();
 }
 
 function renderGodPublicBanner() {
@@ -5032,7 +7327,11 @@ function renderGodPublicBanner() {
   godSeenInterventionIds.add(fresh.id);
   const label = fresh.title || fresh.text || fresh.kind || "A divine intervention";
   godPublicBannerEl.textContent = `Divine: ${String(label)}`;
+  godPublicBannerEl.classList.remove("divine-banner-soft", "divine-banner-thunder");
+  const pres = fresh.presentation === "thunder" ? "thunder" : "soft";
+  godPublicBannerEl.classList.add(pres === "thunder" ? "divine-banner-thunder" : "divine-banner-soft");
   godPublicBannerEl.style.display = "block";
+  pulseDivineBar();
   if (godBannerTimer) clearTimeout(godBannerTimer);
   godBannerTimer = setTimeout(() => {
     godPublicBannerEl.style.display = "none";

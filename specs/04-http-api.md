@@ -39,9 +39,9 @@ configured; see "Sovereign God mode" below.
 | `/meta/update` | POST | Build an autobiography + persona directive (experimental, off by default) | `{agent, report, frame_tick?}` | `{ok, autobiography, persona}` |
 | `/memory/clean` | POST | Dedupe/trim the memory store | `{frame_tick?}` | `{ok, removed, size}` |
 | `/agent/think` | POST | **Legacy** — calls `run_agent_decision()` directly | full think-payload dict (see specs/03) | validated decision dict |
-| `/council-llm-log` | GET | Slim decision records (`llm.jsonl`) for a council frame window (blueprint pitches/verdicts only). Scans **every retained session directory** under `logs/` (not just the live one) — `frame_tick` is monotonic across restarts, so a past council meeting's window can fall entirely inside an older session's `llm.jsonl`; matches from all directories are merged and re-sorted by `frame_tick` | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
-| `/state` | GET | Full world snapshot for the thin viewer | — | `engine.snapshot()` — see key inventory below |
-| `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected) | — | `{districts: [...], roadNodes: {...}, roadEdges: [...]}` |
+| `/council-llm-log` | GET | Slim decision records (`llm.jsonl`) for a council frame window (blueprint pitches/verdicts only). **Scans the live session's `llm.jsonl` first**; only reads older retained session directories when the requested `[start_frame, end_frame]` is not fully covered by the live file's frame range (`frame_tick` is monotonic across restarts, but each session only spans frames recorded while that server run was alive — a past council window may fall entirely in an older session). Out-of-range files are skipped using cached per-file `(min_frame, max_frame)` when possible. Matches from all scanned directories are merged and re-sorted by `frame_tick` | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
+| `/state` | GET | World snapshot for the thin viewer (full or delta via `?since=`) | query param `since` (int, optional) — client's last applied `frameTick`; omit or `0` for full | See **/state delta protocol** below and key inventory |
+| `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected). Supports conditional polls via `districtsEpoch` | query param `since` (int, optional) — last seen `epoch` from a prior response | **First / gap:** `{districts: [...], roadNodes: {...}, roadEdges: [...], epoch: int}`. **Unchanged:** when `since == engine.districtsEpoch`, HTTP 200 with tiny body `{unchanged: true, epoch: int}` (no district/road payload). `districtsEpoch` bumps on district founding, tile place/remove, terrain dig/plant, road-graph change, architect paint/revert, restore, and reset |
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
 | `/control/resume` | POST | Resume the tick loop | — | `{ok: true, paused: false}` |
 | `/control/reset` | POST | Reset the world, optionally with a new roster size (requires password) | `{password: string, agents?: int}` — `password` must match `SIM_RESET_PASSWORD` (server.py, read once at import; default `"reset"` when unset/blank); `agents` optional (omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` on success; `{ok: false, error: "unauthorized"}` with HTTP 401 on wrong/missing password (no reset) |
@@ -65,14 +65,44 @@ live under the engine lock (same pattern as `/state`) and returns JSON; the
 viewer's periodic `fetch()` re-parses it rather than re-injecting a `<script>`
 tag (which would throw on re-declaring `const` globals every poll).
 
+**`/districts.js` conditional poll.** The viewer tracks `districtsEpoch`
+(engine attribute, not in `/state`). Each poll may send `GET
+/districts.js?since=<epoch>`. When `since` equals the current epoch, the
+handler returns only `{unchanged: true, epoch}` under the lock without
+copying district tiles/terrain; JSON is assembled after the lock is released.
+When the epoch differs (or `since` is omitted), the handler shallow-copies
+district/road data into plain dicts/lists under the lock, then `jsonify`s
+outside the lock. The viewer keeps its last full payload on `unchanged`
+responses.
+
+## `/state` delta protocol
+
+`SimEngine.snapshot_delta(since)` (server route: `GET /state?since=<N>`).
+
+| Request | Response |
+|---------|----------|
+| `GET /state` or `?since=0` / missing `since` | Full snapshot (`full: true`; same top-level keys as before) |
+| `GET /state?since=<N>` and `N == frameTick` and no state changed with `lastMod > N` | `{frameTick, stateGeneration, unchanged: true}` |
+| `GET /state?since=<N>` contiguous (`since < frameTick`, gap ≤ `STATE_DELTA_MAX_GAP` ≈ 90 frames) | `{frameTick, baseFrame: N, stateGeneration, calendar, uptimeSeconds, paused? (if changed), ...partial}` — omitted key = unchanged on the client; each included field was last modified at a frame `> N` within the gap window |
+| Gap > 90 frames / reset / `since > frameTick` / `since < last_reset_frame` | Full snapshot + `full: true`; `stateGeneration` bumps on reset/restore |
+
+Partial rules: dirty agents only in `agents[]`; dirty civ subkeys only (structure upserts may omit `sprite` unless create/upgrade/sprite-submit — full snapshots and the first poll always include `sprite` when present; the viewer keeps prior sprites when a delta upsert omits the field — `structuresRemoved` lists deletions); `config` only on full or when flags change. The engine tracks per-key `lastMod` frame stamps (not cleared per poll) and emits entries with `lastMod > since`, pruning entries older than `frameTick - STATE_DELTA_MAX_GAP` so multiple clients with different `since` values each receive one-time updates within the gap window. Lock discipline: copy/dirty under lock; JSON assembly after release where practical.
+
 ## `/state` payload — top-level keys
 
-From `SimEngine.snapshot()` (sim_engine.py:9907-10049), returned under the
-engine lock for a consistent read:
+From `SimEngine.snapshot()` / `SimEngine.snapshot_delta()` (sim_engine.py),
+returned under the engine lock for a consistent read. Full responses include
+every key below; delta responses omit unchanged keys (client merges — see
+[specs/11-viewer.md](11-viewer.md)). Both modes always include `frameTick`
+and `stateGeneration`; full snapshots also set `full: true`.
 
 | Key | Contents (detail owned elsewhere) |
 |---|---|
 | `frameTick` | current tick counter — specs/02-engine-core.md |
+| `stateGeneration` | monotonic counter bumped on reset/restore; client forces a full resync when it changes |
+| `full` | present and `true` only on full snapshots (omit on delta/unchanged) |
+| `unchanged` | present and `true` only when `?since=frameTick` and nothing has `lastMod > since` |
+| `baseFrame` | on deltas only — the client's `since` value this patch applies after |
 | `paused` | bool |
 | `uptimeSeconds` | process wall-clock uptime |
 | `calendar` | day/season/year — specs/02-engine-core.md |
@@ -188,9 +218,16 @@ Matrix Phase 9 adds `architect_zone`, `architect_zone_cancel`, and
 `architect_release_hold` (Path1 terrain paint, keyed door movement gate, limbo
 hold at `GOD_LIMBO_STATION`; `architectZones` omitted from `/state`; Sight
 summaries only; paint audit `public: true`, door/limbo `public: false`); Divine
-Matrix Phase 10 adds `checkpoint_create`, `checkpoint_restore`, and
-`deja_vu_replay` (stub; `GOD_DEJA_VU_REPLAY` gate); checkpoint metadata in
-Sight only, not `/state`; restore is irreversible world replace; Phase 4 added
+Matrix Phase 10 adds `checkpoint_create` and `checkpoint_restore`; checkpoint
+metadata in Sight only, not `/state`; restore is irreversible world replace.
+Divine Console Phase 8 adds applyable `deja_vu_replay` when
+`GOD_DEJA_VU_REPLAY` is on (`{targetId, maxSteps?}`; cancellable parent
+sequencing compulsion gates from `decisionDigests`); digest summaries in Sight
+only, not `/state`. Divine Console Phase 9 adds `crowd_compulsion` (batch
+decision gates from shared duration/turns + per-target pinned decisions;
+parent `crowdCompulsions`; private) and `dream_broadcast` (batch dream
+`context_mask` from one shared snapshot; parent `dreamBroadcasts`; private).
+Phase 4 added
 `agent_vitals`/`grant_resource`/`structure_condition`; town-integrity adds
 `repair_structures`/`clear_ruins`; Phase 5 adds
 `story_event` (timed modifiers + zero or more Phase 4 primitives + optional
@@ -209,6 +246,10 @@ for the command catalog and stored-text contract, and
 preview/apply step (unlike every other mutating God route). It searches, in
 order, the active `providence` slot, every `privateOmens` record, every
 `whisperCampaigns` entry (by campaign id — revokes all linked omens), every
+`crowdCompulsions` entry (by parent id — closes all linked decision gates),
+every `dreamBroadcasts` entry (by parent id — closes all linked dream masks),
+every `dejaVuReplays` entry (by replay parent id — clears remaining sequenced
+compulsion gates), every
 `agentSampling` override (by intervention `id` or via `revoke_agent_sampling`),
 every `contextMasks` entry (by mask intervention `id`), every
 `decisionGates` entry (by gate intervention `id`), every
@@ -235,12 +276,45 @@ is the first and only client of all five routes. It reads
 `god_preview()`'s response (documented in
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel))
 to drive its preview→apply flow, and reads `god_sight()`'s `agents`/
-`activeEvents`/`recentInterventions`/`recentDivineResponses` for its Sight
-and Voice Adherence panels. `/control/god/capabilities` documents that
+`activeEvents`/`recentInterventions`/`recentDivineResponses`/`pulse` for its Sight
+and Voice Adherence panels.
+
+**Village pulse (Divine Console improvements, Phase 10).** Successful
+`GET /control/god/sight` responses include an additive top-level `pulse`
+object — **ephemeral**, derived live from world state at request time, never
+stored in `godState` or persisted by save/restore. Shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `crisisAgents` | `{id, name, reason}[]` | Living agents in survival crisis (incapacitated, low/critical health, starving/very hungry); capped ~8, worst first |
+| `stockpileTotals` | `object` | Positive resource totals from `civilization.stockpile` |
+| `openProjectsCount` | `int` | Count of active `districtProjects` entries |
+| `sageStatus` | `object` | Elder summary: `present`, `status` (`living`/`critical`/`incapacitated`/`absent`), optional `name`/`role`/`health`/`hunger` |
+| `weather` | `object` | Same projection as `/state` weather (`state`, `since`, `districts`) |
+| `activeEventTitles` | `string[]` | Public-safe titles from active `activeEvents` (`title` for story events, else `kind`) |
+| `providence` | `{active: bool, expiresFrame?}` | Timed providence window only — no guidance text |
+
+No LLM calls; no `GOD_STATE_VERSION` bump. `/control/god/capabilities` documents that
 `proclamation` applies as timed providence (optional `durationFrames`, same
-slot/revoke/expiry as `providence`). No new response shape was needed for the
-viewer beyond `recentDivineResponses` — every other field it reads was
-already documented by Phases 2–6.
+slot/revoke/expiry as `providence`). Both `proclamation` and `providence`
+payloads accept an optional cosmetic `presentation` enum (`"soft"` \| `"thunder"`;
+default omit/`"soft"`) — validated at preview, audited in `divine.jsonl` via
+the normalized command, stored on intervention/providence records and public
+chronicle entries for viewer banner/chronicle styling only (cognition text
+unchanged). No new preview/apply response fields — the viewer reads
+`presentation` from `/state` `god.recentPublicInterventions`, `god.providence`,
+and `world.chronicle` entries.
+
+**Preview warnings (Divine Console improvements, Phase 7).** A successful
+`POST /control/god/preview` response (`ok: true`) may include an additive
+`warnings: string[]` field. Each entry is a short, secret-free human message
+about non-fatal concerns in the normalized command — today, semantically
+opposing timed-modifier keys on `story_event` (including Laws submissions,
+which are `story_event` with modifiers only). Warnings never change
+`ok`, never block Apply, and are omitted (or `[]`) when there is nothing to
+report. Fatal validation still returns `ok: false` with `reason` only.
+See [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
+for the conflict table evaluated at preview time.
 
 ### Optional Phase 8: `/control/god/compile`
 

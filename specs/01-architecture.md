@@ -19,8 +19,12 @@ for the action catalog.
   prompts, calls Ollama, validates the response, and hands a decision back to the
   engine.
 - `simulation/index.html` (shell) + `simulation/viewer.js` + `simulation/sprites.js`
-  poll `GET /state` (~10 Hz) and render; closing the browser tab does not stop
-  the simulation.
+  poll `GET /state` (~10 Hz, delta after the first full snapshot) and render;
+  closing the browser tab does not stop the simulation. Delta responses include
+  only keys whose server-side `lastMod` frame is greater than the client's
+  `?since=` value (within `STATE_DELTA_MAX_GAP`); maps are pruned, not cleared
+  per poll, so multiple viewers with different `since` cursors each receive
+  one-time updates.
 
 The engine mutates state only under `self.lock`; the full world is persisted to
 `simulation/state.db` (see [02-engine-core.md](02-engine-core.md)).
@@ -181,6 +185,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `GOD_COMPILER_ENABLED` | False (env-backed, `SIM_GOD_COMPILER`) | no (advertised only via `/control/god/capabilities`'s `compiler.enabled`, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_DEJA_VU_REPLAY` | False (env-backed, `SIM_GOD_DEJA_VU_REPLAY`) | yes | [02](02-engine-core.md), [04](04-http-api.md), [12](12-ops.md) |
 
-`civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`2` after Divine
-Matrix scaffolding); persisted private maps from that shape never appear in
-`/state` `god` (see [02-engine-core.md](02-engine-core.md)).
+`civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
+Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder
+maps); persisted private maps from that shape never appear in `/state` `god`
+(see [02-engine-core.md](02-engine-core.md)).

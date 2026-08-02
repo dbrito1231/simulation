@@ -58,27 +58,30 @@ folder for its lifetime.
   (`state.db` is the authoritative memory store across restarts, so an old
   session's `memory.json` is pure disk bloat once its directory ages out of
   the retention window).
-- **`/council-llm-log` searches across retained sessions, not just the live
-  one**: `frame_tick` is a global counter persisted in `state.db` that never
-  resets on restart, so a council meeting's `[start_frame, end_frame]` window
-  can fall entirely inside an *older* session's `llm.jsonl` if the server was
-  restarted since that meeting happened. The route lists every subdirectory
-  of `logs/` matching `SESSION_DIR_RE` (same regex `_prune_old_sessions`
-  uses, so it never looks past the retention window), sorts them
-  lexicographically (== chronologically), applies the same per-line frame/
-  agent/action filter to each directory's `llm.jsonl` via a shared helper
-  (`_council_llm_entries_from_file`), and merges + re-sorts all matches by
-  `frame_tick`. This is a small, bounded scan (at most `LOG_RETENTION_SESSIONS`
-  files) — no attempt is made to guess which single session a frame range
-  belongs to via mtime/stat, since simplicity/correctness matters more than
-  the marginal cost of reading a few extra small JSONL files.
+- **`/council-llm-log` prefers the live session, then older retained sessions
+  only when needed**: `frame_tick` is a global counter persisted in
+  `state.db` that never resets on restart, so a council meeting's
+  `[start_frame, end_frame]` window can fall entirely inside an *older*
+  session's `llm.jsonl` if the server was restarted since that meeting
+  happened. The route **always scans the live session's `llm.jsonl` first**
+  via `_scan_council_llm_file` (shared council filter with
+  `_council_llm_entries_from_file`). If the live file's `(min_frame,
+  max_frame)` fully covers the requested window, older directories are not
+  read. Otherwise it lists every other subdirectory of `logs/` matching
+  `SESSION_DIR_RE` (same regex `_prune_old_sessions` uses, so it never
+  looks past the retention window), skips files whose cached or computed
+  bounds do not overlap the window (`_llm_jsonl_frame_bounds`), applies the
+  same per-line filter to the rest, and merges + re-sorts all matches by
+  `frame_tick`. Per-file bounds are cached in memory keyed by path with
+  mtime+size invalidation so steady-state council lookups after a long run
+  typically touch only the live `llm.jsonl`.
 - **Six JSONL streams**, each created empty on startup (server.py:255-264):
   | File | Written by | Record `type` |
   |---|---|---|
   | `activity.jsonl` | `log_activity(message, frame_tick)` (server.py:286-289) | `"activity"` |
   | `conversation.jsonl` | `log_conversation(sender, recipient, message, frame_tick, kind, outcome)` (server.py:291-303) | `"conversation"` |
   | `llm.jsonl` | `log_lm_exchange(record)` (server.py:305-307) | `"llm"` (sessions predating the Ollama migration, `docs/plan-ollama-migration.md` Phase 5, wrote `lm_studio.jsonl` with `type: "lm_studio"`) |
-  | `benchmarks.jsonl` | `log_benchmark(metric, value, frame_tick, detail)` (server.py:309-318) | `"benchmark"` |
+  | `benchmarks.jsonl` | `log_benchmark(metric, value, frame_tick, detail)` (server.py:309-318); flushed via `flush_benchmarks()` | `"benchmark"` |
   | `divine.jsonl` | `log_divine(intervention_id, request_id, frame_tick, kind, normalized_command, outcome, status, public)` — Sovereign God mode Phase 2 | `"divine"` |
   | `compiler.jsonl` | `log_compiler(prose, model, latency_ms, status, reason, preview_id)` — Sovereign God mode Optional Phase 8 | `"compiler"` |
 - Every record passes through `_append()` (server.py:272-284), which stamps
@@ -99,13 +102,33 @@ folder for its lifetime.
   - `activity`: `{type, message, frame_tick}`.
   - `conversation`: `{type, kind, from, to, message, frame_tick, outcome?}`.
   - `llm`: built per decision call by closure `log_lm(...)`
-    (server.py:3010-3035): `{agent_name, frame_tick, latency_ms,
+    (server.py:3010-3035), stripped in `log_lm_exchange` unless full logging
+    is enabled. **Default (slim):** `{agent_name, frame_tick, latency_ms,
     invention_only, sprite_design_only, high_stakes_reason,
     high_stakes_active, high_stakes_capped, prompt_chars, system_chars,
-    nudges_total, nudges_dropped, request, response, http_status, decision,
-    error}` — `request` is the exact payload sent (post any slim-retry
-    swap), `decision` is the normalized/applied decision or fallback.
+    nudges_total, nudges_dropped, response_preview?, http_status, decision,
+    error, module?, timeout_s?}` — omits full `request`/`response` bodies;
+    `response_preview` is a short excerpt of assistant text when present.
+    `decision` is the normalized/applied decision or fallback. PIANO module
+    timeout records omit bodies by default and may include `module` /
+    `timeout_s`. **`SIM_LLM_LOG_FULL=1`** (env, parsed like other `SIM_*`
+    truthy flags — `1`/`true`/`yes`/`on`, read once at import) restores the
+    legacy shape with full `request` (exact payload sent, post any slim-retry
+    swap) and full `response` (Ollama JSON body). Required for
+    `scripts/llm_replay_bench.py`, which replays logged `request.messages`.
+    `/council-llm-log` uses slim fields only (`decision`, `invention_only`,
+    etc.) and does not need full bodies when `invention_only` is stamped on
+    the record.
   - `benchmark`: `{type, metric, value, frame_tick, detail?}`.
+- **`benchmarks.jsonl` buffered flush (perf, docs/plan-perf-degradation-fixes.md
+  Agent 8):** `log_benchmark` appends to an in-memory buffer (cap
+  `BENCHMARK_BUFFER_MAX = 256`, server.py beside `SessionLogger`) instead of
+  opening the file per record. `_sample_benchmarks()` ends with
+  `flush_benchmarks()` (wired through engine deps as `flush_benchmarks`) so
+  each ~20s sample burst becomes one multi-line append. The buffer auto-flushes
+  when full; `atexit` and graceful shutdown also call `flush_benchmarks()` so
+  event-driven metrics are not lost. Record shape is unchanged — each flushed
+  line is still one stamped JSON object with `ts` and `session_id`.
   - `divine`: `{type, intervention_id, request_id, frame_tick, kind,
     normalized_command, outcome, status, public}`. `request_id` is a
     truncated SHA-256 hash of the client-supplied requestId, never the raw
@@ -337,6 +360,23 @@ Until that protocol has been run and its result recorded here, treat
 `GOD_COMPILER_ENABLED=1` as an experimental, operator-opt-in-only setting —
 never a default for any deployment profile.
 
+**Measurement status (2026-08-01, Divine Console Phase 11):** the full A/B
+contention protocol above was **not run** in this environment (requires two
+long-lived comparable server sessions with fresh post-restart
+`benchmarks.jsonl` / `llm.jsonl` baselines plus sustained compile load at
+max rate). Do **not** infer green A/B results from shipping compiler UX
+promotion alone. A lightweight compile-path sanity check may be noted in
+`docs/HANDOFF.md` when Ollama was reachable; that is not a substitute for
+the protocol.
+
+**Viewer UX status:** when `capabilities.compiler.enabled` is true (both
+`GOD_MODE_ENABLED` and `SIM_GOD_COMPILER=1`), the Compile bar button and
+modal are **supported experimental** — solid chrome (no dashed “dark”
+styling), help text cites `SIM_GOD_COMPILER=1`, and a successful compile
+hands off into Story form fields plus the sticky preview strip so the
+operator can Apply without re-Previewing. Default remains **off**
+(`GOD_COMPILER_ENABLED` false at import unless the env var is set).
+
 ## Debugging workflow
 
 There is **no automated test suite or linter** in this repo. Verification is
@@ -375,7 +415,7 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 | `path1_smoke.py` | No | Deterministic smoke harness for the Path 1 bundle (industry, tool tiers, terrain, diplomacy, pressure loop) — same direct-import approach as `sid_parity_smoke.py`. Run: `uv run python scripts/path1_smoke.py`. |
 | `path1_soak.py` | Mode-dependent | "SA-9 Path 1 soak verifier": live soak orchestration + log audit for the 2h mini-soak from the archived Path 1 plan. Subcommands: `report`/`prompt-check`/`audit LOG_DIR` need no Ollama; `run [--duration S] [--agents N]` is a live soak against a running server (Ollama optional, recommended for one check). |
 | `blueprint_smoke.py` | No | Deterministic blueprint validation/recovery checks — imports `server.py`/`sim_engine.py` directly to exercise proposal/approval edge cases (e.g. duplicate-effect detection) with no live LLM call. |
-| `god_mode_smoke.py` | No | Deterministic smoke harness for Sovereign God mode Phases 2–6 plus Divine Matrix Phases 1–10 (docs/plan-sovereign-god-mode-v2.md, docs/plan-divine-matrix-interventions.md): flag/auth gate, preview/idempotency/expiry, the stored-text contract (including hostile-string round-tripping), godState persistence/restore/reset, the five `/control/god/*` routes via a real `server.app.test_client()` (Phase 2); **Voice binding** — `divine_response` required while guidance unacked, `follow` clears goal/assignedTask, missing/invalid synthesizes `continue` + `missing_divine_response` without rejecting the action, sprite/invention special turns cancelled (not deferred) on Voice apply and while guidance unacked, proclamation auto-applies as providence (same slot/duration/revoke), `recentDivineResponses` in Sight only, adherence `divine.jsonl` `status: "adherence"` records; providence/private-omen set/replace/revoke/expire and the divine-vs-directive prompt separation (Phase 3); whisper campaigns, agent sampling, memory surgery, context masks (Matrix Phases 1–4); **decision gate / possession** — compulsion forces pinned `rest`, possession skips `llm_decide`, veto hold+resolve, Sage `_rush_to_heal` bypass, veto hold cap, `decisionGates` privacy (Matrix Phase 5); **Burning Bush / bargain** — thread privacy, bargain success grant, expiry failure path (Matrix Phase 6); **Anointed** — destiny/oracle target-only prompt, stigmata in neighbor `nearby_agents`, oracle gated by `revealFrame`, revoke clears, no `/state` leak (Matrix Phase 7); **Identity Forge** — role swap changes `role_skill` in think payload, copy progresses across N thinks, cancel restores snapshot, `identityForges` privacy (Matrix Phase 8); **Architect Zones** — door blocks move without `godKeys` and allows with key, limbo sets `divineHold` and release restores, paint cancel reverts terrain, `architectZones`/key privacy (Matrix Phase 9); **Reload checkpoints** — create → mutate → restore roundtrip on temp `DB_PATH`/`GOD_CHECKPOINT_ROOT`, cap reject + `replaceOldest`, Sight summaries without path leak, `deja_vu_replay` rejects when flag off (Matrix Phase 10); the three immediate miracles and their shared `irreversible` class (Phase 4); Phase 5's `_divine_modifier`/`story_event` layer — every one of the seven modifier keys at `0.0`/fractional/`1.0`/max, the gather zero-path returning before the carry-cap clamp with `collectSuccesses`/the tool benchmark untouched, `fish_yield_multiplier` replacing (not multiplying with) `gather_yield_multiplier`, a collapsed agent still recovering under an active `0.0` `health_regen_multiplier`, an all-`1.0` run proving byte-identical to a feature-off baseline built the same way, carry-cap and low-ecology-stock boundaries, spoilage never exceeding eligible overflow, one-value-per-key rejection with `replaceEffectId` acceptance, `story_event` atomicity (one invalid sub-component changes nothing) and its full modifiers+primitives+providence composition, expiry closing an event (and its linked providence) exactly once with the modifier stopping exactly at `expiresFrame` before cleanup runs, `god_cancel` closing an active event while refusing an irreversible miracle's id, active events surviving save/restore with an absolute `expiresFrame`, and preview disclosing the divine and custom-rule gather contributions separately; and Phase 6's `weather_override` — forced entry drawing zero RNG (`random.getstate()` byte-identical before/after apply) with `weather["state"]`/`exitFrame`/`districts` set from the operator input, `exitFrame` matching the event's `expiresFrame` exactly, the natural `_tick_weather` never transitioning while an override holds, expiry handoff to the natural cycle's successor for all four overridden states (both `gathering` probability branches forced via a `random.random` monkeypatch), `god_cancel` running the same handoff, unknown-state/unknown-district/`WEATHER_ENABLED=False` rejections, the `consequential` reversibility class with preview disclosing the affected districts and non-ruined at-risk structure count, `replaceEffectId` one-active-override enforcement (closing the previous as `replaced`), save/restore round-tripping an absolute `expiresFrame`, restore-time expiry-plus-handoff firing exactly once, and a seeded-RNG natural-cycle trajectory proving byte-identical whether `GOD_MODE_ENABLED` is off or on-but-unused. Sets `SIM_GOD_MODE`/`SIM_GOD_TOKEN`/`SIM_GOD_AUTH=1` before importing `sim_engine`/`server`, then toggles other on/off scenarios by monkeypatching the already-imported modules' plain globals (the same idiom `sid_parity_smoke.py` uses for `PIANO_MODULES`/`ALWAYS_ON_MODULES`) rather than re-importing. Never calls `save_state()`/`reset()`/`clear_state()` against the real `state.db`, so it is safe to run alongside a live server process. Run: `uv run python scripts/god_mode_smoke.py`. |
+| `god_mode_smoke.py` | No | Deterministic smoke harness for Sovereign God mode Phases 2–6 plus Divine Matrix Phases 1–10 (docs/plan-sovereign-god-mode-v2.md, docs/plan-divine-matrix-interventions.md): flag/auth gate, preview/idempotency/expiry, the stored-text contract (including hostile-string round-tripping), godState persistence/restore/reset, the five `/control/god/*` routes via a real `server.app.test_client()` (Phase 2); **Voice binding** — `divine_response` required while guidance unacked, `follow` clears goal/assignedTask, missing/invalid synthesizes `continue` + `missing_divine_response` without rejecting the action, sprite/invention special turns cancelled (not deferred) on Voice apply and while guidance unacked, proclamation auto-applies as providence (same slot/duration/revoke), `recentDivineResponses` in Sight only, adherence `divine.jsonl` `status: "adherence"` records; providence/private-omen set/replace/revoke/expire and the divine-vs-directive prompt separation (Phase 3); whisper campaigns, agent sampling, memory surgery, context masks (Matrix Phases 1–4); **decision gate / possession** — compulsion forces pinned `rest`, possession skips `llm_decide`, veto hold+resolve, Sage `_rush_to_heal` bypass, veto hold cap, `decisionGates` privacy (Matrix Phase 5); **Burning Bush / bargain** — thread privacy, bargain success grant, expiry failure path (Matrix Phase 6); **Anointed** — destiny/oracle target-only prompt, stigmata in neighbor `nearby_agents`, oracle gated by `revealFrame`, revoke clears, no `/state` leak (Matrix Phase 7); **Identity Forge** — role swap changes `role_skill` in think payload, copy progresses across N thinks, cancel restores snapshot, `identityForges` privacy (Matrix Phase 8); **Architect Zones** — door blocks move without `godKeys` and allows with key, limbo sets `divineHold` and release restores, paint cancel reverts terrain, `architectZones`/key privacy (Matrix Phase 9); **Reload checkpoints** — create → mutate → restore roundtrip on temp `DB_PATH`/`GOD_CHECKPOINT_ROOT`, cap reject + `replaceOldest`, Sight summaries without path leak, `deja_vu_replay` rejects when flag off (Matrix Phase 10); **Déjà Vu replay** — `GOD_STATE_VERSION` 3 default/normalize, digest capture on gated apply, apply/cancel when `GOD_DEJA_VU_REPLAY` on, digests not in `/state` (Divine Console Phase 8, docs/plan-divine-console-improvements.md); the three immediate miracles and their shared `irreversible` class (Phase 4); Phase 5's `_divine_modifier`/`story_event` layer — every one of the seven modifier keys at `0.0`/fractional/`1.0`/max, the gather zero-path returning before the carry-cap clamp with `collectSuccesses`/the tool benchmark untouched, `fish_yield_multiplier` replacing (not multiplying with) `gather_yield_multiplier`, a collapsed agent still recovering under an active `0.0` `health_regen_multiplier`, an all-`1.0` run proving byte-identical to a feature-off baseline built the same way, carry-cap and low-ecology-stock boundaries, spoilage never exceeding eligible overflow, one-value-per-key rejection with `replaceEffectId` acceptance, `story_event` atomicity (one invalid sub-component changes nothing) and its full modifiers+primitives+providence composition, expiry closing an event (and its linked providence) exactly once with the modifier stopping exactly at `expiresFrame` before cleanup runs, `god_cancel` closing an active event while refusing an irreversible miracle's id, active events surviving save/restore with an absolute `expiresFrame`, and preview disclosing the divine and custom-rule gather contributions separately; and Phase 6's `weather_override` — forced entry drawing zero RNG (`random.getstate()` byte-identical before/after apply) with `weather["state"]`/`exitFrame`/`districts` set from the operator input, `exitFrame` matching the event's `expiresFrame` exactly, the natural `_tick_weather` never transitioning while an override holds, expiry handoff to the natural cycle's successor for all four overridden states (both `gathering` probability branches forced via a `random.random` monkeypatch), `god_cancel` running the same handoff, unknown-state/unknown-district/`WEATHER_ENABLED=False` rejections, the `consequential` reversibility class with preview disclosing the affected districts and non-ruined at-risk structure count, `replaceEffectId` one-active-override enforcement (closing the previous as `replaced`), save/restore round-tripping an absolute `expiresFrame`, restore-time expiry-plus-handoff firing exactly once, and a seeded-RNG natural-cycle trajectory proving byte-identical whether `GOD_MODE_ENABLED` is off or on-but-unused. Sets `SIM_GOD_MODE`/`SIM_GOD_TOKEN`/`SIM_GOD_AUTH=1` before importing `sim_engine`/`server`, then toggles other on/off scenarios by monkeypatching the already-imported modules' plain globals (the same idiom `sid_parity_smoke.py` uses for `PIANO_MODULES`/`ALWAYS_ON_MODULES`) rather than re-importing. Never calls `save_state()`/`reset()`/`clear_state()` against the real `state.db`, so it is safe to run alongside a live server process. Run: `uv run python scripts/god_mode_smoke.py`. |
 | `llm_replay_bench.py` | Yes | Replay-benchmarks previously-logged decision calls (from a session's `llm.jsonl`, falling back to the pre-rename `lm_studio.jsonl` for old sessions) against Ollama's native `/api/chat` endpoint (ported `docs/plan-ollama-migration.md` Phase 4, 2026-07-24 — ~~formerly targeted LM Studio's OpenAI-compat endpoint~~). Extracts the portable fields (messages, max_tokens, temperature, response_format, the logged `reasoning_effort` marker) from each logged request and rebuilds a real Ollama request body via `simulation/llm_wire.to_ollama_body()` — the same wire-format conversion `server.py` itself uses at its POST call sites (imported, not re-implemented, so the bench can't drift from production). Modes: `--as-logged` (translate the logged `reasoning_effort=="none"` marker 1:1 to `think:false`, otherwise pass sampling/max_tokens through unchanged) and `--patched` (ignore the logged transform and apply the CURRENT production one from `build_decision_payload`: routine turns get `think:false` + `NON_THINKING_SAMPLING`, invention/high-stakes turns get `THINKING_SAMPLING` with thinking left on). Reports median/p90 latency, JSON validity, think-leak (`<think>` in `message.content`), and `prompt_eval_count`/`eval_count`. Always targets `sim-smart` (the decision model). Usage: `uv run python scripts/llm_replay_bench.py --as-logged [--session PATH] [--n N] [--workers N]`; pause the sim server first (`POST /control/pause`) so its own think traffic doesn't contend for `sim-smart`'s `OLLAMA_NUM_PARALLEL` slots and skew latencies; `--workers 1` measures sequential latency, `--workers 3` mirrors `MAX_CONCURRENT_LLM`. Phase 4 results: `ollama_config.md`'s Benchmarking table. |
 | `ollama_setup.py` | Yes (configures Ollama itself) | Canonical CLI loader for the sim's Ollama models: sets `OLLAMA_NUM_PARALLEL`/`OLLAMA_MAX_LOADED_MODELS`/`OLLAMA_FLASH_ATTENTION`/`OLLAMA_KEEP_ALIVE` env vars, restarts the Ollama service, pulls/creates `sim-smart`/`sim-fast` from `ollama/Modelfile.{smart,fast}` (idempotent), warms both, and verifies dual residency via `/api/ps`. Usage: `uv run python scripts/ollama_setup.py` (apply) or `--check` (readback only). Successor to the removed `scripts/lms_load.py`, per `docs/plan-ollama-migration.md` Phase 5. |
 | `soak_monitor.py` | No (tails a live session's existing logs) | Read-only Always-on-PIANO soak observer. At start selects the newest session directory, tails its `llm.jsonl` and `benchmarks.jsonl`, prints one progress line every 60 seconds (elapsed, decision count/p50, module failures), and writes `simulation/logs/soak-<label>.json`. The summary separates decision records from module records; reports decision p50/p90, error/fallback rates, literal `module_pulse_work`, note-age and pulse observations, plus three decision prompt module-report samples. It selects `module_refresh_failures` (always-on, rate against dispatched pulse work) or `piano_module_drops` (flag-off, rate against per-module latency counts when emitted, otherwise successful `module_total` plus drops), exposing metric name/count/attempts/rate. Usage: `uv run python scripts/soak_monitor.py --label attempt2 [--minutes 45]`. |

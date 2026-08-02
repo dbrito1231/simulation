@@ -251,7 +251,13 @@ decrement ecology gather stocks).
 
 `civilization["structures"]` is a flat list of built structure instances
 (`{id, type, districtId, condition, level, visualTier, renderScale, isRuin, ...}`,
-sim_engine.py:3786-3808). Structure *types* are declared once via two registries:
+sim_engine.py:3786-3808). In-memory and full `/state` snapshots include an
+optional `sprite` grid per structure when present; delta `/state` upserts omit
+`sprite` unless the structure was created, visually upgraded, or received a
+custom `submit_structure_sprite` since the client's last applied frame (the
+viewer merges partial rows and keeps prior sprites). On disk (`state.db`), sprite
+grids are stored in the `structure_sprites` table, not embedded in the civ
+JSON blob — see [02-engine-core.md](02-engine-core.md#persistence).
 
 - `PROJECT_TEMPLATES` (sim_engine.py:754-765, extended by flag-gated blocks like
   `granary` under `CRAFTING_ENABLED`, `kiln`/`harbor`/`mill`/`foundry` under Path-1

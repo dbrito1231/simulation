@@ -32,22 +32,37 @@ world state beyond a cached palette/season key.
 
 ## Polling and render loop
 
-- `STATE_POLL_MS = 100` (`viewer.js`, `pollState()`) drives polling: fetches
-  `GET /state`, replaces `world` wholesale, and on fetch failure patches
-  `world.lmStatus = "disconnected"` while keeping the last-known snapshot.
+- `STATE_POLL_MS = 100` (`viewer.js`, `pollState()`) drives polling: the first
+  successful fetch uses `GET /state` (full snapshot); thereafter
+  `GET /state?since=<lastFrameTick>` unless an error or `stateGeneration`
+  mismatch forces another full fetch. The client merges deltas into module-level
+  `world` (`mergeStateDelta()`): full/`full: true` replaces wholesale;
+  `unchanged: true` keeps `world`; partial payloads replace agents by `id`,
+  deep-merge allowlisted `civilization` keys (structure upserts by `id`,
+  `structuresRemoved` tombstones), and replace any other included top-level keys.
+  The server emits only fields whose `lastMod` frame is greater than the
+  client's `since` (within `STATE_DELTA_MAX_GAP`); multiple tabs with different
+  `since` cursors each receive the same one-time updates.
+  Responses with `frameTick` older than the last applied frame are ignored
+  (stale poll race). On fetch failure, patches `world.lmStatus = "disconnected"`
+  while keeping the last-known snapshot and sets `statePollFull` so the next
+  poll retries with a full snapshot.
   **Offline behavior**: the last good frame stays on
   screen and the sidebar status dot goes gray (`#9E9E9E`, `renderSidebar()`)
   with the hint "Showing last frame; retrying /state…"
   — distinct from `lmStatus: "offline"` (Ollama
   unreachable, Flask up) and `"compute_error"` (GPU memory error), each with
   its own dot color/label in `renderSidebar()`.
-- `DISTRICTS_POLL_MS = 3000` drives `pollDistricts()` (`GET /districts.js`)
-  on a slower cadence since districts/roads change only when a district is
-  founded server-side. The first terrain-cache build starts immediately at page
-  kickoff (via `scheduleTerrainCacheBuild`) using `STARTER_DISTRICTS_JS` as a
-  fallback — it does **not** wait for `/districts.js`. When the served
-  district-id list later differs, `pollDistricts()` nulls `terrainCanvas` and
-  rebuilds.
+- `DISTRICTS_POLL_MS = 3000` drives `pollDistricts()` (`GET /districts.js`
+  with optional `?since=<districtsEpoch>`) on a slower cadence since
+  districts/roads change only when district/tile/terrain/road data mutates
+  server-side. The viewer tracks `districtsEpoch` from each full response;
+  when the server returns `{unchanged: true, epoch}`, the last payload is
+  kept (no parse/merge of district tiles/terrain). The first terrain-cache
+  build starts immediately at page kickoff (via `scheduleTerrainCacheBuild`)
+  using `STARTER_DISTRICTS_JS` as a fallback — it does **not** wait for
+  `/districts.js`. When the served district-id list or `districtsEpoch`
+  changes, `pollDistricts()` nulls `terrainCanvas` and rebuilds.
 - The render loop is **decoupled from polling** via `requestAnimationFrame`:
   `tick()` (`viewer.js`) redraws every animation frame from
   whatever `world` currently holds, keeping ~60fps even though network polls
@@ -674,6 +689,145 @@ effectively authorized (`godEffectivelyAuthorized()`); Laws →
 The Compile bar button `#godCompileTabBtn` stays dual-gated via
 `capabilities.compiler.enabled` (see Compile below).
 
+**Modal width (Divine Console improvements, Phase 1).** Default `#divineModal`
+width is `min(680px, 96vw)`. `openDivineModal(name)` toggles a `wide` class on
+`#divineModal` for **matrix**, **story**, **laws**, and **compile**; `closeDivineModal()`
+removes it. Wide modals use `min(960px, 96vw)`. All other features keep the
+default width. Presentation-only — no route or engine changes.
+
+**Operator context + speed (Divine Console improvements, Phase 2).** Viewer-only
+UX; engine preview/apply payloads unchanged (durations remain frames server-side).
+
+- **Agent focus (`godFocusAgentId`).** Module-level focus id (initially `null`).
+  Sidebar agent selection sets `godFocusAgentId` to match `selectedAgentId`
+  (cleared on deselect). `setGodFocusAgent(id, opts)` sets focus, optionally
+  mirrors sidebar selection, and refreshes agent `<select>`s. `populateGodAgentSelects()`
+  rebuilds options via `godAgentOptionsHtml(preferredId)` where `preferredId`
+  is `godFocusAgentId` then `selectedAgentId`, but still preserves an open
+  dropdown's current value when that agent is still living (existing
+  preserve-value pattern). `#godAgentFilter` (modal head) narrows living-agent
+  option lists by name/role/id substring; repopulates on filter change.
+- **Canvas pick.** When `GOD_MODE_ENABLED_FLAG` is true, a canvas click on a
+  living agent (via `clientToWorld` + `agentAtWorldPoint`) sets both
+  `selectedAgentId` and `godFocusAgentId`, syncs sidebar selection/detail,
+  centers the camera (`centerCameraOnAgent`), and refreshes agent selects.
+  Empty-space clicks do **not** clear focus. Hover (`hoveredAgentId`) and
+  existing camera controls are unchanged. **Priority:** agent hit-test wins
+  over structure pick (Phase 7).
+- **Canvas structure pick (Phase 7).** While the Miracles or Story divine
+  modal is open and God mode is on, a canvas click that misses agents but
+  hits a non-ruin structure (`structureAtWorldPoint`, bounding box from
+  `getStructureRenderSize`) sets structure targets: `#godStructureSelect` on
+  Miracles; every `.godPrimStructure` select in Story primitive rows on Story.
+  Does not invalidate an cached preview until the operator edits a wired field.
+- **Seconds-first durations.** Divine Console duration number inputs display
+  **seconds** (labels/placeholders). Preview envelope builders convert with
+  `godSecondsToFrames(sec)` → `Math.round(sec * 30)` before setting
+  `durationFrames`; blank still means until-revoke / omit. Capability bounds
+  from `applyGodCapabilitiesToForms()` are converted frames→seconds for
+  `min`/`max`/`default` on those inputs. Display helpers (`godDurationLabel`,
+  Sight countdowns) still show both seconds and frames.
+- **Keyboard (modal open).** Shortcuts are ignored while focus is in
+  `input`/`textarea`/`select` except **Ctrl/Cmd+Enter** (Apply). With the
+  modal open: digit keys **1–9** open the Nth **visible, enabled** bar feature
+  in DOM order (Unlock skipped when `GOD_AUTH_REQUIRED_FLAG` is false; Compile
+  skipped when hidden); **`/`** focuses `#godAgentFilter`; **`S`** calls
+  `refreshGodSight()` when effectively authorized; **Ctrl/Cmd+Enter** applies
+  the cached preview (same irreversible guard as the Apply button).
+- **Favorites.** Up to four shortcuts in `sessionStorage` key
+  `divineFavorites`: `{feature, fieldsetId?, label}`. `#divineBarFavorites`
+  renders chips on the bar; click opens the feature and scrolls to
+  `fieldsetId` when set. **Pin this section** (`#divinePinSectionBtn`, modal
+  head) pins the current scroll target; fieldset legends with `data-fav` support
+  double-click pin. Token is never stored in favorites or `localStorage`.
+- **Irreversible confirm.** Apply on `.divine-fieldset-irreversible` forms and
+  on `#divinePreviewStrip` when the owning fieldset is irreversible requires
+  **hold Apply ~400ms** or typing the target agent's name (first agent
+  `<select>` in the fieldset, else `godFocusAgentId` / `selectedAgentId`) into
+  `#divineIrreversibleConfirmInput` (shown in the preview strip when relevant).
+  Agent-less irreversible forms (e.g. mass repair) accept hold-only. Crimson
+  `.divine-fieldset-irreversible` styling unchanged; reversible applies
+  unchanged.
+
+**Bar situational awareness (Divine Console improvements, Phase 3).**
+Viewer-only HUD on `#divineBar`; no new poll loop — wired into the existing
+`updateGodModeGate()` / `renderDivineConsole()` / `pollState()` →
+`renderSidebar()` path.
+
+- **`#divineBarEffects` chips** (between `.bar-brand` and `.bar-buttons`):
+  compact clickable chips for **Providence** (on/off), **Omens** (count),
+  **Laws/events** (active count), **Gates** (gate + possession aggregate),
+  **Zones** (architect zones), and **Sampling** (agent sampling overrides).
+  **Data sources:** when `godEffectivelyAuthorized()`, prefer the last Sight
+  snapshot (`godLastSight` from `GET /control/god/sight`); always merge public
+  fields from `/state` `world.god` (`providence`, `activePublicEvents`,
+  `recentPublicInterventions` for pulse only). **Private counts** (omens,
+  gates, sampling, zones) render only after Sight has been fetched while
+  authorized — chips are omitted (not shown as "—") until then. **Providence**
+  and **public law/event** counts may render from `/state` alone. Clicking a
+  chip calls `openDivineModal()` for the owning feature and
+  `scrollIntoView()` on a relevant fieldset/section when one exists (Voice →
+  providence/omen fieldsets; Laws → `#godLawsActive`; Matrix → Mind/Will/Place
+  sections).
+- **Status pips on feature buttons.** Small count badges (`.gbtn-countpip`) on
+  `.gbtn.voice`, `.gbtn.laws`, and `.gbtn.matrix`: Voice shows providence/omen
+  activity; Laws shows active timed law/event count; Matrix shows
+  gate+possession+sampling+zone aggregate. Unlock, History, Sight, Miracles,
+  Story, and Compile stay clean unless a future phase adds signal.
+- **Bar pulse.** When `recentPublicInterventions` gains a new id, edge-detect
+  with the same `godSeenInterventionIds` set as `#godPublicBanner` and briefly
+  add `.divine-bar-pulse` on `#divineBar` (CSS keyframe; disabled under
+  `prefers-reduced-motion`, falling back to a static gold top border).
+- **Sight soft-refresh for bar counts.** When authorized, no divine modal is
+  open, and the last Sight fetch is older than ~30s (or Sight was never
+  fetched), `maybeRefreshGodSight()` may call `refreshGodSight()` once —
+  throttled, not on every 100ms poll — so private chips populate without
+  spamming `/control/god/sight`. Between refreshes, chips and pips update from
+  `godLastSight` plus public `/state` each poll.
+
+**Sight HUD (Divine Console improvements, Phase 4).** Viewer-only; no new routes
+unless noted. Engine `god_sight()` shape unchanged — architect zone summaries
+still expose `id`, `kind`, `districtId`, `cellCount`, `expiresFrame`, and
+optional `holdCount` only (no per-cell bounds in Sight).
+
+- **Live Sight soft-refresh.** `maybeRefreshGodSight()` (same hook as bar
+  refresh inside `updateGodModeGate()` / `pollState()` → `renderSidebar()`) uses
+  two throttles: **~30s** when no divine modal is open (bar private chips); **~1.5s**
+  when the Sight feature modal or Voice feature modal (adherence panel) is open
+  and the operator is effectively authorized. No second poll loop.
+- **Client-side diff.** Each successful `refreshGodSight()` compares the new
+  snapshot to the prior one. For the Sight-selected agent (prefer
+  `godFocusAgentId` when set) show detailed vitals/`lastAction`/`decisionGate`/
+  `divineHold` deltas; other agents contribute compact one-line entries when
+  changed. A **Changed since last look** strip at the top of `#godSightOutput`
+  escapes all dynamic text via `escapeHtml()`.
+- **One-click intervene.** Sight agent rows and relevant effect summaries expose
+  small buttons (**Omen**, **Heal**, **Possess**, **Sampling**) that call
+  `setGodFocusAgent()` + `openDivineModal(feature)` + `scrollIntoView()` on the
+  owning fieldset (`godOmenFieldset`, `godVitalsFieldset`, `godPossessionFieldset`,
+  `godSamplingFieldset`), reusing Phase 2/3 scroll helpers.
+- **Canvas overlays (divine modal open).** While `#divineModalScrim` is open,
+  the render pass draws viewer-only overlays from Sight (when authorized) plus
+  public agent positions from `/state`:
+  - **Focus ring** — gold ellipse on `godFocusAgentId` (else `selectedAgentId`).
+  - **Architect zones** — dashed district-bounds rectangle per
+    `godLastSight.architectZones[]` entry, colored by `kind` (`paint` gold,
+    `door` cyan, `limbo` violet); cell-level outlines deferred until Sight
+    exposes cells.
+  - **Limbo / divine hold** — pulsing violet ring on agents with
+    `architectLimbo.active` or `divineHold` in Sight.
+  - **Anointed** — warm halo on agents with `anointment.active` in Sight.
+  Does not mutate world state.
+
+**Village pulse (Divine Console improvements, Phase 10).** When
+`godLastSight.pulse` is present, a compact **Village pulse** card renders in
+`#godSightOutput` immediately below the Phase 4 diff strip and above the
+per-agent detail / intervene row. All dynamic text uses `escapeHtml()`. The
+card summarizes: crisis agents (name + reason, capped display), stockpile
+totals, open project count, Sage/elder status, weather state + affected
+districts, active event titles, and providence active/expiry — mirroring the
+engine `pulse` object without secret omen/providence text.
+
 **Tooltips.** Every interactive control, every fieldset legend, and every bar
 button carries a `data-tip` attribute whose value is JSON `{t,d}` (short title
 + one-sentence description). A single shared engine on `#tooltip` shows on
@@ -769,19 +923,58 @@ conflict the same way — see this phase's report for the underlying gap.
   as timed providence (same slot, duration, revoke) per
   [02-engine-core.md](02-engine-core.md); capabilities echoes optional
   `durationFrames` on the proclamation kind.
-- **Voice Adherence** — a dedicated panel section (reachable from the Voice
-  feature window and cross-linked from Sight) that renders the full authenticated
-  `recentDivineResponses` ring from the latest `god_sight()` refresh: all
-  agents, newest first, with stance/reason/synthetic flag/guidance kind/action/
-  frame. This is the operator's primary adherence surface; it never shows private
-  omen text, only each agent's stated reason. Refresh reuses the same Sight fetch.
+- **Voice presets (Phase 5).** `sessionStorage` key `divineVoicePresets` holds
+  named presets for `proclamation`, `providence`, and `private_omen` (text,
+  duration seconds where applicable, optional `presentation` for public kinds).
+  Minimal controls at the top of the Voice tab: preset `<select>`, **Load**,
+  **Save current** (prompts for a label), **Delete**. Loading a preset fills
+  the matching fieldset inputs only — never auto-previews or applies.
+- **Voice Adherence (Phase 5).** A dedicated panel section (reachable from the
+  Voice feature window and cross-linked from Sight) fed by the authenticated
+  `recentDivineResponses` ring from the latest `god_sight()` refresh. Two
+  sub-panels beside each other:
+  - **Adherence timeline** — compact chronological list (newest first, capped)
+    of `follow`/`continue` entries with agent name, stance badge, reason
+    snippet (~80 chars), and frame. All dynamic text via `escapeHtml`.
+  - **Reply inbox** — same ring, reason-focused: agent name + full stated
+    reason (truncated for layout), newest first; never shows private omen text
+    or raw `normalizedCommand`. Distinct layout from the timeline so operators
+    can scan stances vs read replies.
+  Refresh reuses the same Sight fetch. Sight's per-agent subsection keeps a
+  compact table (hide agent column) cross-linked to Voice → Adherence.
+- **Voice presentation (Phase 5).** Proclamation and Providence fieldsets
+  expose a **Presentation** control (`soft` \| `thunder`, default soft) passed
+  through preview builders. `#godPublicBanner` toggles CSS classes
+  `divine-banner-soft` / `divine-banner-thunder` from
+  `recentPublicInterventions[].presentation` (setdefault `"soft"`). Chronicle
+  list items add `chronicle-presentation-thunder` when `entry.presentation ===
+  "thunder"`. Cognition/prompt text is unchanged server-side.
+**Plain-language operator help (Divine Console improvements).** `DIVINE_FEATURES`
+in `viewer.js` is the source of truth for modal title, subtitle, bar tooltip,
+and the always-visible `#divineFeatureGuide` callout (`.divine-feature-guide`)
+inserted at the top of `#divineModalBody` on `openDivineModal()` and removed on
+`closeDivineModal()`. Guide copy uses `textContent` only. Individual controls
+keep delegated `#tooltip` hovers via `data-tip` JSON (`t` title, `d` detail) —
+operator-facing strings use village/villager vocabulary (no API paths, no
+preview/apply protocol jargon); Preview ≈ “check without changing the village”,
+Apply ≈ “make it real”. Irreversible fieldsets retain crimson styling and say
+“cannot be undone” in legend or `.divine-help`.
+
 - **Matrix** — brain, memory, distortion, possession, dialogue, identity, zone,
   and checkpoint interventions (see phase list below). Each tool fieldset shows
   an always-visible `.divine-help` blurb under its legend plus `data-tip`
   tooltips on labels, controls, and Preview/Apply buttons (same delegated
   `#tooltip` handler as Voice). The panel opens with a short intro paragraph;
-  tools are grouped under section headings (Brain, Memory, Distortion,
-  Possession, Dialogue & Bargain, Identity, Zones, Reload). Phase 2 ships **Brain / Temperature
+  tools are grouped under `.divine-matrix-section` blocks with stable ids
+  (`#matrix-sec-mind`, `#matrix-sec-memory`, …) and section headings (Brain,
+  Memory, Distortion, Possession, Dialogue & Bargain, Identity, Zones, Reload).
+  **Matrix category nav (Phase 1):** a sticky chip row (`.divine-matrix-nav`)
+  at the top of `#divineTab-matrix` scrolls the modal body to the matching
+  section via `scrollIntoView` — chip labels Mind / Memory / Distortion / Will /
+  Covenant / Form / Place / Time map to those sections (Brain→Mind,
+  Possession→Will, Dialogue & Bargain→Covenant, Identity→Form, Zones→Place,
+  Reload→Time). Sections use `scroll-margin-top` so headings clear the sticky
+  chips. Phase 2 ships **Brain / Temperature
   Dial** (`agent_sampling`: agent + model + temperature slider + optional
   `top_p`/`top_k`/`min_p` + duration; `revoke_agent_sampling` to clear).
   Phase 3 adds **Memory Surgery** (`memory_insert`, `memory_delete`,
@@ -813,8 +1006,17 @@ conflict the same way — see this phase's report for the underlying gap.
   Phase 10 adds **Reload** (`checkpoint_create`: label + optional `replaceOldest`;
   `checkpoint_restore`: checkpoint picker from Sight; irreversible fieldset +
   strong confirm copy in preview). `checkpoints` never in `/state`; Sight lists
-  id/label/frameTick/createdAt only. **Déjà Vu** fieldset stays disabled unless
-  `GOD_DEJA_VU_REPLAY` (stub — not implemented).
+  id/label/frameTick/createdAt only. **Déjà Vu** (`deja_vu_replay`): enabled
+  when `/control/god/capabilities` reports `kinds.deja_vu_replay.applyable`
+  (requires `GOD_DEJA_VU_REPLAY`); agent picker + optional max steps; wired
+  through `wireDivineForm`; Sight shows recent `decisionDigests` snippets when
+  authorized. **Crowd compulsion** (`crowd_compulsion`): optional theme +
+  shared duration (seconds) or remaining turns + repeatable target rows (agent +
+  pinned action, max 12) under Will; Preview→Apply via `wireDivineForm`; cancel
+  parent id clears all linked gates. **Dream broadcast** (`dream_broadcast`):
+  shared duration + dream snapshot JSON + multi-select target agents (max 12)
+  under Distortion; private dream text never in `/state`; cancel parent clears
+  all linked dream masks.
 - **Miracles** — Phase 4 trio (`agent_vitals`, `grant_resource`,
   `structure_condition`) plus town-integrity kinds (`repair_structures`,
   `clear_ruins` — [02-engine-core.md](02-engine-core.md)); all labeled
@@ -837,41 +1039,74 @@ conflict the same way — see this phase's report for the underlying gap.
   private-visibility law's modifiers; falling back to
   `state.god.activePublicEvents` otherwise) with a per-effect Cancel button
   wired straight to `/control/god/cancel`.
-- **History** — the last (up to 50, newest first) entries from
-  `state.god.recentPublicInterventions`, each tagged with a `public` badge.
-  Private history (omens, private story events) is deliberately never shown
-  here — per `snapshot()`'s allowlist (04-http-api.md), it is not present in
-  `/state` at all and is reachable only through the authenticated Sight
-  feature window.
-- **Compile** (Optional Phase 8, dual-gated) — `#godCompileTabBtn` stays
-  `display:none` until `applyGodCapabilitiesToForms()` sees
-  `capabilities.compiler.enabled === true` (itself already the AND of
-  `GOD_MODE_ENABLED` and the separate `GOD_COMPILER_ENABLED` dark flag on the
-  server — see [04-http-api.md](04-http-api.md#optional-phase-8-controlgodcompile)
-  and [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler)); the
-  same check also bounds the prose textarea's `maxLength` to
-  `capabilities.compiler.promptMaxChars` and stores
+- **History** — intervention log with filter/search, re-run, soft undo, and
+  narrative export (Divine Console improvements, Phase 6). Default source is
+  `state.god.recentPublicInterventions` (newest first, up to 50 displayed
+  after filter). When effectively authorized and `godLastSight.recentInterventions`
+  exists, an **Include private (Sight)** toggle merges the fuller Sight ring
+  (deduped by id). Controls: kind substring/select, agent id/name substring,
+  **Public only** toggle, frame from/to. `#godHistoryList` re-renders from the
+  filtered list; every dynamic string uses `escapeHtml()`.
+  - **Re-run** — per-row **Re-run** rebuilds the owning form from typed keys
+    present on the History/Sight record only (never `normalizedCommand` into
+    DOM). Opens the correct feature modal, fills fields, scrolls to the
+    fieldset, invalidates any cached preview — operator must **Preview** again
+    (never auto-apply). Kinds without enough stored payload disable Re-run or
+    show a short reason (e.g. whisper per-agent text, law modifier values,
+    matrix compulsion pinned action).
+  - **Soft undo** — `#divinePinRow` adds **Revoke last cancellable** when the
+    last applied intervention id (or the newest still-active cancellable entry
+    from Sight `recentInterventions`) matches a kind `POST /control/god/cancel`
+    accepts and is likely still active (providence slot, `activeEvents`, zone
+    summaries, or `expiresFrame` vs `world.frameTick`). Irreversible kinds hide
+    the control. Reuses `godCancelEffect()` / Laws cancel wiring.
+  - **Narrative export** — **Export Markdown** downloads the currently filtered
+    list (kind, frame, id, public flag, short text/title fields) for demos.
+  Private-only entries never appear without Sight authorization + toggle.
+- **Miracles / Story / Laws QoL (Phase 7).**
+  - **Law conflict warnings.** Successful previews of modifier-bearing
+    `story_event` commands (Story tab and Laws tab) may return additive
+    `warnings: string[]` from the engine. `#divinePreviewStrip` and the form
+    result panel render each warning through `escapeHtml()` in
+    `.divine-warning` styling; Apply stays enabled.
+  - **Story recipes.** `#godStoryRecipeSelect` + **Apply recipe to form**
+    (`#godStoryRecipeApplyBtn`) expand a named client-side bundle (Festival,
+    Famine week, Plague scare, Harsh winter, Bountiful seas) into Story title,
+    narration, duration (seconds), and modifier checkboxes/values only — does
+    not call Preview or Apply automatically; operator must Preview again.
+- **Compile** (Optional Phase 8, dual-gated, **supported experimental when
+  enabled**) — `#godCompileTabBtn` stays `display:none` until
+  `applyGodCapabilitiesToForms()` sees `capabilities.compiler.enabled ===
+  true` (the AND of `GOD_MODE_ENABLED` and `GOD_COMPILER_ENABLED` /
+  `SIM_GOD_COMPILER=1` on the server — see
+  [04-http-api.md](04-http-api.md#optional-phase-8-controlgodcompile) and
+  [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler)); when
+  visible it uses the same solid `.gbtn` chrome as other bar buttons (no
+  dashed “dark/experimental” border). Help text: experimental — enable with
+  `SIM_GOD_COMPILER=1`; contention A/B measurement is documented in
+  [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler) and is
+  **not** claimed green until run. The same capability check bounds the prose
+  textarea's `maxLength` to `capabilities.compiler.promptMaxChars` and stores
   `capabilities.compiler.minIntervalSec` for the client-side rate-limit UX
   below. The feature window holds one textarea and a single Compile button —
   **no Apply button of its own, on purpose**. Clicking Compile posts `{prose}` to
-  `POST /control/god/compile`; on `compileOk: true` it calls
-  `godPopulateStoryFromCompiled(normalizedCommand)` — which fills the Story
-  feature window's title/narration/visibility/target/duration/modifier-checkboxes/
-  primitive rows/providence fields from the compiled draft, explicitly
-  invalidates any stale Story preview (dispatches the same `input` event
-  `wireDivineForm`'s own listener already watches), then calls
-  `openDivineModal("story")` — so the operator reviews and Applies through the
-  **exact same** Preview → Apply flow every other Voice/Miracle/Law/Story
-  action already uses, documented above. On rejection or a network error the
-  reason is written via `.textContent` only (never `innerHTML`) into
-  `#godCompileResult` — the compiler's raw model output can appear inside
-  that reason string (e.g. a truncated non-JSON response), so it gets the
-  same plain-text-only treatment as every other stored/adversarial string in
-  this console. After every click (success, rejection, or error alike) the
-  Compile button disables itself client-side for `minIntervalSec` seconds —
-  advisory only; `GOD_COMPILER_MIN_INTERVAL_SEC` on the server is the
-  authoritative rate limit and rejects independently of what the client UI
-  does.
+  `POST /control/god/compile`; on `compileOk: true` the server returns the
+  same preview record shape as `POST /control/god/preview` (`previewId`,
+  `normalizedCommand`, `reversibilityClass`, `previewOutcome`, …). The
+  client calls `godPopulateStoryFromCompiled(normalizedCommand, {
+  skipPreviewInvalidate: true })` — filling Story title/narration/visibility/
+  target/duration/modifier-checkboxes/primitive rows/providence from the
+  draft without clearing an in-flight preview — then
+  `godDivineFormControllers["#godStoryFieldset"].acceptServerPreview(...)`
+  wires the compile preview into `#godStoryResult`, enables Story Apply, and
+  shows `#divinePreviewStrip`; finally `openDivineModal("story")`. The
+  operator may edit fields (which invalidates the handoff per the standard
+  `wireDivineForm` contract) or Apply directly from the sticky strip. On
+  rejection or a network error the reason is written via `.textContent` only
+  (never `innerHTML`) into `#godCompileResult`. After every click (success,
+  rejection, or error alike) the Compile button disables itself client-side
+  for `minIntervalSec` seconds — advisory only;
+  `GOD_COMPILER_MIN_INTERVAL_SEC` on the server is authoritative.
 
 **Public banner.** `#godPublicBanner` (fixed, top-center, styled distinctly
 from `#councilBanner`/`#foundingBanner`) fires on the same client-diff
@@ -884,8 +1119,10 @@ entries), shows one line of `textContent` for 6s on a fresh one, and — on
 the very first snapshot after a page load — records existing history as
 "already seen" without banner-ing it, so resuming a long `GOD_MODE_ENABLED`
 session doesn't replay its whole intervention history as a banner burst.
-There is no full-screen flash, no forced camera movement, and no banner (or
-any other public surface) for a private omen or private story event.
+Presentation class: `divine-banner-soft` (default) or `divine-banner-thunder`
+from the intervention's optional `presentation` field. There is no full-screen
+flash, no forced camera movement, and no banner (or any other public surface)
+for a private omen or private story event.
 
 ## Active viewer work
 

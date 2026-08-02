@@ -262,39 +262,61 @@ over a stale in-flight decision.
 World state is persisted to a SQLite database at `DB_PATH` (`<module dir>/
 state.db`), replacing the earlier monolithic `state.json` file. `_serialize_state()`
 (sim_engine.py:9531) still builds the save payload under the lock, with the
-same shape as before: top-level keys `version` (`STATE_VERSION = 2`,
-sim_engine.py:31), `frameTick`, `savedAt` (UTC ISO timestamp), `roster_size`,
+same shape as before: top-level keys `version` (`STATE_VERSION = 3`,
+sim_engine.py:39; restore also accepts `2` once for embedded-sprite migration),
+`frameTick`, `savedAt` (UTC ISO timestamp), `roster_size`,
 `civilization`, `agents`, `memory`, `council_transcript` (sets are serialized as sorted arrays,
 `isThinking` is dropped, memory rows are vec-stripped for storage and
-re-embedded on import).
+re-embedded on import). Structure `sprite` grids are **not** stored inside
+`civilization["structures"]` in the DB — they live in the `structure_sprites`
+table and are merged back onto structures in memory on `restore_state()`.
+Saves upsert only dirty sprite rows (`_persist_dirty_structure_sprites`); a
+`structureSpritesFingerprint` field in the serialized payload (not written to
+`meta`) keeps autosave hashing correct when only sprites change.
 
 `_connect_db(path)` opens a SQLite connection in WAL mode
 (`synchronous=NORMAL`) and idempotently runs the schema DDL. The schema has
 four tables: `meta(key, value)` (one row each for `version`, `frameTick`,
 `savedAt`, `roster_size`); `civ(key, value)` (one row per top-level
-`civilization` key, value JSON-encoded); `agents(name PK, ord, data)` (one row
-per agent, `data` JSON-encoded, `ord` preserving roster order on load); and
-`memory(rowid_pk, id, agent, text, salience, kind, tier, frame_tick, ts)`; and
+`civilization` key, value JSON-encoded — structure instances omit embedded
+`sprite` grids); `agents(name PK, ord, data)` (one row
+per agent, `data` JSON-encoded, `ord` preserving roster order on load);
+`memory(rowid_pk, id, agent, text, salience, kind, tier, frame_tick, ts)`;
 `council_transcript(rowid_pk, meeting_id, who, type, text, feeling, frame_tick,
-ts)`. The latter is the full human/audit record for Daily Council events, not
+ts)`; and `structure_sprites(structure_id PK, sprite_json, updated_frame)`
+(one row per structure that has a custom/stored sprite grid). The council
+transcript table is the full human/audit record for Daily Council events, not
 prompt context.
 
-`_write_state_db(path, payload)` performs a full rewrite on every save: it
-upserts `meta`, then deletes and re-inserts all `civ`/`agents`/`memory`/
-`council_transcript` rows, all inside a single transaction, followed by a
-`wal_checkpoint`. `save_state()`
-serializes the payload under the lock, then writes it outside the lock via a
-per-call connection (`_write_state_db`) and never raises — the single-
-transaction commit gives crash safety without the old tmp-file-plus-rename
-trick. A dedicated `SimSaver` daemon thread calls `save_state()` every
-`AUTOSAVE_SECONDS = 10` s (sim_engine.py:33, 9523-9529), unchanged. `atexit`
-and signal handlers in server.py additionally flush a final save on graceful
-shutdown (server.py:3420-3439).
+`_write_state_db(path, payload)` performs a full rewrite on every save that
+actually reaches disk: it upserts `meta`, then deletes and re-inserts all
+`civ`/`agents`/`memory`/`council_transcript` rows, upserts dirty
+`structure_sprites` rows (and deletes removed structure ids), all inside a
+single transaction, followed by a `wal_checkpoint`. `save_state(force=False)`
+serializes the payload under the lock, computes a stable SHA-256 content hash
+via `_state_content_hash()` over the payload **excluding** `savedAt`, updates
+an in-memory `_last_save_considered_at` timestamp, and **skips** the SQLite
+rewrite when the hash matches `_last_saved_hash` (typical for a paused/idle
+world). A successful write updates `_last_saved_hash`. Pass `force=True` to
+always rewrite — used by graceful shutdown, `reset()`, and God checkpoint
+snapshots so `savedAt` and on-disk bytes refresh even when gameplay state is
+unchanged. Serialization uses `_json_safe_copy()` (explicit set→sorted-list
+conversion) instead of a redundant `json.loads(json.dumps(...))` round-trip.
+The write itself happens outside the lock via a per-call connection
+(`_write_state_db`) and never raises — the single-transaction commit gives
+crash safety without the old tmp-file-plus-rename trick. A dedicated `SimSaver`
+daemon thread calls `save_state()` (default `force=False`) every
+`AUTOSAVE_SECONDS = 10` s, unchanged. `atexit` and signal handlers in
+server.py additionally flush a final `save_state(force=True)` on graceful
+shutdown.
 
 `_read_state_db(path)` checks the file exists, connects, and returns the same
 payload dict shape as `_serialize_state()` produced, or `None` if the file is
 missing or `meta.version` isn't present. `restore_state()` (sim_engine.py:9613)
-accepts only `STATE_VERSION = 2` — the old v1→v2 migration
+accepts `STATE_VERSION` `3` and still accepts `2` once — v2 DBs may embed
+sprites inside `civilization["structures"]`; restore merges those into memory
+and marks them persist-dirty so the next save splits them into
+`structure_sprites` and rewrites as v3. The old v1→v2 migration
 (`_migrate_v1_to_v2`, which seeded `districts`/`roadNodes`/`roadEdges`/
 `frontierPlots`/`districtProjects` from the starter blueprint for pre-districts
 saves) has been removed. The `setdefault`/flag-gated backfill chain for
@@ -328,19 +350,24 @@ of `civilization` (no serializer change) and always exists, flag on or off:
 
 ```json
 {
-  "version": 2, "intervened": false, "nextInterventionSeq": 1,
+  "version": 3, "intervened": false, "nextInterventionSeq": 1,
   "providence": null, "privateOmens": {}, "activeEvents": [],
   "recentInterventions": [], "recentDivineResponses": [],
   "whisperCampaigns": {}, "agentSampling": {}, "contextMasks": {},
   "decisionGates": {}, "burningBush": {}, "anointments": {},
-  "identityForges": {}, "architectZones": [], "checkpoints": []
+  "identityForges": {}, "architectZones": [], "checkpoints": [],
+  "decisionDigests": [], "dejaVuReplays": {},
+  "crowdCompulsions": {}, "dreamBroadcasts": {}
 }
 ```
 
-`GOD_STATE_VERSION` is `2` (Matrix scaffolding + live `whisperCampaigns` and
-`agentSampling`).
-Private maps (`whisperCampaigns`, `agentSampling`, `contextMasks`, etc.) never
-appear in `snapshot()["god"]` — only the public allowlist fields below.
+`GOD_STATE_VERSION` is `3` (Divine Console Phase 8: bounded `decisionDigests`
+ring + live `dejaVuReplays`; Phase 9 placeholder maps `crowdCompulsions` /
+`dreamBroadcasts` default empty).
+Private maps (`whisperCampaigns`, `agentSampling`, `contextMasks`,
+`decisionDigests`, `dejaVuReplays`, `crowdCompulsions`, `dreamBroadcasts`,
+etc.) never appear in `snapshot()["god"]` — only the public allowlist fields
+below.
 
 `_default_god_state()` builds this; `_normalize_god_state(raw)` is the
 restore-time normalizer, called unconditionally (same setdefault-only
@@ -374,7 +401,16 @@ the lock, stores the response, and consumes the preview (single-use once
 applied).
 
 **Command catalog (Phase 2).** `kind == "proclamation"` is applyable:
-`{"kind": "proclamation", "payload": {"text": str, "durationFrames": int?}}`.
+`{"kind": "proclamation", "payload": {"text": str, "durationFrames": int?, "presentation": "soft"|"thunder"?}}`.
+Optional `presentation` (`"soft"` \| `"thunder"`) is a **cosmetic stage-direction**
+only: validated in `_validate_god_envelope`, stored on the intervention record
+and (when proclamation auto-applies providence) on the active providence slot,
+and copied onto chronicle entries as `presentation` when not the default
+`"soft"`. It never changes cognition prompt text, activity wording, or
+`conversationLog` content — only viewer banner/chronicle CSS class selection
+and `divine.jsonl` audit of the normalized command. Omitted or `"soft"` is
+equivalent; only `"thunder"` is emitted in the canonical normalized payload.
+No `GOD_STATE_VERSION` bump — setdefault-safe reads on older saves.
 `text` passes through `_normalize_divine_text` (Unicode NFC; rejects NUL and
 C0/C1 controls other than space; rejects embedded newlines; enforces both a
 240-character and a 600-UTF-8-byte cap post-normalization — the byte cap is
@@ -422,10 +458,12 @@ omen status field and `recentDivineResponses` adherence log this section
 describes. Cognition-side rendering (binding prompt lines, `divine_response`,
 the elder-directive separation) is [03](03-cognition.md).
 
-**`providence`** — `{"text": str, "durationFrames": int?}`. One active public
-**binding** guidance line at a time, stored in
+**`providence`** — `{"text": str, "durationFrames": int?, "presentation": "soft"|"thunder"?}`.
+One active public **binding** guidance line at a time, stored in
 `civilization["godState"]["providence"]` as `{id, text, createdFrame,
-expiresFrame, visibility: "public", ackedAgentIds?: {}}`.
+expiresFrame, visibility: "public", ackedAgentIds?: {}, presentation?: "thunder"}`.
+Optional `presentation` follows the same cosmetic-only contract as proclamation
+(chronicle/banner class; cognition unchanged).
 `durationFrames` is optional (default `GOD_GUIDANCE_DEFAULT_DURATION_FRAMES =
 5400`, ~3 minutes, mirroring `DIRECTIVE_TTL_FRAMES`) and is silently clamped
 into `GOD_GUIDANCE_MIN_DURATION_FRAMES..GOD_GUIDANCE_MAX_DURATION_FRAMES`
@@ -652,7 +690,7 @@ tags, not craft items). `architect_release_hold` restores pose and clears
 `_close_architect_zone` (shared with `god_cancel` on zone `id`).
 
 **Reload / Déjà Vu checkpoints (Divine Matrix Phase 10).** Kinds:
-`checkpoint_create`, `checkpoint_restore`, `deja_vu_replay` (stub). Metadata in
+`checkpoint_create`, `checkpoint_restore`. Metadata in
 `godState["checkpoints"]` (list, cap `GOD_CHECKPOINT_MAX = 5`): `{id, label,
 frameTick, path, createdAt}` with `path` relative (`backup/god-checkpoints/<id>`).
 Disk layout under `simulation/backup/god-checkpoints/<id>/`: `state.db` and
@@ -662,10 +700,53 @@ per-engine `god_checkpoint_root` attribute (smoke uses temp dirs). At cap,
 preview rejects unless `replaceOldest: true` (drops oldest file+metadata on
 apply). Restore: pause-safe copy back to live `DB_PATH` + memory store path,
 `restore_state()`, clear preview/idempotency caches (same as any restore),
-resume. Audit `public: true`. `deja_vu_replay` rejects when
-`GOD_DEJA_VU_REPLAY` is off; when on, still rejects as not implemented (honest
-stub). Sight lists checkpoint summaries (no absolute disk paths); `checkpoints`
-metadata is **not** in `/state` `god` allowlist.
+resume. Audit `public: true`. Sight lists checkpoint summaries (no absolute
+disk paths); `checkpoints` metadata is **not** in `/state` `god` allowlist.
+
+**Déjà Vu replay (Divine Console Phase 8).** Kind `deja_vu_replay` (flag
+`GOD_DEJA_VU_REPLAY`, env `SIM_GOD_DEJA_VU_REPLAY`, default off). Persisted
+`godState["decisionDigests"]` is a bounded ring (cap
+`GOD_DECISION_DIGEST_CAP = 200`) of `{frameTick, agentId, action,
+reasoningHash?}` — appended on the gated LLM apply path when a natural decision
+is applied (not divine compulsion/possession/`decision_veto_resolve`/replay
+steps; no full think payload). `reasoningHash` is optional SHA-256 of reasoning text truncated to 16
+hex chars. Parent map `godState["dejaVuReplays"]` stores cancellable replay
+sessions `{id, targetId, steps[], currentIndex, status, createdFrame}`.
+Apply payload `{targetId, maxSteps?}` (default `maxSteps =
+GOD_DEJA_VU_MAX_STEPS = 8`): preview freezes the last K digest actions for
+that agent in chronological order into `replaySteps`; apply creates the parent
+and sequences `decision_compulsion` gates (`remainingTurns: 1` per step,
+`dejaVuReplayId` on each gate). When a step completes, the next compulsion
+spawns until steps exhaust or the parent is cancelled. Session cap
+`GOD_DEJA_VU_SESSION_CAP = 12` (in-memory counter, like grant session cap).
+`god_cancel(replayId)` closes the parent and any in-flight gate for that
+replay. Audit `public: false`. Sight exposes digest snippets
+(`frameTick`/`agentId`/`action`/`reasoningHash` only) and active replay
+summaries — never in `/state`.
+
+**`crowd_compulsion`** — `{"theme"?: str, "durationFrames"?: int,
+"remainingTurns"?: int, "targets": [{targetId, pinnedDecision}, ...]}` (max
+`GOD_CROWD_COMPULSION_MAX_TARGETS = 12`). At least one of `durationFrames`
+or `remainingTurns` is required at campaign level (shared by every target
+gate). Batch apply: one parent id in `godState["crowdCompulsions"]` linking
+`targets: {str(agentId): gateId}` plus per-target `decision_compulsion`
+gates via `_god_set_decision_gate` (`crowdCompulsionId` on each gate record;
+replace semantics unchanged). Campaign `theme` and pinned decisions are
+**private** — never in `snapshot()` god allowlist or public logs. Cancel via
+`god_cancel(parentId)` closes every linked gate still active and removes the
+parent; individual gate expiry/replacement also finalizes the parent when no
+linked gates remain.
+
+**`dream_broadcast`** — `{"durationFrames": int, "dreamSnapshot": object,
+"targetIds": [int, ...]}` (max `GOD_DREAM_BROADCAST_MAX_TARGETS = 12`).
+Batch apply: one parent id in `godState["dreamBroadcasts"]` linking
+`targets: {str(agentId): maskId}` plus per-target `context_mask` mode
+`dream` with the shared validated snapshot (`dreamBroadcastId` on each mask;
+replace semantics unchanged). Dream snapshot text is **private** — never in
+`snapshot()` god allowlist; Sight shows mask mode/expiry only. Cancel via
+`god_cancel(parentId)` closes every linked mask still active and removes the
+parent; individual mask expiry/replacement also finalizes the parent when no
+linked masks remain.
 
 **Voice apply side effects.** `_god_apply_providence`, `_god_apply_private_omen`,
 whisper-campaign per-target omens, and proclamation (via the providence path)
@@ -750,6 +831,14 @@ reachable through `recentInterventions` in the same `god_sight` response (an
 or by the operator recalling what they wrote. No omen content ever reaches
 unauthenticated surfaces.
 
+**Village pulse (Divine Console improvements, Phase 10).** `god_sight()` adds
+a top-level `pulse` aggregate computed under the engine lock from live world
+state — crisis agents, stockpile totals, open build-project count, elder
+(`role=="elder"`) status, weather snapshot, active-event titles, and a
+providence `{active, expiresFrame}` summary without guidance text. It is
+**not** written to `godState`, not autosaved, and not required on restore;
+each Sight fetch recomputes it cheaply with no LLM calls.
+
 ## Sovereign God mode (Phase 4 — bounded immediate miracles)
 
 Three catalog kinds become applyable: `agent_vitals`, `grant_resource`,
@@ -771,6 +860,16 @@ and `_god_apply_revoke_guidance` only ever matches an id against the
 `providence` slot or a `privateOmens` record — a Phase 4 intervention id can
 never match either, so both refuse by construction with no kind-specific
 carve-out required.
+
+**Preview warnings (Divine Console improvements, Phase 7).** After validation,
+`god_preview()` may attach `warnings: string[]` on `ok: true` responses.
+Non-fatal only — Apply remains allowed. For `story_event` payloads with a
+non-empty `modifiers` map, `_god_modifier_conflict_warnings()` scans a small
+fixed table of opposing `GOD_MODIFIER_RANGES` pairs (both keys present and
+stressed above neutral, e.g. high gather yield plus high hunger drain) and
+returns one message per matched pair. Active-key occupancy conflicts
+(`replaceEffectId` required) stay fatal rejections in
+`_validate_god_story_event`, not warnings.
 
 **Preview outcome.** `god_preview()`'s response gains a `previewOutcome`
 field: the exact clamped/bounded value the corresponding miracle would apply
