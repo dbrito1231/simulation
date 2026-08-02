@@ -1,14 +1,19 @@
 # Scoping: Huntable Wildlife + More Creature Kinds
 
+> **Historical (pre-implementation).** This doc captured scoping before huntable
+> wildlife shipped. For the live contract see
+> [specs/05-world.md](../specs/05-world.md#huntable-wildlife-wildlife_enabled) and
+> [specs/07-actions.md](../specs/07-actions.md) (`hunt_wildlife`).
+
 Context for implementing huntable wildlife and additional ambient creature
-kinds. Written after inspecting the current ambient-wildlife implementation;
-not yet planned or built.
+kinds. Written after inspecting the ambient-wildlife implementation at the
+time; not yet planned or built when this was drafted.
 
-## Current state
+## Baseline at time of writing
 
-The fish/bird/grazer sprites visible in the viewer (`WILDLIFE_ENABLED`,
-living-ecosystem Phase 2) are **decoration only, with zero server-side
-representation**:
+At the time this was written, the fish/bird/grazer sprites visible in the
+viewer (`WILDLIFE_ENABLED`, living-ecosystem Phase 2) were **decoration only,
+with zero server-side representation**:
 
 - Draw functions live in `simulation/sprites.js` (`drawFishRipple`,
   `drawBird`, `drawGrazer`, dispatched via `drawWildlifeCreature`).

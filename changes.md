@@ -76,7 +76,7 @@
 
 ### New action (full action-sync)
 
-- **`confront_agent`** — `DECISION_ACTIONS`, `DECISION_SCHEMA`, `SYSTEM_PROMPT` (server.py); `apply_decision`, `available_actions` (sim_engine.py); `ACTION_LABELS` (index.html)
+- **`confront_agent`** — `DECISION_ACTIONS`, `DECISION_SCHEMA`, `SYSTEM_PROMPT` (server.py); `apply_decision`, `available_actions` (sim_engine.py); `ACTION_LABELS` (viewer.js)
 
 ### Specs
 
@@ -111,7 +111,7 @@
 
 ### New action (full action-sync)
 
-- **`deliver_caravan`** — full chain: server.py, sim_engine.py, index.html, prompts.py
+- **`deliver_caravan`** — full chain: server.py, sim_engine.py, viewer.js, prompts.py
 
 ### Treaty tariffs
 
