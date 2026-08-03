@@ -503,6 +503,9 @@ GOD_CONTEXT_MASK_FORGED_MAX = 8
 # Divine Matrix Phase 5: decision gate (compulsion / thought veto / possession).
 GOD_DECISION_GATE_MODES = frozenset({"compulsion", "veto", "possession"})
 GOD_VETO_HOLD_CAP = 3
+GOD_VOICE_ACK_SKIP_CAP = 3          # consecutive synthetic (non-genuine) divine_response turns for the
+                                     # same guidance id before it is force-acked so a model that never
+                                     # cooperates can't stall the guidance forever (see _bump_voice_guidance_skip)
 GOD_PREVIEW_CACHE_MAX = 32          # bounded, in-memory, never persisted
 GOD_PREVIEW_TTL_SECONDS = 60        # wall-clock, not frame-based (previews are a request-scoped concept)
 GOD_REQUEST_CACHE_MAX = 100         # bounded, in-memory idempotency store (never persisted -- see docs/plan)
@@ -7832,8 +7835,42 @@ class SimEngine:
                 if isinstance(omen, dict) and omen.get("id") == gid:
                     omen["acked"] = True
 
+    def _bump_voice_guidance_skip(self, entry, agent_key):
+        """Increment and return the consecutive-synthetic-response counter for
+        one guidance entry (providence's skipCounts[agent_key], or the
+        per-agent omen's skipCount), reading/writing directly against the
+        live godState record so it persists like ackedAgentIds does. Returns
+        None if the underlying record can no longer be found (e.g. guidance
+        expired between _active_voice_guidance() and here)."""
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        gid = entry.get("id")
+        kind = entry.get("kind")
+        if kind == "providence":
+            prov = god.get("providence")
+            if isinstance(prov, dict) and prov.get("id") == gid:
+                skip_counts = prov.setdefault("skipCounts", {})
+                skip_counts[agent_key] = skip_counts.get(agent_key, 0) + 1
+                return skip_counts[agent_key]
+        elif kind == "private_omen":
+            omen = (god.get("privateOmens") or {}).get(agent_key)
+            if isinstance(omen, dict) and omen.get("id") == gid:
+                omen["skipCount"] = omen.get("skipCount", 0) + 1
+                return omen["skipCount"]
+        return None
+
     def _record_divine_response_adherence(self, agent, decision, voice):
-        """Log Voice adherence after a decision is applied. Lock held."""
+        """Log Voice adherence after a decision is applied. Lock held.
+
+        A genuine (non-synthetic) divine_response acks its guidance entry
+        immediately, same as before. A synthetic one (model omitted/malformed
+        the field) no longer auto-acks -- it increments a per-guidance skip
+        counter instead, so the same binding prompt line keeps reappearing on
+        the agent's next think. Only once that counter reaches
+        GOD_VOICE_ACK_SKIP_CAP consecutive synthetic turns is the entry
+        force-acked (capped close), so a model that never cooperates can't
+        stall the guidance forever."""
         if not voice.get("voice_guidance_active"):
             return
         unacked = list(voice.get("unacked_guidance") or [])
@@ -7869,7 +7906,18 @@ class SimEngine:
         if not isinstance(log_ring, list):
             log_ring = []
             god["recentDivineResponses"] = log_ring
+        agent_key = str(agent["id"])
+        to_ack = []
         for entry in unacked:
+            skip_count = None
+            capped = False
+            if not synthetic:
+                to_ack.append(entry)
+            else:
+                skip_count = self._bump_voice_guidance_skip(entry, agent_key)
+                if skip_count is None or skip_count >= GOD_VOICE_ACK_SKIP_CAP:
+                    capped = True
+                    to_ack.append(entry)
             record = {
                 "agentId": agent["id"],
                 "agentName": agent["name"],
@@ -7881,6 +7929,8 @@ class SimEngine:
                 "frameTick": self.frameTick,
                 "action": action,
                 "public": bool(entry.get("public")),
+                "skipCount": skip_count,
+                "capped": capped,
             }
             log_ring.insert(0, record)
             kind_label = "public guidance" if entry.get("public") else "private guidance"
@@ -7898,13 +7948,16 @@ class SimEngine:
                     "action": action,
                     "synthetic": synthetic,
                     "agentName": agent["name"],
+                    "skipCount": skip_count,
+                    "capped": capped,
                 },
                 "adherence",
                 public=bool(entry.get("public")),
             )
         if len(log_ring) > GOD_DIVINE_RESPONSE_LOG_MAX:
             del log_ring[GOD_DIVINE_RESPONSE_LOG_MAX:]
-        self._mark_voice_guidance_acked(agent, unacked)
+        if to_ack:
+            self._mark_voice_guidance_acked(agent, to_ack)
 
     def _active_burning_bush_record(self, agent_id):
         """Active Burning Bush session for one agent, or None."""

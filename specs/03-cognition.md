@@ -324,19 +324,40 @@ explicitly declines to let the guidance override current plans; goals and
 assigned tasks are left intact. The `reason` is a short, human-readable
 explanation surfaced to operators in Sight and the Voice Adherence panel.
 
-**Missing/invalid `divine_response`.** When Voice guidance is active and
-unacknowledged but the model omits `divine_response`, returns a malformed
-object, or supplies an unknown `stance`, `normalize_decision` **does not**
-reject the turn — it **synthesizes** `{"stance": "continue", "reason":
-"missing_divine_response"}` and still applies the validated `action`. This is
-an explicit non-compliance signal for operators, not a hard fallback to
-`rest`. The synthesized record is written to the divine-response log (see
-[02-engine-core.md](02-engine-core.md)) exactly once per guidance ack.
+**Schema-required while active.** `build_response_format()` (server.py) is
+called per-request with `require_divine_response=bool(data.get(
+"voice_guidance_active"))`. When True it builds a shallow copy of
+`DECISION_SCHEMA` (never mutating the module-level schema — `MAX_CONCURRENT_LLM
+= 3` means multiple think-workers can call this concurrently) that adds
+`"divine_response"` to `required` and tightens its `type` from `["object",
+"null"]` to `"object"`, so the model can no longer silently omit the field
+when guidance is active. When guidance is inactive the field stays optional/
+nullable as before.
 
-**Acknowledgement.** A turn counts as acknowledged when a valid or
-synthesized `divine_response` is recorded against the active guidance id(s).
-Until then, every subsequent think for that agent carries the same binding
-prompt lines and the `divine_response` requirement.
+**Missing/invalid `divine_response`.** `synthesize_divine_response()` remains
+a safety net for malformed-but-present objects, retries, and the case where
+structured output degrades to unstructured mode (schema enforcement no longer
+applies). When Voice guidance is active and unacknowledged but the model
+omits `divine_response`, returns a malformed object, or supplies an unknown
+`stance`, `normalize_decision` **does not** reject the turn — it
+**synthesizes** `{"stance": "continue", "reason": "missing_divine_response"}`
+and still applies the validated `action`. This is an explicit non-compliance
+signal for operators, not a hard fallback to `rest`.
+
+**Acknowledgement and the skip cap.** A turn with a **genuine** (non-
+synthetic) `divine_response` acks its guidance entry immediately, same as
+before. A **synthetic** response no longer auto-acks — `sim_engine.py`'s
+`_record_divine_response_adherence` increments a per-guidance skip counter
+instead (providence's `skipCounts[agentIdStr]`, or the private omen's
+`skipCount` — see [02-engine-core.md](02-engine-core.md)) via
+`_bump_voice_guidance_skip`. Only once that counter reaches
+`GOD_VOICE_ACK_SKIP_CAP` (3) consecutive synthetic turns for the same
+guidance id is the entry force-acked (a "capped" close, logged as
+`capped: true`) — same effect as a genuine ack, but recorded as
+non-compliance rather than engagement. Until acked (by either path), every
+subsequent think for that agent carries the same binding prompt lines and the
+`divine_response` requirement; the skip counter resets implicitly once the
+guidance is replaced/expired/closed (a fresh guidance id starts at zero).
 
 **Special-turn cancellation.** While Voice guidance is active and
 unacknowledged for an agent, any pending `sprite_design_only` or
@@ -879,7 +900,7 @@ surfaces to the agent's next prompt):
 | `switch_role` | `new_role` (or `target`) must be a key in `ROLES` |
 | `move_to_district` | promotes `target_district` into `target` if target is empty (the engine only reads `target`) |
 | `talk_to_nearby` | target/message both required, target must be in the nearby-agents list, nearby list non-empty |
-| `divine_response` (when active Voice guidance is unacknowledged) | must be an object with `stance` in `follow`/`continue` and a non-empty `reason` string; missing/invalid values are **not** rejected — see Voice binding guidance above |
+| `divine_response` (when active Voice guidance is unacknowledged) | must be an object with `stance` in `follow`/`continue` and a non-empty `reason` string; the JSON schema now *requires* the field's presence (as a non-null object) for this request via `build_response_format(require_divine_response=True)`, but missing/invalid *values* are still **not** rejected as a hard fallback to `rest` — instead of an immediate ack, non-response is now capped: it increments a per-guidance skip counter and only force-acks after `GOD_VOICE_ACK_SKIP_CAP` consecutive synthetic turns — see Voice binding guidance above |
 | every other action | passed through as-is (any `blueprint` key stripped unless the action is one of the blueprint-carrying ones) |
 
 `role_fallback_action(role, agent_data)` (server.py:1890-2022) priority

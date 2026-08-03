@@ -461,7 +461,10 @@ the elder-directive separation) is [03](03-cognition.md).
 **`providence`** — `{"text": str, "durationFrames": int?, "presentation": "soft"|"thunder"?}`.
 One active public **binding** guidance line at a time, stored in
 `civilization["godState"]["providence"]` as `{id, text, createdFrame,
-expiresFrame, visibility: "public", ackedAgentIds?: {}, presentation?: "thunder"}`.
+expiresFrame, visibility: "public", ackedAgentIds?: {}, skipCounts?: {},
+presentation?: "thunder"}`. `skipCounts` maps `str(agentId)` to a running
+count of that agent's consecutive synthetic (non-genuine) `divine_response`
+turns against this providence id — see the Voice-adherence skip cap below.
 Optional `presentation` follows the same cosmetic-only contract as proclamation
 (chronicle/banner class; cognition unchanged).
 `durationFrames` is optional (default `GOD_GUIDANCE_DEFAULT_DURATION_FRAMES =
@@ -485,11 +488,14 @@ deceased (`deathFrame is not None`) target is rejected before the text is
 even normalized. Stored in `civilization["godState"]["privateOmens"]`, keyed
 **only** by `str(agent["id"])`, one record per agent:
 `{id, targetId, targetName, text, createdFrame, expiresFrame,
-memoryWritten, acked?: bool}`. `targetName` is a non-authoritative display
-snapshot only. **Binding** — same `divine_response` contract as public
-providence ([03](03-cognition.md)). Never touches public activity/
-`conversationLog`/chronicle. Replacement follows the same disclose-then-
-replace fingerprint mechanism as providence, keyed per-target.
+memoryWritten, acked?: bool, skipCount?: int}`. `targetName` is a
+non-authoritative display snapshot only. **Binding** — same `divine_response`
+contract as public providence ([03](03-cognition.md)). `skipCount` is a
+running count of this agent's consecutive synthetic (non-genuine)
+`divine_response` turns against this omen id — see the Voice-adherence skip
+cap below. Never touches public activity/`conversationLog`/chronicle.
+Replacement follows the same disclose-then-replace fingerprint mechanism as
+providence, keyed per-target.
 
 **`whisper_campaign`** — `{"theme": str, "durationFrames": int?,
 "whispers": [{targetId, text}, ...]}` (max `GOD_WHISPER_CAMPAIGN_MAX_TARGETS =
@@ -772,15 +778,25 @@ records a valid or synthesized `divine_response` against active guidance:
   "reason": "…",
   "synthetic": false,
   "frameTick": 120450,
-  "action": "contribute_resources"
+  "action": "contribute_resources",
+  "skipCount": null,
+  "capped": false
 }
 ```
 
-`synthetic: true` when the engine supplied `missing_divine_response`.
-`reason` is always operator-visible in Sight; private-omen **text** itself
-never appears here — only the agent's stated adherence reason. The log is
-**private** (never in `/state`); `god_sight()` exposes it in full for the
-authenticated operator. Entries are never folded into agent prompts.
+`synthetic: true` when the engine supplied `missing_divine_response`. A
+genuine (non-synthetic) `divine_response` acks the guidance immediately;
+`skipCount` stays `null`/omitted-equivalent and `capped` stays `false`. A
+synthetic response no longer acks immediately — `skipCount` is the running
+per-guidance count `_bump_voice_guidance_skip` returned for this turn
+(providence's `skipCounts[agentIdStr]`, or the omen's `skipCount`), and
+`capped: true` marks the turn where that count reached
+`GOD_VOICE_ACK_SKIP_CAP` (3) and the entry was force-acked as a
+non-compliance close rather than genuine engagement. `reason` is always
+operator-visible in Sight; private-omen **text** itself never appears here —
+only the agent's stated adherence reason. The log is **private** (never in
+`/state`); `god_sight()` exposes it in full for the authenticated operator.
+Entries are never folded into agent prompts.
 
 **`revoke_guidance`** — `{"id": str}`. Ends an active providence or private
 omen early by its intervention id, whichever it matches (checked in that

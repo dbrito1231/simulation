@@ -1445,18 +1445,35 @@ def looks_like_model_not_found_error(http_status, lm_body):
         k in low for k in ("not found", "no model", "failed to load", "unknown model"))
 
 
-def build_response_format():
+def build_response_format(require_divine_response=False):
     """The internal response_format payload field for the current mode, or
     None. Kept in this OpenAI-style shape (rather than Ollama's flatter
     `format` field) so the rest of this module's payload-building code is
     unchanged; to_ollama_body() extracts the actual JSON schema object out of
-    the "json_schema" nesting when converting to the wire request."""
+    the "json_schema" nesting when converting to the wire request.
+
+    require_divine_response: when True (agent has binding Voice guidance
+    active this turn -- see run_agent_decision's call site), the schema is
+    amended with a shallow copy so "divine_response" is a required, non-null
+    object rather than optional -- the model can no longer silently omit it.
+    Built fresh per call (never mutates the module-level DECISION_SCHEMA)
+    because MAX_CONCURRENT_LLM=3 means multiple think-workers can call this
+    concurrently with different require_divine_response values."""
     if not _structured_output_enabled:
         return None
+    schema = DECISION_SCHEMA
+    if require_divine_response and STRUCTURED_OUTPUT_MODE == "json_schema":
+        schema = dict(DECISION_SCHEMA)
+        schema["required"] = list(DECISION_SCHEMA["required"]) + ["divine_response"]
+        properties = dict(DECISION_SCHEMA["properties"])
+        divine_response_field = dict(DECISION_SCHEMA["properties"]["divine_response"])
+        divine_response_field["type"] = "object"
+        properties["divine_response"] = divine_response_field
+        schema["properties"] = properties
     if STRUCTURED_OUTPUT_MODE == "json_schema":
         return {
             "type": "json_schema",
-            "json_schema": {"name": "agent_decision", "schema": DECISION_SCHEMA},
+            "json_schema": {"name": "agent_decision", "schema": schema},
         }
     if STRUCTURED_OUTPUT_MODE == "json_object":
         return {"type": "json_object"}
@@ -4329,7 +4346,7 @@ def run_agent_decision(data):
         # instead of re-evaluating -- see resolve_high_stakes()'s docstring.
         high_stakes_active, high_stakes_capped = resolve_high_stakes(data)
         self_prompt = (data.get("self_prompt") or "").strip()
-        response_format = build_response_format()
+        response_format = build_response_format(require_divine_response=bool(data.get("voice_guidance_active")))
         payload = build_decision_payload(data, self_prompt, response_format)
         request_timeout = THINKING_TIMEOUT_S if is_high_stakes_turn(data) else DEFAULT_TIMEOUT_S
 
