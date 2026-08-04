@@ -2127,6 +2127,46 @@ def test_voice_omen_cancels_special_turns_not_defer():
         se.GOD_MODE_ENABLED = old
 
 
+def test_voice_skip_cap_forces_close_after_repeated_synthetic():
+    """A synthetic (missing divine_response) turn no longer acks immediately
+    -- it increments a per-guidance skip counter and only force-acks once
+    that counter reaches GOD_VOICE_ACK_SKIP_CAP consecutive synthetic turns."""
+    old = se.GOD_MODE_ENABLED
+    se.GOD_MODE_ENABLED = True
+    try:
+        engine = make_engine()
+        agent = engine.agents[0]
+        preview = engine.god_preview(
+            _omen_envelope(agent["id"], "Answer the sign.", duration=se.GOD_GUIDANCE_MIN_DURATION_FRAMES))
+        engine.god_apply(preview["previewId"], "req-voice-skip-cap-1")
+
+        with engine.lock:
+            for i in range(se.GOD_VOICE_ACK_SKIP_CAP - 1):
+                engine._apply_gated_decision(agent, {"action": "rest", "reasoning": f"turn {i}"})
+                voice = engine._active_voice_guidance(agent)
+                assert_true(voice["voice_guidance_active"] is True, (i, voice))
+                omen = engine.civilization["godState"]["privateOmens"].get(str(agent["id"]))
+                assert_true(omen.get("acked") is not True, (i, omen))
+                assert_true(omen.get("skipCount") == i + 1, (i, omen))
+
+            # Final turn reaches the cap and force-acks (closes) the guidance.
+            engine._apply_gated_decision(agent, {"action": "rest", "reasoning": "final synthetic turn"})
+            voice = engine._active_voice_guidance(agent)
+            assert_true(voice["voice_guidance_active"] is False, voice)
+            omen = engine.civilization["godState"]["privateOmens"].get(str(agent["id"]))
+            assert_true(omen.get("acked") is True, omen)
+            assert_true(omen.get("skipCount") == se.GOD_VOICE_ACK_SKIP_CAP, omen)
+
+        responses = engine.civilization["godState"].get("recentDivineResponses") or []
+        last = responses[0]
+        assert_true(last.get("synthetic") is True, last)
+        assert_true(last.get("capped") is True, last)
+        assert_true(last.get("skipCount") == se.GOD_VOICE_ACK_SKIP_CAP, last)
+        print("  OK synthetic divine_response skip counter caps close at GOD_VOICE_ACK_SKIP_CAP")
+    finally:
+        se.GOD_MODE_ENABLED = old
+
+
 def test_proclamation_sets_providence_and_cancels_special_turns():
     """Proclamation broadcasts publicly and arms providence for binding Voice."""
     old = se.GOD_MODE_ENABLED
@@ -4890,6 +4930,7 @@ def main():
     test_synthesize_divine_response_missing_and_valid()
     test_voice_follow_clears_goal_continue_keeps()
     test_voice_omen_cancels_special_turns_not_defer()
+    test_voice_skip_cap_forces_close_after_repeated_synthetic()
     test_proclamation_sets_providence_and_cancels_special_turns()
     test_presentation_soft_thunder_validates_and_applies()
     test_sight_recent_divine_responses_and_snapshot_privacy()

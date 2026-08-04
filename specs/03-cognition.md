@@ -169,7 +169,7 @@ ally/neutral/rival), `blueprint` (nullable object: id/name/needs/new_resources/
 visual_style/sprite/function), `recipe` (nullable object: id/name/inputs/
 station), `rule` (nullable object: id/name/kind/value/description), `vote`
 (nullable string), `sage_decision` (nullable enum approve/deny), `sprite`
-(nullable object: palette/grid). **TECH_TREE_ENABLED import-time addition**
+(nullable object: palette/grid — **bounded**, see below). **TECH_TREE_ENABLED import-time addition**
 (server.py:3208-3215, applied only if the engine flag is on so flag-off
 prompts stay byte-identical): adds `verdict` (nullable object with
 `rejections`) and `blueprint.tier` (nullable integer) to the schema, and
@@ -183,6 +183,37 @@ HTTP 400 or an error body mentioning `format`/`response_format`/
 practice Ollama's `format` field is stable (Phase 0 finding #2: a full JSON
 schema was honored in every trial), so this is a safety net rather than an
 expected path.
+
+**Bounded sprite grid (grammar-level, not just post-hoc validation).**
+`SPRITE_GRID_MIN = 4` / `SPRITE_GRID_MAX = 14` (server.py, module-level
+constants declared just above `DECISION_SCHEMA` so the schema can reference
+them directly, and exported to the engine via `_ENGINE_DEPS`). The
+**top-level** `sprite` property (the `submit_structure_sprite` action's
+payload) is bounded at the JSON-schema level: `palette` is an array of
+strings, `minItems: 2` / `maxItems: 5`; `grid` is an array of strings,
+`minItems`/`maxItems` = `SPRITE_GRID_MIN`/`SPRITE_GRID_MAX`, and each row
+string carries the same `minLength`/`maxLength`. Rationale: a Phase 0 probe
+measured 5 of 5 sprite-turn failures as Ollama `done_reason: "length"` at
+`eval_count: 768` (the sprite turn's `max_tokens`) — generation was truncated
+mid-JSON because nothing at the decode-grammar level bounded the grid, and
+the model emitted 30-100+ rows. The bound makes that runaway
+unrepresentable at generation time, mirroring (and now grammar-enforcing
+ahead of) the limits `validate_sprite_block()` already checked post-hoc. The
+**blueprint-nested** `sprite` (`blueprint.sprite`, used by `propose_blueprint`/
+invention turns) is deliberately left unbounded — a blueprint sprite is
+optional and is never rejected, so there is no runaway risk to guard
+against there.
+
+`build_sprite_upgrade_prompt()`/`_sprite_upgrade_size_requirement()`
+(server.py) render the per-dimension growth requirement for a sprite-design
+turn rather than collapsing a `0` minimum (meaning "no growth required on
+this axis" — see [05-world.md](05-world.md#structures)) into a fake floor of
+`SPRITE_GRID_MIN`: "strictly more than N rows AND strictly more than N
+columns", or just one axis, or "no minimum size requirement this turn" when
+both are `0`, always followed by the stated `SPRITE_GRID_MIN`-`SPRITE_GRID_MAX`
+ceiling. `SPRITE_UPGRADE_SYSTEM_PROMPT` rule 4 states the same per-dimension
+growth-plus-ceiling contract instead of an unconditional "more rows AND more
+columns".
 
 ## Prompt construction
 
@@ -293,19 +324,40 @@ explicitly declines to let the guidance override current plans; goals and
 assigned tasks are left intact. The `reason` is a short, human-readable
 explanation surfaced to operators in Sight and the Voice Adherence panel.
 
-**Missing/invalid `divine_response`.** When Voice guidance is active and
-unacknowledged but the model omits `divine_response`, returns a malformed
-object, or supplies an unknown `stance`, `normalize_decision` **does not**
-reject the turn — it **synthesizes** `{"stance": "continue", "reason":
-"missing_divine_response"}` and still applies the validated `action`. This is
-an explicit non-compliance signal for operators, not a hard fallback to
-`rest`. The synthesized record is written to the divine-response log (see
-[02-engine-core.md](02-engine-core.md)) exactly once per guidance ack.
+**Schema-required while active.** `build_response_format()` (server.py) is
+called per-request with `require_divine_response=bool(data.get(
+"voice_guidance_active"))`. When True it builds a shallow copy of
+`DECISION_SCHEMA` (never mutating the module-level schema — `MAX_CONCURRENT_LLM
+= 3` means multiple think-workers can call this concurrently) that adds
+`"divine_response"` to `required` and tightens its `type` from `["object",
+"null"]` to `"object"`, so the model can no longer silently omit the field
+when guidance is active. When guidance is inactive the field stays optional/
+nullable as before.
 
-**Acknowledgement.** A turn counts as acknowledged when a valid or
-synthesized `divine_response` is recorded against the active guidance id(s).
-Until then, every subsequent think for that agent carries the same binding
-prompt lines and the `divine_response` requirement.
+**Missing/invalid `divine_response`.** `synthesize_divine_response()` remains
+a safety net for malformed-but-present objects, retries, and the case where
+structured output degrades to unstructured mode (schema enforcement no longer
+applies). When Voice guidance is active and unacknowledged but the model
+omits `divine_response`, returns a malformed object, or supplies an unknown
+`stance`, `normalize_decision` **does not** reject the turn — it
+**synthesizes** `{"stance": "continue", "reason": "missing_divine_response"}`
+and still applies the validated `action`. This is an explicit non-compliance
+signal for operators, not a hard fallback to `rest`.
+
+**Acknowledgement and the skip cap.** A turn with a **genuine** (non-
+synthetic) `divine_response` acks its guidance entry immediately, same as
+before. A **synthetic** response no longer auto-acks — `sim_engine.py`'s
+`_record_divine_response_adherence` increments a per-guidance skip counter
+instead (providence's `skipCounts[agentIdStr]`, or the private omen's
+`skipCount` — see [02-engine-core.md](02-engine-core.md)) via
+`_bump_voice_guidance_skip`. Only once that counter reaches
+`GOD_VOICE_ACK_SKIP_CAP` (3) consecutive synthetic turns for the same
+guidance id is the entry force-acked (a "capped" close, logged as
+`capped: true`) — same effect as a genuine ack, but recorded as
+non-compliance rather than engagement. Until acked (by either path), every
+subsequent think for that agent carries the same binding prompt lines and the
+`divine_response` requirement; the skip counter resets implicitly once the
+guidance is replaced/expired/closed (a fresh guidance id starts at zero).
 
 **Special-turn cancellation.** While Voice guidance is active and
 unacknowledged for an agent, any pending `sprite_design_only` or
@@ -533,6 +585,26 @@ or `vote: "abstain"`; ordinary ballots continue using `vote:
 village result has promoted a winner and roster refresh has seated that new
 elder. Invalid/offline succession-vote fallback abstains instead of silently
 supporting whichever candidate was listed first.
+
+**`normalize_decision` council-branch responsibilities (server.py).** Phase/
+seating eligibility is authoritative only at apply time —
+`normalize_decision()` enforces shape and coarse session existence only:
+a seated attendee (`council_turn and council_seated`) choosing a non-council
+action is rejected to the role fallback (`council_rejection_note: "not a
+seated active council turn"`); a council action chosen with no council
+session/phase present at all (`not council or not phase`) is rejected
+(`"no active council session"`) so a spuriously-emitted council action from a
+model outside any session doesn't sail through to `apply_decision` only to
+be rejected live, wasting the turn. Per-action payload shape is still fully
+checked (`council_speak` requires a non-empty `message`; `council_vote`
+requires a valid `vote`/succession `candidate`; `council_propose` requires a
+valid `rule`/`blueprint`/idea payload per `kind`). Per-turn/per-phase
+eligibility (is the ballot actually open right now, has discussion ended,
+etc.) is deliberately **not** re-checked here — `council_turn`/`phase` were
+snapshotted before the LLM call and can go stale while the model thinks;
+`apply_decision()`'s `_daily_council_actor()` (sim_engine.py) is the live
+authority and rejects non-fatally on a stale snapshot. See
+[07-actions.md](07-actions.md) for the full phase/seating-authority split.
 
 Every think payload, including non-council turns, receives at most
 `COUNCIL_DIGEST_PROMPT_ENTRIES = 2` newest compact entries from
@@ -828,7 +900,7 @@ surfaces to the agent's next prompt):
 | `switch_role` | `new_role` (or `target`) must be a key in `ROLES` |
 | `move_to_district` | promotes `target_district` into `target` if target is empty (the engine only reads `target`) |
 | `talk_to_nearby` | target/message both required, target must be in the nearby-agents list, nearby list non-empty |
-| `divine_response` (when active Voice guidance is unacknowledged) | must be an object with `stance` in `follow`/`continue` and a non-empty `reason` string; missing/invalid values are **not** rejected — see Voice binding guidance above |
+| `divine_response` (when active Voice guidance is unacknowledged) | must be an object with `stance` in `follow`/`continue` and a non-empty `reason` string; the JSON schema now *requires* the field's presence (as a non-null object) for this request via `build_response_format(require_divine_response=True)`, but missing/invalid *values* are still **not** rejected as a hard fallback to `rest` — instead of an immediate ack, non-response is now capped: it increments a per-guidance skip counter and only force-acks after `GOD_VOICE_ACK_SKIP_CAP` consecutive synthetic turns — see Voice binding guidance above |
 | every other action | passed through as-is (any `blueprint` key stripped unless the action is one of the blueprint-carrying ones) |
 
 `role_fallback_action(role, agent_data)` (server.py:1890-2022) priority
@@ -860,6 +932,24 @@ normal-looking decision.
 ## Retries & degradation
 
 All in `run_agent_decision()` (server.py), each a single retry (no loops).
+
+**Per-turn call budget.** `LLM_CALLS_PER_TURN_MAX = 4` (server.py) bounds the
+total number of `requests.post(OLLAMA_CHAT_URL, ...)` calls one
+`run_agent_decision()` invocation may make. Every POST site in the
+function — the initial call, the format-degrade retry (item 1 below), the
+context-overflow slim retry (item 3), and the answer-quality decision retry
+(below) — routes through a local `_post_ollama(body, timeout)` closure that
+counts calls (`llm_calls_made`, local to the invocation, not shared/global)
+and raises `LLMBudgetExhausted` once the budget is spent, rather than posting
+a 5th request. `LLMBudgetExhausted` is deliberately **not** a
+`requests.exceptions.RequestException` subclass, so it can never be mistaken
+for a network failure at any call site; every catch site returns
+`{"error": "llm budget exhausted", "action": "rest"}` immediately — a
+distinct error tag from `"llm offline"`/`"llm timeout"`, never confusable
+with either in `llm.jsonl`. Worst case under the current retry ladder is 4
+calls: initial + format-degrade + context-overflow slim retry + one
+answer-quality retry.
+
 **Orphan caveat (Phase 0 operational finding):** Ollama does not cancel
 server-side generation when a client aborts/times out a `stream:false`
 request — an orphaned timed-out request keeps consuming a queue slot. None of
@@ -902,6 +992,121 @@ error) clears both `llm_cooldown_until` and `_llm_orphan_timeouts`.
    "Context size has been exceeded." error and its silent-truncation
    assumption — Ollama 0.32.3 does **not** silently truncate, it errors
    instead (Phase 0 finding #5, ollama_config.md).
+
+**Same-turn answer-quality retry (`DECISION_RETRY_ENABLED`, default on).**
+Distinct from items 1-3 above, which retry on transport/format-level
+failures: this retries once, same turn, purely on *answer quality* — either
+the reply's JSON was unparseable, or `normalize_decision()`'s raw result
+carries the `_fallback` sentinel (see below). At most **one** retry per turn
+total across both trigger points (a shared `decision_retries` local, `0` on
+the common path, set to `1` the moment either point fires, guarding both so
+a turn can retry for unparseable JSON OR a `_fallback` decision, never
+both):
+
+- **Trigger 1 — unparseable JSON.** `extract_json_decision()` returns
+  `None`. Feedback text is truncation-specific when the failed response's
+  `done_reason == "length"` (Phase 0 probe finding: the dominant real cause
+  of unparseable replies is generation truncation, not a malformed answer —
+  a generic "could not be parsed" message would mislead the model into
+  re-emitting the same oversized reply) — `"your previous reply was cut off
+  before it finished ...; reply with a smaller, more compact JSON
+  object"` (plus a sprite-grid hint on `sprite_design_only` turns) — otherwise
+  a generic `"your previous reply could not be parsed as JSON; reply with
+  only the JSON decision object."`
+- **Trigger 2 — `_fallback` on the raw `normalize_decision()` result.**
+  Feedback text is the concrete rejection reason: whichever
+  `*_rejection_note` key is present on the fallback (see
+  `_REJECTION_NOTE_KEYS` — `sprite_rejection_note`, `council_rejection_note`,
+  `terraform_rejection_note`, `upgrade_rejection_note`, `rejection_note`),
+  read via `_rejection_feedback_text()`; falls back to a generic
+  "valid JSON but rejected during validation" text when the fallback carries
+  no note (e.g. an invalid `talk_to_nearby`, which is redirected without one)
+  — distinct from the unparseable-JSON path's own generic wording, since here
+  the reply did parse.
+
+`retry_feedback` threads through `build_decision_payload()` →
+`build_user_prompt()` → `build_sprite_upgrade_prompt()` /
+`build_invention_prompt()`. On a **council turn** it is prefixed onto the
+user message as `"RETRY (previous reply rejected): {feedback}\n\n" +
+user_content` inside `build_decision_payload()`; for every other prompt it is
+prepended to the `behavior_nudge` line inside `build_user_prompt()` (and
+likewise onto the special-turn prompts' own feedback line). The retry itself is dispatched
+through `_post_ollama` (so it spends from the same `LLM_CALLS_PER_TURN_MAX`
+budget as every other call) via a `_decision_retry(feedback_text,
+slim_used)` helper that rebuilds the payload with `retry_feedback` set and
+reuses the same `slim` state (`True` if the turn already took the
+context-overflow branch). It deliberately does **not** catch
+`LLMBudgetExhausted` / `requests.exceptions.RequestException` — those
+propagate exactly like every other call site (immediate `{"error": ...}`
+return, no fallback, no further retry). **Network failures never retry** —
+the existing Ollama orphaned-generation constraint (see the Orphan caveat
+above) is unchanged; this retry only ever fires once Ollama has actually
+returned something evaluable. New `llm.jsonl` field **`decision_retries`**:
+`0` on the common path, `1` the one time this retry fired for a given turn.
+
+**Terminal candidate-choice step (`FALLBACK_AI_CHOICE_ENABLED`, default on).**
+Reached only once the answer-quality retry above is exhausted with no
+usable decision, from **both** of `run_agent_decision`'s terminal
+answer-quality fallback sites: `bad_response_fallback` (unparseable/
+non-recoverable reply) and the post-retry path where `normalize_decision()`
+still returns a `_fallback`-stamped decision. Never reached for a network
+failure — every `llm offline`/`llm timeout`/`compute_error`/
+`model_not_found`/`llm budget exhausted` path returns directly from its own
+call site before ever reaching a fallback call site.
+
+Instead of always silently taking the highest-priority
+`role_fallback_action()` ladder entry, `role_fallback_candidates(role,
+agent_data, limit=3)` collects up to 3 candidates in the ladder's existing
+priority order. Both `_role_fallback_action()` (first match wins) and
+`role_fallback_candidates()` (accumulate up to `limit` matches) iterate the
+same ordered list of branch closures, `_role_fallback_candidate_checks()`,
+so the two cannot silently drift; duplicate `(action, target)` candidates
+are trimmed. When `council_turn` and `council_seated` are both set,
+`role_fallback_candidates()` stops after the first match (the council
+ladder entry) so the terminal AI-choice step cannot swap a council beat for
+village work. With **≥2** candidates and budget remaining
+(`llm_calls_made < LLM_CALLS_PER_TURN_MAX`), one minimal A/B/C-style prompt
+(not the full decision schema, routed to `MODEL_FAST`, `max_tokens=5`,
+`FALLBACK_AI_CHOICE_TIMEOUT_S = 10`, never retried) asks the model to pick a
+lettered option among the candidates; a non-matching or failed/timed-out
+reply falls back to the highest-priority candidate rather than retrying.
+With fewer than 2 candidates, or no budget left to ask, the
+highest-priority candidate is used directly with no extra call. Where the
+rejection path came from a `normalize_decision()` fallback (as opposed to
+`bad_response_fallback`), the original `*_rejection_note` and `reasoning`
+are carried onto the replacement decision so diagnostics survive the swap.
+
+New `llm.jsonl` fields, **absent on ordinary turns** (present only when this
+step actually fires): `fallback_triggered` (`True`), `fallback_candidate_count`,
+`fallback_selection_method` (`"single_candidate"` — fewer than 2 candidates;
+`"ai_choice"` — the A/B/C call returned a matching letter; `"priority_default"`
+— no call was made, or it failed/timed out/returned no match),
+`fallback_candidates` (the candidate list's `action`/`target` pairs), and
+`fallback_ai_latency_ms` (present only when the choice call was actually
+attempted).
+
+**`_fallback` sentinel.** `role_fallback_action()` is a thin wrapper over
+`_role_fallback_action()` that stamps `decision["_fallback"] = True` on
+every return path — the internal ladder function has many return points,
+one per role/phase branch, so a single wrapper call site provably covers
+every path rather than trusting each branch to remember to self-stamp. This
+is the one signal that always fires, including for `normalize_decision()`
+return paths that carry no `*_rejection_note` (e.g. its non-dict guard).
+The key is inert for `apply_decision()`, which reads only named fields, but
+stays in the logged decision because it makes `llm.jsonl` greppable and is
+what both the same-turn retry (trigger 2 above) and the terminal
+candidate-choice step key off of.
+
+**Four server-side cognition flags.** `DECISION_RETRY_ENABLED`,
+`FALLBACK_AI_CHOICE_ENABLED`, `FALLBACK_AI_CHOICE_TIMEOUT_S`, and
+`LLM_CALLS_PER_TURN_MAX` are module-level constants in `server.py`, not
+`sim_engine.py` — they are **not** part of the
+[01-architecture.md](01-architecture.md#flag-index-complete--52-module-level-flags-sim_enginepy)
+module-level flag index, which is specifically the `sim_engine.py` engine
+flag list. `SPRITE_DESIGN_MAX_ATTEMPTS = 3` is the one related constant that
+**is** engine-side (`sim_engine.py`, gates sprite-design-turn retirement —
+see [05-world.md](05-world.md#structures) and
+[07-actions.md](07-actions.md)).
 
 ## Civ-1 library lessons
 

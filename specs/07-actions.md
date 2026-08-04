@@ -42,7 +42,7 @@ structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 | `start_terraform` | `target` (terraform id: `plant_grove`/`clear_field`/`extend_beach`), `target_district` | `ECOLOGY_ENABLED`; district kind must match template | Starts a terraform project funded like a build ([05](05-world.md)) |
 | `repair_structure` | `target` (structure id) | `GOODS_ENABLED` | Restores `condition`, un-ruins a collapsed structure for half original materials ([08](08-systems-economy.md)) |
 | `upgrade_structure` | `target` (structure id/type/name) | `STRUCTURE_UPGRADES_ENABLED`; target must be in `upgradeable_structures` (validated by `normalize_decision`) | Raises structure `level` by `LEVEL_STEP`, up to `MAX_STRUCTURE_LEVEL` ([05](05-world.md)) |
-| `submit_structure_sprite` | `sprite` (grid block) | only offered when it's the agent's sprite-design turn; sprite must pass `validate_sprite_block` | Applies a custom sprite render to a structure |
+| `submit_structure_sprite` | `sprite` (grid block) | only offered when it's the agent's sprite-design turn; sprite must pass `validate_sprite_block` | Applies a custom sprite render to a structure. Grid is bounded to `SPRITE_GRID_MIN`-`SPRITE_GRID_MAX` (4-14) rows/columns at the schema level (server.py `DECISION_SCHEMA`) as well as by `validate_sprite_block`; a design turn's per-dimension minimum can be `0`, meaning that dimension is already at the cap and needs no growth this turn. A structure at `SPRITE_GRID_MAX` in both dimensions gets no sprite-design turn at all — the procedural tier sprite stands. A design turn expires after `SPRITE_DESIGN_MAX_ATTEMPTS = 3` failed think cycles, at which point the turn is cleared and the existing sprite kept. An attempt is counted (via the shared `SimEngine._count_sprite_design_failure`) for *any* think cycle where a pending sprite-design turn fails to produce an applied `submit_structure_sprite` — not only an engine-side `validate_sprite_block`/degenerate-sprite rejection inside `apply_decision`'s `submit_structure_sprite` branch, but also a decision whose action comes back as something else entirely (e.g. server.py's `normalize_decision()` rejecting the model's sprite reply and substituting a _fallback-stamped role fallback action), counted by `apply_decision` itself once dispatch completes; the missing-case requires `decision["_fallback"]` — infra `rest` from `_think_job` does not count ([05](05-world.md#structures)) |
 | `propose_blueprint` | `blueprint` (id/name/needs/function/new_resources/visual_style/sprite[/tier]) | must pass `validate_blueprint` (schema, uniqueness, tier gate if `TECH_TREE_ENABLED`); rejected-id blueprints are permanently blocked | Adds to `pendingBlueprints` with `sageReview: "pending"`; records an invention-council proposal if `TECH_TREE_ENABLED` |
 | `approve_blueprint` | `target` (blueprint id), `target_district` (optional) | actor role `elder`; `SAGE_REVIEW_ENABLED` requires `sageReview` already `approved`/`skipped` | Registers the new structure/resource type, pops the pending blueprint, starts a district project for it (or applies as a structure upgrade if `duplicateOf` an existing type) |
 | `reject_blueprint` | `target` (blueprint id) | actor role `elder` | Pops the pending blueprint into `rejectedBlueprintIds` (amnesty-expiring — [09](09-systems-society.md)) |
@@ -102,6 +102,23 @@ ladder has a council branch so a seated attendee with an invalid model response
 still produces a deterministic phase-appropriate action. On a succession
 ballot, its voting fallback is abstention, never synthetic support for the
 first candidate.
+
+**Phase/seating authority split.** `normalize_decision()` (server.py) enforces
+only shape and coarse session existence for council actions: a seated
+attendee's turn (`council_turn`) choosing a non-council action is rejected to
+the role fallback with `council_rejection_note: "not a seated active council
+turn"`; a council action chosen with no council session/phase at all
+(`not council or not phase`) is rejected with `"no active council session"`;
+and each action's own payload shape (`council_speak` requires a non-empty
+`message`; `council_vote` requires a valid `vote`/`candidate`; `council_propose`
+requires a valid `rule`/`blueprint`/idea payload per `kind`) is still checked.
+`normalize_decision()` deliberately does **not** re-check per-turn/per-phase
+eligibility (e.g. whether the ballot is currently open, or the discussion
+phase has ended) — those were snapshotted before the LLM call and can go
+stale while the model thinks. Live phase/turn authority is
+`apply_decision()`'s `_daily_council_actor()` (sim_engine.py), which
+re-checks eligibility at apply time and rejects non-fatally if the snapshot
+went stale.
 
 ## The build pipeline
 

@@ -331,8 +331,9 @@ Use only the council actions offered in available_actions. Respond with ONLY val
 No markdown, explanation, or chain-of-thought.
 
 Actions:
-- council_speak: include message (your concise opinion), feeling (a short honest feeling),
-  and topic (an agenda topic id).
+- council_speak: message is REQUIRED and must be a non-empty string (your concise opinion) —
+  a missing or blank message causes the whole turn to be discarded. Also include feeling
+  (a short honest feeling) and topic (an agenda topic id).
 - council_propose: include kind "rule", "blueprint", or "idea". For rule include the
   ordinary rule object; for blueprint include the ordinary blueprint object; for idea include
   title and detail. Proposals must be concrete and useful.

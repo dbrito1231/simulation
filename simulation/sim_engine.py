@@ -503,6 +503,9 @@ GOD_CONTEXT_MASK_FORGED_MAX = 8
 # Divine Matrix Phase 5: decision gate (compulsion / thought veto / possession).
 GOD_DECISION_GATE_MODES = frozenset({"compulsion", "veto", "possession"})
 GOD_VETO_HOLD_CAP = 3
+GOD_VOICE_ACK_SKIP_CAP = 3          # consecutive synthetic (non-genuine) divine_response turns for the
+                                     # same guidance id before it is force-acked so a model that never
+                                     # cooperates can't stall the guidance forever (see _bump_voice_guidance_skip)
 GOD_PREVIEW_CACHE_MAX = 32          # bounded, in-memory, never persisted
 GOD_PREVIEW_TTL_SECONDS = 60        # wall-clock, not frame-based (previews are a request-scoped concept)
 GOD_REQUEST_CACHE_MAX = 100         # bounded, in-memory idempotency store (never persisted -- see docs/plan)
@@ -887,6 +890,7 @@ LEVEL_STEP = 1              # levels gained per upgrade_structure action (1 → 
 UPGRADE_STAT_STEP = 10        # cost + produce/boost weight tier every N levels
 UPGRADE_TIERS = (1, 25, 50, 75, 100)
 UPGRADE_COST_BASE = 1       # primary material units; scales with level tier
+SPRITE_DESIGN_MAX_ATTEMPTS = 3  # give up on a rejected sprite design turn after this many tries
 # Structure footprint model (size-aware placement/overlap): mirrors the
 # client's drawn size so the engine can prevent/detect visual overlap after
 # upgrades grow a structure's renderScale.
@@ -5556,15 +5560,25 @@ class SimEngine:
         new_tier = self._visual_tier_index(new_level)
         if new_tier > old_tier:
             self._apply_visual_tier(s, new_tier)
+            sprite_max = int(self.d.get("SPRITE_GRID_MAX") or 14)
             rows, cols = self._sprite_dimensions(s.get("sprite"))
-            agent["spriteDesignTurn"] = {
-                "structureId": s["id"],
-                "tier": new_tier,
-                "minRows": rows,
-                "minCols": cols,
-                "structureName": name,
-                "structureType": s.get("type"),
-            }
+            rows_at_cap = rows >= sprite_max
+            cols_at_cap = cols >= sprite_max
+            if rows_at_cap and cols_at_cap:
+                # Already at the validator's hard cap in both dimensions: asking for
+                # a bigger sprite is unsatisfiable, and asking for a same-size redraw
+                # burns an LLM turn for no visual change. The procedural tier sprite
+                # from _apply_visual_tier stands.
+                agent["spriteDesignTurn"] = None
+            else:
+                agent["spriteDesignTurn"] = {
+                    "structureId": s["id"],
+                    "tier": new_tier,
+                    "minRows": 0 if rows_at_cap else rows,   # 0 = no growth required
+                    "minCols": 0 if cols_at_cap else cols,
+                    "structureName": name,
+                    "structureType": s.get("type"),
+                }
             # The upgrade may have grown this structure's footprint enough to
             # overlap a neighbor; the upgrader becomes the relocator.
             self._enqueue_reorg_for_overlaps(s, preferred_agent=agent)
@@ -5574,6 +5588,38 @@ class SimEngine:
         self._log_benchmark("structure_upgraded", new_level,
                             {"structure": s.get("type"), "id": s["id"]})
         return f"{agent['name']} upgraded {name} to level {new_level}"
+
+    def _count_sprite_design_failure(self, agent, structure_or_name):
+        """Count one failed think-cycle against agent['spriteDesignTurn'].
+
+        Shared by every site where a pending sprite-design turn fails to
+        produce an applied submit_structure_sprite -- an engine-side
+        validate_sprite_block/degenerate-sprite rejection (_apply_structure_sprite)
+        as well as a decision whose action never made it to
+        submit_structure_sprite at all (e.g. rejected server-side by
+        normalize_decision() and replaced with a _fallback-stamped role
+        fallback; see apply_decision). The apply_decision missing-case covers
+        _fallback-stamped substitutions only, not infra/network rests such as
+        _think_job's bare ``{"action": "rest"}`` with no _fallback stamp.
+        Bumps turn["attempts"], writes it back, and once
+        SPRITE_DESIGN_MAX_ATTEMPTS is reached clears the turn (the existing
+        procedural sprite stays on the structure) and logs the give-up.
+        structure_or_name may be the structure dict, a plain name string, or
+        None (e.g. the structure was deleted out from under the turn).
+        """
+        turn = agent.get("spriteDesignTurn")
+        if not turn:
+            return
+        turn["attempts"] = int(turn.get("attempts") or 0) + 1
+        agent["spriteDesignTurn"] = turn
+        if turn["attempts"] >= SPRITE_DESIGN_MAX_ATTEMPTS:
+            agent["spriteDesignTurn"] = None
+            if isinstance(structure_or_name, dict):
+                name = structure_or_name.get("name") or structure_or_name.get("type")
+            else:
+                name = structure_or_name
+            name = name or turn.get("structureName") or "structure"
+            self._push_activity(f"{agent['name']} gave up refining the sprite for the {name}")
 
     def _apply_structure_sprite(self, agent, sprite):
         turn = agent.get("spriteDesignTurn") or {}
@@ -5591,12 +5637,14 @@ class SimEngine:
             ok, reason = True, None
         if not ok:
             agent["lastSpriteRejection"] = {"reason": reason, "frame": self.frameTick}
+            self._count_sprite_design_failure(agent, s)
             return f"{agent['name']}'s sprite design was rejected ({reason})"
         if self.d.get("sprite_spec_is_degenerate", lambda sp: False)(sprite):
             agent["lastSpriteRejection"] = {
                 "reason": "sprite is too flat (use varied colors/pattern, not one solid fill)",
                 "frame": self.frameTick,
             }
+            self._count_sprite_design_failure(agent, s)
             return f"{agent['name']}'s sprite design was rejected (too flat)"
         s["sprite"] = sprite
         agent["spriteDesignTurn"] = None
@@ -7787,8 +7835,58 @@ class SimEngine:
                 if isinstance(omen, dict) and omen.get("id") == gid:
                     omen["acked"] = True
 
+    def _bump_voice_guidance_skip(self, entry, agent_key):
+        """Increment and return the consecutive-synthetic-response counter for
+        one guidance entry (providence's skipCounts[agent_key], or the
+        per-agent omen's skipCount), reading/writing directly against the
+        live godState record so it persists like ackedAgentIds does. Returns
+        None if the underlying record can no longer be found (e.g. guidance
+        expired between _active_voice_guidance() and here).
+
+        Both the container and the counter are coerced defensively: this runs
+        under the engine lock on every synthetic divine_response, and a
+        restored/hand-edited state.db carrying a non-dict skipCounts or a
+        null/non-numeric counter must not raise here and break the tick loop.
+        A malformed value is treated as "no skips counted yet" (0)."""
+        def _as_count(value):
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        god = self.civilization.get("godState")
+        if not isinstance(god, dict):
+            return None
+        gid = entry.get("id")
+        kind = entry.get("kind")
+        if kind == "providence":
+            prov = god.get("providence")
+            if isinstance(prov, dict) and prov.get("id") == gid:
+                skip_counts = prov.get("skipCounts")
+                if not isinstance(skip_counts, dict):
+                    skip_counts = {}
+                    prov["skipCounts"] = skip_counts
+                skip_counts[agent_key] = _as_count(skip_counts.get(agent_key)) + 1
+                return skip_counts[agent_key]
+        elif kind == "private_omen":
+            omens = god.get("privateOmens")
+            omen = omens.get(agent_key) if isinstance(omens, dict) else None
+            if isinstance(omen, dict) and omen.get("id") == gid:
+                omen["skipCount"] = _as_count(omen.get("skipCount")) + 1
+                return omen["skipCount"]
+        return None
+
     def _record_divine_response_adherence(self, agent, decision, voice):
-        """Log Voice adherence after a decision is applied. Lock held."""
+        """Log Voice adherence after a decision is applied. Lock held.
+
+        A genuine (non-synthetic) divine_response acks its guidance entry
+        immediately, same as before. A synthetic one (model omitted/malformed
+        the field) no longer auto-acks -- it increments a per-guidance skip
+        counter instead, so the same binding prompt line keeps reappearing on
+        the agent's next think. Only once that counter reaches
+        GOD_VOICE_ACK_SKIP_CAP consecutive synthetic turns is the entry
+        force-acked (capped close), so a model that never cooperates can't
+        stall the guidance forever."""
         if not voice.get("voice_guidance_active"):
             return
         unacked = list(voice.get("unacked_guidance") or [])
@@ -7824,7 +7922,18 @@ class SimEngine:
         if not isinstance(log_ring, list):
             log_ring = []
             god["recentDivineResponses"] = log_ring
+        agent_key = str(agent["id"])
+        to_ack = []
         for entry in unacked:
+            skip_count = None
+            capped = False
+            if not synthetic:
+                to_ack.append(entry)
+            else:
+                skip_count = self._bump_voice_guidance_skip(entry, agent_key)
+                if skip_count is None or skip_count >= GOD_VOICE_ACK_SKIP_CAP:
+                    capped = True
+                    to_ack.append(entry)
             record = {
                 "agentId": agent["id"],
                 "agentName": agent["name"],
@@ -7836,6 +7945,8 @@ class SimEngine:
                 "frameTick": self.frameTick,
                 "action": action,
                 "public": bool(entry.get("public")),
+                "skipCount": skip_count,
+                "capped": capped,
             }
             log_ring.insert(0, record)
             kind_label = "public guidance" if entry.get("public") else "private guidance"
@@ -7853,13 +7964,16 @@ class SimEngine:
                     "action": action,
                     "synthetic": synthetic,
                     "agentName": agent["name"],
+                    "skipCount": skip_count,
+                    "capped": capped,
                 },
                 "adherence",
                 public=bool(entry.get("public")),
             )
         if len(log_ring) > GOD_DIVINE_RESPONSE_LOG_MAX:
             del log_ring[GOD_DIVINE_RESPONSE_LOG_MAX:]
-        self._mark_voice_guidance_acked(agent, unacked)
+        if to_ack:
+            self._mark_voice_guidance_acked(agent, to_ack)
 
     def _active_burning_bush_record(self, agent_id):
         """Active Burning Bush session for one agent, or None."""
@@ -10585,13 +10699,38 @@ class SimEngine:
         """An unused AGENT_DEFS entry if one exists (mirrors
         _maybe_welcome_newcomer); otherwise a generated villager beyond the
         fixed 12-name roster, so births never stall just because every named
-        slot is occupied by long-lived retirees."""
+        slot is occupied by long-lived retirees.
+
+        AGENT_DEFS ids must never collide with an id already held by any
+        agent that has ever existed in this world -- living or dead, since
+        buried/deceased agents stay in self.agents forever. This matters
+        because AGENT_DEFS has grown over the project's history (e.g. Kane
+        was added with a hardcoded id after some long-running worlds had
+        already generated a procedural agent using that same id via the
+        nextGeneratedAgentId counter). If an AGENT_DEFS entry's *name* is
+        free but its *id* is already taken, we keep the def's identity
+        (name/role/personality/color/zone) but substitute a fresh id from
+        the same generated-id counter the fallback path uses, so the two
+        paths can never hand out a colliding id. The generated-id fallback
+        itself also fast-forwards past any id already in use, in case the
+        counter is ever behind (e.g. after restoring an older save)."""
+        used_ids = {a["id"] for a in self.agents}
+        c = self.civilization
+
+        def _next_generated_id():
+            gen_id = c.get("nextGeneratedAgentId", 1000)
+            while gen_id in used_ids:
+                gen_id += 1
+            c["nextGeneratedAgentId"] = gen_id + 1
+            return gen_id
+
         unused = next((d for d in AGENT_DEFS if d["name"] not in self.agent_names), None)
         if unused:
-            return dict(unused), False
-        c = self.civilization
-        gen_id = c.get("nextGeneratedAgentId", 1000)
-        c["nextGeneratedAgentId"] = gen_id + 1
+            slot = dict(unused)
+            if slot["id"] in used_ids:
+                slot["id"] = _next_generated_id()
+            return slot, False
+        gen_id = _next_generated_id()
         roles = list(self.d["ROLES"].keys()) or ["gatherer"]
         role = random.choice([r for r in roles if r != "elder"] or roles)
         zone = random.choice(list(self.civilization["districts"].keys()))
@@ -12059,16 +12198,32 @@ class SimEngine:
         _generated_agent_defs is what the cold-start path already uses for
         these exact slot indices, so a newcomer looks identical regardless of
         whether the village started large or grew into this slot. Newcomers
-        persist via state.db like any other agent."""
+        persist via state.db like any other agent.
+
+        AGENT_DEFS ids must never collide with an id already held by any
+        agent that has ever existed in this world -- living or dead (mirrors
+        _next_agent_slot's fix for the same defect). Unlike that function,
+        this path is deliberately deterministic (see above), so a candidate
+        whose name is free but whose id collides is not eligible: we don't
+        substitute a different id for it, we just skip it and let the next
+        candidate (from AGENT_DEFS, then the generated pool) be considered.
+        If nothing in either source has both a free name and a free id, no
+        newcomer arrives this cycle -- same as any other "unused is None"
+        case today."""
         if not STRUCTURE_EFFECTS_ENABLED:
             return
         # Corpses remain in self.agents for burial; only the living occupy beds.
         if len(self._living_agents()) >= self._population_cap():
             return
-        unused = next((d for d in AGENT_DEFS if d["name"] not in self.agent_names), None)
+        used_ids = {a["id"] for a in self.agents}
+
+        def _free(d):
+            return d["name"] not in self.agent_names and d["id"] not in used_ids
+
+        unused = next((d for d in AGENT_DEFS if _free(d)), None)
         if not unused:
             generated_pool = _generated_agent_defs(MAX_ROSTER_SIZE - len(AGENT_DEFS))
-            unused = next((d for d in generated_pool if d["name"] not in self.agent_names), None)
+            unused = next((d for d in generated_pool if _free(d)), None)
         if not unused:
             return
         newcomer = self._make_agents([unused])[0]
@@ -14246,6 +14401,13 @@ class SimEngine:
         resource_acted = None  # set by collect_resource/contribute_resources/trade_resource
         # below; used only to honor a pending commitment (#5.4) after the fact.
         c = self.civilization
+        # Snapshot the pending sprite-design turn (if any) before dispatch so
+        # the missing-case check below can tell whether *this* turn survived
+        # untouched -- i.e. the decision's action wasn't submit_structure_sprite
+        # and nothing else (e.g. _upgrade_structure replacing it, or the
+        # voice-guidance cancel in _build_think_payload) already handled it.
+        # See _count_sprite_design_failure.
+        pending_sprite_turn = agent.get("spriteDesignTurn")
 
         is_talk = action == "talk_to_nearby"
         if is_talk and decision.get("message"):
@@ -14906,6 +15068,23 @@ class SimEngine:
             summary = self._council_vote(agent, decision)
 
         # rest / default: summary already set
+
+        # Missing-case counting: the decision's action never reached
+        # submit_structure_sprite (typically because server.py's
+        # normalize_decision() rejected the model's sprite reply and
+        # substituted a _fallback-stamped role fallback action). Only count
+        # _fallback-stamped substitutions -- _think_job's infra/network path
+        # applies bare {"action": "rest"} with no _fallback stamp. Only count
+        # if the pending turn is still the exact same object -- if
+        # _upgrade_structure (or anything else) already replaced/cleared
+        # spriteDesignTurn during dispatch above, don't double-count it here.
+        if (pending_sprite_turn is not None
+                and action != "submit_structure_sprite"
+                and agent.get("spriteDesignTurn") is pending_sprite_turn
+                and decision.get("_fallback")):
+            sid = pending_sprite_turn.get("structureId")
+            s = next((x for x in c["structures"] if x.get("id") == sid), None)
+            self._count_sprite_design_failure(agent, s or pending_sprite_turn.get("structureName"))
 
         agent["lastAction"] = action
         agent["lastReasoning"] = decision.get("reasoning")
@@ -17200,6 +17379,36 @@ class SimEngine:
                     a.setdefault("inventionBuildContext", None)
                     a.setdefault("councilTurn", False)
                     a.setdefault("spriteDesignTurn", None)
+                    # Heals worlds saved before the fix that made
+                    # _upgrade_structure zero out a dimension already at the
+                    # sprite grid cap (SPRITE_GRID_MAX) instead of demanding
+                    # "strictly more than the cap" rows/cols -- an
+                    # unsatisfiable request the model would refuse forever.
+                    # Restored turns predating that fix can still carry
+                    # minRows/minCols == the old cap in both dimensions; without
+                    # this pass they'd loop until the attempt-counter give-up
+                    # burns SPRITE_DESIGN_MAX_ATTEMPTS LLM calls for nothing.
+                    turn = a.get("spriteDesignTurn")
+                    if isinstance(turn, dict):
+                        cap = int(self.d.get("SPRITE_GRID_MAX") or 14)
+                        try:
+                            min_rows = int(turn.get("minRows") or 0)
+                            min_cols = int(turn.get("minCols") or 0)
+                        except (TypeError, ValueError):
+                            # Malformed minRows/minCols: drop the turn rather
+                            # than crash restore_state on a bad state.db value.
+                            a["spriteDesignTurn"] = None
+                        else:
+                            if min_rows >= cap and min_cols >= cap:
+                                a["spriteDesignTurn"] = None
+                            elif min_rows >= cap:
+                                turn["minRows"] = 0
+                            elif min_cols >= cap:
+                                turn["minCols"] = 0
+                    elif turn is not None:
+                        # Malformed (non-dict) restored turn: drop it rather
+                        # than risk a crash later when it's read as a dict.
+                        a["spriteDesignTurn"] = None
                     a.setdefault("lastUpgradeRejection", None)
                     a.setdefault("lastSpriteRejection", None)
                     a.setdefault("lastBlockRejection", None)
