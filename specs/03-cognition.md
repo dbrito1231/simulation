@@ -1018,16 +1018,19 @@ both):
   `*_rejection_note` key is present on the fallback (see
   `_REJECTION_NOTE_KEYS` — `sprite_rejection_note`, `council_rejection_note`,
   `terraform_rejection_note`, `upgrade_rejection_note`, `rejection_note`),
-  read via `_rejection_feedback_text()`; falls back to the same generic
-  "could not be parsed as JSON" text when the fallback carries no note (e.g.
-  an invalid `talk_to_nearby`, which is redirected without one).
+  read via `_rejection_feedback_text()`; falls back to a generic
+  "valid JSON but rejected during validation" text when the fallback carries
+  no note (e.g. an invalid `talk_to_nearby`, which is redirected without one)
+  — distinct from the unparseable-JSON path's own generic wording, since here
+  the reply did parse.
 
 `retry_feedback` threads through `build_decision_payload()` →
 `build_user_prompt()` → `build_sprite_upgrade_prompt()` /
-`build_invention_prompt()`; for the ordinary (non-special-turn) prompt it is
-prefixed onto the user message as `"RETRY (previous reply rejected):
-{feedback}\n\n" + user_content` inside `build_decision_payload()` rather than
-folded into the `behavior_nudge` line. The retry itself is dispatched
+`build_invention_prompt()`. On a **council turn** it is prefixed onto the
+user message as `"RETRY (previous reply rejected): {feedback}\n\n" +
+user_content` inside `build_decision_payload()`; for every other prompt it is
+prepended to the `behavior_nudge` line inside `build_user_prompt()` (and
+likewise onto the special-turn prompts' own feedback line). The retry itself is dispatched
 through `_post_ollama` (so it spends from the same `LLM_CALLS_PER_TURN_MAX`
 budget as every other call) via a `_decision_retry(feedback_text,
 slim_used)` helper that rebuilds the payload with `retry_feedback` set and
