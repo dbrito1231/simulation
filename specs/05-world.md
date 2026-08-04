@@ -335,8 +335,9 @@ are both at/over `SPRITE_GRID_MAX`, the turn is unsatisfiable and is cleared
 silently (no activity line — this is load-time housekeeping, not an in-world
 event); if only one dimension is at/over cap, that dimension's minimum is
 rewritten to `0` to match what a freshly issued turn would carry. Malformed
-restored turns (non-dict, or missing fields) are dropped defensively rather
-than raising.
+restored turns (non-dict, or with non-numeric `minRows`/`minCols`) are
+dropped defensively rather than raising; missing `minRows`/`minCols` default
+to `0`, same as a freshly issued turn.
 
 ## Path-1 terrain grid + composable blocks
 

@@ -2846,6 +2846,15 @@ def normalize_decision(decision, agent_data):
         if action in council_actions and (not council or not phase):
             fallback["council_rejection_note"] = "no active council session"
             return fallback
+        # Coarse, slow-changing check: is this agent even seated at the council at
+        # all? Unlike phase/speaking-order (which are racy -- see below), seat
+        # membership is fixed for the whole session, so a non-attendee agent
+        # emitting a council action would otherwise sail through to
+        # apply_decision only to be rejected live ("actor is not an attendee" /
+        # "actor is not seated"), wasting the whole turn.
+        if action in council_actions and not council_turn and not agent_data.get("council_seated"):
+            fallback["council_rejection_note"] = "not seated at the council"
+            return fallback
         # Per-turn/per-phase eligibility (council_turn, phase gates) is deliberately NOT
         # re-checked here: council_turn/phase were snapshotted before the LLM call and can
         # go stale while the model thinks. apply_decision()'s _daily_council_actor() is the
@@ -4395,11 +4404,12 @@ def run_agent_decision(data):
                 "decision": decision,
                 "error": error,
             }
-            # Phase 6 (Fix 5): only bad_response_fallback ever passes
-            # fallback_extra, and only with FALLBACK_AI_CHOICE_ENABLED on --
-            # every ordinary turn's log_lm call leaves this None, so these
-            # keys are simply absent from the record rather than present
-            # with null/false values.
+            # Phase 6 (Fix 5): fallback_extra is populated when
+            # bad_response_fallback runs (with FALLBACK_AI_CHOICE_ENABLED on)
+            # or when normalize_decision() returns a terminal _fallback
+            # decision -- every ordinary turn's log_lm call leaves this None,
+            # so these keys are simply absent from the record rather than
+            # present with null/false values.
             if fallback_extra:
                 record.update(fallback_extra)
             session_logger.log_lm_exchange(record)
