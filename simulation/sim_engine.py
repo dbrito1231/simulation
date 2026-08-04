@@ -17375,14 +17375,20 @@ class SimEngine:
                     turn = a.get("spriteDesignTurn")
                     if isinstance(turn, dict):
                         cap = int(self.d.get("SPRITE_GRID_MAX") or 14)
-                        min_rows = int(turn.get("minRows") or 0)
-                        min_cols = int(turn.get("minCols") or 0)
-                        if min_rows >= cap and min_cols >= cap:
+                        try:
+                            min_rows = int(turn.get("minRows") or 0)
+                            min_cols = int(turn.get("minCols") or 0)
+                        except (TypeError, ValueError):
+                            # Malformed minRows/minCols: drop the turn rather
+                            # than crash restore_state on a bad state.db value.
                             a["spriteDesignTurn"] = None
-                        elif min_rows >= cap:
-                            turn["minRows"] = 0
-                        elif min_cols >= cap:
-                            turn["minCols"] = 0
+                        else:
+                            if min_rows >= cap and min_cols >= cap:
+                                a["spriteDesignTurn"] = None
+                            elif min_rows >= cap:
+                                turn["minRows"] = 0
+                            elif min_cols >= cap:
+                                turn["minCols"] = 0
                     elif turn is not None:
                         # Malformed (non-dict) restored turn: drop it rather
                         # than risk a crash later when it's read as a dict.

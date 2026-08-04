@@ -4802,8 +4802,8 @@ def run_agent_decision(data):
                     feedback_text = f"{feedback_text} ({rejection_note})"
             else:
                 feedback_text = rejection_note or (
-                    "your previous reply could not be parsed as JSON; reply with only "
-                    "the JSON decision object."
+                    "your previous reply was valid JSON but was rejected during "
+                    "validation; reply with a decision matching the required schema."
                 )
             retry_start = datetime.now()
             try:
