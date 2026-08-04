@@ -1378,9 +1378,12 @@ _structured_output_enabled = STRUCTURED_OUTPUT_MODE != "off"
 _model_routing_enabled = True
 
 # Bounds the WORST CASE across every requests.post(OLLAMA_CHAT_URL, ...) call
-# site inside a single run_agent_decision() invocation (currently 3: the
-# initial call, the format-degrade retry, and the context-overflow slim
-# retry -- a later phase adds a 4th). MAX_CONCURRENT_LLM = 3 (sim_engine.py)
+# site inside a single run_agent_decision() invocation (currently 5: the
+# initial call, the format-degrade retry, the context-overflow slim retry,
+# Fix 4's answer-quality retry, and Fix 5's terminal fallback AI-choice
+# call). The ceiling is 4 rather than 5 because the format-degrade and
+# context-overflow retries are mutually exclusive on any one turn, so no
+# real path can reach all five. MAX_CONCURRENT_LLM = 3 (sim_engine.py)
 # means one agent stuck making sequential calls can otherwise hold a scarce
 # worker slot for far longer than one call's timeout; this constant is the
 # hard ceiling _post_ollama() (see run_agent_decision) enforces per turn.
@@ -4434,7 +4437,8 @@ def run_agent_decision(data):
             return "llm offline"
 
         # Every requests.post(OLLAMA_CHAT_URL, ...) in this turn (initial call,
-        # format-degrade retry, context-overflow slim retry, and any future
+        # format-degrade retry, context-overflow slim retry, answer-quality
+        # retry, terminal fallback AI-choice call, and any future
         # call site) routes through here so a single run_agent_decision
         # invocation can never fire more than LLM_CALLS_PER_TURN_MAX requests
         # -- llm_calls_made is local to this invocation, not shared/global.
@@ -4450,13 +4454,15 @@ def run_agent_decision(data):
             llm_calls_made += 1
             return requests.post(OLLAMA_CHAT_URL, json=body, timeout=timeout)
 
-        # Phase 6 (Fix 5, FALLBACK_AI_CHOICE_ENABLED): called only from
-        # bad_response_fallback, i.e. only once Fix 4's retry is exhausted
-        # with no usable decision at all -- unparseable JSON, a missing
-        # `message` key, or a non-recoverable error body. Every network-level
+        # Phase 6 (Fix 5, FALLBACK_AI_CHOICE_ENABLED): reached only once Fix
+        # 4's retry is exhausted on an ANSWER-QUALITY failure, from either of
+        # two call sites -- bad_response_fallback (no usable decision at all:
+        # unparseable JSON, a missing `message` key, or a non-recoverable
+        # error body) or the post-normalize path where normalize_decision()
+        # returned a terminal _fallback-stamped decision. Every network-level
         # failure (llm offline/timeout, compute_error, model_not_found, llm
         # budget exhausted) returns directly from its own call site above
-        # without ever reaching bad_response_fallback, so this can never fire
+        # without ever reaching either site, so this can never fire
         # for those. Returns (decision, extra_log_fields); extra_log_fields
         # is {} when the flag is off, so log_lm emits nothing extra and
         # behavior is byte-identical to pre-Phase-6.

@@ -7841,7 +7841,19 @@ class SimEngine:
         per-agent omen's skipCount), reading/writing directly against the
         live godState record so it persists like ackedAgentIds does. Returns
         None if the underlying record can no longer be found (e.g. guidance
-        expired between _active_voice_guidance() and here)."""
+        expired between _active_voice_guidance() and here).
+
+        Both the container and the counter are coerced defensively: this runs
+        under the engine lock on every synthetic divine_response, and a
+        restored/hand-edited state.db carrying a non-dict skipCounts or a
+        null/non-numeric counter must not raise here and break the tick loop.
+        A malformed value is treated as "no skips counted yet" (0)."""
+        def _as_count(value):
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError):
+                return 0
+
         god = self.civilization.get("godState")
         if not isinstance(god, dict):
             return None
@@ -7850,13 +7862,17 @@ class SimEngine:
         if kind == "providence":
             prov = god.get("providence")
             if isinstance(prov, dict) and prov.get("id") == gid:
-                skip_counts = prov.setdefault("skipCounts", {})
-                skip_counts[agent_key] = skip_counts.get(agent_key, 0) + 1
+                skip_counts = prov.get("skipCounts")
+                if not isinstance(skip_counts, dict):
+                    skip_counts = {}
+                    prov["skipCounts"] = skip_counts
+                skip_counts[agent_key] = _as_count(skip_counts.get(agent_key)) + 1
                 return skip_counts[agent_key]
         elif kind == "private_omen":
-            omen = (god.get("privateOmens") or {}).get(agent_key)
+            omens = god.get("privateOmens")
+            omen = omens.get(agent_key) if isinstance(omens, dict) else None
             if isinstance(omen, dict) and omen.get("id") == gid:
-                omen["skipCount"] = omen.get("skipCount", 0) + 1
+                omen["skipCount"] = _as_count(omen.get("skipCount")) + 1
                 return omen["skipCount"]
         return None
 
