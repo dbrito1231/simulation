@@ -12,3 +12,5 @@ Update **all** of these when adding/changing an action ([specs/07-actions.md](sp
 2. `apply_decision`, `available_actions` — `sim_engine.py`
 3. `ACTION_LABELS` — `viewer.js` (display only)
 4. Spec entry in `07-actions.md` + `normalize_decision` validation if needed
+
+Workflow: [AGENTS.md](AGENTS.md).

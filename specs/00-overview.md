@@ -7,9 +7,9 @@ themselves. It is a proof-of-concept of the LLM-as-brain loop, inspired by
 Project Sid, not a game or a research-grade sim.
 
 **Canonical for:** what/why, non-goals, repo layout, spec index, SDD contract.
-**See also:** [CLAUDE.md](../CLAUDE.md) for commands; [01-architecture.md](01-architecture.md)
-for topology and the flag index; [docs/REFERENCE.md](../docs/REFERENCE.md) for
-deep mechanics.
+**See also:** [AGENTS.md](../AGENTS.md) for AI workflow; [CLAUDE.md](../CLAUDE.md) for
+commands/ops; [01-architecture.md](01-architecture.md) for topology and the flag
+index; [docs/REFERENCE.md](../docs/REFERENCE.md) for deep mechanics.
 
 ## Non-goals
 
@@ -62,7 +62,7 @@ deep mechanics.
 | `simulation/logs/<timestamp>/` | Per-run JSONL logs (gitignored) |
 | `specs/` | This spec set — canonical, rebuild-from-scratch documentation |
 | `scripts/` | Deterministic smoke/soak tools (no Ollama needed for most) |
-| `docs/` | CLAUDE.md companion docs: REFERENCE.md, HANDOFF.md, active plans, archive |
+| `docs/` | Companion docs: REFERENCE.md, HANDOFF.md, active plans, archive |
 
 ## Running it
 

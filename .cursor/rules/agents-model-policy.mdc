@@ -1,0 +1,14 @@
+---
+description: Orchestrator vs implementer/reviewer model roles from AGENTS.md
+alwaysApply: true
+---
+
+# Model policy
+
+Per [AGENTS.md](AGENTS.md), with Cursor-specific implementer pinning:
+
+- **Orchestrator** (current session model): plan, split into phases, dispatch, review only — no repo edits.
+- **Implementer (Cursor):** **Composer 2.5 only** (e.g. `composer-2.5` / `composer-2.5-fast`). Do not dispatch Sonnet, Grok, or other models as implementer.
+- **Reviewer:** Claude Sonnet 5 or Cursor Composer 2.5 Fast.
+- Only implementers write. Reviewers do not drive-by fix; FAIL findings go back to the orchestrator for a new implementer prompt.
+- Usage limit mid-implementation: pause; do not finish edits on the wrong role or model.

@@ -1,0 +1,10 @@
+---
+description: Spec-driven development — specs/ is behavior source of truth
+alwaysApply: true
+---
+
+# Spec-driven development
+
+- [specs/](specs/) is the behavior source of truth. Update owning spec(s) in the same change as code — specs must never drift.
+- Ownership index: [specs/00-overview.md](specs/00-overview.md). Workflow: [AGENTS.md](AGENTS.md).
+- Action changes: follow the action-sync rule and [specs/07-actions.md](specs/07-actions.md).

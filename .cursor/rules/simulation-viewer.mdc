@@ -10,3 +10,4 @@ alwaysApply: false
 - `index.html` is markup shell only; logic lives in `viewer.js`; styles in `viewer.css`.
 - `sprites.js` is stateless Canvas helpers only.
 - Keep `WORLD_W`/`WORLD_H` and `ACTION_LABELS` in sync with the engine (labels = display only).
+- Workflow: [AGENTS.md](AGENTS.md). Spec: [specs/11-viewer.md](specs/11-viewer.md).

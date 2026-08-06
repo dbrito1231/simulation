@@ -12,3 +12,4 @@ alwaysApply: false
 - `MAX_CONCURRENT_LLM = 3`. Keep `WORLD_W`/`WORLD_H` matched with `viewer.js`.
 - God routes (`/control/god/*`) are not decision actions; audit via `divine.jsonl`.
 - New/changed actions: see action-sync rule / [specs/07-actions.md](specs/07-actions.md).
+- Workflow: [AGENTS.md](AGENTS.md). Ops: [CLAUDE.md](CLAUDE.md).
