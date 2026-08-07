@@ -10,4 +10,4 @@ Read and follow [AGENTS.md](AGENTS.md) for every user-requested change.
 - Full loop: plan → user proceeds → orchestrator → implementer → reviewer → SUCCESS or FAIL-reprompt. Do not skip steps or invent a side path.
 - Orchestrator is read-only for edits; only implementers write. Doubts escalate orchestrator → user.
 - KISS. No hallucinations, unproven theories, or AI slop. No out-of-scope work without user approval.
-- Manual start/resume: project skill `loop-in-devs`.
+- Manual start/resume: project skills `loop-in-devs`, `orchestrator`, `implementer`, `reviewer`.

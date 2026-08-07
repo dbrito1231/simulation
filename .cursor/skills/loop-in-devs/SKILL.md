@@ -10,7 +10,7 @@ disable-model-invocation: true
 
 # loop-in-devs
 
-Manual entry point for the repo AI development loop. This skill does not redefine the workflow — read and follow [`AGENTS.md`](../../../AGENTS.md) exactly.
+Manual entry point for the full repo AI development loop. For a single role only, use `orchestrator`, `implementer`, or `reviewer` instead. This skill does not redefine the workflow — read and follow [`AGENTS.md`](../../../AGENTS.md) exactly.
 
 ## Instructions
 
