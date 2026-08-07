@@ -13,40 +13,33 @@ scheduling, Sage emergency), [specs/04-http-api.md](04-http-api.md) (routes
 that front this pipeline), [specs/07-actions.md](07-actions.md) (the action
 catalog — not repeated here).
 
-> **Migration note (2026-07-24):** the sim's LLM runtime has cut over from LM
-> Studio to Ollama (`docs/plan-ollama-migration.md` Phases 2-3). LM Studio is
+> **Migration note (2026-07-24):** LLM runtime cut over from LM Studio to
+> Ollama (`docs/archive/plan-ollama-migration.md` Phases 2-3). LM Studio is
 > permanently unavailable. See [ollama_config.md](../ollama_config.md) for
-> the full settings/contract reference (required env vars, VRAM gate,
-> restore procedure). This spec documents what `simulation/server.py`
-> actually sends as of the Phase 3 revision: native
+> settings/contract reference (required env vars, VRAM gate, restore
+> procedure). This spec documents what `simulation/server.py` sends: native
 > `POST http://localhost:11434/api/chat` (`OLLAMA_CHAT_URL`), `stream:false`.
 > `MODEL_SMART = "sim-smart"` (qwen3.5 9B, `num_ctx=20480`) and
-> `MODEL_FAST = "sim-fast"` (`llama3.2:3b`, `num_ctx=4096`) are genuinely
-> distinct models split **by workload kind, not by decision stakes**: ALL
-> decision turns (routine and high-stakes) route to `MODEL_SMART`;
-> `MODEL_FAST` serves only background cognition (PIANO modules, memory
-> summarizer/wiki merge, meta system, belief pitch — every direct
-> `lm_complete()` caller). This supersedes an initial Phase 3 attempt that
-> also routed routine decisions to `sim-fast`: a live soak measured
-> `piano_module_drops` climbing to ~25-38% (vs. the ~9% pre-migration
-> reference) and module latencies rising instead of falling, because routine
-> decisions and PIANO modules were contending for `sim-fast`'s
-> `OLLAMA_NUM_PARALLEL=3` slots. Keeping decisions entirely on `sim-smart`
-> (a separate, uncontended slot pool) removes that contention. Both models
-> are created via `scripts/ollama_setup.py` and kept resident with
-> `OLLAMA_KEEP_ALIVE=-1`. A module-init check in server.py prints a loud
-> `[server] WARNING: MODEL_FAST == MODEL_SMART` if the two constants ever
-> collapse back to the same value (env override, hotfix, etc.) — implemented
-> as a **warning, not a hard assert/crash**: the plan called for a startup
-> assert enforcing the "permanent two-model MUST", but a hard crash on a
-> config regression would strand the 24/7 sim server with no rollback runtime
-> (LM Studio is gone). The warning fires once at import time and the server
-> continues to start; decisions and background cognition would silently
-> share the smart model's queue until the regression is fixed. Historical LM
-> Studio numbers/behavior remain in comments and `ollama_config.md`'s
-> "Thinking-epidemic history" section (the original record, `lms_config.md`,
-> was removed in the migration's Phase 5) for context but no longer describe
-> the running system.
+> `MODEL_FAST = "sim-fast"` (`llama3.2:3b`, `num_ctx=4096`) are distinct
+> models split **by workload kind, not by decision stakes**: ALL decision
+> turns route to `MODEL_SMART`; `MODEL_FAST` serves only background cognition
+> (PIANO modules, memory summarizer/wiki merge, meta system, belief pitch —
+> every direct `lm_complete()` caller). This supersedes an initial Phase 3
+> attempt that routed routine decisions to `sim-fast`: a live soak measured
+> `piano_module_drops` at ~25-38% (vs. ~9% pre-migration) and rising module
+> latencies, because routine decisions and PIANO modules contended for
+> `sim-fast`'s `OLLAMA_NUM_PARALLEL=3` slots. Decisions on `sim-smart` use a
+> separate slot pool. Both models are created via `scripts/ollama_setup.py`
+> and kept resident with `OLLAMA_KEEP_ALIVE=-1`. A module-init check prints
+> `[server] WARNING: MODEL_FAST == MODEL_SMART` if the constants collapse
+> (env override, hotfix, etc.) — a **warning, not a hard assert/crash**: a
+> hard crash on config regression would strand the 24/7 server with no
+> rollback runtime (LM Studio is gone). The warning fires once at import;
+> the server continues; decisions and background cognition would share the
+> smart model's queue until fixed. Historical LM Studio numbers remain in
+> comments and `ollama_config.md`'s "Thinking-epidemic history" section
+> (`lms_config.md` removed in Phase 5) but no longer describe the running
+> system.
 
 ## Ollama call settings
 
@@ -59,10 +52,9 @@ catalog — not repeated here).
 | Sprite-design turn | `SPRITE_UPGRADE_SYSTEM_PROMPT` | `MODEL_SMART` | 768 | 0.3 | 75s | as above |
 | Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/80/90/100/220 per call site; PIANO=`PIANO_MODULE_MAX_TOKENS`=90) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`); PIANO fan-out 15s (`PIANO_MODULE_TIMEOUT_S`), always-on refresh 60s (`MODULE_REFRESH_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
 
-Note the Routine-decision and High-stakes-decision rows both resolve to
-`MODEL_SMART` now — they're kept as separate table rows because
-`is_high_stakes_turn` still fully determines timeout, max_tokens, and
-thinking/sampling for each, independent of the (now-constant) model choice.
+Routine and high-stakes rows both use `MODEL_SMART`; separate rows because
+`is_high_stakes_turn` still determines timeout, max_tokens, and
+thinking/sampling per turn.
 
 Phase 3 input-size sanity check (all against `sim-fast`'s `num_ctx=4096`):
 the largest background call is the wiki-memory merge
@@ -73,82 +65,67 @@ wiki sections (`WIKI_SECTION_CHAR_CAP=300` chars each, ~225 tokens) plus up to
 call (`run_meta_update`, `max_tokens=100`) joins up to 14 memories
 (~980 tokens) plus report fields and a ~150-token system prompt, roughly
 1,150 input tokens; the follow-up persona call adds the ~300-char
-autobiography, still under 1,500 input tokens. All are well under half of
-4096, so no truncation risk and no input capping was added — this is a
-documented finding, not a code change.
+autobiography, still under 1,500 input tokens. All are well under half of 4096 — no truncation risk; documented finding, not
+a code change.
 
-`to_ollama_body(payload)` lives in `simulation/llm_wire.py` (moved out of
-`server.py`, docs/plan-ollama-migration.md Phase 4, so
-`scripts/llm_replay_bench.py` can import the exact conversion `server.py`
-uses without importing `server.py` itself — that module has import-time side
-effects, see `simulation/prompts.py`'s docstring). `server.py` imports it
+`to_ollama_body(payload)` lives in `simulation/llm_wire.py` (moved from
+`server.py`, docs/archive/plan-ollama-migration.md Phase 4, so
+`scripts/llm_replay_bench.py` can import the conversion without importing
+`server.py` — that module has import-time side effects; see
+`simulation/prompts.py`'s docstring). `server.py` imports it
 (`import llm_wire as _llm_wire; to_ollama_body = _llm_wire.to_ollama_body`)
-right after the `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM` import near the top of
-the module, and every call site (next to `build_response_format`, and both
-`run_agent_decision`/`lm_complete`'s POST sites) still refers to it as
-`to_ollama_body`. It is the single conversion point every call site routes
-through: it takes the
-internal OpenAI-chat-completions-shaped payload this module builds (model,
-messages, max_tokens, temperature, sampling keys, an optional
-`response_format`, an optional boolean `think`) and produces the Ollama wire
-body — `messages` pass through; `max_tokens` → `options.num_predict`;
-`temperature`/`top_p`/`top_k`/`min_p`/`presence_penalty` → `options.*`;
-`response_format` (json_schema nesting, see `build_response_format`) →
-`format` (the extracted schema object, or `"json"` for `json_object` mode);
-`think` passes through under its own Ollama-native name if present (omitted
-= let the model think).
+after the `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM` import; every call site still
+refers to it as `to_ollama_body`. Single conversion point for all call sites:
+takes the internal OpenAI-chat-completions-shaped payload (model, messages,
+max_tokens, temperature, sampling keys, optional `response_format`, optional
+boolean `think`) and produces the Ollama wire body — `messages` pass through;
+`max_tokens` → `options.num_predict`; `temperature`/`top_p`/`top_k`/`min_p`/
+`presence_penalty` → `options.*`; `response_format` (json_schema nesting, see
+`build_response_format`) → `format` (extracted schema object, or `"json"` for
+`json_object` mode); `think` passes through if present (omitted = let the
+model think).
 
 `MODEL_SMART = "sim-smart"` and `MODEL_FAST = "sim-fast"` (server.py).
 `model_for_decision(data)` always returns `MODEL_SMART` — decisions never
 route to `sim-fast`, regardless of `is_high_stakes_turn(data)`.
-`is_high_stakes_turn()` remains a real, actively-used predicate: it still
-selects timeout (`THINKING_TIMEOUT_S` vs `DEFAULT_TIMEOUT_S`), max_tokens
-(`HIGH_STAKES_MAX_TOKENS`), and sampling/thinking (`THINKING_SAMPLING` vs
-`NON_THINKING_SAMPLING`) — only its role in picking the model id was removed.
-`MODEL_FAST` is reserved for background cognition only (PIANO modules, the
-memory summarizer/wiki merge, the meta system, belief-pitch scoring — every
-direct `lm_complete()` caller); see Concurrency & context sizing for why
-(decision/background contention on `sim-fast`'s slot pool measured in the
-first Phase 3 attempt). Fallback: Ollama has no LM-Studio-style
-`"local-model"` alias to retry with — if `looks_like_model_not_found_error`
-fires, that is treated as a **setup failure**: the server logs a `[server]`
-line pointing at `uv run python scripts/ollama_setup.py`, disables
-`_model_routing_enabled` (session-wide, to avoid repeat-logging), and returns
+`is_high_stakes_turn()` still selects timeout (`THINKING_TIMEOUT_S` vs
+`DEFAULT_TIMEOUT_S`), max_tokens (`HIGH_STAKES_MAX_TOKENS`), and
+sampling/thinking (`THINKING_SAMPLING` vs `NON_THINKING_SAMPLING`) — only
+model-id selection was removed. `MODEL_FAST` is for background cognition only
+(PIANO modules, memory summarizer/wiki merge, meta system, belief-pitch
+scoring — every direct `lm_complete()` caller); see Concurrency & context
+sizing for contention rationale. Fallback: Ollama has no LM-Studio-style
+`"local-model"` alias — if `looks_like_model_not_found_error` fires, that is
+a **setup failure**: the server logs a `[server]` line pointing at
+`uv run python scripts/ollama_setup.py`, disables `_model_routing_enabled`
+(session-wide, to avoid repeat-logging), and returns
 `{"error": "llm offline", "action": "rest"}` immediately — no retry (see
 Retries).
 
 `NON_THINKING_SAMPLING = {"top_p": 0.8, "top_k": 20, "min_p": 0}`;
 `THINKING_SAMPLING = {"top_p": 0.95, "top_k": 20}` (server.py) — Qwen
-model-card-recommended pins, sent on every call (routed into Ollama's
-`options` object by `to_ollama_body`) so behavior doesn't drift with preset
-changes.
+model-card pins, sent on every call via `to_ollama_body` → `options`.
 
 ### Thinking-mode suppression (`THINKING_ENABLED_HIGH_STAKES`)
 
 `DISABLE_THINKING_ROUTINE = True` (server.py): every routine turn sends
-top-level `"think": false` in the Ollama `/api/chat` body — the native
-endpoint's own thinking-suppression contract (Phase 0 finding #4, verified
-live: `eval_count` dropped 1288→81 tokens, wall time 77s→4.8s when
-`think:false` was set vs. left unset). The OpenAI-compat
-`/v1/chat/completions` endpoint silently ignores `think:false` entirely,
-which is why this repo targets native `/api/chat` exclusively — see
-`OLLAMA_CHAT_URL`. (Historical: LM Studio's equivalent knob was a top-level
-`"reasoning_effort": "none"` field; that mechanism no longer exists.)
+top-level `"think": false` in the Ollama `/api/chat` body (Phase 0 finding
+#4: `eval_count` dropped 1288→81 tokens, wall time 77s→4.8s with
+`think:false` vs. unset). The OpenAI-compat `/v1/chat/completions` endpoint
+ignores `think:false` — this repo targets native `/api/chat` only (see
+`OLLAMA_CHAT_URL`). (Historical: LM Studio used `"reasoning_effort": "none"`.)
 
-`THINKING_ENABLED_HIGH_STAKES = False` (server.py, current value) — high-
-stakes turns do **not** omit `think:false`, but since this flag is False,
-`thinking_active` in `build_decision_payload` never goes True, so high-stakes
-turns still use `NON_THINKING_SAMPLING` + `think:false` in practice.
-**Consequence (LM Studio-era finding, semantics carried over unchanged):** a
-2026-07-14 live analysis of 48 high-stakes samples (server.py comments) found
-reasoning content gave zero measurable decision-quality benefit when it *was*
-enabled — the model emitted the identical JSON either way, just routed
-through the reasoning channel — while costing 33% concurrency (parallel 3→2
-was needed for headroom). Reverted to `False` + `MAX_CONCURRENT_LLM=3`.
-`HIGH_STAKES_MAX_TOKENS=1600` (server.py) is therefore currently dead code,
-kept in case thinking is revisited — if it is, the same `think:false`
-contract above is not optional (see ollama_config.md's thinking-epidemic
-history note).
+`THINKING_ENABLED_HIGH_STAKES = False` (server.py) — since this flag is
+False, `thinking_active` in `build_decision_payload` never goes True, so
+high-stakes turns still use `NON_THINKING_SAMPLING` + `think:false`.
+**Consequence (LM Studio-era finding, semantics unchanged):** a 2026-07-14
+analysis of 48 high-stakes samples found reasoning content gave zero
+measurable decision-quality benefit — identical JSON either way, routed through
+the reasoning channel — while costing 33% concurrency (parallel 3→2 for
+headroom). Reverted to `False` + `MAX_CONCURRENT_LLM=3`.
+`HIGH_STAKES_MAX_TOKENS=1600` (server.py) is dead code, kept if thinking is
+revisited — the `think:false` contract above is not optional (see
+ollama_config.md's thinking-epidemic history note).
 
 ## Structured output
 
@@ -181,32 +158,24 @@ rewrites `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM` to document the tier field.
 
 **Auto-disable on rejection:** `_structured_output_enabled` (module-level)
 flips to `False` for the rest of the session — and the retry drops
-`response_format` from the payload — the first time Ollama responds with an
-HTTP 400 or an error body mentioning `format`/`response_format`/
-`json_schema`/`grammar`/`schema` (`looks_like_response_format_error`). In
-practice Ollama's `format` field is stable (Phase 0 finding #2: a full JSON
-schema was honored in every trial), so this is a safety net rather than an
-expected path.
+`response_format` — on the first Ollama HTTP 400 or error body mentioning
+`format`/`response_format`/`json_schema`/`grammar`/`schema`
+(`looks_like_response_format_error`). Ollama's `format` field is stable (Phase
+0 finding #2: full JSON schema honored in every trial); this is a safety net.
 
 **Bounded sprite grid (grammar-level, not just post-hoc validation).**
-`SPRITE_GRID_MIN = 4` / `SPRITE_GRID_MAX = 14` (server.py, module-level
-constants declared just above `DECISION_SCHEMA` so the schema can reference
-them directly, and exported to the engine via `_ENGINE_DEPS`). The
-**top-level** `sprite` property (the `submit_structure_sprite` action's
-payload) is bounded at the JSON-schema level: `palette` is an array of
-strings, `minItems: 2` / `maxItems: 5`; `grid` is an array of strings,
-`minItems`/`maxItems` = `SPRITE_GRID_MIN`/`SPRITE_GRID_MAX`, and each row
-string carries the same `minLength`/`maxLength`. Rationale: a Phase 0 probe
-measured 5 of 5 sprite-turn failures as Ollama `done_reason: "length"` at
-`eval_count: 768` (the sprite turn's `max_tokens`) — generation was truncated
-mid-JSON because nothing at the decode-grammar level bounded the grid, and
-the model emitted 30-100+ rows. The bound makes that runaway
-unrepresentable at generation time, mirroring (and now grammar-enforcing
-ahead of) the limits `validate_sprite_block()` already checked post-hoc. The
-**blueprint-nested** `sprite` (`blueprint.sprite`, used by `propose_blueprint`/
-invention turns) is deliberately left unbounded — a blueprint sprite is
-optional and is never rejected, so there is no runaway risk to guard
-against there.
+`SPRITE_GRID_MIN = 4` / `SPRITE_GRID_MAX = 14` (server.py, above
+`DECISION_SCHEMA`, exported via `_ENGINE_DEPS`). Top-level `sprite`
+(`submit_structure_sprite`) is bounded at JSON-schema level: `palette` array
+`minItems: 2` / `maxItems: 5`; `grid` array `minItems`/`maxItems` =
+`SPRITE_GRID_MIN`/`SPRITE_GRID_MAX`, each row string same `minLength`/
+`maxLength`. Phase 0 probe: 5/5 sprite-turn failures were Ollama
+`done_reason: "length"` at `eval_count: 768` — generation truncated mid-JSON
+with 30-100+ unbounded rows. The bound makes runaway unrepresentable at
+generation time, grammar-enforcing limits `validate_sprite_block()` already
+checked post-hoc. **Blueprint-nested** `sprite` (`blueprint.sprite`,
+`propose_blueprint`/invention turns) stays unbounded — optional, never
+rejected, no runaway risk.
 
 `build_sprite_upgrade_prompt()`/`_sprite_upgrade_size_requirement()`
 (server.py) render the per-dimension growth requirement for a sprite-design
@@ -222,21 +191,15 @@ columns".
 ## Prompt construction
 
 `SYSTEM_PROMPT` and `SYSTEM_PROMPT_SLIM` live in `simulation/prompts.py`
-(moved out of server.py 2026-07-24, docs/plan-ollama-migration.md Phase 6) —
-the single source of truth both `server.py` (`import prompts as _prompts`,
-aliased at module scope so every existing `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM`
-reference below is unchanged) and `scripts/ollama_setup.py --with-system`
-import from, so the rulebook text is never duplicated. `prompts.py` also owns
-the one `TECH_TREE_ENABLED`-gated rewrite (documents the optional blueprint
-`"tier"` field) and the two `[server] system prompt sha256=...` startup-proof
-prints — both now fire at `prompts.py`'s import time (which server.py triggers
-near the top of its own module, before Flask is constructed), not at the
-bottom of server.py where they used to live. `prompts.py` is importable on its
-own (it only imports the `sim_engine` package for the `TECH_TREE_ENABLED` flag, which
-has no import-time side effects) without importing `server.py` — `server.py`
-has module-level side effects on import (opens a new session log directory,
-constructs the live `SimEngine`) that make it unsafe for a setup script to
-import.
+(moved from server.py 2026-07-24, docs/archive/plan-ollama-migration.md Phase 6) —
+single source of truth for `server.py` (`import prompts as _prompts`, aliased
+at module scope) and `scripts/ollama_setup.py --with-system`. `prompts.py`
+owns the `TECH_TREE_ENABLED`-gated rewrite (blueprint `"tier"` field) and the
+two `[server] system prompt sha256=...` startup-proof prints — both fire at
+`prompts.py` import (triggered by server.py before Flask construction).
+`prompts.py` imports only `sim_engine` for `TECH_TREE_ENABLED` (no import-time
+side effects); `server.py` is unsafe to import from setup scripts (opens
+session log dir, constructs `SimEngine`).
 
 `SYSTEM_PROMPT` (~20 numbered rule groups): talk-gating,
 build-project/district steering, ecology/terraform, blueprints (two-stage Sage
@@ -254,10 +217,9 @@ server.py:33 (`SYSTEM_PROMPT_SLIM = _prompts.SYSTEM_PROMPT_SLIM`): `SYSTEM_PROMP
 sliced at the first `"\nEXAMPLE ("` marker — same rules and JSON schema, no
 worked examples. Used for the context-overflow retry (see Retries).
 
-`INVENTION_SYSTEM_PROMPT` (server.py:647-686): a dedicated, ~85%-smaller
-system prompt for invention-only turns — output-format contract + blueprint
-schema/example only, no village rulebook (irrelevant to authoring a blueprint
-and was wasting the token budget on every council member's turn).
+`INVENTION_SYSTEM_PROMPT` (server.py:647-686): dedicated ~85%-smaller
+prompt for invention-only turns — output-format contract + blueprint
+schema/example only, no village rulebook.
 
 `SPRITE_UPGRADE_SYSTEM_PROMPT` (server.py:1388+): a dedicated prompt for the
 sprite-design-only turn that follows a blueprint's mechanical approval.
@@ -288,23 +250,18 @@ storm conditions in council.
 ### Sovereign God mode (Phase 3): Voice binding guidance
 
 `_build_think_payload` computes `divine_public_line`/`divine_private_line` per
-agent via `_divine_prompt_lines(agent)` (`mixin_divine_matrix.py:44`) — placed immediately
-next to `directive` in the payload but returned by a separate helper and
-carried in **separate keys**, never folded into or read from
-`civilization["directive"]`. `_divine_prompt_lines` re-checks
-`startFrame <= frame_tick < expiresFrame` itself for whichever of
-`godState["providence"]` / `godState["privateOmens"][str(agent["id"])]` is
-present, rather than trusting `_expire_divine_effects` to have already swept
-that exact tick — an expired-but-not-yet-closed record must never reach a
-prompt. Whisper campaigns apply one private omen per target; each agent's
+agent via `_divine_prompt_lines(agent)` (`mixin_divine_matrix.py:44`) —
+separate keys, never folded into `civilization["directive"]`.
+`_divine_prompt_lines` re-checks `startFrame <= frame_tick < expiresFrame` for
+`godState["providence"]` / `godState["privateOmens"][str(agent["id"])]` —
+expired-but-not-yet-closed records must never reach a prompt. Whisper
+campaigns apply one private omen per target; each agent's
 `divine_private_line` reflects only their own omen text (campaign theme is
-operator metadata, not injected). Both are `None` outright when `GOD_MODE_ENABLED` is off.
+operator metadata, not injected). Both are `None` when `GOD_MODE_ENABLED` is off.
 
-`build_user_prompt` (server.py) folds each into its own line, rendered ONLY
-when set — the same fold-in-only-when-set pattern as `weather_line` above, so
-flag-off / no-active-guidance prompts stay byte-identical to before this
-phase — immediately after the `Civilization directive: {directive}` line via
-a `{divine_lines}` template slot:
+`build_user_prompt` (server.py) folds each into its own line when set —
+same fold-in-only-when-set pattern as `weather_line` — immediately after
+`Civilization directive: {directive}` via `{divine_lines}`:
 
 ```text
 Divine guidance (binding): Prepare for a difficult winter. State whether you follow or continue in divine_response.
@@ -321,84 +278,71 @@ object in the returned JSON:
 {"stance": "follow" | "continue", "reason": "<short string>"}
 ```
 
-`stance: "follow"` means the agent accepts the guidance as governing intent
-for this turn; the engine clears `goal` and `assignedTask` before applying the
+`stance: "follow"` clears `goal` and `assignedTask` before applying the
 chosen `action` (the LLM still picks the concrete action — guidance steers
-intent, it does not pin the action). `stance: "continue"` means the agent
-explicitly declines to let the guidance override current plans; goals and
-assigned tasks are left intact. The `reason` is a short, human-readable
-explanation surfaced to operators in Sight and the Voice Adherence panel.
+intent, not the action). `stance: "continue"` leaves goals and assigned tasks
+intact. `reason` is a short explanation surfaced in Sight and the Voice
+Adherence panel.
 
 **Schema-required while active.** `build_response_format()` (server.py) is
 called per-request with `require_divine_response=bool(data.get(
 "voice_guidance_active"))`. When True it builds a shallow copy of
 `DECISION_SCHEMA` (never mutating the module-level schema — `MAX_CONCURRENT_LLM
-= 3` means multiple think-workers can call this concurrently) that adds
-`"divine_response"` to `required` and tightens its `type` from `["object",
-"null"]` to `"object"`, so the model can no longer silently omit the field
-when guidance is active. When guidance is inactive the field stays optional/
-nullable as before.
+= 3` means concurrent think-workers) that adds `"divine_response"` to
+`required` and tightens its `type` from `["object", "null"]` to `"object"`.
+When guidance is inactive the field stays optional/nullable.
 
-**Missing/invalid `divine_response`.** `synthesize_divine_response()` remains
-a safety net for malformed-but-present objects, retries, and the case where
-structured output degrades to unstructured mode (schema enforcement no longer
-applies). When Voice guidance is active and unacknowledged but the model
-omits `divine_response`, returns a malformed object, or supplies an unknown
-`stance`, `normalize_decision` **does not** reject the turn — it
-**synthesizes** `{"stance": "continue", "reason": "missing_divine_response"}`
-and still applies the validated `action`. This is an explicit non-compliance
-signal for operators, not a hard fallback to `rest`.
+**Missing/invalid `divine_response`.** `synthesize_divine_response()` is a
+safety net for malformed objects, retries, and unstructured-mode degradation.
+When Voice guidance is active and unacknowledged but the model omits
+`divine_response`, returns a malformed object, or supplies an unknown
+`stance`, `normalize_decision` **does not** reject the turn — it **synthesizes**
+`{"stance": "continue", "reason": "missing_divine_response"}` and still
+applies the validated `action`. Non-compliance signal for operators, not a
+hard fallback to `rest`.
 
 **Acknowledgement and the skip cap.** A turn with a **genuine** (non-
-synthetic) `divine_response` acks its guidance entry immediately, same as
-before. A **synthetic** response no longer auto-acks — `mixin_divine_matrix.py`'s
-`_record_divine_response_adherence` (line 196) increments a per-guidance skip counter
-instead (providence's `skipCounts[agentIdStr]`, or the private omen's
-`skipCount` — see [02-engine-core.md](02-engine-core.md)) via
-`_bump_voice_guidance_skip`. Only once that counter reaches
-`GOD_VOICE_ACK_SKIP_CAP` (3) consecutive synthetic turns for the same
-guidance id is the entry force-acked (a "capped" close, logged as
-`capped: true`) — same effect as a genuine ack, but recorded as
-non-compliance rather than engagement. Until acked (by either path), every
-subsequent think for that agent carries the same binding prompt lines and the
-`divine_response` requirement; the skip counter resets implicitly once the
-guidance is replaced/expired/closed (a fresh guidance id starts at zero).
+synthetic) `divine_response` acks its guidance entry immediately. A
+**synthetic** response no longer auto-acks — `_record_divine_response_adherence`
+(`mixin_divine_matrix.py:196`) increments a per-guidance skip counter
+(providence's `skipCounts[agentIdStr]`, or the private omen's `skipCount` —
+see [02-engine-core.md](02-engine-core.md)) via `_bump_voice_guidance_skip`.
+Only at `GOD_VOICE_ACK_SKIP_CAP` (3) consecutive synthetic turns for the same
+guidance id is the entry force-acked (`capped: true`) — same effect as a
+genuine ack, logged as non-compliance. Until acked, every subsequent think
+carries the same binding prompt lines and `divine_response` requirement; the
+skip counter resets when guidance is replaced/expired/closed.
 
 **Special-turn cancellation.** While Voice guidance is active and
-unacknowledged for an agent, any pending `sprite_design_only` or
-`invention_only` special turn for that agent is **cancelled/dropped** — not
-soft-deferred. The engine clears the special-turn flag and returns the agent
-to the ordinary decision path on the next think. Applying new Voice guidance
-(providence, private omen, whisper target, or a proclamation that auto-applies
-as providence) also cancels any in-flight special turn for affected agents at
-apply time. Matrix anoint/bush/story soft prompt lines are unchanged — only
-providence/private-omen Voice guidance participates in this binding contract.
+unacknowledged, any pending `sprite_design_only` or `invention_only` special
+turn for that agent is **cancelled/dropped** — not soft-deferred. The engine
+clears the special-turn flag and returns the agent to the ordinary decision
+path on the next think. Applying new Voice guidance (providence, private omen,
+whisper target, or a proclamation that auto-applies as providence) also
+cancels in-flight special turns for affected agents at apply time. Matrix
+anoint/bush/story soft prompt lines are unchanged — only providence/private-
+omen Voice guidance participates in this binding contract.
 
-At most one public line and one private line, each already capped at
-`GOD_TEXT_MAX_CHARS = 240`
+At most one public line and one private line, each capped at
+`GOD_TEXT_MAX_CHARS = 240` characters (`GOD_TEXT_MAX_BYTES = 600` bytes) by
+`_normalize_divine_text` at write time (`mixin_persistence.py:1149`, [02](02-engine-core.md)).
 
 **Divine Matrix memory surgery (Phase 3).** `memory_insert` and `belief_plant`
 write into the same `memory` slice `_memory_for_prompt` composes — via
 `_god_memory_insert` with kinds `divine_false_memory` / `divine_belief` —
-without ever touching public activity/communication/chronicle. `memory_delete`
+without touching public activity/communication/chronicle. `memory_delete`
 removes matching `MemoryStore` rows and keyword-matching local tier lines.
-These are distinct from private omens: false memories are ordinary recall
-lines immediately, not deferred until omen closure.
-characters (`GOD_TEXT_MAX_BYTES = 600` bytes) by `_normalize_divine_text` at
-write time (`mixin_persistence.py:1149`, [02](02-engine-core.md)), so the two lines add a
-small, precisely bounded amount of prompt text even at maximum omen length —
-no raw intervention history, no Chronicle duplication of private content ever
-enters a prompt. The elder `directive` line is completely unaffected: both
-fields can be active simultaneously, are rendered on separate template lines
-with separate labels, and an agent sees them as two distinct sources of
-guidance (village leadership vs. an unexplained divine signal), never as one
-merged instruction.
+Distinct from private omens: false memories are ordinary recall lines
+immediately, not deferred until omen closure. The two divine lines add bounded
+prompt text at maximum omen length — no raw intervention history, no Chronicle
+duplication of private content. The elder `directive` line is unaffected: both
+fields can be active simultaneously on separate template lines; agents see
+village leadership vs. divine signal as distinct sources, never merged.
 
 **Measurement gate.** Binding Voice guidance ships with the providence/omen
-apply path; operators should still spot-check `llm.jsonl` for
-`divine_response` presence and `divine.jsonl` / Sight for adherence before
-recommending an always-on god-guided deployment. `SIM_GOD_MODE` ships dark
-(see [01](01-architecture.md)), so no default-on run is affected.
+apply path; spot-check `llm.jsonl` for `divine_response` presence and
+`divine.jsonl` / Sight for adherence before always-on god-guided deployment.
+`SIM_GOD_MODE` ships dark (see [01](01-architecture.md)).
 
 ### Divine Matrix Phase 2: per-agent sampling overlay (Temperature Dial)
 
@@ -420,8 +364,8 @@ selection, etc.). This path affects **agent decision turns only** — PIANO,
 
 **Concurrency risk:** routing decisions to `sim-fast` contends with PIANO on the
 same Ollama pool. Preview/apply refuses a second living agent's `sim-fast`
-override while one is already active (cap = 1). Prefer `sim-smart` for routine
-operator overrides.
+override while one is active (cap = 1). Prefer `sim-smart` for operator
+overrides.
 
 ### Divine Matrix Phase 4: context masks (Reality Distortion)
 
@@ -508,65 +452,52 @@ to three source memory lines — never a full clone. Restore semantics:
 
 ### Sovereign God mode (Optional Phase 8): free-prose story compiler
 
-`sim_engine.god_compile_prose(prose)` is a **distinct LLM path**, entirely
-separate from the agent-cognition prompts documented above — it never reads
-`civilization["directive"]`, never appears in `_build_think_payload`, and its
-call never counts as a "decision" or "module" turn in any benchmark. It turns
-operator-authored free prose into a draft `story_event` command that lands in
-the SAME `_god_preview_cache` Phase 2 already established; the operator still
-has to explicitly Preview (again, through the normal Story tab) and Apply.
-The compiler itself never mutates state and never calls `god_apply`.
+`sim_engine.god_compile_prose(prose)` is a **distinct LLM path**, separate
+from agent-cognition prompts — it never reads `civilization["directive"]`,
+never appears in `_build_think_payload`, and its call never counts as a
+"decision" or "module" turn in any benchmark. It turns operator-authored free
+prose into a draft `story_event` command in `_god_preview_cache`; the operator
+still must Preview and Apply through the normal Story tab. The compiler never
+mutates state and never calls `god_apply`.
 
-**Concurrency pool.** A compile is a genuinely blocking `self.d["lm_complete"]`
-call made **while holding `self.lock`** (the engine's `threading.RLock`),
-directly inside `god_compile_prose` — unlike agent decisions (`self._executor`,
-`MAX_CONCURRENT_LLM = 3`) or PIANO modules (`self.piano_workers`,
-`PIANO_CONCURRENT_LLM = 2`), the compiler does **not** use either pool. It is
-routed to `MODEL_SMART` ("sim-smart") via `lm_complete(..., model="sim-smart")`
-— `lm_complete`'s `model` parameter defaults to `None` (which resolves to
-`MODEL_FAST`) for every pre-existing caller; the compiler is the one caller
-that overrides it. This means a compile call temporarily blocks the tick
-thread for up to `GOD_COMPILER_TIMEOUT_SEC = 10.0` seconds (an aggressive
-timeout specifically to bound that exposure) and consumes one of
-`sim-smart`'s own `OLLAMA_NUM_PARALLEL` slots — the same slots agent
-decisions use — for the duration of the call. `GOD_COMPILER_MIN_INTERVAL_SEC
-= 5.0` and `GOD_COMPILER_SESSION_CAP = 60` (module constants, `constants.py:746-747`)
-bound how often this can happen; there is no queue — an over-budget compile
-request is rejected immediately, never buffered.
+**Concurrency pool.** A compile is a blocking `self.d["lm_complete"]` call
+**while holding `self.lock`** (`threading.RLock`), inside `god_compile_prose` —
+unlike agent decisions (`self._executor`, `MAX_CONCURRENT_LLM = 3`) or PIANO
+modules (`self.piano_workers`, `PIANO_CONCURRENT_LLM = 2`), the compiler uses
+neither pool. Routed to `MODEL_SMART` via `lm_complete(..., model="sim-smart")`
+— `lm_complete`'s `model` defaults to `None` → `MODEL_FAST` for all other
+callers; the compiler is the one override. A compile blocks the tick thread
+for up to `GOD_COMPILER_TIMEOUT_SEC = 10.0` and consumes one of `sim-smart`'s
+`OLLAMA_NUM_PARALLEL` slots (same slots agent decisions use).
+`GOD_COMPILER_MIN_INTERVAL_SEC = 5.0` and `GOD_COMPILER_SESSION_CAP = 60`
+(`constants.py:746-747`) bound frequency; no queue — over-budget requests are
+rejected immediately.
 
-**Model routing — deliberately NOT `sim-fast`.** `sim-fast` already serves
-`PIANO_MODULES` background cognition, and past `sim-fast` contention has
-measurably increased PIANO module drops (see the Concurrency & context
-sizing section above). The plan is explicit that this compiler must not
-default onto that tier. Routing instead to `sim-smart` avoids reproducing
-that specific regression, but it is a NEW, not-yet-measured source of
-contention on `sim-smart`'s pool (the same pool every agent decision uses) —
-see [specs/12-ops.md](12-ops.md) "Optional Phase 8" for the recommended A/B
-contention protocol and the explicit statement that it has not been run.
+**Model routing — NOT `sim-fast`.** `sim-fast` already serves PIANO background
+cognition; past contention measurably increased PIANO module drops (see
+Concurrency & context sizing). Routing to `sim-smart` avoids that regression
+but is a new, not-yet-measured source of contention on `sim-smart`'s pool
+(same pool every agent decision uses) — see [specs/12-ops.md](12-ops.md)
+"Optional Phase 8" for the recommended A/B contention protocol (not yet run).
 
-**Schema-locked output, not free text.** The prompt built by
-`_god_compiler_prompt` lists every `GOD_MODIFIER_RANGES` key and bound and
-the three `_GOD_PRIMITIVE_KINDS` shapes inline, with two worked few-shot
-examples (a small model needs the shape shown, not merely described). The
-model's raw response must parse as `{"kind": "story_event", "payload": {...}}`
-exactly (`_god_compiler_parse`); the `payload` is then run through the SAME
-`_validate_god_story_event` every other story_event command uses
-([02-engine-core.md](02-engine-core.md)) — an unknown modifier key,
-out-of-range value, or unknown resource/structure/agent id is rejected with
-the SAME error the validator would give a malformed hand-authored command,
-never silently clamped or dropped.
+**Schema-locked output.** `_god_compiler_prompt` lists every
+`GOD_MODIFIER_RANGES` key and bound and the three `_GOD_PRIMITIVE_KINDS`
+shapes inline, with two worked few-shot examples. The model's raw response
+must parse as `{"kind": "story_event", "payload": {...}}`
+(`_god_compiler_parse`); the `payload` runs through `_validate_god_story_event`
+(same validator as hand-authored story_event commands —
+[02-engine-core.md](02-engine-core.md)) — unknown modifier key, out-of-range
+value, or unknown resource/structure/agent id is rejected with the same error
+as a malformed hand-authored command, never silently clamped or dropped.
 
-**Dual gate.** `GOD_COMPILER_ENABLED` (env `SIM_GOD_COMPILER`, read once at
-import, module-level, alongside `GOD_MODE_ENABLED`) is a SECOND flag —
-`god_compile_prose` and the `/control/god/compile` route both require
-`GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`. Ships off by default; see
-[specs/12-ops.md](12-ops.md) for why the flag stays off until an A/B
-contention measurement is actually run.
+**Dual gate.** `GOD_COMPILER_ENABLED` (env `SIM_GOD_COMPILER`, import-time,
+alongside `GOD_MODE_ENABLED`) is a second flag — `god_compile_prose` and
+`/control/god/compile` both require `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`.
+Ships off by default; see [specs/12-ops.md](12-ops.md).
 
-**No god token.** `god_compile_prose(prose)` has no parameter for
-`SIM_GOD_TOKEN` and never reads it — the token gate lives entirely in
-server.py's route handler, checked BEFORE `engine.god_compile_prose` is ever
-called, exactly like every other `/control/god/*` route.
+**No god token.** `god_compile_prose(prose)` has no `SIM_GOD_TOKEN` parameter
+— the token gate lives in server.py's route handler, checked before
+`engine.god_compile_prose` is called, like every other `/control/god/*` route.
 
 ### Daily Council prompt contract
 
@@ -593,23 +524,19 @@ supporting whichever candidate was listed first.
 
 **`normalize_decision` council-branch responsibilities (server.py).** Phase/
 seating eligibility is authoritative only at apply time —
-`normalize_decision()` enforces shape and coarse session existence only:
-a seated attendee (`council_turn and council_seated`) choosing a non-council
+`normalize_decision()` enforces shape and coarse session existence only: a
+seated attendee (`council_turn and council_seated`) choosing a non-council
 action is rejected to the role fallback (`council_rejection_note: "not a
-seated active council turn"`); a council action chosen with no council
-session/phase present at all (`not council or not phase`) is rejected
-(`"no active council session"`) so a spuriously-emitted council action from a
-model outside any session doesn't sail through to `apply_decision` only to
-be rejected live, wasting the turn. Per-action payload shape is still fully
-checked (`council_speak` requires a non-empty `message`; `council_vote`
-requires a valid `vote`/succession `candidate`; `council_propose` requires a
-valid `rule`/`blueprint`/idea payload per `kind`). Per-turn/per-phase
-eligibility (is the ballot actually open right now, has discussion ended,
-etc.) is deliberately **not** re-checked here — `council_turn`/`phase` were
-snapshotted before the LLM call and can go stale while the model thinks;
-`apply_decision()`'s `_daily_council_actor()` (`mixin_council_growth.py:399`) is the live
-authority and rejects non-fatally on a stale snapshot. See
-[07-actions.md](07-actions.md) for the full phase/seating-authority split.
+seated active council turn"`); a council action with no council session/phase
+(`not council or not phase`) is rejected (`"no active council session"`).
+Per-action payload shape is still fully checked (`council_speak` requires
+non-empty `message`; `council_vote` requires valid `vote`/succession
+`candidate`; `council_propose` requires valid `rule`/`blueprint`/idea payload
+per `kind`). Per-turn/per-phase eligibility (ballot open, discussion ended,
+etc.) is **not** re-checked here — `council_turn`/`phase` were snapshotted
+before the LLM call and can go stale; `apply_decision()`'s
+`_daily_council_actor()` (`mixin_council_growth.py:399`) is the live authority.
+See [07-actions.md](07-actions.md) for the full phase/seating-authority split.
 
 Every think payload, including non-council turns, receives at most
 `COUNCIL_DIGEST_PROMPT_ENTRIES = 2` newest compact entries from
@@ -657,22 +584,19 @@ quota/rationing/burial/abandonment rejections, idle/opportunity notes) are
 unaffected.
 
 **Persona-at-top-of-user-message rationale** (server.py:1832-1837): the
-per-agent persona line is prepended to the *user* message, not appended to the
-system prompt, because Ollama (llama.cpp-based, same as LM Studio) reuses KV
-cache by longest common prefix per slot — per-agent text inside the system
-message forced a full ~5k-token
-reprocess on every agent rotation; keeping the system prompt byte-identical
-across agents makes it a shared cached prefix instead.
+per-agent persona line is prepended to the *user* message, not the system
+prompt, because Ollama (llama.cpp-based, same as LM Studio) reuses KV cache
+by longest common prefix per slot — per-agent text in the system message forced
+a full ~5k-token reprocess on every agent rotation; a byte-identical system
+prompt across agents is a shared cached prefix.
 
 ### KV-cache prefix stability (Phase 2, TASKS_PENDING #2a)
 
-The system message is designed to be byte-identical across every routine
-decision turn, for every agent, all session long, so Ollama's
-longest-common-prefix KV-cache reuse always fires for that shared prefix
-(prefix-cache posture carries over unchanged from LM Studio — Ollama is
-llama.cpp-based and reuses prompt prefixes per slot the same way)
-(this is also why the persona line lives at the top of the *user* message,
-above — see the rationale note just above this one).
+The system message is byte-identical across every routine decision turn, for
+every agent, all session long, so Ollama's longest-common-prefix KV-cache reuse
+always fires (prefix-cache posture unchanged from LM Studio — Ollama is
+llama.cpp-based and reuses prompt prefixes per slot the same way; also why
+the persona line lives at the top of the *user* message above).
 
 - **Audit result:** every per-agent/per-tick/per-request value (name, role,
   hunger, resources, nearby agents, timestamps, districts, etc.) is rendered
@@ -689,80 +613,59 @@ above — see the rationale note just above this one).
   import time, before the Flask app serves any request — so the rewrite
   cannot fire mid-session; whatever `SYSTEM_PROMPT` is after import is what
   every routine turn for the rest of the process sees.
-- **Slim-retry exception (by design):** the context-overflow retry path
-  (`run_agent_decision`, `slim=True`) deliberately swaps `SYSTEM_PROMPT` for
-  `SYSTEM_PROMPT_SLIM` — a different, shorter prefix — and therefore forfeits
-  KV-cache reuse for that one retried call. This is expected, rare (only
-  fires after a context-overflow on the primary call), and acceptable; it is
-  not tracked by the mismatch guard below.
-- **Startup proof:** on boot (and again immediately if the `TECH_TREE_ENABLED`
-  rewrite fires), the server prints a `[server] system prompt sha256=<first
-  12 hex chars>` line so a soak's stdout/log can show the hash appears
-  exactly once (or, if rewritten, exactly twice, both before any traffic)
-  and never changes again for the life of the process.
+- **Slim-retry exception (by design):** context-overflow retry (`slim=True`)
+  swaps `SYSTEM_PROMPT` for `SYSTEM_PROMPT_SLIM` — a different, shorter
+  prefix — forfeiting KV-cache reuse for that one call. Expected, rare (only
+  after context-overflow on the primary call); not tracked by the mismatch
+  guard below.
+- **Startup proof:** on boot (and again if the `TECH_TREE_ENABLED` rewrite
+  fires), the server prints `[server] system prompt sha256=<first 12 hex
+  chars>` — a soak's stdout should show the hash once (or twice if rewritten,
+  both before any traffic) and never again.
 - **Mid-session mismatch guard:** `_check_system_prompt_stability()` (server.py,
-  just above `build_decision_payload`) runs only on the primary (non-slim)
-  routine-turn dispatch, and only when `SYSTEM_PROMPT_AT_LOAD_TIME` is False
-  (see below) — an intentionally *omitted* system message is not a "changed
-  prefix" and must not trip this guard. Fast path is an `is` identity check
-  against the system string used on the previous routine turn (near-zero
-  cost, since `SYSTEM_PROMPT` is a stable module global); only on an identity
-  mismatch does it fall back to a value/hash comparison. If the content has
-  actually changed, it prints one `[server] WARNING: system prompt changed
+  above `build_decision_payload`) runs only on primary (non-slim) routine-turn
+  dispatch, only when `SYSTEM_PROMPT_AT_LOAD_TIME` is False — an omitted
+  system message is not a "changed prefix". Fast path: `is` identity check
+  against the previous routine turn's system string; on mismatch, value/hash
+  comparison. If content changed, one `[server] WARNING: system prompt changed
   mid-session (cache invalidated) old_sha256=... new_sha256=...` line
-  (log-once, never raises) so a regression that silently reintroduces a
-  per-call system rebuild is observable in soak logs instead of only showing
-  up as an unexplained latency regression.
+  (log-once, never raises).
 
 ### Load-time rulebook (`SYSTEM_PROMPT_AT_LOAD_TIME`, default False, dark) {#load-time-rulebook}
 
-Phase 6 of `docs/plan-ollama-migration.md` (TASKS_PENDING item 2b revived —
-LM Studio could never set a default system prompt at load time, see that
-item's history; Ollama's Modelfile `SYSTEM` directive is the mechanism that
-was missing). Ships **dark** (flag False) — machinery is in place but
-inactive pending an A/B soak.
+Phase 6 of `docs/archive/plan-ollama-migration.md` (TASKS_PENDING item 2b —
+LM Studio could never set a default system prompt at load time; Ollama's
+Modelfile `SYSTEM` directive is the missing mechanism). Ships **dark** (flag
+False) — machinery in place, inactive pending A/B soak.
 
 - **The flag** (`server.py`, near `MODEL_SMART`/`MODEL_FAST`): when True, the
   primary (non-slim) dispatch of every routine/high-stakes decision turn that
-  is not `sprite_design_only` or `invention_only` — i.e. the same "else"
-  branch of `build_decision_payload` that already used `SYSTEM_PROMPT`/
-  `SYSTEM_PROMPT_SLIM` — omits the system message from `messages` entirely
-  and routes to `MODEL_SMART_SYS` (`"sim-smart-sys"`) instead of
-  `MODEL_SMART`. The slim-retry path (`slim=True`), `invention_only`, and
+  is not `sprite_design_only` or `invention_only` omits the system message
+  from `messages` and routes to `MODEL_SMART_SYS` (`"sim-smart-sys"`) instead
+  of `MODEL_SMART`. Slim-retry (`slim=True`), `invention_only`, and
   `sprite_design_only` turns are **unaffected**: they always send their own
-  explicit system message (`SYSTEM_PROMPT_SLIM` / `INVENTION_SYSTEM_PROMPT` /
-  `SPRITE_UPGRADE_SYSTEM_PROMPT` respectively) and stay on `MODEL_SMART` for
-  cache-locality — their prompts differ from the baked `SYSTEM_PROMPT`, and
-  Ollama's verified semantics (an explicit request-time system message always
-  *replaces*, never concatenates with, a Modelfile `SYSTEM` directive — see
-  `ollama_config.md` "Modelfile SYSTEM semantics") make them correct either
-  way, so there's no correctness reason to route them to `sim-smart-sys`.
-- **`sim-smart-sys`**: a Modelfile-generated Ollama model, SEPARATE from
-  `sim-smart` (same base GGUF/`num_ctx`/sampling params as
-  `ollama/Modelfile.smart`, plus a `SYSTEM """..."""` block). Generated —
-  never hand-copied — by `uv run python scripts/ollama_setup.py
-  --with-system`, which imports `simulation/prompts.py`'s `SYSTEM_PROMPT`
-  (the canonical text stays in `prompts.py`; the Modelfile is a build
-  artifact) and writes `ollama/Modelfile.smart.system` (git-ignored-style
-  generated file, DO-NOT-EDIT header, regenerate after any `SYSTEM_PROMPT`
-  change) before running `ollama create sim-smart-sys -f
+  system message and stay on `MODEL_SMART` — their prompts differ from the
+  baked `SYSTEM_PROMPT`, and Ollama's semantics (request-time system message
+  *replaces*, never concatenates with, Modelfile `SYSTEM` — see
+  `ollama_config.md` "Modelfile SYSTEM semantics") make them correct either way.
+- **`sim-smart-sys`**: Modelfile-generated Ollama model, separate from
+  `sim-smart` (same base GGUF/`num_ctx`/sampling as `ollama/Modelfile.smart`,
+  plus `SYSTEM """..."""`). Generated by `uv run python scripts/ollama_setup.py
+  --with-system`, which imports `simulation/prompts.py`'s `SYSTEM_PROMPT` and
+  writes `ollama/Modelfile.smart.system` (generated, DO-NOT-EDIT, regenerate
+  after any `SYSTEM_PROMPT` change) before `ollama create sim-smart-sys -f
   ollama/Modelfile.smart.system`. Creating/updating `sim-smart-sys` never
-  touches the live `sim-smart`/`sim-fast` models (distinct name, safe to run
-  while the sim server is up — verified live 2026-07-24: `/api/ps` showed
-  `sim-smart`/`sim-fast` `size_vram`/`expires_at` unchanged across the
-  `--with-system` run).
-- **Gate before flipping** (same bar TASKS_PENDING item 2b originally
-  specified): an A/B soak comparing decision fallback rate (`bad_response` +
-  `role_fallback`) and action distribution against a flag-off session of
-  similar length. The tripwire is "the model forgets a distant/baked system
-  prompt under a long user message" — a real risk for small local models that
-  was never actually tested here (LM Studio could not reach this experiment
-  at all; see TASKS_PENDING item 2b's history). Flip procedure:
-  `ollama_config.md` "Load-time rulebook (dark)".
-- **Payoff if the gate passes:** ~3k tokens off every routine decision turn
-  (the rulebook is baked in instead of resent), the `context_overflow` class
-  should largely disappear, and per-turn prompt processing drops by roughly
-  half.
+  touches live `sim-smart`/`sim-fast` (verified 2026-07-24: `/api/ps` showed
+  `size_vram`/`expires_at` unchanged across `--with-system`).
+- **Gate before flipping** (TASKS_PENDING item 2b bar): A/B soak comparing
+  decision fallback rate (`bad_response` + `role_fallback`) and action
+  distribution against a flag-off session. Tripwire: "model forgets a distant/
+  baked system prompt under a long user message" — never tested here (LM
+  Studio could not reach this experiment). Flip procedure: `ollama_config.md`
+  "Load-time rulebook (dark)".
+- **Payoff if gate passes:** ~3k tokens off every routine decision turn,
+  `context_overflow` class largely disappears, per-turn prompt processing
+  drops by roughly half.
 
 Measured prompt size: ~3,100-3,400 prompt tokens per routine decision call
 (docs/REFERENCE.md:40); invention-only prompts run larger due to the
@@ -783,47 +686,32 @@ reverse import would be circular; see that module's docstring.
 
 ### MemoryStore persistence (restart-stable, Phase 1 TASKS_PENDING #1)
 
-`MemoryStore` (the class: `simulation/_server/memory_store.py:112`; the
-`memory_store` singleton: server.py:288) is constructed against
-`MEMORY_STORE_PATH = simulation/memory_store.json` (server.py:286, next to
-`state.db`'s own `os.path.dirname(os.path.abspath(__file__))` derivation) —
-a restart-stable path, not the per-session log directory. The singleton
-construction stays in server.py (not `_server/memory_store.py`) because its
-`mirror_path` depends on `session_logger.dir`, a server.py bootstrap value —
-see [01-architecture.md](01-architecture.md). This matters because `agent
-["memory"]` tiers persist via `state.db` already, but the *semantic-recall
-embedding index* (`memory_store`) previously lived only in
-`simulation/logs/<timestamp>/memory.json`, so every server restart silently
-started the index empty even though agent-visible memory survived.
+`MemoryStore` (class: `simulation/_server/memory_store.py:112`; singleton:
+server.py:288) is constructed against `MEMORY_STORE_PATH =
+simulation/memory_store.json` (server.py:286) — restart-stable, not the
+per-session log directory. Singleton construction stays in server.py because
+`mirror_path` depends on `session_logger.dir` — see
+[01-architecture.md](01-architecture.md). `agent["memory"]` tiers persist via
+`state.db`, but the semantic-recall embedding index (`memory_store`)
+previously lived only in `simulation/logs/<timestamp>/memory.json`, so every
+restart started the index empty despite surviving agent-visible memory.
 
 - **Load-on-init.** `MemoryStore.__init__` calls `_load_locked_startup()`,
-  which reads `MEMORY_STORE_PATH` if present and rebuilds entries via
-  `import_entries()` (re-embedding each text with the same offline
-  hashing-trick `embed_text()` — no LLM call, safe at cold boot).
-  Absent file → starts empty (`_load_status = ("absent", 0)`). Corrupt/
-  unparseable file (bad JSON, wrong shape) → also starts empty but tagged
-  `("corrupt", 0)`, and never raises — persistence failures must not break
-  server startup.
-- **Startup observability.** One `[server]` line logs the load status,
-  entry count, and path (e.g. `[server] MemoryStore loaded (1200 entries)
-  from .../simulation/memory_store.json`), and `session_logger.log_benchmark
-  ("memory_store_loaded", entry_count)` is emitted once so a future
-  regression to empty-on-restart shows up in `benchmark.jsonl`, not just a
-  console line.
-- **Per-session inspection mirror.** `memory_store` is constructed with
-  `mirror_path=os.path.join(session_logger.dir, "memory.json")`. Every
-  `_persist()` (debounced by `MEMORY_PERSIST_EVERY`, and always flushed on
-  `clean()`) writes the stable path first, then best-effort mirrors the same
-  payload (entries minus the recomputable `vec` field) into the session
-  log dir's `memory.json` for human inspection. The mirror write is wrapped
-  in its own `try/except OSError` — a failed mirror write never affects the
-  stable store.
-- **Reset semantics.** `/control/reset` → `SimEngine.reset()` (`mixin_snapshot.py:52`)
-  calls `memory_store.clear()`, which wipes in-memory entries AND flushes
-  the now-empty store to `MEMORY_STORE_PATH` (matching the existing
-  `_piano_module_cache` wipe-on-reset precedent) — a reset drops the whole
-  world, so a restart afterward must not resurrect pre-reset semantic
-  memories. `reset()` logs a `[server]` line confirming the clear.
+  reads `MEMORY_STORE_PATH` if present, rebuilds via `import_entries()`
+  (re-embedding with offline hashing-trick `embed_text()` — no LLM call).
+  Absent file → empty (`_load_status = ("absent", 0)`). Corrupt/unparseable →
+  empty, tagged `("corrupt", 0)`, never raises.
+- **Startup observability.** One `[server]` line logs load status, entry count,
+  path; `session_logger.log_benchmark("memory_store_loaded", entry_count)` once.
+- **Per-session inspection mirror.** `mirror_path=os.path.join(
+  session_logger.dir, "memory.json")`. Every `_persist()` (debounced by
+  `MEMORY_PERSIST_EVERY`, flushed on `clean()`) writes stable path first,
+  then best-effort mirrors (entries minus `vec`) to session log dir. Mirror
+  write in its own `try/except OSError` — failure never affects stable store.
+- **Reset semantics.** `/control/reset` → `SimEngine.reset()`
+  (`mixin_snapshot.py:52`) calls `memory_store.clear()`, wiping in-memory
+  entries AND flushing empty store to `MEMORY_STORE_PATH` (matching
+  `_piano_module_cache` wipe-on-reset precedent).
 
 ### Wiki-style compounding memory (`WIKI_MEMORY`, default False) {#wiki-memory}
 
@@ -886,16 +774,14 @@ adding any new LLM call site or timer — it upgrades what
 
 ## Decision handling
 
-`extract_json_decision(text)` (server.py) fallback ladder: (1) strip
-markdown code fences, try `json.loads` on the whole text; (2) scan for the
-first balanced `{...}` block via brace-depth counting and parse that; (3) regex
-for a bare `"action": "..."` (and best-effort `target`/`message`) to build a
-minimal decision dict when the JSON is truncated/malformed. Returns `None` if
-even the action regex fails. `lm_message_text()` (server.py) reads Ollama's
-`message.content` — there is no `reasoning_content` fallback channel anymore
-(that was an LM Studio quirk); with `think:false` sent on every call, content
-should already be clean JSON, but as defense in depth any `<think>...</think>`
-block that leaks in anyway is stripped rather than fed to the JSON parser.
+`extract_json_decision(text)` (server.py) fallback ladder: (1) strip markdown
+fences, `json.loads` on whole text; (2) first balanced `{...}` via brace-depth;
+(3) regex for bare `"action": "..."` (and best-effort `target`/`message`) when
+JSON is truncated/malformed. Returns `None` if action regex fails.
+`lm_message_text()` (server.py) reads Ollama's `message.content` — no
+`reasoning_content` fallback (LM Studio quirk); with `think:false` on every
+call, content should be clean JSON, but any `<think>...</think>`
+block that leaks is stripped before the JSON parser.
 
 `normalize_decision(decision, agent_data)` (`simulation/_server/decision_validation.py:928`,
 imported into server.py's namespace — see [01-architecture.md](01-architecture.md)) — per-action
@@ -957,23 +843,18 @@ context-overflow slim retry (item 3), and the answer-quality decision retry
 (below) — routes through a local `_post_ollama(body, timeout)` closure that
 counts calls (`llm_calls_made`, local to the invocation, not shared/global)
 and raises `LLMBudgetExhausted` once the budget is spent, rather than posting
-a 5th request. `LLMBudgetExhausted` is deliberately **not** a
-`requests.exceptions.RequestException` subclass, so it can never be mistaken
-for a network failure at any call site; every catch site returns
-`{"error": "llm budget exhausted", "action": "rest"}` immediately — a
-distinct error tag from `"llm offline"`/`"llm timeout"`, never confusable
-with either in `llm.jsonl`. Worst case under the current retry ladder is 4
-calls: initial + format-degrade + context-overflow slim retry + one
-answer-quality retry.
+a 5th request. `LLMBudgetExhausted` is **not** a `requests.exceptions.RequestException`
+subclass, so it cannot be mistaken for a network failure; every catch site
+returns `{"error": "llm budget exhausted", "action": "rest"}` — distinct from
+`"llm offline"`/`"llm timeout"`. Worst case: initial + format-degrade +
+context-overflow slim retry + one answer-quality retry = 4 calls.
 
 **Orphan caveat (Phase 0 operational finding):** Ollama does not cancel
 server-side generation when a client aborts/times out a `stream:false`
-request — an orphaned timed-out request keeps consuming a queue slot. None of
-the paths below retry on a `requests.exceptions.RequestException` (including
-`Timeout`); every one returns immediately instead, so this code never
-compounds queue depth with a naive retry-on-timeout loop. Timeouts are tagged
-`"llm timeout"` (not `"llm offline"`) so the engine can distinguish orphan
-pressure from a dead endpoint.
+request — orphaned timed-out requests keep consuming a queue slot. No path
+below retries on `requests.exceptions.RequestException` (including `Timeout`);
+each returns immediately. Timeouts are tagged `"llm timeout"` (not `"llm
+offline"`) so the engine can distinguish orphan pressure from a dead endpoint.
 
 **Orphan timeout backpressure (engine):** `_think_job` increments
 `_llm_orphan_timeouts` on `"llm timeout"`; `run_piano_module` HTTP timeouts
@@ -997,68 +878,42 @@ error) clears both `llm_cooldown_until` and `_llm_orphan_timeouts`.
    offline", "action": "rest"}` immediately. Unlike LM Studio's
    `"local-model"` alias retry, a missing `sim-smart`/`sim-fast` is a setup
    problem, not a transient one.
-3. **context-overflow retry**: on `is_context_overflow_error` — Ollama's
-   structured HTTP 400 `{"error": {"type": "exceed_context_size_error",
-   "message": ..., "n_prompt_tokens":, "n_ctx":}}` (or, as a fallback for any
-   future Ollama build that changes the type string, a message containing
-   both "context" and "exceed") — rebuild the payload with `slim=True`
-   (`SYSTEM_PROMPT_SLIM`, no memory line, no recent conversations) and retry
-   once; any further failure falls through to `bad_response_fallback` tagged
-   `error="context_overflow"`. This replaces LM Studio's string-sniffed
-   "Context size has been exceeded." error and its silent-truncation
-   assumption — Ollama 0.32.3 does **not** silently truncate, it errors
-   instead (Phase 0 finding #5, ollama_config.md).
+3. **context-overflow retry**: on `is_context_overflow_error` — Ollama HTTP 400
+   `{"error": {"type": "exceed_context_size_error", "message": ...,
+   "n_prompt_tokens":, "n_ctx":}}` (or fallback: message containing both
+   "context" and "exceed") — rebuild with `slim=True` (`SYSTEM_PROMPT_SLIM`,
+   no memory line, no recent conversations) and retry once; further failure →
+   `bad_response_fallback` tagged `error="context_overflow"`. Replaces LM
+   Studio's string-sniffed "Context size has been exceeded." — Ollama 0.32.3
+   does **not** silently truncate, it errors (Phase 0 finding #5,
+   ollama_config.md).
 
 **Same-turn answer-quality retry (`DECISION_RETRY_ENABLED`, default on).**
-Distinct from items 1-3 above, which retry on transport/format-level
-failures: this retries once, same turn, purely on *answer quality* — either
-the reply's JSON was unparseable, or `normalize_decision()`'s raw result
-carries the `_fallback` sentinel (see below). At most **one** retry per turn
-total across both trigger points (a shared `decision_retries` local, `0` on
-the common path, set to `1` the moment either point fires, guarding both so
-a turn can retry for unparseable JSON OR a `_fallback` decision, never
-both):
+Retries once, same turn, on *answer quality* — unparseable JSON or
+`normalize_decision()` raw result carrying `_fallback`. At most **one** retry
+per turn across both triggers (shared `decision_retries` local):
 
-- **Trigger 1 — unparseable JSON.** `extract_json_decision()` returns
-  `None`. Feedback text is truncation-specific when the failed response's
-  `done_reason == "length"` (Phase 0 probe finding: the dominant real cause
-  of unparseable replies is generation truncation, not a malformed answer —
-  a generic "could not be parsed" message would mislead the model into
-  re-emitting the same oversized reply) — `"your previous reply was cut off
-  before it finished ...; reply with a smaller, more compact JSON
-  object"` (plus a sprite-grid hint on `sprite_design_only` turns) — otherwise
-  a generic `"your previous reply could not be parsed as JSON; reply with
-  only the JSON decision object."`
-- **Trigger 2 — `_fallback` on the raw `normalize_decision()` result.**
-  Feedback text is the concrete rejection reason: whichever
-  `*_rejection_note` key is present on the fallback (see
-  `_REJECTION_NOTE_KEYS` — `sprite_rejection_note`, `council_rejection_note`,
-  `terraform_rejection_note`, `upgrade_rejection_note`, `rejection_note`),
-  read via `_rejection_feedback_text()`; falls back to a generic
-  "valid JSON but rejected during validation" text when the fallback carries
-  no note (e.g. an invalid `talk_to_nearby`, which is redirected without one)
-  — distinct from the unparseable-JSON path's own generic wording, since here
-  the reply did parse.
+- **Trigger 1 — unparseable JSON.** `extract_json_decision()` returns `None`.
+  Truncation-specific feedback when `done_reason == "length"` (Phase 0:
+  dominant cause) — `"your previous reply was cut off before it finished ...;
+  reply with a smaller, more compact JSON object"` (plus sprite-grid hint on
+  `sprite_design_only` turns) — otherwise generic parse-failure message.
+- **Trigger 2 — `_fallback` on raw `normalize_decision()` result.** Feedback
+  is the concrete rejection reason via `_rejection_feedback_text()` on
+  whichever `*_rejection_note` key is present (`_REJECTION_NOTE_KEYS`); generic
+  "valid JSON but rejected during validation" when no note (e.g. invalid
+  `talk_to_nearby`).
 
 `retry_feedback` threads through `build_decision_payload()` →
 `build_user_prompt()` → `build_sprite_upgrade_prompt()` /
-`build_invention_prompt()`. On a **council turn** it is prefixed onto the
-user message as `"RETRY (previous reply rejected): {feedback}\n\n" +
-user_content` inside `build_decision_payload()`; for every other prompt it is
-prepended to the `behavior_nudge` line inside `build_user_prompt()` (and
-likewise onto the special-turn prompts' own feedback line). The retry itself is dispatched
-through `_post_ollama` (so it spends from the same `LLM_CALLS_PER_TURN_MAX`
-budget as every other call) via a `_decision_retry(feedback_text,
-slim_used)` helper that rebuilds the payload with `retry_feedback` set and
-reuses the same `slim` state (`True` if the turn already took the
-context-overflow branch). It deliberately does **not** catch
-`LLMBudgetExhausted` / `requests.exceptions.RequestException` — those
-propagate exactly like every other call site (immediate `{"error": ...}`
-return, no fallback, no further retry). **Network failures never retry** —
-the existing Ollama orphaned-generation constraint (see the Orphan caveat
-above) is unchanged; this retry only ever fires once Ollama has actually
-returned something evaluable. New `llm.jsonl` field **`decision_retries`**:
-`0` on the common path, `1` the one time this retry fired for a given turn.
+`build_invention_prompt()`. On a **council turn** prefixed onto the user
+message as `"RETRY (previous reply rejected): {feedback}\n\n" + user_content`
+inside `build_decision_payload()`; otherwise prepended to `behavior_nudge` in
+`build_user_prompt()` (and special-turn prompts' feedback line). Retry via
+`_decision_retry(feedback_text, slim_used)` through `_post_ollama`, reusing
+`slim` state. Does **not** catch `LLMBudgetExhausted` /
+`requests.exceptions.RequestException` — network failures never retry. New
+`llm.jsonl` field **`decision_retries`**: `0` common path, `1` when retry fired.
 
 **Terminal candidate-choice step (`FALLBACK_AI_CHOICE_ENABLED`, default on).**
 Reached only once the answer-quality retry above is exhausted with no
@@ -1101,17 +956,10 @@ step actually fires): `fallback_triggered` (`True`), `fallback_candidate_count`,
 `fallback_ai_latency_ms` (present only when the choice call was actually
 attempted).
 
-**`_fallback` sentinel.** `role_fallback_action()` is a thin wrapper over
-`_role_fallback_action()` that stamps `decision["_fallback"] = True` on
-every return path — the internal ladder function has many return points,
-one per role/phase branch, so a single wrapper call site provably covers
-every path rather than trusting each branch to remember to self-stamp. This
-is the one signal that always fires, including for `normalize_decision()`
-return paths that carry no `*_rejection_note` (e.g. its non-dict guard).
-The key is inert for `apply_decision()`, which reads only named fields, but
-stays in the logged decision because it makes `llm.jsonl` greppable and is
-what both the same-turn retry (trigger 2 above) and the terminal
-candidate-choice step key off of.
+**`_fallback` sentinel.** `role_fallback_action()` wraps `_role_fallback_action()`
+and stamps `decision["_fallback"] = True` on every return path — one wrapper
+covers all branches. Inert for `apply_decision()` but greppable in `llm.jsonl`;
+key for same-turn retry (trigger 2) and terminal candidate-choice step.
 
 **Four server-side cognition flags.** `DECISION_RETRY_ENABLED`,
 `FALLBACK_AI_CHOICE_ENABLED`, `FALLBACK_AI_CHOICE_TIMEOUT_S`, and
@@ -1148,87 +996,63 @@ settings table); it no longer affects which model id is used. No fallback id
 `sprite_design_only`, `invention_only`, `role=="elder"`, or
 `invention_status` starting with `"REQUIRED"`.
 `HIGH_STAKES_ENABLED_REASONS = {"emergency", "election", "treaty_vote"}`
-(`_server/model_routing.py:66`) — extra reasons that ALSO route to
-`THINKING_TIMEOUT_S`/thinking-on, gated by a rolling-window limiter:
+(`_server/model_routing.py:66`) — extra reasons routing to
+`THINKING_TIMEOUT_S`/thinking-on, gated by rolling-window limiter:
 `EXTRA_THINKING_PER_WINDOW=4` per `EXTRA_THINKING_WINDOW_S=60` seconds
 (`_server/model_routing.py:74-76`), thread-safe via `_extra_thinking_lock`.
-Deliberately excluded from the enabled-reasons set: `elder_blueprint_review`
-(redundant — already high-stakes via the elder-role check) and
-`repeated_rejections` (too frequent, would dominate the budget).
+Excluded: `elder_blueprint_review` (redundant — already high-stakes via elder
+role) and `repeated_rejections` (too frequent, would dominate budget).
 
 `resolve_high_stakes(data)` (`_server/model_routing.py:130`) resolves
-`is_high_stakes_turn` exactly ONCE per request and stamps
-`data["_high_stakes_resolved"]`, because the reasons budget is stateful and
-`is_high_stakes_turn()` is called from multiple sites per request (payload
-build, timeout choice, the context-overflow retry) that must all agree
-without re-consuming the budget.
+`is_high_stakes_turn` once per request and stamps `data["_high_stakes_resolved"]`
+— the reasons budget is stateful and `is_high_stakes_turn()` is called from
+multiple sites per request (payload build, timeout choice, context-overflow
+retry) that must agree without re-consuming the budget.
 
 ## Concurrency & context sizing
 
-`MAX_CONCURRENT_LLM = 3` (`constants.py:1300`, `ThreadPoolExecutor` bound on the
-engine's decision-think worker pool, `self._executor`) — matches
-`OLLAMA_NUM_PARALLEL=3` (ollama_config.md). `LLM_MIN_GAP_MS = 250` (minimum
-spacing between decision dispatches). `LLM_ORPHAN_TIMEOUT_THRESHOLD = 3` and
+`MAX_CONCURRENT_LLM = 3` (`constants.py:1300`, `ThreadPoolExecutor` on
+`self._executor`) — matches `OLLAMA_NUM_PARALLEL=3` (ollama_config.md).
+`LLM_MIN_GAP_MS = 250`. `LLM_ORPHAN_TIMEOUT_THRESHOLD = 3` and
 `LLM_ORPHAN_COOLDOWN_S = 30.0` gate new decision dispatches after repeated
-client-side timeouts (see Retries & degradation). Context formula under Ollama is
-**per-model**, not a shared token-budget-divided-by-slots formula like LM
-Studio's: each model (`sim-smart`, `sim-fast`) has its own fixed `num_ctx`
-baked into its Modelfile (20480 / 4096 respectively — see
-`ollama/Modelfile.smart`, `ollama/Modelfile.fast`), and `OLLAMA_NUM_PARALLEL`
-governs how many concurrent requests share that per-model context budget
-(each parallel slot gets a fraction of `num_ctx`, similar in spirit to LM
-Studio's old per-slot division, but configured per-model rather than as one
-combined pool). Decision-call prompts (~3,100-3,400 routine tokens, up to
-~6,163 for invention-only) must stay under the `sim-smart` per-slot share at
-`OLLAMA_NUM_PARALLEL=3` against `num_ctx=20480`; the structured
-`exceed_context_size_error` (see Retries) is the enforced backstop if a
-prompt exceeds it.
+client-side timeouts (see Retries). Context formula under Ollama is **per-model**,
+not shared token-budget-divided-by-slots like LM Studio: each model has its
+own fixed `num_ctx` in its Modelfile (20480 / 4096 — `ollama/Modelfile.smart`,
+`ollama/Modelfile.fast`); `OLLAMA_NUM_PARALLEL` governs concurrent requests
+sharing that per-model context budget. Decision prompts (~3,100-3,400 routine,
+up to ~6,163 invention-only) must stay under `sim-smart`'s per-slot share at
+`OLLAMA_NUM_PARALLEL=3` against `num_ctx=20480`; `exceed_context_size_error`
+(see Retries) is the enforced backstop.
 
-`PIANO_MODULES` (`constants.py:483`, default `True` since Sid-parity Phase 1) — the
+`PIANO_MODULES` (`constants.py:483`, default `True` since Sid-parity Phase 1) —
 Perception/Social/Desire/Reflection module fan-out is the default cognition
-path, not experimental. Module calls run on their own pool,
-`self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`), bounded independently of
-`MAX_CONCURRENT_LLM` so a module backlog can never starve the decision path —
-`_run_piano_modules` submits to `piano_workers` and waits on the futures, it
-never dispatches into `self._executor`. Decision-path fan-out and the gated
-always-on pulse share one inflight set, `_piano_refresh_inflight` (keyed by
+path. Module calls run on `self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`),
+bounded independently of `MAX_CONCURRENT_LLM` — `_run_piano_modules` submits
+to `piano_workers`, never `self._executor`. Decision-path fan-out and the
+gated always-on pulse share `_piano_refresh_inflight` (keyed by
 `(agent_name, module)`): before each submit wave `_run_piano_modules` checks
-`_piano_free_slots()` and never queues more work than
-`PIANO_CONCURRENT_LLM - len(_piano_refresh_inflight)` — the executor therefore
-cannot grow an unbounded backlog when several think jobs overlap. Within one
-turn it submits in waves (wait for a slot, then dispatch the next due module)
-so a single agent still completes its stagger when no other PIANO work holds
-the pool. When the pool is saturated at think snapshot time (`free slots == 0`),
-`_think_job` passes `force_cache_only=True` and the fan-out assembles reports
-from cache only. Modules skipped for saturation (no fresh cache) increment
+`_piano_free_slots()` and never queues more than
+`PIANO_CONCURRENT_LLM - len(_piano_refresh_inflight)`. Within one turn it
+submits in waves (wait for a slot, dispatch next due module). When pool is
+saturated at think snapshot time (`free slots == 0`), `_think_job` passes
+`force_cache_only=True`. Modules skipped for saturation increment
 `piano_module_drops` alongside timeouts/failures. Every module call routes to
-`MODEL_FAST` with a hard, non-blocking `PIANO_MODULE_TIMEOUT_S = 15s` timeout
-(server.py `run_piano_module`); a timeout is dropped, never retried (per the
-orphan caveat in Retries), logged to `llm.jsonl` with `"error":
-"piano_module_timeout"`, and counted in the
-`piano_module_drops` benchmark. Reports are cached per `(agent, module)` with
-a `PIANO_MODULE_CACHE_TTL = 2` module-tick TTL so the perception/social/desire/
-reflection stagger (perception+desire every module-tick, social every 2nd,
-reflection every 3rd) fills an off-tick module's slot from its last real
-report instead of an empty one. That decision-payload fill is age-labeled —
-a fresh, same-tick report renders as the bare `module: text` form, while an
-off-tick fill served from cache renders as `module (N turns ago): text` so
-the Cognitive Controller can discount stale advice.
+`MODEL_FAST` with `PIANO_MODULE_TIMEOUT_S = 15s` (`run_piano_module`); timeout
+is dropped, never retried, logged `"error": "piano_module_timeout"`. Reports
+cached per `(agent, module)` with `PIANO_MODULE_CACHE_TTL = 2` module-tick TTL
+(perception+desire every module-tick, social every 2nd, reflection every 3rd);
+fresh same-tick reports render as bare `module: text`, off-tick fills as
+`module (N turns ago): text` so the Cognitive Controller can discount stale
+advice.
 
-**Module prompt contract (Phase 1).** `run_piano_module` leads its user
-message with `You ARE {agent_name}. Context: {context}` so the report's acting
-agent is explicit rather than merely embedded in context. Each of the four
-static `MODULE_PROMPTS` requires references only to agents, resources, and
-numbers present in that context and prohibits inventing a name, quantity, or
-statistic. The Social module additionally must never suggest coordinating
-with, messaging, or requesting from that same agent. These reports remain
-advisory input to the Cognitive Controller; this contract does not alter
-decision actions or validation. `PIANO_MODULE_MAX_TOKENS = 90` is the
-production one-sentence output budget (raised from 60 after the repeatable
-module-quality screen's guarded 90-token variant reduced the recorded Phase 0
-grounded-wrong modal count 1→0 with no category regression). The screen reads
-that constant directly from `server.py`; its `--max-tokens 60` override
-preserves the Phase 0 budget for controlled comparisons.
+**Module prompt contract (Phase 1).** `run_piano_module` leads with
+`You ARE {agent_name}. Context: {context}`. Each `MODULE_PROMPTS` requires
+references only to agents, resources, and numbers present in context and
+prohibits inventing names, quantities, or statistics. Social module must never
+suggest coordinating with, messaging, or requesting from that same agent.
+Advisory input to the Cognitive Controller only. `PIANO_MODULE_MAX_TOKENS = 90`
+(raised from 60 after module-quality screen: guarded 90-token variant reduced
+grounded-wrong modal count 1→0 with no category regression).
 
 ### Gated always-on PIANO (`ALWAYS_ON_MODULES`, default False)
 
@@ -1259,19 +1083,16 @@ pulse. The Attempt-2 freshness target was median note age <=120 seconds, with
 decision p50 as the latency tiebreak after freshness and refresh-failure rate
 are acceptable.
 
-**Phase B gate outcome: FAILED, machinery stays dark.** Attempt 2's first
-treatment soak (batch 2) missed both latency (+17.73%) and freshness gates.
-Its permitted retune, batch 1, passed latency on re-soak (+13.47%, within
-+15%) but failed freshness (median note age 619.0s, all 39 pulses dispatching
-exactly 1 refresh with zero empty pulses) — one refresh per 45-second pulse
-cannot keep the full note set fresh. No `MODULE_PULSE_MAX_BATCH` value
-satisfies both gates simultaneously on the single-GPU reference hardware
-(contention favors latency at low batch, throughput favors freshness at
-higher batch). Per the two-soak stop rule, `ALWAYS_ON_MODULES` is rolled back
-to `False` and `MODULE_PULSE_MAX_BATCH` restored to its Phase A default of 2;
-full numbers are recorded in `ollama_config.md`. The scheduler code above
-remains intact and exercised by the deterministic smoke, dark until a second
-GPU or a materially faster/smaller fast model is available to retry.
+**Phase B gate outcome: FAILED, machinery stays dark.** Attempt 2 batch 2
+missed latency (+17.73%) and freshness gates. Batch 1 retune passed latency
+(+13.47%, within +15%) but failed freshness (median note age 619.0s, all 39
+pulses dispatching exactly 1 refresh, zero empty pulses) — one refresh per
+45-second pulse cannot keep the full note set fresh. No `MODULE_PULSE_MAX_BATCH`
+value satisfies both gates on single-GPU reference hardware. Per two-soak stop
+rule, `ALWAYS_ON_MODULES` rolled back to `False`, `MODULE_PULSE_MAX_BATCH`
+restored to 2; full numbers in `ollama_config.md`. Scheduler code remains,
+exercised by deterministic smoke, dark until second GPU or faster/smaller fast
+model.
 
 In this mode `_run_piano_modules` is decision-path assembly only: it launches
 no futures and labels cached reports with wall-clock age, for example
@@ -1294,21 +1115,14 @@ so a restart no longer runs every module blind for up to
 `_piano_module_cache` to `{}` — only `restore_state` rehydrates it.
 
 **Cross-module visibility (working-memory half-step).** Before dispatching
-`to_run` for an agent's turn, `_run_piano_modules` builds one shared
-`last_reports=` suffix from every cached report still within
-`PIANO_CROSS_CONTEXT_TTL = 6` module-ticks (a separate, more tolerant TTL
-than `PIANO_MODULE_CACHE_TTL` above, which only gates the decision payload's
-off-tick fills) and appends it (`context + "; " + suffix`) to the context
-string every module dispatched this turn receives, e.g.
-`last_reports=desire(1 ago): stockpile wood | social(2 ago): ask Sage about
-the blueprint`. Entries are formatted `module(N ago): text`; a module seeing
-its own previous report is intentional (continuity, especially for
-Reflection). `MODULE_PROMPTS` (server.py) each carry one added clause telling
-the module to build on or correct prior reports rather than repeat them. No
-extra LLM call is added — the suffix rides on the existing module calls.
-Reports are capped at 200 chars (server.py), so the suffix adds at most
-~4 × 60 ≈ 240 tokens per module call, comfortably inside the ~3,400-token/slot
-formula above with no change to the formula itself.
+`to_run`, `_run_piano_modules` builds one shared `last_reports=` suffix from
+every cached report within `PIANO_CROSS_CONTEXT_TTL = 6` module-ticks (more
+tolerant than `PIANO_MODULE_CACHE_TTL` above) and appends it to every module's
+context this turn, e.g. `last_reports=desire(1 ago): stockpile wood | social(2
+ago): ask Sage about the blueprint`. `MODULE_PROMPTS` each carry one added
+clause to build on or correct prior reports. No extra LLM call — suffix rides
+on existing module calls. Reports capped at 200 chars (server.py), suffix adds
+at most ~4 × 60 ≈ 240 tokens per call.
 
 Revised context picture with PIANO on, under Ollama's per-model `num_ctx`
 scheme (see "Concurrency & context sizing" above): decision calls
@@ -1337,22 +1151,17 @@ summarize.
 
 ### Scale headroom (Phase 6) — concurrency unchanged
 
-Sid-parity Phase 6 raises the roster ceiling to `MAX_ROSTER_SIZE = 20` (see
-specs/02-engine-core.md) but deliberately does **not** raise
-`MAX_CONCURRENT_LLM` or `PIANO_CONCURRENT_LLM` — the concurrency budget above
-was sized for the loaded Ollama config (`OLLAMA_NUM_PARALLEL=3`,
-`OLLAMA_MAX_LOADED_MODELS=2`) and reopening it needs its own measured soak,
-not a side effect of a roster-size change. `MAX_CONCURRENT_LLM` +
-`LLM_MIN_GAP_MS` are the throughput cap regardless of roster size; the actual
-scaling risk at a bigger roster was *fairness*, not throughput — more agents
-contending for the same fixed number of slots meant some agents could lose
-the pool-full race indefinitely under the old fixed-roster-order dispatch
-(see "Dispatch fairness (Phase 6)" in specs/02-engine-core.md). That ordering
-fix is what keeps average think latency reasonable at roster 20 without
-touching either concurrency constant; per-agent `thinkInterval` staggering is
-otherwise unchanged (still `360 + i*60`, `240` for the elder), so total LLM
-call volume per unit time still scales with roster size — a roster of 20 at
-the default cadence does dispatch more decision calls/minute in aggregate
-than a roster of 8, but no single agent is starved by it, and the existing
-worker-pool cap prevents that aggregate demand from exceeding what the loaded
-Ollama config already serves for the default roster.
+Sid-parity Phase 6 raises roster ceiling to `MAX_ROSTER_SIZE = 20` (see
+specs/02-engine-core.md) but does **not** raise `MAX_CONCURRENT_LLM` or
+`PIANO_CONCURRENT_LLM` — concurrency budget was sized for loaded Ollama config
+(`OLLAMA_NUM_PARALLEL=3`, `OLLAMA_MAX_LOADED_MODELS=2`) and reopening it
+needs its own measured soak. `MAX_CONCURRENT_LLM` + `LLM_MIN_GAP_MS` are the
+throughput cap regardless of roster size; the scaling risk at bigger roster was
+*fairness*, not throughput — more agents contending for fixed slots under old
+fixed-roster-order dispatch (see "Dispatch fairness (Phase 6)" in
+specs/02-engine-core.md). That ordering fix keeps average think latency
+reasonable at roster 20 without touching concurrency constants;
+`thinkInterval` staggering unchanged (`360 + i*60`, `240` for elder). Roster
+20 at default cadence dispatches more decision calls/minute in aggregate than
+roster 8, but no single agent is starved, and the worker-pool cap prevents
+aggregate demand from exceeding what the loaded Ollama config serves.

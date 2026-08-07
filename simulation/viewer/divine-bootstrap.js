@@ -1,5 +1,5 @@
 // =====================================================================
-// Divine Console (Sovereign God mode Phase 7, docs/plan-sovereign-god-mode-
+// Divine Console (Sovereign God mode Phase 7, docs/archive/plan-sovereign-god-mode-
 // v2.md "Viewer: Divine Console"). Strictly additive and feature-gated on
 // GOD_MODE_ENABLED_FLAG (mirrors config.flags.GOD_MODE_ENABLED from /state,
 // see applyFlags above): every function below is a no-op, and the panel/
@@ -9,7 +9,7 @@
 // /control/god/* on an explicit user click (Connect/Preview/Apply/Cancel/
 // Refresh).
 //
-// Security contract (docs/plan "Feature gate and security contract" +
+// Security contract (docs/archive/plan-sovereign-god-mode-v2.md "Feature gate and security contract" +
 // "Stored-content safety"):
 //   - the token lives in the `godToken` variable only -- never localStorage,
 //     optionally sessionStorage behind the explicit "remember" checkbox;
@@ -293,7 +293,7 @@ function godAgentFilterText() {
   return el ? el.value.trim().toLowerCase() : "";
 }
 
-// Both simulation time AND raw frames, per docs/plan UX requirement.
+// Both simulation time AND raw frames, per docs/archive/plan-sovereign-god-mode-v2.md UX requirement.
 function godDurationLabel(frames) {
   return `${godFramesToSeconds(frames)}s (${Math.round(Number(frames) || 0)}f)`;
 }

@@ -115,8 +115,6 @@ Related action: `hunt_wildlife`
 ([07-actions.md](07-actions.md)); hunter specialty `meat`
 ([06-agents.md](06-agents.md)).
 
-([06-agents.md](06-agents.md)).
-
 ## Survival role rebalance (`EMERGENT_ROLES`)
 
 `_village_needed_role()` branch **(2) survival-critical** replaces the old

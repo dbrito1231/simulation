@@ -172,11 +172,6 @@ Full invention-council mechanics (tier gates, duplicate-effect-vector detection,
 Sage-emergency interaction, safeguards against runaway proposal spam):
 [09-systems-society.md](09-systems-society.md).
 
-## Action-sync invariant reminder
+## Action-sync reminder
 
-Any change to this catalog must be mirrored across `DECISION_ACTIONS`,
-`DECISION_SCHEMA`, `SYSTEM_PROMPT` (server.py), `apply_decision`
-(`mixin_decisions.py`) + `available_actions` (`mixin_think_job.py`), and
-`ACTION_LABELS` (viewer/sidebar.js, display
-only) — see [01-architecture.md](01-architecture.md#action-sync-invariant) for the
-full table of locations.
+See [01-architecture.md](01-architecture.md#action-sync-invariant).

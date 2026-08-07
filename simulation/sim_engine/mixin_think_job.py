@@ -1,29 +1,20 @@
 """Phase 6e mixin: LLM think-job + per-frame tick loop slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_build_think_payload` through
+class body — the contiguous method range from `_build_think_payload` through
 `stop` (formerly core.py lines ~1793-3404). Covers: the large ~840-line
 `_build_think_payload` LLM-context builder (kept as a single undivided
-method -- splitting its body would be a logic change, not a pure move),
+method — splitting its body would be a logic change, not a pure move),
 PIANO module helpers (context dirtying, always-on module reports, module
 pulsing/throttling), the `_think_job` worker-pool callback and
 `_schedule_think` dispatch, and the per-frame tick (`_tick_once`,
 `_run_loop`, `start`, `stop`).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _ThinkJobMixin, ...)` in core.py can reference this
-class by name at class-definition time, and so every bare-name global
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep
-working. See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _ThinkJobMixin:
@@ -1457,7 +1448,7 @@ class _ThinkJobMixin:
             if GOD_MODE_ENABLED:
                 # Sovereign God mode (Phase 2): bounded scan (activeEvents
                 # capped at 8), immediately after frameTick advances and
-                # before every other consumer -- see docs/plan-sovereign-god-
+                # before every other consumer -- see docs/archive/plan-sovereign-god-
                 # mode-v2.md's "Expiry ownership" section. In Phase 2 there
                 # are no timed effects yet (only the no-mechanics
                 # `proclamation` command applies), so this call is a cheap

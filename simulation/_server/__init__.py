@@ -1,5 +1,5 @@
 """Sibling helper package for simulation/server.py (Phase 5 modularization,
-pure move split, no behavior change -- see docs/plan-*.md for the phase plan
+pure move split, no behavior change -- see docs/archive/plan-*.md for the phase plan
 and specs/01-architecture.md for the module-layout summary).
 
 server.py stays the real, directly-runnable entry point: the Flask `app`

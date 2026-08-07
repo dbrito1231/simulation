@@ -1,7 +1,7 @@
 """Phase 6d mixin: Divine Matrix slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_current_directive` through
+class body — the contiguous method range from `_current_directive` through
 `_anointment_prompt_line` (formerly core.py lines ~1479-2633). Covers: the
 leader-directive helper, Divine Voice guidance-window/adherence tracking,
 Burning Bush conversational threads, Anointment (stigmata/oracle hints),
@@ -9,21 +9,11 @@ Identity Forge basics (snapshot/restore/blend/advance/close), Divine Matrix
 Phase 9 Architect Zones (paint/door/limbo mechanics), and Divine Matrix
 Phase 10 checkpoint helpers (create/restore/file-copy machinery).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _DivineMatrixMixin, ...)` in core.py can reference
-this class by name at class-definition time, and so every bare-name global
-(GOD_* constants, etc.) referenced in these method bodies keeps resolving
-against the one shared module dict -- required for scripts/*_smoke.py
-monkeypatches to keep working. See simulation/sim_engine/__init__.py for the
-full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _DivineMatrixMixin:

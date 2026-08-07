@@ -2,7 +2,7 @@
 closure / expiry / free-prose compiler slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_god_preview_evict_expired`
+class body — the contiguous method range from `_god_preview_evict_expired`
 through `god_compile_prose` (formerly core.py lines ~2137-2599). Covers: the
 in-memory bounded preview cache (`_god_preview_evict_expired`,
 `_god_preview_insert`), the in-memory bounded idempotency store
@@ -13,20 +13,11 @@ divine-effect and bargain expiry sweeps (`_expire_divine_effects`,
 free-prose compiler (`_god_compiler_prompt`, `_god_compiler_call_model`,
 `_god_compiler_parse`, `_log_compiler`, `god_compile_prose`).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _GodLifecycleMixin, ...)` in core.py can reference
-this class by name at class-definition time, and so every bare-name global
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep
-working. See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _GodLifecycleMixin:
@@ -59,7 +50,7 @@ class _GodLifecycleMixin:
             del self._god_requests[oldest_id]
 
     def _hash_request_id(self, request_id):
-        """Never log a raw client-supplied requestId verbatim (docs/plan
+        """Never log a raw client-supplied requestId verbatim (docs/archive/plan-sovereign-god-mode-v2.md
         Logging section: "Hash or redact request_id")."""
         if not request_id:
             return None
@@ -87,7 +78,7 @@ class _GodLifecycleMixin:
     # --- guidance closure (Phase 3: providence + private omens) ---
     def _close_providence(self, status):
         """Clears the single active providence slot exactly once, emitting
-        one audit record (docs/plan "Expiry ownership" + "Cancellable"
+        one audit record (docs/archive/plan-sovereign-god-mode-v2.md "Expiry ownership" + "Cancellable"
         reversibility). Returns the closed record, or None if none was
         active. Must be called with self.lock already held. Providence
         carries no memory-write contract -- only private omens do."""
@@ -109,7 +100,7 @@ class _GodLifecycleMixin:
         record's own `memoryWritten` flag so expiry, revocation, and
         replacement can never double-fire it, and restore-time re-closure of
         an already-closed omen (memoryWritten already True, or the key
-        already gone) is a safe no-op (docs/plan Phase 3 memory contract).
+        already gone) is a safe no-op (docs/archive/plan-sovereign-god-mode-v2.md Phase 3 memory contract).
         Must be called with self.lock already held."""
         god = self.civilization.get("godState")
         if not isinstance(god, dict):
@@ -163,7 +154,7 @@ class _GodLifecycleMixin:
                         # Shared with god_cancel's story_event branch: closes the
                         # event exactly once and, if it still owns the current
                         # providence slot, closes that too through the SAME
-                        # _close_providence path (docs/plan Phase 5: expiry
+                        # _close_providence path (docs/archive/plan-sovereign-god-mode-v2.md Phase 5: expiry
                         # closes every sub-effect of an event exactly once).
                         self._close_story_event(event, status)
                         if not restore and event.get("visibility", "public") == "public":
@@ -286,7 +277,7 @@ class _GodLifecycleMixin:
             if isinstance(expires, int) and ft >= expires:
                 self._settle_bargain(key, bush, "failure", "expiry")
 
-    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Optional
+    # --- Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md, Optional
     # Phase 8: free-prose story compiler) ---
     # This section NEVER mutates world state and NEVER calls god_apply --
     # god_compile_prose's only side effect is populating the SAME
@@ -302,7 +293,7 @@ class _GodLifecycleMixin:
         """Strict system+user prompt for the compiler model. Lists every
         known modifier key + bound and the three known primitive kinds
         inline, with two worked few-shot examples -- a small model needs the
-        shape SHOWN, not merely described (docs/plan "Optional Phase 8")."""
+        shape SHOWN, not merely described (docs/archive/plan-sovereign-god-mode-v2.md "Optional Phase 8")."""
         modifier_lines = "\n".join(
             f'  - "{k}": number in [{lo}, {hi}]' for k, (lo, hi) in GOD_MODIFIER_RANGES.items())
         system = (
@@ -357,7 +348,7 @@ class _GodLifecycleMixin:
         if lm_fn is None:
             return None, 0
         try:
-            # Model routing (docs/plan-sovereign-god-mode-v2.md "Optional
+            # Model routing (docs/archive/plan-sovereign-god-mode-v2.md "Optional
             # Phase 8" + "Model routing and implementation ownership"):
             # sim-fast ALREADY serves PIANO/background cognition, and past
             # sim-fast contention increased PIANO module drops. This phase
@@ -407,7 +398,7 @@ class _GodLifecycleMixin:
         return payload, None
 
     def _log_compiler(self, prose, model, latency_ms, status, reason=None, preview_id=None):
-        """One record per compile attempt (docs/plan Logging section:
+        """One record per compile attempt (docs/archive/plan-sovereign-god-mode-v2.md Logging section:
         "request text, model, latency, and result"). NEVER receives or logs
         SIM_GOD_TOKEN -- this method has no such parameter. Swallows any
         logging failure, matching every other divine log call in this
@@ -424,7 +415,7 @@ class _GodLifecycleMixin:
     def god_compile_prose(self, prose):
         """Turn free operator prose into a DRAFT typed story_event preview.
         NEVER mutates world state; NEVER calls god_apply. Dual-gated on
-        GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED (docs/plan: "the
+        GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED (docs/archive/plan-sovereign-god-mode-v2.md: "the
         contention gate is not cleared by shipping" -- both flags must be
         explicitly on). Enforces its own rate limit and session cap,
         distinct from agent cognition's MAX_CONCURRENT_LLM pool."""
@@ -449,7 +440,7 @@ class _GodLifecycleMixin:
                         "reason": f"rate limited: at most one compile per {GOD_COMPILER_MIN_INTERVAL_SEC:.0f}s"}
 
             # Bump BEFORE the model call so a hung/failed/rejected compile
-            # still counts against the session cap and interval (docs/plan:
+            # still counts against the session cap and interval (docs/archive/plan-sovereign-god-mode-v2.md:
             # "Bump session count regardless of success").
             state["lastCompileWallTime"] = now
             state["compileCount"] += 1

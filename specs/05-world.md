@@ -167,9 +167,8 @@ Gated by `ECOLOGY_ENABLED` (default True). Each district carries a
   multiplier is deliberately fractional and never floored to exactly 0:
   combined with `WEATHER_DWELL_TICKS` already bounding how long `"storm"`/
   `"clearing"` can last (a few minutes, see the Weather section below), a
-  district always keeps inching toward recovery even mid-storm — the
-  plan-mandated floor against an unrecoverable starvation spiral, achieved
-  without a second bespoke duration/cap mechanism. `WEATHER_GOVERNANCE_ENABLED`
+  district always keeps inching toward recovery even mid-storm.
+  `WEATHER_GOVERNANCE_ENABLED`
   off is byte-identical to Phase 4 alone. Reuses the exact scarcity/recovery
   narration lines above (no new logging code) — see
   [09-systems-society.md](09-systems-society.md) for the emergency-rule

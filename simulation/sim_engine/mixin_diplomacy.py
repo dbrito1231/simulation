@@ -1,32 +1,20 @@
 """Phase 6c mixin: Path 1 tiles/terrain and diplomacy slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from the Path 1 tool-tiers section
+class body — the contiguous method range from the Path 1 tool-tiers section
 through `_deliver_caravan_action` (formerly core.py lines ~3855-4675, before
 Phase 6b's extraction shifted line numbers; re-located by method name for
 this move). Covers: Path 1 tool tiers, composable tiles, terrain mutation,
 Path 1 diplomacy (settlements/caravans/treaties), and the Living-ecosystem
 Phase 3 cosmetic shipment records.
 
-Loaded the same way as core.py, mixin_world_state.py, and
-mixin_structures_economy.py: `simulation/sim_engine/__init__.py` exec()s this
-file's source into its own module namespace (not a plain submodule import),
-BEFORE it exec()s core.py, so that `class SimEngine(_WorldStateMixin,
-_StructuresEconomyMixin, _DiplomacyMixin)` in core.py can reference this
-class by name at class-definition time, and so every bare-name global
-(TOOL_TIERS_ENABLED, COMPOSABLE_BUILD_ENABLED, TERRAIN_TILES_ENABLED,
-PATH1_DIPLOMACY_ENABLED, etc.) referenced in these method bodies keeps
-resolving against the one shared module dict -- required for
-scripts/*_smoke.py monkeypatches like `se.PATH1_DIPLOMACY_ENABLED = False` to
-keep working. See simulation/sim_engine/__init__.py for the full rationale
-(same one documented there for core.py and mixin_world_state.py).
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names (TOOL_TIERS_ENABLED,
 # COMPOSABLE_BUILD_ENABLED, TERRAIN_TILES_ENABLED, PATH1_DIPLOMACY_ENABLED,
-# ...) are NOT imported here. They are already present in this exec()-shared
-# namespace by the time this file's body runs -- see the module docstring
-# above and simulation/sim_engine/__init__.py.
+# ...) are NOT imported here. They live in the exec()-shared namespace — see
+# simulation/sim_engine/__init__.py.
 
 
 class _DiplomacyMixin:

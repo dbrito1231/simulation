@@ -168,7 +168,7 @@ def test_compiler_timeout_handled_cleanly():
         resp = engine.god_compile_prose("The river runs dark.")
         assert_true(resp["compileOk"] is False, resp)
         assert_true(engine._god_compiler_state["compileCount"] == 1,
-                    "a timeout must still bump compileCount (docs/plan: regardless of success)")
+                    "a timeout must still bump compileCount (docs/archive/plan-sovereign-god-mode-v2.md: regardless of success)")
         print("  OK a simulated lm_complete timeout returns a clean rejection, not an unhandled exception, "
               "and still counts against the session cap")
     finally:

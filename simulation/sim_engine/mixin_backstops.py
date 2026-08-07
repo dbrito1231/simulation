@@ -2,7 +2,7 @@
 SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_deliver_message` through
+class body — the contiguous method range from `_deliver_message` through
 `_maybe_retire_custom_resource` (formerly core.py lines ~5340-6194). Covers:
 the agent message bus/inbox, emergent-role helpers, scarcity/confront
 mechanics, role auto-switching, and a large family of deterministic
@@ -12,21 +12,11 @@ building, stalled-project abandonment, approved-custom-resource starts,
 newcomer welcome, blueprint retirement/amnesty, Sage review skip/amnesty,
 and custom-resource retirement).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _BackstopsMixin, ...)` in core.py can reference this
-class by name at class-definition time, and so every bare-name global
-(AGENT_MESSAGING, EMERGENT_ROLES, etc.) referenced in these method bodies
-keeps resolving against the one shared module dict -- required for
-scripts/*_smoke.py monkeypatches to keep working. See
-simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _BackstopsMixin:

@@ -54,7 +54,7 @@ def test_roster_headroom_generates_20():
 def test_newcomer_backstop_reaches_generated_slots():
     """_maybe_welcome_newcomer must not silently stall at 12 agents once
     every hand-written AGENT_DEFS name is taken. Regression for the gap left
-    by Phase 6 (docs/plan-sid-parity-gaps.md): MAX_ROSTER_SIZE/
+    by Phase 6 (docs/archive/plan-sid-parity-gaps.md): MAX_ROSTER_SIZE/
     _generated_agent_defs raised the cold-start ceiling to 20, but the
     house-driven newcomer backstop still only ever drew from the 12
     hand-written defs, so a village that never cold-started above 12 could

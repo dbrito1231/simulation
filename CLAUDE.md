@@ -84,5 +84,5 @@ Each server run writes to `simulation/logs/<timestamp>/` (gitignored): `activity
 - [docs/REFERENCE.md](docs/REFERENCE.md) — historical-rationale pointers plus Ollama operational tips not already canonical in specs/03.
 - [README.md](README.md) — human-facing setup/run instructions and the agent-roster override.
 - [ollama_config.md](ollama_config.md) — target Ollama model/context configuration.
-- `docs/plan-*.md` — per-batch implementation plans (living-ecosystem, living-world, agents-panel, sovereign-god-mode, visual polish, etc.).
+- `docs/archive/plan-*.md` — shipped implementation plans (living-ecosystem, living-world, agents-panel, sovereign-god-mode, visual polish, etc.); triage index at `docs/archive/plan-archive-triage-phase-b.md`.
 - `docs/archive/` — **historical record only. Do not read or act on files there unless the user explicitly asks.**

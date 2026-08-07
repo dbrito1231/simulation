@@ -1,7 +1,7 @@
 """Canonical source for the routine-decision system prompt (SYSTEM_PROMPT)
 and its reduced-context sibling (SYSTEM_PROMPT_SLIM).
 
-Split out of server.py (2026-07-24, docs/plan-ollama-migration.md Phase 6)
+Split out of server.py (2026-07-24, docs/archive/plan-ollama-migration.md Phase 6)
 so scripts/ollama_setup.py can import the exact rulebook text -- the single
 source of truth CLAUDE.md requires -- without importing server.py itself.
 server.py has module-level side effects on import (SessionLogger() opens a

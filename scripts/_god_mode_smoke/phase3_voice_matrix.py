@@ -20,7 +20,7 @@ def test_providence_set_replace_revoke_expire():
         prov_id = applied["outcome"]["interventionId"]
         assert_true(god["providence"]["id"] == prov_id, god["providence"])
         assert_true(god["providence"]["expiresFrame"] == engine.frameTick + 1000, god["providence"])
-        # Public per docs/plan Visibility: same treatment as proclamation.
+        # Public per docs/archive/plan-sovereign-god-mode-v2.md Visibility: same treatment as proclamation.
         assert_true('"A season of trial approaches."' in engine.activityLog[0], engine.activityLog[0])
         assert_true(engine.conversationLog[0]["message"] == "A season of trial approaches."
                     and engine.conversationLog[0]["source"] == "divine", engine.conversationLog[0])

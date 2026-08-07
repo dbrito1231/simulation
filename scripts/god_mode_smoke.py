@@ -1,5 +1,5 @@
 """Deterministic smoke harness for Sovereign God mode Phase 2 (secure kernel,
-persistence, preview, audit -- docs/plan-sovereign-god-mode-v2.md).
+persistence, preview, audit -- docs/archive/plan-sovereign-god-mode-v2.md).
 
 Exercises the flag/token gate, preview/idempotency, expiry, the stored-text
 contract (including hostile-string round-tripping), godState persistence,

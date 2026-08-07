@@ -5,7 +5,7 @@ qwen/qwen3.5-9b model. Ollama's model is different: env vars control server-
 wide behavior (parallelism, dual residency, KV-cache attention, keep-alive),
 and `ollama create` bakes per-model settings (context length, sampling
 defaults) from version-controlled Modelfiles. See ollama_config.md for the
-full settings table and docs/plan-ollama-migration.md Phase 1 for how this
+full settings table and docs/archive/plan-ollama-migration.md Phase 1 for how this
 script's responsibilities were scoped.
 
 Target state (see ollama/Modelfile.smart, ollama/Modelfile.fast,
@@ -32,7 +32,7 @@ Usage:
   uv run python scripts/ollama_setup.py           # apply full target state
   uv run python scripts/ollama_setup.py --check   # readback only, no changes
   uv run python scripts/ollama_setup.py --with-system
-      # Phase 6 (docs/plan-ollama-migration.md, dark by default -- see
+      # Phase 6 (docs/archive/plan-ollama-migration.md, dark by default -- see
       # SYSTEM_PROMPT_AT_LOAD_TIME in simulation/server.py). Generates
       # ollama/Modelfile.smart.system (copy of Modelfile.smart + a SYSTEM
       # block baking in simulation/prompts.py's SYSTEM_PROMPT text, the
@@ -348,7 +348,7 @@ def generate_system_modelfile():
         "# from ollama/Modelfile.smart + simulation/prompts.py's SYSTEM_PROMPT\n"
         "# (the single source of truth -- edit the rulebook there, then\n"
         "# re-run --with-system to regenerate this file and re-bake the\n"
-        "# sim-smart-sys model). See docs/plan-ollama-migration.md Phase 6\n"
+        "# sim-smart-sys model). See docs/archive/plan-ollama-migration.md Phase 6\n"
         "# and ollama_config.md \"Load-time rulebook (dark)\".\n"
         "# ============================================================\n\n"
     )

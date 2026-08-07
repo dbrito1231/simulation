@@ -433,5 +433,5 @@ def test_phase4_duplicate_request_and_expired_preview():
 
 
 # --- Phase 5 tests: storyteller events and timed lawgiver modifiers
-# (docs/plan-sovereign-god-mode-v2.md "Timed lawgiver modifiers" +
+# (docs/archive/plan-sovereign-god-mode-v2.md "Timed lawgiver modifiers" +
 # "Exact consumer sites and arithmetic" + "Storyteller events") ---

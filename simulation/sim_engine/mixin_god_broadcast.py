@@ -2,7 +2,7 @@
 of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `god_preview` through
+class body — the contiguous method range from `god_preview` through
 `_god_apply_dream_broadcast` (formerly core.py lines ~560-1007). Covers the
 HTTP-facing preview entry point (`god_preview`), the shared intervention-id/
 recentInterventions bookkeeping (`_next_intervention_id`,
@@ -14,20 +14,11 @@ whisper-campaign/crowd-compulsion/dream-broadcast apply handlers
 `_god_apply_crowd_compulsion`, `_god_apply_dream_broadcast_mask`,
 `_god_apply_dream_broadcast`).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _GodBroadcastMixin, ...)` in core.py can reference this
-class by name at class-definition time, and so every bare-name global
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep working.
-See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _GodBroadcastMixin:
@@ -243,7 +234,7 @@ class _GodBroadcastMixin:
         """Sets the single active public providence line, replacing any
         prior one. The outgoing record (if any) is closed through the SAME
         _close_providence path expiry/revocation use, so it is logged
-        exactly once regardless of how it ends. Public per docs/plan
+        exactly once regardless of how it ends. Public per docs/archive/plan-sovereign-god-mode-v2.md
         Visibility: activity/communication/Chronicle, same treatment as
         proclamation."""
         god = self.civilization["godState"]
@@ -289,7 +280,7 @@ class _GodBroadcastMixin:
     def _god_apply_private_omen(self, payload):
         """Sets the one active private omen for a single living agent,
         replacing any prior one for that same agent. Never touches public
-        activity/communication/Chronicle (docs/plan Visibility: private
+        activity/communication/Chronicle (docs/archive/plan-sovereign-god-mode-v2.md Visibility: private
         omens must never appear there). The outgoing record (if any) is
         closed through the SAME _close_omen path expiry/revocation use, so
         its memory write (if not already written) fires exactly once here,

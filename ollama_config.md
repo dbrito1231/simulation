@@ -1,7 +1,7 @@
 # Ollama config (simulation)
 
 Successor to `lms_config.md` (LM Studio is permanently unavailable — user
-decision 2026-07-24, see `docs/plan-ollama-migration.md`). Target load for
+decision 2026-07-24, see `docs/archive/plan-ollama-migration.md`). Target load for
 this project on Ollama 0.32.3. If `ollama ps` / `/api/ps` shows anything
 else after a restart, re-apply with `uv run python scripts/ollama_setup.py`
 (the canonical loader — see below).
@@ -368,7 +368,7 @@ new dated subsection below, "CPU-offload probe (2026-07-25, corrected retry)
 cover 3 truly-concurrent models and continues from where this attempt
 stopped.
 
-Probed per `docs/plan-cpu-offload-probe.md`: whether pinning a throwaway
+Probed per `docs/archive/plan-cpu-offload-probe.md`: whether pinning a throwaway
 `sim-fast`-equivalent model (`llama3.2:3b`, `PARAMETER num_gpu 0`, plus a
 `num_thread 8` variant) to the CPU would decouple decision latency (GPU,
 `sim-smart`) from module-refresh throughput (would-be CPU, `sim-fast`),
@@ -452,7 +452,7 @@ still-NO-GO result.
 ## CPU-offload probe (2026-07-25, corrected retry) — raised MAX_LOADED_MODELS to 3
 
 Continuation of the corrected-record note above, per
-`docs/plan-cpu-offload-probe.md` steps 1–6 (steps proving `num_gpu 0` works
+`docs/archive/plan-cpu-offload-probe.md` steps 1–6 (steps proving `num_gpu 0` works
 and CPU residency reports correctly were not redone — already proven in the
 first attempt). Orchestrator-directed correction: a direct `HKCU:\Environment`
 registry read confirmed `OLLAMA_MAX_LOADED_MODELS=2` (this repo's own Phase 1
@@ -515,7 +515,7 @@ are loaded. This is a genuinely different root cause than the first attempt's
 outcome: a 3rd model cannot stay resident alongside `sim-smart`+`sim-fast` on
 this specific box.
 
-Per `docs/plan-cpu-offload-probe.md`'s own timebox condition and this task's
+Per `docs/archive/plan-cpu-offload-probe.md`'s own timebox condition and this task's
 explicit constraint ("If anything else structurally blocks... stop and
 report — don't improvise further tuning"), stopped here. Steps 2 (thread-cap
 variant), 3 (throughput measurement), and 4 (10-minute tick-integrity soak)

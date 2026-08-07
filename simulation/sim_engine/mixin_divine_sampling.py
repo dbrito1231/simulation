@@ -2,7 +2,7 @@
 SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_god_sampling_optional_float`
+class body — the contiguous method range from `_god_sampling_optional_float`
 through `_apply_context_mask` (formerly core.py lines ~1850-2643). Covers the
 Divine Matrix Phase 2 per-agent sampling overlay cluster: sampling-payload
 validation helpers, dream-snapshot/forged-conversation validation, context
@@ -11,20 +11,11 @@ stigmata, identity edit/copy-overwrite validation, Merovingian bargain
 predicates/primitives, and the reality-distortion `_apply_context_mask` used
 by the think-payload builder.
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _DivineSamplingMixin, ...)` in core.py can reference
-this class by name at class-definition time, and so every bare-name global
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep
-working. See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _DivineSamplingMixin:

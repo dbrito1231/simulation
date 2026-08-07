@@ -455,7 +455,7 @@ function agentVitalsHtml(a) {
 }
 
 // Truncated last-thought line for the main list row (replaces the old
-// per-agent beliefs line — see docs/plan-agents-panel-3-*.md step 4b).
+// per-agent beliefs line — see docs/archive/plan-agents-panel-3-*.md step 4b).
 // Intentionally no "feeling" line: the decision `feeling` field is ~0%
 // populated in practice, so showing it would be an empty column.
 const AGENT_THOUGHT_TRUNCATE = 60;

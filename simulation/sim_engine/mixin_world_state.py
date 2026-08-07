@@ -1,7 +1,7 @@
 """Phase 6b mixin: world-state bookkeeping slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_init_state_delta_sets`
+class body — the contiguous method range from `_init_state_delta_sets`
 through `_structure_type_built` (formerly core.py lines ~495-2038). Covers:
 state-delta dirty tracking (Contract 2), logging/memory helpers
 (`_push_activity`, `_push_memory`, `_god_memory_*`), agent lookups
@@ -11,25 +11,16 @@ districts/roads/movement, survival, Sage emergency, project helpers
 ECOLOGY_ENABLED) through `_structure_type_built`.
 
 `__init__`/`_select_active_defs`/`_make_agents`/`_reset_world` stay on the
-concrete `SimEngine` class in core.py -- they are intimately tied to
+concrete `SimEngine` class in core.py — they are intimately tied to
 construction, so they were left there per the Phase 6b plan rather than
 moved here.
 
-Loaded the same way as core.py: `simulation/sim_engine/__init__.py` exec()s
-this file's source into its own module namespace (not a plain submodule
-import), BEFORE it exec()s core.py, so that `class SimEngine(_WorldStateMixin)`
-in core.py can reference this class by name at class-definition time, and so
-every bare-name global (SURVIVAL_ENABLED, ECOLOGY_ENABLED, etc.) referenced
-in these method bodies keeps resolving against the one shared module dict --
-required for scripts/*_smoke.py monkeypatches like `se.ECOLOGY_ENABLED =
-False` to keep working. See simulation/sim_engine/__init__.py for the full
-rationale (same one documented there for core.py).
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names (SURVIVAL_ENABLED,
 # ECOLOGY_ENABLED, STOCK_LOW_RATIO, WILDLIFE_ENABLED, ...) are NOT imported
-# here. They are already present in this exec()-shared namespace by the time
-# this file's body runs -- see the module docstring above and
+# here. They live in the exec()-shared namespace — see
 # simulation/sim_engine/__init__.py.
 
 
@@ -369,7 +360,7 @@ class _WorldStateMixin:
 
     def _find_agent_by_id(self, agent_id):
         """Sovereign God mode (Phase 3): omens/miracles target stable int
-        ids, never names (see docs/plan "Agent ids are stable ints")."""
+        ids, never names (see docs/archive/plan-sovereign-god-mode-v2.md "Agent ids are stable ints")."""
         for a in self.agents:
             if a["id"] == agent_id:
                 return a
@@ -755,7 +746,7 @@ class _WorldStateMixin:
         agent["hunger"] = max(0, agent["hunger"] - HUNGER_RATE * self._divine_modifier("hunger_drain_multiplier"))
         if agent["incapacitated"]:
             # COLLAPSE_REGEN is DELIBERATELY excluded from divine scaling
-            # (docs/plan "Collapse recovery -- deliberately excluded"):
+            # (docs/archive/plan-sovereign-god-mode-v2.md "Collapse recovery -- deliberately excluded"):
             # health_regen_multiplier must never reach this line, or a 0.0
             # value would permanently strand an incapacitated agent below
             # COLLAPSE_REVIVE_HEALTH with no deterministic escape.

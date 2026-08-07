@@ -2,13 +2,13 @@
 sweep machinery slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_god_apply_agent_sampling`
+class body — the contiguous method range from `_god_apply_agent_sampling`
 through `_god_apply_revoke_guidance` (formerly core.py lines ~1378-2163).
 Covers the per-agent LLM sampling override apply/revoke handlers
 (`_god_apply_agent_sampling`, `_god_apply_revoke_agent_sampling`), memory/
 belief plant apply handlers (`_god_apply_memory_insert`,
 `_god_apply_memory_delete`, `_god_apply_belief_plant`), the context-mask
-apply handler (`_god_apply_context_mask` -- the APPLY/entry-point version;
+apply handler (`_god_apply_context_mask` — the APPLY/entry-point version;
 distinct from `_apply_context_mask`, the Phase 6f validation helper in
 mixin_divine_sampling.py), and the full decision-gate/possession/veto
 machinery: gate creation (`_god_set_decision_gate`), the decision-compulsion/
@@ -32,20 +32,11 @@ dream-broadcast closure and per-tick sweep helpers
 `_sweep_whisper_campaigns`), and the guidance-revocation apply handler
 (`_god_apply_revoke_guidance`).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _GodGateMixin, ...)` in core.py can reference this
-class by name at class-definition time, and so every bare-name global
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep working.
-See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _GodGateMixin:
@@ -811,7 +802,7 @@ class _GodGateMixin:
                 self._maybe_finalize_whisper_campaign(campaign_id)
 
     def _god_apply_revoke_guidance(self, guidance_id):
-        """Ends a providence or omen early by id (docs/plan: "records a
+        """Ends a providence or omen early by id (docs/archive/plan-sovereign-god-mode-v2.md: "records a
         revocation"). Returns (outcome, reason) directly -- unlike the other
         _god_apply_* helpers this can itself fail (unknown/already-inactive
         id), and a failed revoke must never consume an intervention id."""

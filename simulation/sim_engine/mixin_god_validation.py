@@ -1,14 +1,14 @@
 """Phase 6g mixin: Sovereign God mode command validation slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_god_active_weather_override`
+class body — the contiguous method range from `_god_active_weather_override`
 through `_god_check_fingerprint` (formerly core.py lines ~547-2136). Covers:
 weather-override validation (`_god_active_weather_override`,
 `_validate_god_weather_override`), the timed lawgiver-modifier reader
 (`_divine_modifier`), repair_structures/clear_ruins selection helpers
 (`_god_select_repair_structures`, `_god_select_clear_ruins`,
 `_god_project_structure_repair`), the large per-kind command-envelope
-validator/canonicalizer `_validate_god_envelope` (moved whole, not split --
+validator/canonicalizer `_validate_god_envelope` (moved whole, not split —
 every `if kind == ...` branch it dispatches to stays inside this one method
 body exactly as it was in core.py), the command digest/preview-outcome
 projection cluster (`_god_command_digest`, `_god_preview_outcome`,
@@ -17,20 +17,11 @@ projection cluster (`_god_command_digest`, `_god_preview_outcome`,
 `_god_target_fingerprint`), and the target-fingerprint staleness check
 `_god_check_fingerprint`.
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _GodValidationMixin, ...)` in core.py can reference
-this class by name at class-definition time, and so every bare-name global
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep
-working. See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _GodValidationMixin:
@@ -40,10 +31,10 @@ class _GodValidationMixin:
     moved whole), and the preview-outcome/digest/fingerprint cluster. See
     module docstring for exact scope."""
 
-    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 6) ---
+    # --- Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md, Phase 6) ---
     def _god_active_weather_override(self, exclude_id=None):
         """The currently-active weather_override activeEvents record, or
-        None -- "one active weather override at a time" (docs/plan
+        None -- "one active weather override at a time" (docs/archive/plan-sovereign-god-mode-v2.md
         Validation), mirroring _god_active_event_holding_key's shape for the
         story_event one-value-per-key policy."""
         god = self.civilization.get("godState") or {}
@@ -59,7 +50,7 @@ class _GodValidationMixin:
 
     def _validate_god_weather_override(self, payload):
         """Validate + canonicalize a weather_override command. NO mutation.
-        docs/plan Phase 6 "Validation": requires WEATHER_ENABLED; state must
+        docs/archive/plan-sovereign-god-mode-v2.md Phase 6 "Validation": requires WEATHER_ENABLED; state must
         be a real machine state; district ids must exist, with an empty list
         allowed only for "clear" (the only state the natural machine itself
         ever clears districts for -- gathering/storm/clearing all require at
@@ -121,9 +112,9 @@ class _GodValidationMixin:
                 "payload": {"state": state, "districts": districts,
                            "durationFrames": duration, "replaceEffectId": replace_effect_id}}, None
 
-    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 5) ---
+    # --- Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md, Phase 5) ---
     def _divine_modifier(self, key, default=1.0):
-        """The one active value for `key` (docs/plan "Timed lawgiver
+        """The one active value for `key` (docs/archive/plan-sovereign-god-mode-v2.md "Timed lawgiver
         modifiers" + "Expiry ownership"), or exactly `default` when the flag
         is off, godState is missing/malformed, or no activeEvents record
         currently carries that key within [startFrame, expiresFrame). Every
@@ -1002,7 +993,7 @@ class _GodValidationMixin:
     def _god_preview_outcome(self, normalized):
         """Sovereign God mode Phase 4: a non-mutating projection of the EXACT
         clamped/bounded value an immediate miracle would apply, computed
-        against CURRENT live state (docs/plan Phase 4: "Preview must show the
+        against CURRENT live state (docs/archive/plan-sovereign-god-mode-v2.md Phase 4: "Preview must show the
         exact clamped/bounded value that will be applied, plus the affected
         target, computed against current world state"). Uses the identical
         clamp arithmetic the corresponding _god_apply_* helper uses, so as
@@ -1091,7 +1082,7 @@ class _GodValidationMixin:
                 ],
                 "providenceOutgoingId": None,
             }
-            # docs/plan "Divine law vs. village law": when a proposed
+            # docs/archive/plan-sovereign-god-mode-v2.md "Divine law vs. village law": when a proposed
             # gather/fish modifier composes with an agent-authored custom
             # rule, preview discloses BOTH contributions separately so the
             # operator sees they are amplifying an emergent effect rather
@@ -1103,7 +1094,7 @@ class _GodValidationMixin:
                 outcome["providenceOutgoingId"] = self._god_current_outgoing_guidance_id("providence", {})
             return outcome
         if kind == "weather_override":
-            # docs/plan Phase 6 Answer 4 ("consequential disclosure"):
+            # docs/archive/plan-sovereign-god-mode-v2.md Phase 6 Answer 4 ("consequential disclosure"):
             # preview must state explicitly that entering "storm" can
             # PERMANENTLY damage structures in the named districts, that
             # neither cancelling nor expiry undoes that damage, and must
@@ -1380,7 +1371,7 @@ class _GodValidationMixin:
     def _god_custom_rule_gather_context(self):
         """Compact summary of currently-enacted village custom rules that
         modify collect_resource -- shown alongside a proposed divine
-        gather/fish multiplier in preview (docs/plan "Divine law vs. village
+        gather/fish multiplier in preview (docs/archive/plan-sovereign-god-mode-v2.md "Divine law vs. village
         law"). Mirrors the matching logic in _custom_rule_modifier without
         needing an agent/resource to evaluate against (a preview has
         neither)."""
@@ -1401,7 +1392,7 @@ class _GodValidationMixin:
         return entries
 
     def _god_reversibility_class(self, normalized_command):
-        """Three classes per the docs/plan "Honest reversibility" table.
+        """Three classes per the docs/archive/plan-sovereign-god-mode-v2.md "Honest reversibility" table.
         providence/private_omen are cancellable (revocable before expiry,
         expire naturally otherwise). proclamation is a one-shot broadcast
         with no revocable state, and revoke_guidance is itself the "undo" --
@@ -1411,7 +1402,7 @@ class _GodValidationMixin:
         modifiers/providence, both revocable). One WITH primitives is
         consequential: cancelling it stops future effect (modifiers,
         providence) but cannot retract the primitives it already applied --
-        those are irreversible mutations by their own nature (docs/plan
+        those are irreversible mutations by their own nature (docs/archive/plan-sovereign-god-mode-v2.md
         "Honest reversibility" -- the third, consequential, class)."""
         kind = normalized_command["kind"] if isinstance(normalized_command, dict) else normalized_command
         if kind in ("providence", "private_omen", "whisper_campaign",
@@ -1446,7 +1437,7 @@ class _GodValidationMixin:
         if kind == "story_event":
             payload = normalized_command["payload"] if isinstance(normalized_command, dict) else {}
             return "consequential" if payload.get("primitives") else "cancellable"
-        # docs/plan Phase 6 Answer 4: weather_override is consequential, not
+        # docs/archive/plan-sovereign-god-mode-v2.md Phase 6 Answer 4: weather_override is consequential, not
         # merely cancellable -- entering "storm" can trigger real, permanent
         # structure damage (via the normal _maybe_disaster path) that
         # neither cancelling the override nor letting it expire retracts.
@@ -1460,7 +1451,7 @@ class _GodValidationMixin:
         Shared by the preview-time fingerprint and the apply-time
         revalidation of it -- this IS the "disclose-then-replace" mechanism:
         preview freezes the outgoing id it saw; apply recomputes it fresh and
-        rejects on mismatch (docs/plan "Replacing an existing one is allowed
+        rejects on mismatch (docs/archive/plan-sovereign-god-mode-v2.md "Replacing an existing one is allowed
         ONLY when the preview disclosed the replacement")."""
         god = self.civilization.get("godState") or {}
         if kind == "providence":

@@ -2,7 +2,7 @@
 OpenAI-chat-completions-shaped LLM payloads and Ollama's native /api/chat
 request body.
 
-Split out of server.py (2026-07-24, docs/plan-ollama-migration.md Phase 4)
+Split out of server.py (2026-07-24, docs/archive/plan-ollama-migration.md Phase 4)
 so scripts/llm_replay_bench.py can build real Ollama request bodies from
 logged (LM-Studio-shaped) request payloads without duplicating this mapping
 or importing server.py itself -- server.py has module-level side effects on

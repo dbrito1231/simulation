@@ -1,7 +1,7 @@
 """Phase 6c mixin: structures/economy/weather slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_structure_function_for_type`
+class body — the contiguous method range from `_structure_function_for_type`
 through the end of the structure-upgrades section (formerly core.py lines
 ~2041-3854, before Phase 6b's extraction shifted line numbers; re-located by
 method name for this move). Covers: the structure function registry (Phase A
@@ -11,23 +11,12 @@ Phase 4), Phase E market pricing/priced trade/property (ECONOMY_ENABLED),
 Phase C tick mechanics (spoilage/decay/disaster/shelter), `repair_structure`
 (the decay escape hatch), and structure upgrades (STRUCTURE_UPGRADES_ENABLED).
 
-Loaded the same way as core.py and mixin_world_state.py:
-`simulation/sim_engine/__init__.py` exec()s this file's source into its own
-module namespace (not a plain submodule import), BEFORE it exec()s core.py,
-so that `class SimEngine(_WorldStateMixin, _StructuresEconomyMixin, ...)` in
-core.py can reference this class by name at class-definition time, and so
-every bare-name global (WEATHER_ENABLED, ECONOMY_ENABLED,
-STRUCTURE_UPGRADES_ENABLED, TECH_TREE_ENABLED, etc.) referenced in these
-method bodies keeps resolving against the one shared module dict -- required
-for scripts/*_smoke.py monkeypatches like `se.WEATHER_ENABLED = False` to
-keep working. See simulation/sim_engine/__init__.py for the full rationale
-(same one documented there for core.py and mixin_world_state.py).
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names (WEATHER_ENABLED,
 # ECONOMY_ENABLED, STRUCTURE_UPGRADES_ENABLED, TECH_TREE_ENABLED, ...) are NOT
-# imported here. They are already present in this exec()-shared namespace by
-# the time this file's body runs -- see the module docstring above and
+# imported here. They live in the exec()-shared namespace — see
 # simulation/sim_engine/__init__.py.
 
 
@@ -338,7 +327,7 @@ class _StructuresEconomyMixin:
             w["districts"] = []
 
     def _weather_enter_forced(self, state, districts, exit_frame):
-        """Sovereign God mode Phase 6 (docs/plan Answer 3 -- "RNG
+        """Sovereign God mode Phase 6 (docs/archive/plan-sovereign-god-mode-v2.md Answer 3 -- "RNG
         discipline"): enters `state` with an OPERATOR-chosen district list
         and an exit frame DERIVED from the divine event's expiresFrame
         (Answer 1: the event owns the clock), drawing NO RNG at all --
@@ -367,7 +356,7 @@ class _StructuresEconomyMixin:
             w["districts"] = []
 
     def _weather_handoff_successor(self, state):
-        """Sovereign God mode Phase 6 (docs/plan Answer 2 -- "returning to
+        """Sovereign God mode Phase 6 (docs/archive/plan-sovereign-god-mode-v2.md Answer 2 -- "returning to
         the natural cycle"): the natural _tick_weather successor for the
         OVERRIDDEN `state`, entered via the SAME RNG-drawing _weather_enter()
         the natural machine always uses -- mirrors _tick_weather's
@@ -921,7 +910,7 @@ class _StructuresEconomyMixin:
     def _apply_structure_condition_delta(self, s, delta):
         """Shared condition-delta + ruin-transition helper. Used by BOTH the
         passive per-goods-tick decay below (always a negative delta) AND the
-        Sovereign God mode structure_condition miracle (docs/plan-sovereign-
+        Sovereign God mode structure_condition miracle (docs/archive/plan-sovereign-
         god-mode-v2.md Phase 4: "Reuse condition/ruin helpers ... so disrepair
         and ruin transitions fire with their normal narration"). A no-op on
         an already-ruined structure (cond <= 0) -- callers that can reach a
@@ -1796,7 +1785,7 @@ class _StructuresEconomyMixin:
             if did:
                 grove_mult = 0.5 + self._terrain_grove_ratio(did)
                 amount = max(1, int(amount * grove_mult))
-        # Sovereign God mode Phase 5 (docs/plan-sovereign-god-mode-v2.md
+        # Sovereign God mode Phase 5 (docs/archive/plan-sovereign-god-mode-v2.md
         # "Exact consumer sites and arithmetic"): the divine yield multiplier
         # is applied AFTER the custom-rule addition above (line ~5095) and
         # the ecology/grove scaling, and BEFORE the carry-cap clamp below --

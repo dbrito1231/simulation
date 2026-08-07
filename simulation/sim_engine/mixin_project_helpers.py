@@ -1,27 +1,18 @@
 """Phase 6d mixin: project/invention helper slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_path1_industry_benchmark`
+class body — the contiguous method range from `_path1_industry_benchmark`
 through `_start_project_for` (formerly core.py lines ~1244-1478). Covers:
 Path 1 industry/tool benchmarks, project resource-list/belief-score helpers,
 default project selection per role, seed-exhaustion checks, invention
 requirement gating, and `_start_project_for` (the core "begin a build
 project" mechanic).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _ProjectHelpersMixin, ...)` in core.py can reference
-this class by name at class-definition time, and so every bare-name global
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep
-working. See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _ProjectHelpersMixin:

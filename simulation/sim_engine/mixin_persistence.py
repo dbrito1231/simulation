@@ -2,11 +2,11 @@
 of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_save_loop` through
+class body — the contiguous method range from `_save_loop` through
 `_clamp_god_duration` (formerly core.py lines ~540-1847). Covers: full-state
-persistence (Contract 3) -- `_save_loop`, `_serialize_state`, `save_state`,
+persistence (Contract 3) — `_save_loop`, `_serialize_state`, `save_state`,
 `clear_state`, `_ensure_registry_entry_from_instance`, and the large
-`restore_state` (kept as a single undivided method -- splitting its body
+`restore_state` (kept as a single undivided method — splitting its body
 would be a logic change, not a pure move); Sovereign God mode core state
 (`_default_god_state`, `_normalize_god_state`); decision digests and Deja Vu
 replay (godState v3: `_decision_reasoning_hash` through
@@ -16,20 +16,11 @@ replay (godState v3: `_decision_reasoning_hash` through
 storyteller-event validation basics (`_god_active_event_holding_key`,
 `_validate_god_story_event`, `_clamp_god_duration`).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _PersistenceMixin, ...)` in core.py can reference this
-class by name at class-definition time, and so every bare-name global
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep
-working. See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _PersistenceMixin:
@@ -623,7 +614,7 @@ class _PersistenceMixin:
         except Exception:
             return False
 
-    # --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
+    # --- Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md, Phase 2) ---
     # Secure kernel only: the module-level GOD_MODE_ENABLED flag gates the
     # dark default, and server.py's SIM_GOD_TOKEN + X-God-Token check gates
     # every route BEFORE it reaches these methods -- these engine entry
@@ -635,7 +626,7 @@ class _PersistenceMixin:
     # be rejected cleanly with "not implemented in this phase".
 
     def _default_god_state(self):
-        """Authoritative shape (docs/plan section "Authoritative state
+        """Authoritative shape (docs/archive/plan-sovereign-god-mode-v2.md section "Authoritative state
         model"). recentRequests is deliberately absent -- the idempotency
         store is self._god_requests, in-memory only, never persisted."""
         return {
@@ -1147,7 +1138,7 @@ class _PersistenceMixin:
 
     # --- stored-text contract ---
     def _normalize_divine_text(self, raw, max_chars=GOD_TEXT_MAX_CHARS, max_bytes=GOD_TEXT_MAX_BYTES):
-        """Single normalizer used by every divine text field (docs/plan
+        """Single normalizer used by every divine text field (docs/archive/plan-sovereign-god-mode-v2.md
         section "Stored-content safety"): Unicode NFC, reject NUL and C0/C1
         controls other than ordinary space, reject embedded newlines, enforce
         char AND UTF-8-byte limits post-normalization, return plain text --
@@ -1193,7 +1184,7 @@ class _PersistenceMixin:
         return {}
 
     # --- command envelope ---
-    # Kinds already named in the v2 catalog (docs/plan) that this phase still
+    # Kinds already named in the v2 catalog (docs/archive/plan-sovereign-god-mode-v2.md) that this phase still
     # does not implement -- validated far enough to be rejected cleanly
     # rather than falling into the generic "unknown kind" branch. Phase 4
     # implements agent_vitals/grant_resource/structure_condition (removed

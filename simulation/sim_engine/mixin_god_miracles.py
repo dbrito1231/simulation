@@ -4,7 +4,7 @@ command dispatch (`god_apply`, `god_cancel`, `god_sight`), slice of
 SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_god_apply_agent_vitals`
+class body — the contiguous method range from `_god_apply_agent_vitals`
 through `god_sight` (formerly core.py lines ~571-1699), immediately
 following the four construction methods (`__init__`, `_select_active_defs`,
 `_make_agents`, `_reset_world`) that stay on the concrete `SimEngine` class
@@ -19,20 +19,11 @@ storyteller events (`_god_events_insert`, `_close_story_event`,
 `_god_apply_story_event`), and the top-level God command dispatch/cancel/
 observability routes (`god_apply`, `god_cancel`, `god_sight`).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _GodMiraclesMixin, ...)` in core.py can reference this
-class by name at class-definition time, and so every bare-name global
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep working.
-See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _GodMiraclesMixin:
@@ -42,7 +33,7 @@ class _GodMiraclesMixin:
     module docstring for the exact method range and rationale."""
 
     # --- Sovereign God mode Phase 4: bounded immediate miracles ---
-    # All three are irreversible (docs/plan "Honest reversibility" -- the
+    # All three are irreversible (docs/archive/plan-sovereign-god-mode-v2.md "Honest reversibility" -- the
     # default branch of _god_reversibility_class covers them; god_cancel and
     # _god_apply_revoke_guidance only ever look inside providence/
     # privateOmens, so an intervention id from one of these three can never
@@ -93,7 +84,7 @@ class _GodMiraclesMixin:
                 "newHealth": new_health, "newHunger": new_hunger}
 
     def _god_apply_grant_resource(self, payload):
-        """Storage/carry semantics preserved explicitly (docs/plan Phase 4):
+        """Storage/carry semantics preserved explicitly (docs/archive/plan-sovereign-god-mode-v2.md Phase 4):
         a grant to an agent fills their _carry_cap room first, then routes
         any remainder to the village stockpile -- the SAME two sinks every
         normal gather/trade/tax path already uses, never a third bypass
@@ -147,7 +138,7 @@ class _GodMiraclesMixin:
         SAME _apply_structure_condition_delta helper _tick_structure_decay
         uses, so a damage delta that crosses the ruin threshold fires the
         identical disrepair/ruin narration and homeOf homeless handling a
-        natural decay collapse would (docs/plan Phase 4: "damage may
+        natural decay collapse would (docs/archive/plan-sovereign-god-mode-v2.md Phase 4: "damage may
         legitimately drive a structure to ruin -- if it does, it must go
         through the same ruin path"). Validation already rejected ruined
         structures, so repair here can never recreate a destroyed structure
@@ -336,7 +327,7 @@ class _GodMiraclesMixin:
 
     # --- Sovereign God mode Phase 6: weather override ---
     def _god_apply_weather_override(self, payload):
-        """docs/plan Phase 6 Answers 1-4. By the time this runs, god_apply
+        """docs/archive/plan-sovereign-god-mode-v2.md Phase 6 Answers 1-4. By the time this runs, god_apply
         has already revalidated the whole normalized command against current
         live state under the same lock, so replaceEffectId (if any) still
         names the active weather override.
@@ -394,13 +385,13 @@ class _GodMiraclesMixin:
     def _close_weather_override(self, event, status):
         """Closes one weather_override activeEvents record exactly once and
         hands off to the natural cycle's successor of the OVERRIDDEN state
-        via _weather_handoff_successor (docs/plan Phase 6 Answer 2 -- never
+        via _weather_handoff_successor (docs/archive/plan-sovereign-god-mode-v2.md Phase 6 Answer 2 -- never
         restores `event["priorState"]`, which would desync the cycle).
         Shared verbatim by expiry (_expire_divine_effects) and cancel
         (god_cancel) so both paths behave identically -- "cancelling an
         active override runs the SAME expiry handoff (so the machine never
         gets stranded mid-override), and says plainly that any damage
-        already dealt stands" (docs/plan Validation)."""
+        already dealt stands" (docs/archive/plan-sovereign-god-mode-v2.md Validation)."""
         if not isinstance(event, dict) or event.get("status") != "active":
             return
         event["status"] = status
@@ -411,7 +402,7 @@ class _GodMiraclesMixin:
     # --- Sovereign God mode Phase 5: storyteller events ---
     def _god_events_insert(self, event):
         """Append to the bounded activeEvents ring (cap GOD_ACTIVE_EVENTS_CAP
-        per docs/plan). Evicts the oldest CLOSED (non-"active") entry first
+        per docs/archive/plan-sovereign-god-mode-v2.md). Evicts the oldest CLOSED (non-"active") entry first
         so a full ring never displaces something still live; only falls back
         to evicting the oldest active entry if every slot happens to be
         active, which the cap (8) plus normal expiry/cancellation makes an
@@ -423,7 +414,7 @@ class _GodMiraclesMixin:
             del events[closed_idx if closed_idx is not None else 0]
 
     def _close_story_event(self, event, status):
-        """Closes one activeEvents record exactly once (docs/plan "Expiry
+        """Closes one activeEvents record exactly once (docs/archive/plan-sovereign-god-mode-v2.md "Expiry
         ownership" -- shared by cancel and _expire_divine_effects so both
         paths log identically). Once closed, _divine_modifier can no longer
         see its modifiers (status != "active"). If the event carried an
@@ -446,7 +437,7 @@ class _GodMiraclesMixin:
                          {"status": status}, status, public=(event.get("visibility") != "private"))
 
     def _god_apply_story_event(self, payload):
-        """Atomic multi-effect apply (docs/plan "Storyteller events" --
+        """Atomic multi-effect apply (docs/archive/plan-sovereign-god-mode-v2.md "Storyteller events" --
         "Events are atomic: preview validates every component; apply
         accepts all or changes nothing"). By the time this runs, god_apply
         has already revalidated the WHOLE normalized command against
@@ -630,7 +621,7 @@ class _GodMiraclesMixin:
 
     def god_cancel(self, target_id):
         """Cancel an active omen, providence, or timed story event by id
-        (docs/plan Phase 5: "wire the /control/god/cancel route properly").
+        (docs/archive/plan-sovereign-god-mode-v2.md Phase 5: "wire the /control/god/cancel route properly").
         A direct, lock-held mutation -- unlike every other applyable command
         this route intentionally has no preview/apply step (Phase 2 already
         established that shape for this stub; nothing here changes it).
@@ -789,7 +780,7 @@ class _GodMiraclesMixin:
                 # named that contract; the omen's actual text is still
                 # reachable through recentInterventions ("intervention
                 # outcomes" is explicitly in scope for /control/god/sight per
-                # docs/plan) or by the operator recalling what they wrote.
+                # docs/archive/plan-sovereign-god-mode-v2.md) or by the operator recalling what they wrote.
                 omen = omens.get(str(agent_id))
                 if not isinstance(omen, dict):
                     return None

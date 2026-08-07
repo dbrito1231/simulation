@@ -1,5 +1,7 @@
 # Four Breakthroughs (A / C / B / E) — Branch Change Inventory
 
+> **Historical branch inventory** for `feature/four-breakthroughs-ace`. Shipped content lives on `main`. For current resume context, use [`docs/HANDOFF.md`](docs/HANDOFF.md).
+
 **Branch:** `feature/four-breakthroughs-ace`  
 **Base:** `fad699d` (storm presence pack on main)  
 **Scope:** A town integrity, C hunt/conflict, B real trade, E atmosphere. Excludes D (God Compiler Phase 8) and F (PIANO re-soak).
@@ -8,7 +10,7 @@
 
 ## A — Town integrity
 
-### Constants (`simulation/sim_engine.py`)
+### Constants (`simulation/sim_engine/constants.py`)
 
 - `STRUCTURE_DECAY_PER_GOODS_TICK`: `0.05` → **`0.025`** (~23.3 h to disrepair, ~33.3 h to ruin)
 - `REPAIR_CAMPAIGN_RUIN_RATIO = 0.15`
@@ -53,7 +55,7 @@
 
 ## C — Hunt + conflict
 
-### Constants (`simulation/sim_engine.py`)
+### Constants (`simulation/sim_engine/constants.py`)
 
 - `HUNT_DAMAGE`: `1` → **`2`**
 - `HUNT_DAMAGE_HUNTER`: `2` → **`4`**
@@ -76,7 +78,7 @@
 
 ### New action (full action-sync)
 
-- **`confront_agent`** — `DECISION_ACTIONS`, `DECISION_SCHEMA`, `SYSTEM_PROMPT` (server.py); `apply_decision`, `available_actions` (sim_engine.py); `ACTION_LABELS` (viewer.js)
+- **`confront_agent`** — `DECISION_ACTIONS`, `DECISION_SCHEMA`, `SYSTEM_PROMPT` (`simulation/server.py`); `apply_decision`, `available_actions` (`simulation/sim_engine/mixin_decisions.py`, `mixin_think_job.py`); `ACTION_LABELS` (`simulation/viewer/sidebar.js`)
 
 ### Specs
 
@@ -93,7 +95,7 @@
 
 ## B — Real trade
 
-### Constants (`simulation/sim_engine.py`)
+### Constants (`simulation/sim_engine/constants.py`)
 
 - `SETTLEMENT_STRUCT_THRESHOLD = 5`
 - `SETTLEMENT_POP_THRESHOLD = 6`
@@ -111,7 +113,7 @@
 
 ### New action (full action-sync)
 
-- **`deliver_caravan`** — full chain: server.py, sim_engine.py, viewer.js, prompts.py
+- **`deliver_caravan`** — full chain: `simulation/server.py`, `simulation/sim_engine/`, `simulation/viewer/sidebar.js`, `simulation/prompts.py`
 
 ### Treaty tariffs
 
@@ -133,14 +135,14 @@
 
 ## E — Atmosphere
 
-### Calendar retune (`simulation/sim_engine.py`)
+### Calendar retune (`simulation/sim_engine/constants.py`)
 
 - `DAY_FRAMES`: `13500` → **`18000`** (~10.0 min real at 30/s)
 - `YEAR_FRAMES`: `324_000` → **`432_000`** (4 real h = exactly 24 day/night cycles)
 - `SEASON_FRAMES`: `81_000` → **`108_000`** (~60 min = 6 day/night cycles per season)
 - Aging/lifecycle, shelter ticks, season regrowth, and weather storminess all derive from these identities
 
-### Viewer (`simulation/index.html`, `simulation/sprites.js`)
+### Viewer (`simulation/index.html`, `simulation/sprites/*.js`, `simulation/viewer/*.js`)
 
 - Stronger dusk/dawn twilight bands and deeper peak night alpha (permanent)
 - Per-terrain-kind seasonal palettes; winter snow accents (permanent)
@@ -149,9 +151,9 @@
 
 ### Plan docs (new)
 
-- `docs/plan-visual-1-day-night-lighting.md`
-- `docs/plan-visual-2-seasonal-terrain-grading.md`
-- `docs/plan-visual-atmosphere-systems.md`
+- `docs/archive/plan-visual-1-day-night-lighting.md`
+- `docs/archive/plan-visual-2-seasonal-terrain-grading.md`
+- `docs/archive/plan-visual-atmosphere-systems.md`
 
 ### Specs
 
@@ -180,8 +182,8 @@
 
 ### Handoff / inventory
 
-- `docs/HANDOFF.md` — refreshed for branch state (Phase 5)
-- `changes.md` — this file
+- `docs/HANDOFF.md` — general `main` resume doc (architecture, recent landings, verify steps)
+- `changes.md` — this file (historical branch inventory for `feature/four-breakthroughs-ace`)
 
 ### Plan artifact
 

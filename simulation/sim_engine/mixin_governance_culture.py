@@ -1,28 +1,18 @@
 """Phase 6d mixin: governance gates + culture slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_active_harvest_quota`
+class body — the contiguous method range from `_active_harvest_quota`
 through `_personality_with_drift` (formerly core.py lines ~4575-5339).
-Covers: governance gates (#5 -- harvest_quota/rationing enforcement),
+Covers: governance gates (#5 — harvest_quota/rationing enforcement),
 blueprint/role validation and the live role registry, small relationship
 helpers, memes (belief registry/seeding/spread/mutation), and Phase G
 skills/library/chronicle/personality-drift mechanics.
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _GovernanceCultureMixin, ...)` in core.py can
-reference this class by name at class-definition time, and so every
-bare-name global (LIFECYCLE_ENABLED, MEMES_ENABLED, CULTURE_ENABLED, etc.)
-referenced in these method bodies keeps resolving against the one shared
-module dict -- required for scripts/*_smoke.py monkeypatches to keep
-working. See simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _GovernanceCultureMixin:

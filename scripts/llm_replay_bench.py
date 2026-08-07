@@ -1,7 +1,7 @@
 """Replay-benchmark logged LLM decision calls against Ollama's native
 /api/chat endpoint.
 
-Ported to Ollama (2026-07-24, docs/plan-ollama-migration.md Phase 4). LM
+Ported to Ollama (2026-07-24, docs/archive/plan-ollama-migration.md Phase 4). LM
 Studio is permanently unavailable (2026-07-24, user decision) -- this script
 now targets `sim-smart` on the sim server's own Ollama instance
 (http://localhost:11434/api/chat, OLLAMA_CHAT_URL in simulation/server.py).

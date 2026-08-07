@@ -1,7 +1,7 @@
 """Phase 6d mixin: crafting + rules/voting slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_is_idle` through
+class body — the contiguous method range from `_is_idle` through
 `_enforce_resource_tax` (formerly core.py lines ~2634-3413). Covers:
 idle-agent/task helpers, crafting (`_has_inputs`, `_craft_item`, custom
 recipe validation/proposal/review), and rules/voting machinery (quorum,
@@ -9,21 +9,11 @@ custom rule-effect normalization, constitution bookkeeping, rule validation,
 enactment/repeal, proposal/repeal/vote decisions, priority-resource and
 resource-tax enforcement).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _CraftingRulesMixin, ...)` in core.py can reference
-this class by name at class-definition time, and so every bare-name global
-(CRAFTING_ENABLED, RULES_ENABLED, etc.) referenced in these method bodies
-keeps resolving against the one shared module dict -- required for
-scripts/*_smoke.py monkeypatches to keep working. See
-simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _CraftingRulesMixin:

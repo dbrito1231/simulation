@@ -564,11 +564,11 @@ The Phase 4 atmosphere pack (lighting, seasonal terrain grading, weather
 particles, Divine Console chrome) is **always on** in the viewer — not gated by
 module-level flags. Only `WEATHER_ENABLED`, `ENV_EFFECTS_ENABLED`, and
 `GOD_MODE_ENABLED` still toggle their respective subsystems.
-`docs/plan-visual-*.md` files are historical design records (superseded banners
+`docs/archive/plan-visual-*.md` files are historical design records (superseded banners
 note the removed flag gates); this section and the viewer implementation are the
-runtime contract. Implementation plans: `docs/plan-visual-1-day-night-lighting.md`,
-`docs/plan-visual-2-seasonal-terrain-grading.md`,
-`docs/plan-visual-atmosphere-systems.md`.
+runtime contract. Implementation plans: `docs/archive/plan-visual-1-day-night-lighting.md`,
+`docs/archive/plan-visual-2-seasonal-terrain-grading.md`,
+`docs/archive/plan-visual-atmosphere-systems.md`.
 
 ## Ambient wildlife (`WILDLIFE_ENABLED`)
 
@@ -716,7 +716,7 @@ returns it to `#divineTabHold`. A shared floating tooltip element `#tooltip`
 serves every `data-tip` control in the bar and modal. `#godPublicBanner` remains
 independent (fixed top-center; see "Public banner" below). The console is
 strictly additive over
-[docs/plan-sovereign-god-mode-v2.md](../docs/plan-sovereign-god-mode-v2.md)'s
+[docs/archive/plan-sovereign-god-mode-v2.md](../docs/archive/plan-sovereign-god-mode-v2.md)'s
 already-shipped backend (Phases 2–6, see
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-2--secure-kernel)
 and [04-http-api.md](04-http-api.md#sovereign-god-mode)) — no engine or route
@@ -1222,14 +1222,14 @@ for a private omen or private story event.
 
 Atmosphere pack (Phase 4) shipped lighting v2, seasonal terrain v2, weather
 particles v2, God console chrome v2, and the calendar retune — see
-[docs/plan-visual-atmosphere-systems.md](../docs/plan-visual-atmosphere-systems.md).
+[docs/archive/plan-visual-atmosphere-systems.md](../docs/archive/plan-visual-atmosphere-systems.md).
 Earlier plan docs remain as design records:
 
-- [docs/plan-visual-1-day-night-lighting.md](../docs/plan-visual-1-day-night-lighting.md)
+- [docs/archive/plan-visual-1-day-night-lighting.md](../docs/archive/plan-visual-1-day-night-lighting.md)
   — **DONE** (atmosphere pack lighting; permanent default in viewer).
-- [docs/plan-visual-2-seasonal-terrain-grading.md](../docs/plan-visual-2-seasonal-terrain-grading.md)
+- [docs/archive/plan-visual-2-seasonal-terrain-grading.md](../docs/archive/plan-visual-2-seasonal-terrain-grading.md)
   — **DONE** (atmosphere pack seasonal terrain; permanent default in viewer).
-- [docs/plan-visual-3-seasonal-sprite-variants.md](../docs/plan-visual-3-seasonal-sprite-variants.md)
+- [docs/archive/plan-visual-3-seasonal-sprite-variants.md](../docs/archive/plan-visual-3-seasonal-sprite-variants.md)
   — **DONE** (plumbing + art passes both shipped and verified; kept for the
   design record). The `setSpriteSeason`/`TREE_GRIDS`/winter-snow-cap
   behavior documented above is this plan's shipped result.

@@ -30,15 +30,10 @@ unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
 True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
 configured; see "Sovereign God mode" below.
 
-The single-file `/viewer.css`, `/sprites.js`, and `/viewer.js` routes
-described in earlier revisions of this spec no longer exist — all three now
-return 404. The stylesheet, Canvas renderer, and viewer client script are
-each served as several small files instead; the full per-file route/path/
-content table lives in [specs/12-ops.md](12-ops.md#viewer-static-assets)
-(also covered, with per-file content summaries, in specs/11-viewer.md's
-"css/*.css: split stylesheet", "sprites/*.js: pure stateless drawing", and
-"viewer/*.js: split viewer client script" sections) rather than duplicated
-below.
+Legacy single-file `/viewer.css`, `/sprites.js`, and `/viewer.js` routes return
+404; see the route table below and
+[12-ops.md](12-ops.md#viewer-static-assets) / [11-viewer.md](11-viewer.md) for
+per-file detail.
 
 | Path | Method | Purpose | Request | Response |
 |---|---|---|---|---|
@@ -178,7 +173,7 @@ migrate to `{}` on restore.
 
 ## Sovereign God mode
 
-The five `/control/god/*` routes (docs/plan-sovereign-god-mode-v2.md) form a
+The five `/control/god/*` routes (docs/archive/plan-sovereign-god-mode-v2.md) form a
 deliberately separate, optional control plane. All five share one gate and
 one uniform failure shape:
 

@@ -619,12 +619,12 @@ STORM_DISASTER_PROB = 0.32
 #      id (see emergencyRuleSeq) -- never a second parallel governance
 #      mechanism, and gated by the SAME RULE_PROPOSE_COOLDOWN/
 #      lastRuleAttemptFrame discipline as the priority/tax branches (see
-#      plan-rule-loop-fix.md).
+#      docs/archive/plan-rule-loop-fix.md).
 WEATHER_GOVERNANCE_ENABLED = True
 WEATHER_STORM_REGROW_MULT = 0.3     # suppression multiplier for storm-affected districts
 WEATHER_CLEARING_REGROW_MULT = 1.5  # post-storm "rain" boost for the same districts while clearing
 
-# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 2) ---
+# --- Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md, Phase 2) ---
 # GOD_MODE_ENABLED is an environment-backed, READ-ONCE-AT-IMPORT module flag,
 # not a runtime toggle: no HTTP route may change it, and there is no live
 # on/off switch by design -- enabling or disabling it requires the normal
@@ -685,7 +685,7 @@ GOD_VOICE_ACK_SKIP_CAP = 3          # consecutive synthetic (non-genuine) divine
                                      # cooperates can't stall the guidance forever (see _bump_voice_guidance_skip)
 GOD_PREVIEW_CACHE_MAX = 32          # bounded, in-memory, never persisted
 GOD_PREVIEW_TTL_SECONDS = 60        # wall-clock, not frame-based (previews are a request-scoped concept)
-GOD_REQUEST_CACHE_MAX = 100         # bounded, in-memory idempotency store (never persisted -- see docs/plan)
+GOD_REQUEST_CACHE_MAX = 100         # bounded, in-memory idempotency store (never persisted -- see docs/archive/plan-sovereign-god-mode-v2.md)
 GOD_RECENT_INTERVENTIONS_CAP = 100  # persisted viewer-history ring inside godState
 GOD_DIVINE_RESPONSE_LOG_MAX = 50    # Voice adherence ring (Sight only, never /state)
 GOD_ACTIVE_EVENTS_CAP = 8           # bounded timed-effect ring (Phase 5 payload; plumbing only in Phase 2)
@@ -730,13 +730,13 @@ GOD_DECISION_DIGEST_CAP = 200          # bounded ring in godState["decisionDiges
 GOD_DEJA_VU_MAX_STEPS = 8              # max replay steps (K) per deja_vu_replay apply
 GOD_DEJA_VU_SESSION_CAP = 12           # max applied replays per process lifetime (in-memory)
 
-# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Optional Phase 8) ---
+# --- Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md, Optional Phase 8) ---
 # GOD_COMPILER_ENABLED is a SECOND, independent, env-backed, read-once-at-
 # import dark flag, gated on GOD_MODE_ENABLED as well (both must be True --
 # see god_compile_prose and server.py's route). The plan is explicit that
 # this phase's contention gate is NOT cleared by shipping the code: the
 # compiler "needs its own A/B contention check" that "is not required for a
-# complete structured Storyteller God" (docs/plan "Optional Phase 8"). No
+# complete structured Storyteller God" (docs/archive/plan-sovereign-god-mode-v2.md "Optional Phase 8"). No
 # A/B measurement has been run in this change, so the flag ships OFF by
 # default and stays off until that measurement happens -- see specs/12-ops.md
 # "not-yet-A/B-measured" section for the recommended protocol.
@@ -749,7 +749,7 @@ GOD_COMPILER_TIMEOUT_SEC = 10.0        # aggressive: a hung Ollama request must 
 GOD_COMPILER_PROSE_MAX_CHARS = 800     # operator free-prose input cap (post-NFC-normalization character count)
 GOD_COMPILER_PROSE_MAX_BYTES = 2400    # byte cap scaled to the larger prose cap (see GOD_TEXT_MAX_BYTES's ratio)
 
-# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 3) ---
+# --- Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md, Phase 3) ---
 # Voice/providence duration bounds, frame-based like every other timed system
 # (DIRECTIVE_TTL_FRAMES above is the closest precedent -- 5400 frames is the
 # same ~3-minute default this reuses). A caller may omit durationFrames (the
@@ -760,9 +760,9 @@ GOD_GUIDANCE_MAX_DURATION_FRAMES = 54000    # ~30 min at 30 ticks/s
 GOD_GUIDANCE_DEFAULT_DURATION_FRAMES = 5400  # ~3 min, mirrors DIRECTIVE_TTL_FRAMES
 GOD_VETO_HOLD_TIMEOUT_FRAMES = GOD_GUIDANCE_DEFAULT_DURATION_FRAMES
 
-# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 4) ---
+# --- Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md, Phase 4) ---
 # Immediate miracles: agent_vitals, grant_resource, structure_condition. All
-# three are irreversible (docs/plan "Honest reversibility" -- the default
+# three are irreversible (docs/archive/plan-sovereign-god-mode-v2.md "Honest reversibility" -- the default
 # branch of _god_reversibility_class already covers any kind that is not
 # providence/private_omen, so no change was needed there).
 #
@@ -798,7 +798,7 @@ GOD_REPAIR_STRUCTURES_CONDITION_MAX = 100
 GOD_REPAIR_STRUCTURES_BATCH_MAX = 10
 GOD_CLEAR_RUINS_BATCH_MAX = 10
 
-# --- Sovereign God mode (docs/plan-sovereign-god-mode-v2.md, Phase 5) ---
+# --- Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md, Phase 5) ---
 # Timed lawgiver modifiers + storyteller events. "One active value per key":
 # a new event whose modifiers include a key already held by another ACTIVE
 # event is rejected unless it declares replaceEffectId naming that event.

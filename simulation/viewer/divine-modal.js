@@ -320,7 +320,7 @@ updateDivineBarAuthUi();
   });
 
 // --- Preview -> Apply generic wiring ------------------------------------
-// One reusable helper per mutating form (docs/plan: "no Apply before a
+// One reusable helper per mutating form (docs/archive/plan-sovereign-god-mode-v2.md: "no Apply before a
 // successful preview; any field edit invalidates it"). `resultEl` renders
 // via escapeHtml()-composed HTML fragments only -- normalizedCommand itself
 // is never inserted into innerHTML (rule: stored-content safety).

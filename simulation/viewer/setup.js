@@ -1,6 +1,6 @@
 "use strict";
 
-// Load-perf instrumentation (docs/plan-load-performance.md): set true to log
+// Load-perf instrumentation (docs/archive/plan-load-performance.md): set true to log
 // terrain-cache build timings and performance marks.
 const VIEWER_LOAD_DEBUG = false;
 const VIEWER_LOAD_T0 = VIEWER_LOAD_DEBUG ? performance.now() : 0;

@@ -14,7 +14,7 @@ import shutil
 import threading
 from datetime import datetime, timezone
 
-# Session-log retention (docs/plan-log-retention.md): keep-N-newest, pruned
+# Session-log retention (docs/archive/plan-log-retention.md): keep-N-newest, pruned
 # once at SessionLogger.__init__ right after the current session's directory
 # is created. Only directories whose basename fully matches this regex are
 # ever candidates -- loose files in logs/ root (soak-*.json, path1_soak_*,
@@ -73,7 +73,7 @@ class SessionLogger:
         # features can be measured (specialization index, rule adherence,
         # meme adoption, memory-store size, module-activation timeline).
         self.benchmark_path = os.path.join(self.dir, "benchmarks.jsonl")
-        # divine.jsonl (Sovereign God mode Phase 2, docs/plan-sovereign-god-
+        # divine.jsonl (Sovereign God mode Phase 2, docs/archive/plan-sovereign-god-
         # mode-v2.md's "Logging" section): the fifth stream, one record per
         # applied/cancelled/expired/rejected-after-preview/restore-closed
         # divine intervention. Preview-only calls are not world events and
@@ -81,7 +81,7 @@ class SessionLogger:
         # headers -- see log_divine below, which only accepts an already-
         # hashed request_id.
         self.divine_path = os.path.join(self.dir, "divine.jsonl")
-        # compiler.jsonl (Sovereign God mode Optional Phase 8, docs/plan-
+        # compiler.jsonl (Sovereign God mode Optional Phase 8, docs/archive/plan-
         # sovereign-god-mode-v2.md "Log separately"): a SIXTH stream, one
         # record per free-prose compile attempt (draft or rejection). Kept
         # separate from llm.jsonl (agent cognition) and divine.jsonl
@@ -107,7 +107,7 @@ class SessionLogger:
         _append's "logging must never break the simulation" contract: a
         listing failure aborts pruning for this run, and a per-directory
         deletion failure is swallowed so one un-deletable folder never blocks
-        the rest. docs/plan-log-retention.md / specs/12-ops.md."""
+        the rest. docs/archive/plan-log-retention.md / specs/12-ops.md."""
         keep = LOG_RETENTION_SESSIONS
         if keep <= 0:
             return  # retention disabled -- keep everything

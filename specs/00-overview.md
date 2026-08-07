@@ -23,10 +23,8 @@ index; [docs/REFERENCE.md](../docs/REFERENCE.md) for deep mechanics.
   interventions. Token auth is a separate optional gate: `GOD_AUTH_REQUIRED`
   (`SIM_GOD_AUTH`) defaults **off**; when auth is on, a non-empty
   `SIM_GOD_TOKEN` must also be configured or routes stay disabled until restart.
-  This is a deliberate departure
-  from the pure-observer stance of earlier drafts, and it is stated here rather
-  than hidden behind an "admin tool" label: a god-enabled run is partly
-  interactive. Divine influence must never masquerade as emergent agent behavior,
+  A god-enabled run is partly interactive — a deliberate departure from the
+  pure-observer stance of earlier drafts. Divine influence must never masquerade as emergent agent behavior,
   so every intervention is attributable and replay-auditable, and a run that has
   received one is permanently marked `intervened`. **Intervened runs are not
   comparable to untouched autonomous runs** and must never be cited as evidence
@@ -95,7 +93,6 @@ the Ollama dependency): [CLAUDE.md](../CLAUDE.md#commands).
 
 ## Spec-driven development contract
 
-These specs are the primary interface for this codebase, not an afterthought.
-Changes are made by editing the relevant spec(s) first, then the code, so specs
-never drift from behavior. The bar: an AI assistant with no other context should be
-able to rebuild this application from the spec set alone.
+These specs are the primary interface for this codebase. Edit relevant spec(s)
+first, then code, so specs never drift. Bar: rebuild the application from the
+spec set alone.

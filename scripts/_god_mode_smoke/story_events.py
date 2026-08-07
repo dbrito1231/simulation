@@ -627,7 +627,7 @@ def test_story_event_private_visibility_and_target_validation():
         se.GOD_MODE_ENABLED = old
 
 
-# --- Phase 6 tests: divine weather override (docs/plan-sovereign-god-mode-
+# --- Phase 6 tests: divine weather override (docs/archive/plan-sovereign-god-mode-
 # v2.md Phase 6 -- event-authoritative clock, RNG-free forced entry, handoff
 # to the natural cycle's successor of the OVERRIDDEN state, consequential
 # reversibility class) ---

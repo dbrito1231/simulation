@@ -1,7 +1,7 @@
 """Model routing / high-stakes-turn predicates, split out of server.py
 (Phase 5 modularization, pure move, no behavior change).
 
-Model routing (Phase 3 revision, 2026-07-24, docs/plan-ollama-migration.md):
+Model routing (Phase 3 revision, 2026-07-24, docs/archive/plan-ollama-migration.md):
 the two-model split is by WORKLOAD KIND, not by decision stakes. ALL
 decision turns (routine and high-stakes alike -- every call built by
 build_decision_payload / run_agent_decision, both still in server.py) go to
@@ -49,7 +49,7 @@ MODEL_FAST = "sim-fast"
 # etc.) and the two-model split is no longer in effect.
 if MODEL_FAST == MODEL_SMART:
     print("[server] WARNING: MODEL_FAST == MODEL_SMART -- two-model design "
-          "violated (see docs/plan-ollama-migration.md Phase 3). Continuing "
+          "violated (see docs/archive/plan-ollama-migration.md Phase 3). Continuing "
           "to start rather than crashing the 24/7 server, but PIANO modules "
           "and routine decisions are now sharing the smart model's queue.")
 

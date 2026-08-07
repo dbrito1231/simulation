@@ -1,5 +1,5 @@
   /* --- Divine Console (Sovereign God mode Phase 7 → bottom-bar relocation,
-     docs/plan-divine-console-bottom-bar.md). Strictly additive: every rule
+     docs/archive/plan-divine-console-bottom-bar.md). Strictly additive: every rule
      below only ever touches #divineBar / #divineModalScrim / #tooltip /
      #divineTabHold / #godPublicBanner (and form styles used inside modals),
      plus chrome clearance for #wrap / #minimap / #councilAssemblyReopenBtn

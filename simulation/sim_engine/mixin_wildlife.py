@@ -2,7 +2,7 @@
 SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_is_night` through
+class body — the contiguous method range from `_is_night` through
 `_maybe_seek_shelter` (formerly core.py lines ~504-1243). Covers: Path 1
 night/upkeep pressure loop (`_is_night`, `_pay_upkeep`, `_tick_env_upkeep`,
 lit-district helpers, `_tick_night_pressure`), the huntable wildlife system
@@ -11,21 +11,11 @@ math, migration, movement/flee behavior, hunt damage/yield, god wildlife
 spawn/despawn/set-hp commands, wildlife snapshot for /state, and the
 `_tick_wildlife` driver), and `_maybe_seek_shelter`.
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _WildlifeMixin, ...)` in core.py can reference this
-class by name at class-definition time, and so every bare-name global
-(WILDLIFE_ENABLED, PRESSURE_LOOP_ENABLED, HUNT_RADIUS, ...) referenced in
-these method bodies keeps resolving against the one shared module dict --
-required for scripts/*_smoke.py monkeypatches to keep working. See
-simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _WildlifeMixin:

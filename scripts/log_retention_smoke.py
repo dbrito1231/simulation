@@ -1,5 +1,5 @@
 """Deterministic no-server/no-Ollama smoke for the session-log retention
-policy (docs/plan-log-retention.md).
+policy (docs/archive/plan-log-retention.md).
 
 This smoke deliberately does NOT `import server` -- doing so would construct
 the module-level `session_logger = SessionLogger(...)` and create/prune a

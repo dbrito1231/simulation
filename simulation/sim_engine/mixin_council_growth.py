@@ -1,30 +1,20 @@
 """Phase 6d mixin: Daily Council + village-growth slice of SimEngine.
 
 Extracted unchanged (pure move, no behavior change) from core.py's SimEngine
-class body -- the contiguous method range from `_daily_council_living`
+class body — the contiguous method range from `_daily_council_living`
 through `_maybe_advance_rules` (formerly core.py lines ~6195-7853). Covers:
-the Daily Council Assembly (scheduled whole-village council -- agenda,
+the Daily Council Assembly (scheduled whole-village council — agenda,
 seating, phases, speak/propose/vote actions, ballot resolution/ratification,
 digest, transcript pruning/adjournment), the Phase D invention council
 (proposal recording, verdicts, dissolution) and its invention-demand
 backstop, stuck-project relocation, structure reorganization, district
 founding, and the rules-proposal backstop (`_maybe_advance_rules`).
 
-Loaded the same way as the other Phase 6 mixin files: `sim_engine/__init__.py`
-exec()s this file's source into its own module namespace (not a plain
-submodule import), BEFORE it exec()s core.py, so that
-`class SimEngine(..., _CouncilGrowthMixin, ...)` in core.py can reference
-this class by name at class-definition time, and so every bare-name global
-(DAILY_COUNCIL_ENABLED, RULES_ENABLED, etc.) referenced in these method
-bodies keeps resolving against the one shared module dict -- required for
-scripts/*_smoke.py monkeypatches to keep working. See
-simulation/sim_engine/__init__.py for the full rationale.
+Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
 # NOTE: constants.py/persistence.py/helpers.py names are NOT imported here.
-# They are already present in this exec()-shared namespace by the time this
-# file's body runs -- see the module docstring above and
-# simulation/sim_engine/__init__.py.
+# They live in the exec()-shared namespace — see simulation/sim_engine/__init__.py.
 
 
 class _CouncilGrowthMixin:

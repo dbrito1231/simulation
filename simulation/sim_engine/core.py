@@ -541,7 +541,7 @@ class SimEngine(
             # districts exist, since "storm" picks from them); restore_state
             # setdefaults this for old saves without re-rolling an existing one.
             "weather": None,
-            # Sovereign God mode (docs/plan-sovereign-god-mode-v2.md Phase 2):
+            # Sovereign God mode (docs/archive/plan-sovereign-god-mode-v2.md Phase 2):
             # set to a real default below via _default_god_state(), mirroring
             # the weather pattern above. Persists wholesale with the rest of
             # civilization (see save_state/_serialize_state) with NO

@@ -134,14 +134,10 @@ decision action-sync set.
   behavior of its own. See [03-cognition.md](03-cognition.md#sovereign-god-mode-optional-phase-8-free-prose-story-compiler)
   and [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler).
 
-`GOD_MODE_ENABLED` is also the **first** env-var-backed flag in
-`sim_engine/constants.py:644` (`os.environ.get("SIM_GOD_MODE", ...)`, read once at import).
-`GOD_AUTH_REQUIRED` is likewise env-backed in sim_engine/constants.py:650 (`SIM_GOD_AUTH`,
-default False). Every prior env-var precedent (`SIM_HOST`, `SIM_PORT`,
-`SIM_AGENTS`, `SIM_LOG_RETENTION`) lives only in server.py; sim_engine's
-`constants.py` previously read no environment state at all. The companion
-`SIM_GOD_TOKEN` env var stays in server.py only, since the token check itself
-lives there.
+`GOD_MODE_ENABLED` and `GOD_AUTH_REQUIRED` are env-backed in
+`sim_engine/constants.py:644` / `:650` (`SIM_GOD_MODE`, `SIM_GOD_AUTH`; read
+once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
+there).
 
 ## Flag index (complete — 52 module-level flags, sim_engine.py)
 

@@ -396,5 +396,5 @@ def test_benchmarks_expose_intervened():
         se.GOD_MODE_ENABLED = old
 
 
-# --- Phase 3 tests: voice and providence (docs/plan-sovereign-god-mode-v2.md
+# --- Phase 3 tests: voice and providence (docs/archive/plan-sovereign-god-mode-v2.md
 # "Voice and providence" + "Bounded cognition impact" + Phase 3 deliverables) ---

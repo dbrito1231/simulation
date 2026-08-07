@@ -27,8 +27,8 @@ simulation/state.db-shm
 simulation/memory_store.json
 simulation/memory_store.json.tmp
 
-# Manual state backups
-archive/
+# Manual state backups (repo root only; docs/archive/ is versioned)
+/archive/
 simulation/backup/
 
 # Local agent/tool state (not part of the repo)

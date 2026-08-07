@@ -456,5 +456,5 @@ def test_restore_does_not_refire_omen_memory():
         se.GOD_MODE_ENABLED = old
 
 
-# --- Phase 4 tests: bounded immediate miracles (docs/plan-sovereign-god-
+# --- Phase 4 tests: bounded immediate miracles (docs/archive/plan-sovereign-god-
 # mode-v2.md "Immediate miracles" + "Honest reversibility" + Phase 4) ---

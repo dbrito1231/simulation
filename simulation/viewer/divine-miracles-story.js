@@ -383,7 +383,7 @@ wireDivineForm("#godStoryFieldset", {
   },
 });
 
-// --- Compile tab (Sovereign God mode Optional Phase 8, docs/plan-sovereign-
+// --- Compile tab (Sovereign God mode Optional Phase 8, docs/archive/plan-sovereign-
 // god-mode-v2.md "Free-prose story compiler") ---------------------------
 // Deliberately NOT wired through wireDivineForm/Apply: a successful compile
 // fills the Story tab and switches to it -- the operator still has to
