@@ -294,8 +294,18 @@ def test_confront_available_actions_gating():
 def test_confront_agent_action_sync():
     action = "confront_agent"
     server_source = (ROOT / "simulation" / "server.py").read_text(encoding="utf-8")
-    engine_source = (ROOT / "simulation" / "sim_engine.py").read_text(encoding="utf-8")
-    viewer_source = (ROOT / "simulation" / "viewer.js").read_text(encoding="utf-8")
+    # sim_engine.py was split into a package under simulation/sim_engine/
+    # (Phase 6a) and viewer.js into ordered files under simulation/viewer/
+    # (see index.html's <script> tag order and specs/11-viewer.md);
+    # concatenate each for this source-scan check (order doesn't matter here).
+    engine_source = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((ROOT / "simulation" / "sim_engine").glob("*.py"))
+    )
+    viewer_source = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((ROOT / "simulation" / "viewer").glob("*.js"))
+    )
     prompts_source = (ROOT / "simulation" / "prompts.py").read_text(encoding="utf-8")
 
     tree = ast.parse(server_source)

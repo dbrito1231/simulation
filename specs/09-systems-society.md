@@ -19,22 +19,22 @@ tech tree gates.
 ## TECH_TREE_ENABLED
 
 Every structure type and recipe carries a `tier` (default 1; seed tier-2
-tech is the granary and cart). `_village_tech_tier()` (sim_engine.py:2629)
+tech is the granary and cart). `_village_tech_tier()` (sim_engine/mixin_structures_economy.py:152)
 = the highest `unlocks.tier` among built, *working* station structures
 (floor 1; capped `MAX_TECH_TIER = 3`). Proposing/crafting/starting tier-T
 tech requires village tier ≥ T; every refusal names the deterministic
 escape (`_tier_gate_reason`) — the tier-T station is itself buildable one
 tier lower (e.g. the Forge, tier-2 unlock, is plain tier-1 tech).
 
-**Era ladder** (`ERA_LADDER`, sim_engine.py:565): Founding → Craftsman
+**Era ladder** (`ERA_LADDER`, sim_engine/constants.py:1505): Founding → Craftsman
 (working craft station) → Forge (working tier-2 station) → Wagon (a
 cart/wagon in village hands) → (`TIER3_CONTENT_ENABLED`) Harbor → Mill.
-`_maybe_era_transition()` (sim_engine.py:2723) is tick-gated and monotonic
+`_maybe_era_transition()` (sim_engine/mixin_structures_economy.py:251) is tick-gated and monotonic
 — a broken Forge never un-names the era — and logs/benchmarks (`era`) on
 advance.
 
 **Legacy invention council (only while `DAILY_COUNCIL_ENABLED` is off).** When `_maybe_invention_backstop()`
-(sim_engine.py:7191) fires — `_invention_required()` has held true for
+(sim_engine/mixin_council_growth.py:1066) fires — `_invention_required()` (sim_engine/mixin_project_helpers.py:122) has held true for
 `INVENTION_BACKSTOP_STREAK = 3` consecutive elder think turns and no
 blueprint is pending — up to `INVENTION_COUNCIL_SIZE = 3` idle villagers
 (only when ≥2 are idle) get parallel invention-only think turns (each
@@ -211,7 +211,7 @@ checks.
 ## RULES_ENABLED
 
 Rule kinds: `RULE_KINDS = {"resource_tax", "custom", "priority"}`
-(sim_engine.py:432), unioned with `{"harvest_quota", "rationing",
+(sim_engine/constants.py:1281), unioned with `{"harvest_quota", "rationing",
 "succession"}` when `LIFECYCLE_ENABLED`, and `{"treaty"}` when
 `PATH1_DIPLOMACY_ENABLED` (see [10-path1.md](10-path1.md) for treaty
 mechanics). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
@@ -259,10 +259,10 @@ or supersession.
 
 **Propose → vote → enact:** `propose_rule` validates and appends to
 `pendingRules` with the proposer's own `"yes"` vote pre-cast, then calls
-`_tally_and_maybe_enact` (sim_engine.py:4891) immediately (so a lone
+`_tally_and_maybe_enact` (sim_engine/mixin_crafting_rules.py:498) immediately (so a lone
 proposer can pass a rule alone if quorum is 1). `vote_rule` adds a vote and
 re-tallies. Quorum = `(active_agent_count // 2) + 1`
-(`_vote_quorum`, sim_engine.py:4826). Reaching `yes ≥ quorum` enacts (moves
+(`_vote_quorum`, sim_engine/mixin_crafting_rules.py:246). Reaching `yes ≥ quorum` enacts (moves
 into `civilization["rules"]`, stamps `enactedFrame`, applies mechanical
 effect via `_apply_governance_rule`); `no ≥ quorum` rejects and discards.
 `harvest_quota` and `rationing` get real teeth once enacted: `harvest_quota`
@@ -293,7 +293,7 @@ pending ordinary rule loses its budget slot, its passed ballot is discarded as
 rejected without mutating effects or the constitution.
 
 **Rule ids are globally non-reusable** (`_ensure_constitution`,
-sim_engine.py): `_validate_rule` rejects any id already present in
+sim_engine/mixin_crafting_rules.py:350): `_validate_rule` (sim_engine/mixin_crafting_rules.py:419) rejects any id already present in
 `civilization["constitution"]` regardless of status, so a repealed id can
 never be re-enacted under the same id. The deterministic priority-rule
 auto-proposer in `_maybe_advance_rules` therefore mints a **unique
@@ -394,7 +394,7 @@ this same cooldown guard). All new fields — `lastRuleAttemptFrame`,
 `0`/`None` on load; a pre-fix save simply resumes as if no attempt/enactment
 had yet happened).
 
-**`repeal_rule`** action → `_propose_repeal` (sim_engine.py:5008): opens a
+**`repeal_rule`** action → `_propose_repeal` (sim_engine/mixin_crafting_rules.py:687): opens a
 new pending ballot (kind `"repeal"`, id `repeal_<target>`) reusing the same
 vote/quorum scaffold; `_enact_repeal` removes the target from
 `civilization["rules"]`, marks its constitution provision repealed, and
@@ -403,12 +403,12 @@ reverses its governance effect (`_clear_governance_rule`) on success.
 **Anti-oscillation guard** (implemented 2026-07-12; the archived
 `docs/archive/rule-oscillation-fix-plan.md` describes the incident this
 fixed — this section is the current, load-bearing behavior). The
-deterministic elder backstop `_maybe_advance_rules` (sim_engine.py:7605,
+deterministic elder backstop `_maybe_advance_rules` (sim_engine/mixin_council_growth.py:1519,
 runs on `RULE_PROPOSE_COOLDOWN = 1500` ticks ≈50s cooldown when nothing is
 pending) has a "keep village law lean" branch that proposes repealing the
 oldest non-tax rule once ≥2 rules are active — but only rules eligible by
 `RULE_REPEAL_MIN_AGE_FRAMES = RULE_PROPOSE_COOLDOWN * 4` (≈3.3 min since
-`enactedFrame`) are candidates (sim_engine.py:7676-7678). Without this age
+`enactedFrame`) are candidates (sim_engine/mixin_council_growth.py:1654-1660). Without this age
 floor, the normal tax+priority two-rule steady state caused the repeal
 branch to fire the very next cooldown window after the propose branch
 enacted the priority rule, undoing it immediately and oscillating
@@ -728,7 +728,7 @@ run on unbounded.
 ## AGENT_MESSAGING
 
 A simple per-agent inbox: `_deliver_message(from, to, text, kind)`
-(sim_engine.py:6373) appends `{from, text, kind, frame}` to every matching
+(sim_engine/mixin_backstops.py:38) appends `{from, text, kind, frame}` to every matching
 recipient's `inbox` (broadcast when `to` is `"everyone"`/`"all"`/`None`),
 trimmed to `INBOX_CAP = 6` most-recent entries. `_drain_inbox(agent)`
 (called once per think-payload build) folds the inbox into the prompt as a
@@ -739,7 +739,7 @@ promptly — see [08-systems-economy.md](08-systems-economy.md)).
 
 ## BENCHMARKS_ENABLED
 
-`_sample_benchmarks()` (sim_engine.py:7713) runs on
+`_sample_benchmarks()` (sim_engine/mixin_decisions.py:53) runs on
 `BENCHMARK_TICK_FRAMES = 600` (20s) plus once at `FIRST_BENCHMARK_FRAME =
 60`. Always samples: role-specialization entropy (Shannon entropy over
 role counts), rule adherence (tax paid/due ratio), meme adoption count +

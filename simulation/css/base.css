@@ -1,0 +1,90 @@
+  html, body { margin: 0; padding: 0; background: #1b1b1b; font-family: system-ui, sans-serif; }
+  #wrap {
+    display: flex;
+    width: 100%;
+    height: 100vh;
+    margin: 0;
+    position: relative;
+    box-sizing: border-box;
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  #canvasWrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+    /* The world (1600x2700) is taller than most viewports; scroll instead of
+       squashing it down to fit, so the expanded village/farm build area is
+       actually usable rather than shrunk to illegibility. */
+    overflow: auto;
+  }
+  #world {
+    display: block;
+    background: #000;
+    /* Native logical size (matches WORLD_W/WORLD_H) -- no longer scaled to
+       fit the viewport. setupCanvas() keeps this in sync on resize. */
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }
+  #pauseBtn, #resetBtn {
+    /* Fixed (not absolute) so the controls stay put over the viewport while
+       the now-scrollable canvasWrap is scrolled around underneath them. */
+    position: fixed; top: 18px;
+    padding: 6px 14px; font: 13px sans-serif;
+    background: #333; color: #fff; border: 1px solid #666;
+    border-radius: 4px; cursor: pointer; z-index: 10;
+  }
+  #pauseBtn { left: 18px; }
+  #resetBtn { left: 98px; }
+  #pauseBtn:hover, #resetBtn:hover { background: #444; }
+  #worldClockHud {
+    /* Fixed like the map controls: the indicator remains legible while the
+       large world canvas scrolls below it. */
+    position: fixed; top: 18px; right: 380px;
+    padding: 6px 10px;
+    background: rgba(18, 21, 32, 0.86); color: #f5ead4;
+    border: 1px solid rgba(241, 205, 126, 0.6); border-radius: 12px;
+    font: 600 12px system-ui, sans-serif; letter-spacing: 0.02em;
+    pointer-events: none; z-index: 10;
+    text-transform: capitalize;
+  }
+  #zoomInBtn, #zoomOutBtn, #zoomFitBtn {
+    /* Same fixed cluster as pause/reset, stacked into a second row so the
+       world can be zoomed out to see it as a whole (esp. on small screens)
+       or zoomed in anywhere without needing to scroll pixel-by-pixel. */
+    position: fixed; top: 54px;
+    padding: 6px 10px; font: 13px sans-serif;
+    background: #333; color: #fff; border: 1px solid #666;
+    border-radius: 4px; cursor: pointer; z-index: 10;
+  }
+  #zoomOutBtn { left: 18px; }
+  #zoomInBtn { left: 58px; }
+  #zoomFitBtn { left: 98px; width: 40px; }
+  #zoomInBtn:hover, #zoomOutBtn:hover, #zoomFitBtn:hover { background: #444; }
+  #minimap {
+    /* Fixed like the pause/reset buttons -- with districts now able to be
+       founded mid-session into the open frontier, this is the only way to
+       notice new territory came online without scrolling to find it.
+       Clickable/draggable: click or drag anywhere on it to jump the main
+       viewport there (see minimap mouse handlers below).
+       Anchored to the bottom-right of the map pane specifically (right:
+       380px = #sidebar's 360px width + the #wrap padding/gap it sits
+       behind), NOT the viewport's left/right edge -- bottom-left used to
+       collide with #convPanel's Activity list, and a plain bottom-right
+       would collide with #sidebar's Agents list. Keep the 380px in sync
+       with #sidebar's width if that ever changes. Reset to the viewport
+       corner on narrow screens (see the max-width:900px block) once
+       convPanel/sidebar stack full-width and stop occupying a side column. */
+    position: fixed;
+    bottom: 18px;
+    right: 380px;
+    width: 220px;
+    height: 160px;
+    background: #0e0e14;
+    border: 1px solid #666;
+    border-radius: 4px;
+    z-index: 10;
+    cursor: pointer;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+  }

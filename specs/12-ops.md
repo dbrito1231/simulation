@@ -13,17 +13,17 @@ for the no-test-suite verification workflow this spec elaborates.
 
 ## SessionLogger
 
-`SessionLogger` (server.py:248) is constructed once at import time —
-`session_logger = SessionLogger(...)` (server.py:321) — so every server
+`SessionLogger` (`simulation/_server/logging_session.py:61`) is constructed once at import time —
+`session_logger = SessionLogger(...)` (server.py:269) — so every server
 process (`uv run python simulation/server.py`) gets exactly one session
 folder for its lifetime.
 
 - **Folder naming**: `simulation/logs/<session_id>/` where `session_id =
-  datetime.now().strftime("%Y-%m-%dT%H-%M-%S")` (server.py:252-253), e.g.
+  datetime.now().strftime("%Y-%m-%dT%H-%M-%S")` (`simulation/_server/logging_session.py:65-66`), e.g.
   `simulation/logs/2026-07-15T09-30-00/`. The whole `logs/` tree is
   gitignored.
 - **Retention (`docs/plan-log-retention.md`)**: count-based, keep-N-newest.
-  Module constant `LOG_RETENTION_SESSIONS = 20` (server.py, beside
+  Module constant `LOG_RETENTION_SESSIONS = 20` (`simulation/_server/logging_session.py`, beside
   `SessionLogger`), overridable via the `SIM_LOG_RETENTION` env var (parsed
   defensively -- a missing, blank, or malformed value falls back to the `20`
   constant rather than raising at import). `0` (or negative) **disables
@@ -75,34 +75,35 @@ folder for its lifetime.
   `frame_tick`. Per-file bounds are cached in memory keyed by path with
   mtime+size invalidation so steady-state council lookups after a long run
   typically touch only the live `llm.jsonl`.
-- **Six JSONL streams**, each created empty on startup (server.py:255-264):
+- **Six JSONL streams**, each created empty on startup (`simulation/_server/logging_session.py:93-95`):
   | File | Written by | Record `type` |
   |---|---|---|
-  | `activity.jsonl` | `log_activity(message, frame_tick)` (server.py:286-289) | `"activity"` |
-  | `conversation.jsonl` | `log_conversation(sender, recipient, message, frame_tick, kind, outcome)` (server.py:291-303) | `"conversation"` |
-  | `llm.jsonl` | `log_lm_exchange(record)` (server.py:305-307) | `"llm"` (sessions predating the Ollama migration, `docs/plan-ollama-migration.md` Phase 5, wrote `lm_studio.jsonl` with `type: "lm_studio"`) |
-  | `benchmarks.jsonl` | `log_benchmark(metric, value, frame_tick, detail)` (server.py:309-318); flushed via `flush_benchmarks()` | `"benchmark"` |
+  | `activity.jsonl` | `log_activity(message, frame_tick)` (`simulation/_server/logging_session.py:144-147`) | `"activity"` |
+  | `conversation.jsonl` | `log_conversation(sender, recipient, message, frame_tick, kind, outcome)` (`simulation/_server/logging_session.py:149-161`) | `"conversation"` |
+  | `llm.jsonl` | `log_lm_exchange(record)` (`simulation/_server/logging_session.py:163-172`) | `"llm"` (sessions predating the Ollama migration, `docs/plan-ollama-migration.md` Phase 5, wrote `lm_studio.jsonl` with `type: "lm_studio"`) |
+  | `benchmarks.jsonl` | `log_benchmark(metric, value, frame_tick, detail)` (`simulation/_server/logging_session.py:181-193`); flushed via `flush_benchmarks()` | `"benchmark"` |
   | `divine.jsonl` | `log_divine(intervention_id, request_id, frame_tick, kind, normalized_command, outcome, status, public)` — Sovereign God mode Phase 2 | `"divine"` |
   | `compiler.jsonl` | `log_compiler(prose, model, latency_ms, status, reason, preview_id)` — Sovereign God mode Optional Phase 8 | `"compiler"` |
-- Every record passes through `_append()` (server.py:272-284), which stamps
+- Every record passes through `_append()` (`simulation/_server/logging_session.py:130-142`), which stamps
   `ts` (UTC ISO-8601) and `session_id` onto whatever fields the caller
   supplied, then appends one JSON line. The first `conversation.jsonl` line
-  is always a synthetic `kind: "session_start"` entry (server.py:265-270).
+  is always a synthetic `kind: "session_start"` entry (`simulation/_server/logging_session.py:96-101`).
 - **Per-session `memory.json`**: the in-process vector `MemoryStore`
-  persists to `session_logger.dir/memory.json` (server.py:620) — debounced
-  (`MEMORY_PERSIST_EVERY = 12` stores, server.py:333) plus always-flushed on
-  `clean()`/`clear()` (server.py:535-536, 581-588) via atomic
-  write-tmp-then-`os.replace` (server.py:611-614). Shape: `{session_id,
+  persists to `session_logger.dir/memory.json` (mirror_path wired at
+  server.py:289, written by `simulation/_server/memory_store.py:401-409`) —
+  debounced (`MEMORY_PERSIST_EVERY = 12` stores, `simulation/_server/memory_store.py:28`)
+  plus always-flushed on `clean()`/`clear()` (`simulation/_server/memory_store.py:295-317, 361-368`)
+  via atomic write-tmp-then-`os.replace` (`simulation/_server/memory_store.py:393-397`). Shape: `{session_id,
   size, entries: [{id, agent, text, salience, kind, tier, frame_tick, ts}]}`
   — the 128-float `vec` is stripped before writing (recomputable, pure disk
-  bloat, server.py:600-609). It's a per-session **inspection artifact
+  bloat, `simulation/_server/memory_store.py:384-388`). It's a per-session **inspection artifact
   only**, never read back by the running server (state.db carries the
   authoritative memory export across restarts).
 - **Record shapes** beyond the common `ts`/`session_id` envelope:
   - `activity`: `{type, message, frame_tick}`.
   - `conversation`: `{type, kind, from, to, message, frame_tick, outcome?}`.
   - `llm`: built per decision call by closure `log_lm(...)`
-    (server.py:3010-3035), stripped in `log_lm_exchange` unless full logging
+    (server.py:2038-2078), stripped in `log_lm_exchange` unless full logging
     is enabled. **Default (slim):** `{agent_name, frame_tick, latency_ms,
     invention_only, sprite_design_only, high_stakes_reason,
     high_stakes_active, high_stakes_capped, prompt_chars, system_chars,
@@ -161,7 +162,8 @@ folder for its lifetime.
     requires `divine_response` (as a non-null object) whenever guidance is
     active for that agent's request (`build_response_format(
     require_divine_response=True)`, [03](03-cognition.md)), but a missing/
-    invalid value is still not rejected as a hard fallback — `sim_engine.py`
+    invalid value is still not rejected as a hard fallback —
+    `_record_divine_response_adherence` (`mixin_divine_matrix.py:196`)
     records a `divine_response` (valid/genuine or synthetic
     `missing_divine_response`) on **every** think turn while guidance remains
     active and unacknowledged, writing an additional `divine.jsonl` record
@@ -227,12 +229,12 @@ folder for its lifetime.
     or persisted) instead. See
     [03-cognition.md](03-cognition.md#sovereign-god-mode-optional-phase-8-free-prose-story-compiler).
 - **Never-raise contract**: `_append()` wraps its write in
-  `try/except OSError: pass` (server.py:279-284, "Logging must never break
+  `try/except OSError: pass` (`simulation/_server/logging_session.py:137-142`, "Logging must never break
   the simulation"); `_persist()` for `memory.json` has the identical guard
-  (server.py:615-617). `/log/event` and `/log/benchmark` wrap their entire
-  body in `try/except Exception: pass` too (server.py:2194-2233) — a
+  (`simulation/_server/memory_store.py:393-400`). `/log/event` and `/log/benchmark` wrap their entire
+  body in `try/except Exception: pass` too (server.py:849-888) — a
   malformed browser-origin log POST can never 500 or disturb the sim.
-- **`/log/event`**/**`/log/benchmark`** (server.py:2194-2233) let the
+- **`/log/event`**/**`/log/benchmark`** (server.py:849-888) let the
   browser forward client-origin events into the same session streams; full
   request/response shapes are in [04-http-api.md](04-http-api.md).
 - **Ollama's own server log** (not written by `SessionLogger`, and not
@@ -243,10 +245,10 @@ folder for its lifetime.
 
 The God control plane (`/control/god/*`) uses a **two-gate model**:
 
-1. **`GOD_MODE_ENABLED`** (sim_engine.py, env `SIM_GOD_MODE`, default on) —
+1. **`GOD_MODE_ENABLED`** (`constants.py:644`, env `SIM_GOD_MODE`, default on) —
    the master switch. When off, every God route returns the uniform
    `401 {"error": "unauthorized"}` regardless of any token.
-2. **`GOD_AUTH_REQUIRED`** (sim_engine.py, env `SIM_GOD_AUTH`, default **off**)
+2. **`GOD_AUTH_REQUIRED`** (`constants.py:650`, env `SIM_GOD_AUTH`, default **off**)
    — an optional second gate. When off (the shipped default), routes go live
    as soon as the flag is on; no token is read or checked. When on, a
    non-empty `SIM_GOD_TOKEN` (server.py, read once at import) must also be
@@ -327,7 +329,7 @@ any JSONL stream or benchmark.
 
 ## Optional Phase 8: free-prose story compiler
 
-`GOD_COMPILER_ENABLED` (sim_engine.py, env-backed `SIM_GOD_COMPILER`, read
+`GOD_COMPILER_ENABLED` (`constants.py:743`, env-backed `SIM_GOD_COMPILER`, read
 once at import — same idiom as `GOD_MODE_ENABLED`, see
 [01-architecture.md](01-architecture.md)) gates `engine.god_compile_prose`
 and the `/control/god/compile` route in addition to, not instead of,
@@ -413,10 +415,37 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 
 | Path | File | Notes |
 |---|---|---|
-| `/viewer.css` | `simulation/viewer.css` | Required — viewer layout and panel chrome |
-| `/viewer.js` | `simulation/viewer.js` | Required — polling, render loop, sidebar, Divine Console |
-| `/sprites.js` | `simulation/sprites.js` | Required — Canvas renderer |
-| `/wildlife.png` | `simulation/wildlife.png` | Wildlife spritesheet (variable-size atlas from user PNGs). When absent (404), `sprites.js` keeps `_wildlifeSheetReady = false` and draws canvas helpers / procedural `WILDLIFE_SPRITES` grids — first paint is never blocked. |
+| `/viewer/setup.js` | `simulation/viewer/setup.js` | Required — viewer 1/16: boot/canvas setup, zoom, feature flags |
+| `/viewer/state.js` | `simulation/viewer/state.js` | Required — viewer 2/16: world snapshot (`MOCK_STATE`, `world`), delta merge, districts cache |
+| `/viewer/render.js` | `simulation/viewer/render.js` | Required — viewer 3/16: convenience accessors + drawing (terrain cache, weather/night overlays, agents, structures) |
+| `/viewer/sidebar.js` | `simulation/viewer/sidebar.js` | Required — viewer 4/16: sidebar render (Civilization/Agents panels, `ACTION_LABELS`, benchmarks, world clock HUD) |
+| `/viewer/council.js` | `simulation/viewer/council.js` | Required — viewer 5/16: Council panel, Council Assembly modal, settlements |
+| `/viewer/minimap.js` | `simulation/viewer/minimap.js` | Required — viewer 6/16: minimap render + navigation |
+| `/viewer/polling.js` | `simulation/viewer/polling.js` | Required — viewer 7/16: `/state` polling, flag sync, social ties/wildlife/shipment drawing |
+| `/viewer/controls.js` | `simulation/viewer/controls.js` | Required — viewer 8/16: Pause/Resume/Reset controls |
+| `/viewer/renderloop.js` | `simulation/viewer/renderloop.js` | Required — viewer 9/16: `tick`/`tickBody` render loop |
+| `/viewer/divine-bootstrap.js` | `simulation/viewer/divine-bootstrap.js` | Required — viewer 10/16: Divine Console state, DOM refs, feature registry/guide, agent/pin selects |
+| `/viewer/divine-auth-sight.js` | `simulation/viewer/divine-auth-sight.js` | Required — viewer 11/16: Divine Console auth/fetch plumbing, Sight overlays/diff, bar effects/pips, preview controller, favorites |
+| `/viewer/divine-modal.js` | `simulation/viewer/divine-modal.js` | Required — viewer 12/16: Divine Console bottom bar/modal/tabs, tooltip engine, preview→apply generic wiring |
+| `/viewer/divine-sight-voice.js` | `simulation/viewer/divine-sight-voice.js` | Required — viewer 13/16: Sight tab render + checkpoint restore, Voice presets |
+| `/viewer/divine-voice.js` | `simulation/viewer/divine-voice.js` | Required — viewer 14/16: Voice tab (proclamation/providence/private omen, whisper/crowd/dream, bargain/oracle/architect) |
+| `/viewer/divine-miracles-story.js` | `simulation/viewer/divine-miracles-story.js` | Required — viewer 15/16: Miracles tab, shared modifier editor, Story/Compile/Laws tabs |
+| `/viewer/divine-history.js` | `simulation/viewer/divine-history.js` | Required — viewer 16/16: History power tools, gate/passive refresh, public banner, `renderDivineConsole` entry point, poll/render loop kickoff |
+| `/css/base.css` | `simulation/css/base.css` | Required — stylesheet 1/6: reset, `#wrap`/`#canvasWrap`/`#world`, map controls, `#worldClockHud`, `#minimap` |
+| `/css/panels.css` | `simulation/css/panels.css` | Required — stylesheet 2/6: `#sidebar`/`#convPanel` shared chrome, `#civPanel` civilization stats |
+| `/css/agents.css` | `simulation/css/agents.css` | Required — stylesheet 3/6: `#agentList`/`#agentRollup`/`#agentDetail`, deceased-agents modal |
+| `/css/council.css` | `simulation/css/council.css` | Required — stylesheet 4/6: council transcript modal, conversation/activity/chronicle lists, council banner/panel, Daily Council Assembly modal |
+| `/css/divine.css` | `simulation/css/divine.css` | Required — stylesheet 5/6: Divine Console bottom bar and modal, `#tooltip`, `#godPublicBanner` |
+| `/css/responsive.css` | `simulation/css/responsive.css` | Required — stylesheet 6/6: the two `@media` breakpoint blocks |
+| `/sprites/core.js` | `simulation/sprites/core.js` | Required — Canvas renderer, part 1/8: shared state (`spriteSeason`), pixel-grid primitives, snow-cap helper, road-edge path cells |
+| `/sprites/tiles.js` | `simulation/sprites/tiles.js` | Required — Canvas renderer, part 2/8: color palette `C`, path-blend tiles, terrain `TILE_*` grids, ocean tile builder |
+| `/sprites/props.js` | `simulation/sprites/props.js` | Required — Canvas renderer, part 3/8: starter-world decor (trees, crops, fences, dock, well, rocks, decorative house/market-stall/cave-entrance) |
+| `/sprites/structures.js` | `simulation/sprites/structures.js` | Required — Canvas renderer, part 4/8: agent-built structure grids, wear/ruin rendering, forge smoke, weather-particle and activity-dust helpers |
+| `/sprites/agents.js` | `simulation/sprites/agents.js` | Required — Canvas renderer, part 5/8: agent sprite palettes/grids, accessories, tombstones, belief tints |
+| `/sprites/world.js` | `simulation/sprites/world.js` | Required — Canvas renderer, part 6/8: district tile compositing, starter district list, `drawTiledWorld` |
+| `/sprites/wildlife.js` | `simulation/sprites/wildlife.js` | Required — Canvas renderer, part 7/8: ambient wildlife (PNG sheet, canvas-helper, and procedural-grid fallbacks) |
+| `/sprites/shipments.js` | `simulation/sprites/shipments.js` | Required — Canvas renderer, part 8/8: goods-in-motion cart/boat sprites |
+| `/wildlife.png` | `simulation/wildlife.png` | Wildlife spritesheet (variable-size atlas from user PNGs). When absent (404), `sprites/wildlife.js` keeps `_wildlifeSheetReady = false` and draws canvas helpers / procedural `WILDLIFE_SPRITES` grids — first paint is never blocked. |
 | `/wildlife_refsheet.html` | `simulation/wildlife_refsheet.html` | Dev/debug only — labeled 4×4 grid calling live `drawWildlifeCreature`; not part of the sim viewer loop. |
 
 **Wildlife art provenance:** User-provided PNGs in `simulation/assets/wildlife/` (16 kinds: `bee`, `bird`, `boar`, `chicken`, `cow`, `crab`, `deer`, `fish`, `fox`, `gull`, `mouse`, `owl`, `rabbit`, `seal`, `squirrel`, `turtle`). `bee` replaces the former decorative farm kind `butterfly` (same role — not huntable). `cow` replaces the former farm kind `grazer` (save migration in `_normalize_wildlife_records`). Rebuild atlas: `uv run python scripts/build_wildlife_sheet.py` (keys square backdrops via border flood-fill, trims transparency; `bee.png` mint-green backdrop keyed from corner samples). Committed outputs: `wildlife.png`, source PNGs, and the build script. Preview (gitignored): `simulation/_vendor/wildlife-preview-4x.png`.
@@ -425,10 +454,10 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 
 | Script | Needs Ollama? | What it does |
 |---|---|---|
-| `sid_parity_smoke.py` | No | Deterministic smoke harness for Sid-parity Phases 1–3: specialization-need signals, priority/repeal governance, competing memes, belief-biased votes — drives `sim_engine` directly (imports `sim_engine.py`/`roles.json`, no network). Run: `uv run python scripts/sid_parity_smoke.py`. |
+| `sid_parity_smoke.py` | No | Deterministic smoke harness for Sid-parity Phases 1–3: specialization-need signals, priority/repeal governance, competing memes, belief-biased votes — drives `sim_engine` directly (imports the `sim_engine` package/`roles.json`, no network). Run: `uv run python scripts/sid_parity_smoke.py`. |
 | `path1_smoke.py` | No | Deterministic smoke harness for the Path 1 bundle (industry, tool tiers, terrain, diplomacy, pressure loop) — same direct-import approach as `sid_parity_smoke.py`. Run: `uv run python scripts/path1_smoke.py`. |
 | `path1_soak.py` | Mode-dependent | "SA-9 Path 1 soak verifier": live soak orchestration + log audit for the 2h mini-soak from the archived Path 1 plan. Subcommands: `report`/`prompt-check`/`audit LOG_DIR` need no Ollama; `run [--duration S] [--agents N]` is a live soak against a running server (Ollama optional, recommended for one check). |
-| `blueprint_smoke.py` | No | Deterministic blueprint validation/recovery checks — imports `server.py`/`sim_engine.py` directly to exercise proposal/approval edge cases (e.g. duplicate-effect detection) with no live LLM call. |
+| `blueprint_smoke.py` | No | Deterministic blueprint validation/recovery checks — imports `server.py`/the `sim_engine` package directly to exercise proposal/approval edge cases (e.g. duplicate-effect detection) with no live LLM call. |
 | `god_mode_smoke.py` | No | Deterministic smoke harness for Sovereign God mode Phases 2–6 plus Divine Matrix Phases 1–10 (docs/plan-sovereign-god-mode-v2.md, docs/plan-divine-matrix-interventions.md): flag/auth gate, preview/idempotency/expiry, the stored-text contract (including hostile-string round-tripping), godState persistence/restore/reset, the five `/control/god/*` routes via a real `server.app.test_client()` (Phase 2); **Voice binding** — `divine_response` schema-required (non-null object) while guidance unacked (`build_response_format(require_divine_response=True)`), `follow` clears goal/assignedTask, missing/invalid synthesizes `continue` + `missing_divine_response` without rejecting the action, a synthetic (non-genuine) response no longer auto-acks — it increments a per-guidance skip counter (providence `skipCounts`, omen `skipCount`) and only force-acks (`capped: true`) after `GOD_VOICE_ACK_SKIP_CAP` consecutive synthetic turns for the same guidance id, sprite/invention special turns cancelled (not deferred) on Voice apply and while guidance unacked, proclamation auto-applies as providence (same slot/duration/revoke), `recentDivineResponses` in Sight only, adherence `divine.jsonl` `status: "adherence"` records; providence/private-omen set/replace/revoke/expire and the divine-vs-directive prompt separation (Phase 3); whisper campaigns, agent sampling, memory surgery, context masks (Matrix Phases 1–4); **decision gate / possession** — compulsion forces pinned `rest`, possession skips `llm_decide`, veto hold+resolve, Sage `_rush_to_heal` bypass, veto hold cap, `decisionGates` privacy (Matrix Phase 5); **Burning Bush / bargain** — thread privacy, bargain success grant, expiry failure path (Matrix Phase 6); **Anointed** — destiny/oracle target-only prompt, stigmata in neighbor `nearby_agents`, oracle gated by `revealFrame`, revoke clears, no `/state` leak (Matrix Phase 7); **Identity Forge** — role swap changes `role_skill` in think payload, copy progresses across N thinks, cancel restores snapshot, `identityForges` privacy (Matrix Phase 8); **Architect Zones** — door blocks move without `godKeys` and allows with key, limbo sets `divineHold` and release restores, paint cancel reverts terrain, `architectZones`/key privacy (Matrix Phase 9); **Reload checkpoints** — create → mutate → restore roundtrip on temp `DB_PATH`/`GOD_CHECKPOINT_ROOT`, cap reject + `replaceOldest`, Sight summaries without path leak, `deja_vu_replay` rejects when flag off (Matrix Phase 10); **Déjà Vu replay** — `GOD_STATE_VERSION` 3 default/normalize, digest capture on gated apply, apply/cancel when `GOD_DEJA_VU_REPLAY` on, digests not in `/state` (Divine Console Phase 8, docs/plan-divine-console-improvements.md); the three immediate miracles and their shared `irreversible` class (Phase 4); Phase 5's `_divine_modifier`/`story_event` layer — every one of the seven modifier keys at `0.0`/fractional/`1.0`/max, the gather zero-path returning before the carry-cap clamp with `collectSuccesses`/the tool benchmark untouched, `fish_yield_multiplier` replacing (not multiplying with) `gather_yield_multiplier`, a collapsed agent still recovering under an active `0.0` `health_regen_multiplier`, an all-`1.0` run proving byte-identical to a feature-off baseline built the same way, carry-cap and low-ecology-stock boundaries, spoilage never exceeding eligible overflow, one-value-per-key rejection with `replaceEffectId` acceptance, `story_event` atomicity (one invalid sub-component changes nothing) and its full modifiers+primitives+providence composition, expiry closing an event (and its linked providence) exactly once with the modifier stopping exactly at `expiresFrame` before cleanup runs, `god_cancel` closing an active event while refusing an irreversible miracle's id, active events surviving save/restore with an absolute `expiresFrame`, and preview disclosing the divine and custom-rule gather contributions separately; and Phase 6's `weather_override` — forced entry drawing zero RNG (`random.getstate()` byte-identical before/after apply) with `weather["state"]`/`exitFrame`/`districts` set from the operator input, `exitFrame` matching the event's `expiresFrame` exactly, the natural `_tick_weather` never transitioning while an override holds, expiry handoff to the natural cycle's successor for all four overridden states (both `gathering` probability branches forced via a `random.random` monkeypatch), `god_cancel` running the same handoff, unknown-state/unknown-district/`WEATHER_ENABLED=False` rejections, the `consequential` reversibility class with preview disclosing the affected districts and non-ruined at-risk structure count, `replaceEffectId` one-active-override enforcement (closing the previous as `replaced`), save/restore round-tripping an absolute `expiresFrame`, restore-time expiry-plus-handoff firing exactly once, and a seeded-RNG natural-cycle trajectory proving byte-identical whether `GOD_MODE_ENABLED` is off or on-but-unused. Sets `SIM_GOD_MODE`/`SIM_GOD_TOKEN`/`SIM_GOD_AUTH=1` before importing `sim_engine`/`server`, then toggles other on/off scenarios by monkeypatching the already-imported modules' plain globals (the same idiom `sid_parity_smoke.py` uses for `PIANO_MODULES`/`ALWAYS_ON_MODULES`) rather than re-importing. Never calls `save_state()`/`reset()`/`clear_state()` against the real `state.db`, so it is safe to run alongside a live server process. Run: `uv run python scripts/god_mode_smoke.py`. |
 | `llm_replay_bench.py` | Yes | Replay-benchmarks previously-logged decision calls (from a session's `llm.jsonl`, falling back to the pre-rename `lm_studio.jsonl` for old sessions) against Ollama's native `/api/chat` endpoint (ported `docs/plan-ollama-migration.md` Phase 4, 2026-07-24 — ~~formerly targeted LM Studio's OpenAI-compat endpoint~~). Extracts the portable fields (messages, max_tokens, temperature, response_format, the logged `reasoning_effort` marker) from each logged request and rebuilds a real Ollama request body via `simulation/llm_wire.to_ollama_body()` — the same wire-format conversion `server.py` itself uses at its POST call sites (imported, not re-implemented, so the bench can't drift from production). Modes: `--as-logged` (translate the logged `reasoning_effort=="none"` marker 1:1 to `think:false`, otherwise pass sampling/max_tokens through unchanged) and `--patched` (ignore the logged transform and apply the CURRENT production one from `build_decision_payload`: routine turns get `think:false` + `NON_THINKING_SAMPLING`, invention/high-stakes turns get `THINKING_SAMPLING` with thinking left on). Reports median/p90 latency, JSON validity, think-leak (`<think>` in `message.content`), and `prompt_eval_count`/`eval_count`. Always targets `sim-smart` (the decision model). Usage: `uv run python scripts/llm_replay_bench.py --as-logged [--session PATH] [--n N] [--workers N]`; pause the sim server first (`POST /control/pause`) so its own think traffic doesn't contend for `sim-smart`'s `OLLAMA_NUM_PARALLEL` slots and skew latencies; `--workers 1` measures sequential latency, `--workers 3` mirrors `MAX_CONCURRENT_LLM`. Phase 4 results: `ollama_config.md`'s Benchmarking table. |
 | `ollama_setup.py` | Yes (configures Ollama itself) | Canonical CLI loader for the sim's Ollama models: sets `OLLAMA_NUM_PARALLEL`/`OLLAMA_MAX_LOADED_MODELS`/`OLLAMA_FLASH_ATTENTION`/`OLLAMA_KEEP_ALIVE` env vars, restarts the Ollama service, pulls/creates `sim-smart`/`sim-fast` from `ollama/Modelfile.{smart,fast}` (idempotent), warms both, and verifies dual residency via `/api/ps`. Usage: `uv run python scripts/ollama_setup.py` (apply) or `--check` (readback only). Successor to the removed `scripts/lms_load.py`, per `docs/plan-ollama-migration.md` Phase 5. |

@@ -679,8 +679,18 @@ def test_deliver_caravan_available_actions_gating():
 def test_deliver_caravan_action_sync():
     action = "deliver_caravan"
     server_source = (ROOT / "simulation" / "server.py").read_text(encoding="utf-8")
-    engine_source = (ROOT / "simulation" / "sim_engine.py").read_text(encoding="utf-8")
-    viewer_source = (ROOT / "simulation" / "viewer.js").read_text(encoding="utf-8")
+    # sim_engine.py was split into a package under simulation/sim_engine/
+    # (Phase 6a) and viewer.js into ordered files under simulation/viewer/
+    # (see index.html's <script> tag order and specs/11-viewer.md);
+    # concatenate each for this source-scan check (order doesn't matter here).
+    engine_source = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((ROOT / "simulation" / "sim_engine").glob("*.py"))
+    )
+    viewer_source = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((ROOT / "simulation" / "viewer").glob("*.js"))
+    )
     prompts_source = (ROOT / "simulation" / "prompts.py").read_text(encoding="utf-8")
 
     tree = ast.parse(server_source)
@@ -830,7 +840,8 @@ def main():
     test_deliver_caravan_action_assigns_goal()
     test_transit_migration_from_instance()
     import py_compile
-    py_compile.compile(str(ROOT / "simulation" / "sim_engine.py"), doraise=True)
+    for _p in sorted((ROOT / "simulation" / "sim_engine").glob("*.py")):
+        py_compile.compile(str(_p), doraise=True)
     py_compile.compile(str(ROOT / "simulation" / "server.py"), doraise=True)
     print("  OK py_compile")
     print("PASS — all Path 1 smoke checks")

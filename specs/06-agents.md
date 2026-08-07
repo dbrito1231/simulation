@@ -15,7 +15,7 @@ detail beyond the summary here; [07-actions.md](07-actions.md) for `switch_role`
 
 ## AGENT_DEFS vs ROSTER
 
-`AGENT_DEFS` (sim_engine.py:1093-1106) is the fixed pool of hand-written agents
+`AGENT_DEFS` (`helpers.py:46-59`) is the fixed pool of hand-written agents
 (12 legacy defs plus at least one `hunter` seed — see roles below):
 `{id, name, role, personality, color, zone}`. Verified roster (legacy twelve;
 hunter inclusion is an additional seed def with role `hunter` and a forest or
@@ -38,10 +38,10 @@ farm starting zone):
 | 13 | Kane | hunter | forest |
 
 `ROSTER` remains an ordered default-8 subset of the hand-written pool
-(sim_engine.py); at least one hunter participates via `AGENT_DEFS` and the
+(`helpers.py`); at least one hunter participates via `AGENT_DEFS` and the
 generated-roster role rotation (below), even when the cold-start 8 omits them.
 
-`MAX_ROSTER_SIZE = 20` (sim_engine.py, Sid-parity Phase 6) is the hard ceiling
+`MAX_ROSTER_SIZE = 20` (`helpers.py:69`, Sid-parity Phase 6) is the hard ceiling
 on `roster_size` — headroom past the hand-written `AGENT_DEFS` so emergent
 roles/belief factions have room to differentiate, deliberately not a bid at
 Project Sid's ~500-agent scale (non-goal, specs/00-overview.md).
@@ -70,7 +70,7 @@ MAX_ROSTER_SIZE]`.
   bespoke.
 
 **Overrides:**
-- `SIM_AGENTS` environment variable (server.py:3692) sets the roster size at
+- `SIM_AGENTS` environment variable (server.py:2635) sets the roster size at
   process start (default 8, clamped to `MAX_ROSTER_SIZE`).
 - `POST /control/reset` accepts a JSON body `{"agents": N}` (not a query
   parameter) to reset with a different roster size at runtime — see
@@ -113,7 +113,7 @@ its display `name`. Its `skill`, `specialty`, and `preferredProject` fields use
 the same meanings and shapes as the seed schema. `leader` is never accepted for
 an emergent role, so the single elder role remains a seed-only invariant.
 
-## Agent state fields (`_make_agents`, sim_engine.py:1298-1388)
+## Agent state fields (`_make_agents`, `core.py:274-382`)
 
 | Group | Fields |
 |---|---|
@@ -129,11 +129,11 @@ an emergent role, so the single elder role remains a seed-only invariant.
 | Culture (`CULTURE_ENABLED`) | `skills` (dict per `SKILL_KINDS`, starts at 0.0), `personalityTraits`, `lastTeachFrame` |
 | Divine Matrix | `divineHold` (bool — veto hold or architect limbo pauses think/move), `godKeys` (set of god-granted key tags for architect door zones; persisted as sorted list), `architectLimbo` (`null` or `{zoneId, priorX, priorY, priorTargetX, priorTargetY, priorDistrict}` — Sight shows active/zoneId only) |
 
-Post-build setup (sim_engine.py:1381-1387) staggers `thinkInterval = 360 + i*60`
+Post-build setup (`core.py:374-381`) staggers `thinkInterval = 360 + i*60`
 (elder forced to `240`) and `thinkTimer = i*30` per roster index `i`, and sets each
 agent's initial movement target to its starting district.
 
-## `/state` agent snapshot (`SimEngine.snapshot()`, sim_engine.py ~12977-12998)
+## `/state` agent snapshot (`SimEngine.snapshot()`, `mixin_snapshot.py:379-388`, per-agent row built by `_agent_snapshot_row`, `mixin_snapshot.py:119-138`)
 
 Not every internal field above is echoed to the viewer's `agents` array in
 `/state` (specs/04-http-api.md) — the snapshot is a filtered/derived view built
@@ -153,13 +153,13 @@ fields always exist on every agent.
 
 ## Speeds
 
-Set in `_make_agents` (sim_engine.py:1306-1310): default `2.8`; **Sage** (elder)
+Set in `_make_agents` (`core.py:282-286`): default `2.8`; **Sage** (elder)
 `1.4` — deliberately slow; **Ivy** and **Nova** (scout/explorer) `3.6` — deliberately
 fast. All other agents use the `2.8` default.
 
 ## Lifecycle (`LIFECYCLE_ENABLED`, default True)
 
-Constants (sim_engine.py:629-651):
+Constants (`constants.py:1576-1598`):
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -186,7 +186,7 @@ Births need housing headroom, the food surplus above, and two ally adults sharin
 a district; capped at one per `BIRTH_MIN_INTERVAL_FRAMES`. Newly-generated agents
 beyond the hand-written `AGENT_DEFS` pool get synthetic ids starting at
 `nextGeneratedAgentId = 1000`
-(sim_engine.py:1465, 5759). Natural death rolls apply once past
+(`core.py:503`, incremented in `mixin_lifecycle.py:1108-1111`). Natural death rolls apply once past
 `DEATH_CHANCE_START_AGE`, deferred by `POPULATION_FLOOR`. On the elder's death, a
 succession election runs on the `propose_rule`/`vote_rule` machinery (kind
 `"succession"`) with a deterministic tie-break if `SUCCESSION_ELECTION_TTL_FRAMES`
@@ -196,24 +196,24 @@ elapses without quorum — full election-flow rules: [09-systems-society.md](09-
 
 Three-tier per-agent structure (`agent["memory"]`): `working` (cap `WORKING_MEM_CAP
 = 6`), `shortTerm` (cap `SHORT_MEM_CAP = 12`), `longTerm` (cap `LONG_MEM_CAP = 8`,
-sim_engine.py:426-428). `_push_memory` (sim_engine.py:1558-1572) appends to
+`constants.py:1272-1274`). `_push_memory` (`mixin_world_state.py:217-232`) appends to
 `working`; on overflow, evicted entries with salience ≥ 0.7 promote into
 `shortTerm`. Every push also writes into the in-process vector store
 (`self.d["memory_store"]`, server.py) via a deterministic 128-dim hashing-trick
-embedding (`MEMORY_DIM = 128`, server.py:331) — bag-of-tokens hashed (MD5) into
+embedding (`MEMORY_DIM = 128`, `simulation/_server/memory_store.py:26`) — bag-of-tokens hashed (MD5) into
 fixed dimension slots, L2-normalized so cosine similarity reduces to dot product;
 no external embedding service. Global store cap: `MEMORY_MAX_ENTRIES = 1200`
-(server.py:332), trimmed by a periodic cleaner.
+(`simulation/_server/memory_store.py:27`), trimmed by a periodic cleaner.
 
 Maintenance runs every `MEMORY_TICK_FRAMES = 1800` frames
-(sim_engine.py:245, 9402) via `_run_memory_maintenance()` (sim_engine.py:7833-7866+):
+(`constants.py:1036`, checked in `mixin_think_job.py:1470`) via `_run_memory_maintenance()` (`mixin_decisions.py:291-345`):
 round-robins one agent per call; if it has ≥4 recent non-summary memories, an LLM
 call compresses them into one first-person sentence, stored as a `longTerm` entry
 (salience 0.9) and pushed to `_push_activity` as a "reflected:" log line. Every 4th
 maintenance call also runs `memory_store.clean()` to scrub stale/poisoned vector
 entries (guards against reasoning-model chain-of-thought scaffolding leaking into
 memory — see server.py's scaffold-detection regexes).
-`_memory_for_prompt(agent)` (sim_engine.py:1574-1576) composes the prompt's memory
+`_memory_for_prompt(agent)` (`mixin_world_state.py:346-363`) composes the prompt's memory
 section from the last 3 longTerm + 4 shortTerm + 4 working entries.
 
 ### Wiki-style compounding memory (`WIKI_MEMORY`, default False)
@@ -225,7 +225,7 @@ Summary for the agent data-shape lens: `agent["memoryWiki"]` is always present
 persistence via `state.db` is automatic — same pattern as `moduleReports`, no
 schema migration needed. Populated only when `WIKI_MEMORY` is True; each
 section is hard-capped at `WIKI_SECTION_CHAR_CAP = 300` chars
-(sim_engine.py, next to `LONG_MEM_CAP`). The flag reuses
+(`constants.py:1277`, next to `LONG_MEM_CAP`). The flag reuses
 `_run_memory_maintenance`'s existing round-robin slot — no new LLM call site
 or cadence. When on, `_memory_for_prompt` prepends up to three
 `"wiki <section>: ..."` lines ahead of the existing longTerm/shortTerm/working
@@ -238,7 +238,7 @@ thing evicted by the char-budget's oldest-first trim.
 Agents carry no new persisted field for this — a private omen lives entirely
 in `civilization["godState"]["privateOmens"]`, keyed by `str(agent["id"])`
 (never by name; names are display-only), not on the agent object itself.
-`_find_agent_by_id(agent_id)` (sim_engine.py, next to `_find_agent`) is the
+`_find_agent_by_id(agent_id)` (`mixin_world_state.py:370-376`, next to `_find_agent` at `mixin_world_state.py:364-368`) is the
 id-keyed lookup this and every other Phase 3 command use. `_god_apply_
 private_omen` rejects an unknown id or a deceased target
 (`agent.get("deathFrame") is not None`) before any text is even normalized —
@@ -351,17 +351,17 @@ role maps, so server-side fallback/project/task helpers use the world's approved
 roles rather than the process-start seed-map conveniences; separate engine worlds
 therefore cannot leak role specializations into one another.
 
-`_is_flexible_role(role)` (sim_engine.py:6401-6402): a role is "flexible" (eligible
+`_is_flexible_role(role)` (`mixin_backstops.py:67-68`): a role is "flexible" (eligible
 for auto-switch) if it has no fixed specialty resource and isn't `elder`.
-`_village_needed_role()` (sim_engine.py:9660+) detects an unfilled need in
+`_village_needed_role()` (`mixin_backstops.py:209-287`) detects an unfilled need in
 priority order: (1) an active build project stalled on an unmet resource with no
 living gatherer for it, (2) **survival-critical** when `SURVIVAL_ENABLED`
 (stock-aware, wildlife-aware — full algorithm in
 [08-systems-economy.md](08-systems-economy.md#survival-role-rebalance-emergent_roles)),
 (3) ecology scarcity (including **`meat`** via village-held totals, not
 `districtStocks`, because `meat` has `gatherZone: None`). Every
-`ROLE_SWITCH_TICK_FRAMES = 120` frames (sim_engine.py:393, 9406),
-`_maybe_auto_switch_role()` (sim_engine.py:6502-6532) checks the needed role
+`ROLE_SWITCH_TICK_FRAMES = 120` frames (`constants.py:1212`, checked in `mixin_think_job.py:1474`),
+`_maybe_auto_switch_role()` (`mixin_backstops.py:310-342`) checks the needed role
 against a cooldown (`ROLE_SWITCH_COOLDOWN`) and, if a flexible-role candidate is
 found (`_auto_switch_candidate`), deterministically applies a `switch_role`
 decision on that agent's behalf — the same code path an LLM-chosen `switch_role`

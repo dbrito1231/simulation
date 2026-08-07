@@ -15,7 +15,7 @@ decay/repair/upkeep detail and hunt yields.
 
 ## World geometry
 
-`WORLD_W = 5200`, `WORLD_H = 5400` (sim_engine.py:69-70). The ~2600×2700 "starter core"
+`WORLD_W = 5200`, `WORLD_H = 5400` (sim_engine/constants.py:860-861). The ~2600×2700 "starter core"
 (hand-authored districts) occupies the northwest corner; everything else is open
 FRONTIER territory that new districts can be founded into at runtime. `index.html`'s
 `WORLD_W`/`WORLD_H` must be kept in sync with the engine's (a manual invariant, not
@@ -24,11 +24,11 @@ enforced in code).
 ## Districts
 
 `civilization["districts"]` is the live, runtime-mutable dict of all districts,
-cold-started from `STARTER_DISTRICTS` (sim_engine.py:90-165) and appended to by
+cold-started from `STARTER_DISTRICTS` (sim_engine/constants.py:881-956) and appended to by
 `_maybe_found_district()` as the frontier is settled. Every runtime function reads the
 live dict, never the module constant.
 
-**Entry shape** (frozen per sim_engine.py:79-81):
+**Entry shape** (frozen per sim_engine/constants.py:870-872):
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -40,7 +40,7 @@ live dict, never the module constant.
 | `entryNode` | str | This district's "front door" in the road graph (`STARTER_ROAD_NODES`) |
 | `grave_grid` | `{x0,y0,cols,dx,dy,cap}` (cemetery only) | Separate grid for tombstone placement, same spacing convention as `build_grid` |
 
-**Starter districts (12, verified `STARTER_DISTRICTS` sim_engine.py:90-165):**
+**Starter districts (12, verified `STARTER_DISTRICTS` sim_engine/constants.py:881-956):**
 
 | id | kind | label | build_grid? |
 |---|---|---|---|
@@ -62,26 +62,26 @@ The starter coast is deliberately oversized for visible vessels: `ocean` spans
 migration updates the former narrow coastal bounds in existing saves. The
 coast remains non-buildable and the beach road gate remains on shore.
 
-`DISTRICT_KIND_TEMPLATES` (sim_engine.py:173-178) covers only the kinds that
+`DISTRICT_KIND_TEMPLATES` (sim_engine/constants.py:964-969) covers only the kinds that
 `_maybe_found_district()` can instantiate anew: `farm`, `village`, `workshop`, `beach`.
 Forest/cave/ocean/market are single-instance by design; a founded cave would need
 per-district mining logic it doesn't have (covered by `cave_deep` already existing).
-`PROJECT_KIND` (sim_engine.py:185-186) maps a project type to the district `kind` it
+`PROJECT_KIND` (sim_engine/constants.py:976-977) maps a project type to the district `kind` it
 must be built in (falls back to `village` for unlisted/custom-blueprint types).
 
 ## Frontier founding
 
-- `FRONTIER_PLOT_W = 500`, `FRONTIER_PLOT_H = 600` (sim_engine.py:228-229): the grid
+- `FRONTIER_PLOT_W = 500`, `FRONTIER_PLOT_H = 600` (sim_engine/constants.py:1019-1020): the grid
   size a new district plot is carved into.
-- `CORE_RESERVED_BOUNDS = {"x1":0,"y1":0,"x2":2600,"y2":2700}` (sim_engine.py:230):
+- `CORE_RESERVED_BOUNDS = {"x1":0,"y1":0,"x2":2600,"y2":2700}` (sim_engine/constants.py:1021):
   frontier plots overlapping this rectangle are excluded (the starter core is
-  reserved ground; see `_rects_overlap` check, sim_engine.py:1211).
-- `MAX_TOTAL_DISTRICTS = 26` (sim_engine.py:231): a generous safety valve on total
+  reserved ground; see `_rects_overlap` check, sim_engine/helpers.py:124).
+- `MAX_TOTAL_DISTRICTS = 26` (sim_engine/constants.py:1022): a generous safety valve on total
   district count.
-- `DISTRICT_FOUND_STALL_THRESHOLD = 900` frames (sim_engine.py:232): a `kind`
+- `DISTRICT_FOUND_STALL_THRESHOLD = 900` frames (sim_engine/constants.py:1023): a `kind`
   qualifies for founding once `frameTick - kindLastActivityFrame[kind] >= 900` (no
   recent activity of that kind anywhere) — the stall signals real demand for more
-  space of that kind. `_maybe_found_district` (sim_engine.py:7582-7596+) also checks
+  space of that kind. `_maybe_found_district` (sim_engine/mixin_council_growth.py:1468) also checks
   `len(districts) < MAX_TOTAL_DISTRICTS` and a per-village cooldown
   (`lastDistrictFoundFrame`).
 - `FOUNDING_EVENTS_ENABLED` (default True): when True, `_found_district()` pushes a
@@ -96,19 +96,19 @@ must be built in (falls back to `village` for unlisted/custom-blueprint types).
 
 ## Road network
 
-`STARTER_ROAD_NODES` (sim_engine.py:194-207, 12 nodes) and `STARTER_ROAD_EDGES`
-(sim_engine.py:208-219+, undirected `[a,b]` pairs) seed `civilization["roadNodes"]`/
+`STARTER_ROAD_NODES` (sim_engine/constants.py:985-998, 12 nodes) and `STARTER_ROAD_EDGES`
+(sim_engine/constants.py:999-1011, undirected `[a,b]` pairs) seed `civilization["roadNodes"]`/
 `["roadEdges"]`, mutable at runtime the same way districts are (a founded district
-extends the graph). `_recompute_road_paths()` (sim_engine.py:1663-1692) runs
+extends the graph). `_recompute_road_paths()` (sim_engine/mixin_world_state.py:523) runs
 all-pairs BFS on cold start and after any graph change, caching every
 `(start,end) -> [node ids]` path in `self.ROAD_PATH_CACHE` — cheap at this graph's
 size (a dozen-ish nodes even after several foundings), so it is never treated as a
 one-time module-load constant. `_road_path_between(agent, dest_district_id)`
-(sim_engine.py:1694-1707) resolves an agent's origin node (its current district's
+(sim_engine/mixin_world_state.py:554) resolves an agent's origin node (its current district's
 `entryNode`, or the nearest road node by position) and the destination district's
 `entryNode`, then looks up the cached path. Movement flag: `ROADS_ENABLED` (default
 True; semantics/rendering owned here, echo status in
-[01-architecture.md](01-architecture.md#flag-index-complete--30-module-level-flags-sim_enginepy)).
+[01-architecture.md](01-architecture.md#flag-index-complete--52-module-level-flags-sim_enginepy)).
 
 ## Inter-settlement movement (ocean corridor)
 
@@ -134,9 +134,9 @@ No persistent vehicle entities are spawned — movement remains agent-centric.
 ## Zone kinds
 
 `ZONE_NAMES = ["farm", "forest", "village", "market", "beach", "cave", "ocean",
-"workshop", "cemetery"]` (sim_engine.py:234) — the fixed set of district `kind`
-values the world understands. `get_zone(districts, x, y)` and
-`get_district(districts, x, y)` (sim_engine.py:1218, 1229) resolve a world position
+"workshop", "cemetery"]` (sim_engine/constants.py:1025) — the fixed set of district `kind`
+values the world understands. `get_zone(districts, x, y)` (sim_engine/helpers.py:226) and
+`get_district(districts, x, y)` (sim_engine/helpers.py:237) resolve a world position
 to its containing zone/district by bounds lookup.
 
 ## Ecology
@@ -145,15 +145,15 @@ Gated by `ECOLOGY_ENABLED` (default True). Each district carries a
 `districtStocks[district_id][resource_id]` counter (lazily populated by
 `_ensure_district_stocks`).
 
-- **Deplete:** gathering removes `STOCK_DEPLETE_MULTIPLIER = 2` (sim_engine.py:316)
-  units per unit collected (`_deplete_district_stock`, sim_engine.py:2088-2097). A
+- **Deplete:** gathering removes `STOCK_DEPLETE_MULTIPLIER = 2` (sim_engine/constants.py:1110)
+  units per unit collected (`_deplete_district_stock`, sim_engine/mixin_world_state.py:1030). A
   stock hitting 0 blocks further gathering of that resource in that district
-  (`_ecology_gather_gate`, sim_engine.py:2099-2116) until it regrows; yield scales
+  (`_ecology_gather_gate`, sim_engine/mixin_world_state.py:1041) until it regrows; yield scales
   down as stock falls below `STOCK_LOW_RATIO`, floored at `STOCK_MIN_YIELD_RATIO`.
-- **Regrow:** `_tick_ecology_regrow()` (sim_engine.py:2172-2198) adds
+- **Regrow:** `_tick_ecology_regrow()` (sim_engine/mixin_world_state.py:1114) adds
   `STOCK_REGROW_PER_TICK` per tick to every below-cap stock. When `GOODS_ENABLED`,
   the amount is multiplied by season via `SEASON_REGROW_MULT = {"spring": 2,
-  "summer": 1, "autumn": 1, "winter": 0}` (sim_engine.py:526) — winter regrowth is
+  "summer": 1, "autumn": 1, "winter": 0}` (sim_engine/constants.py:1453) — winter regrowth is
   fully suppressed. Season mechanics themselves: [02-engine-core.md](02-engine-core.md).
   **Weather term (`WEATHER_GOVERNANCE_ENABLED`, living-ecosystem Phase 5):**
   extends this SAME multiplier chain per-district — never a second, parallel
@@ -175,13 +175,13 @@ Gated by `ECOLOGY_ENABLED` (default True). Each district carries a
   [09-systems-society.md](09-systems-society.md) for the emergency-rule
   branch this same threshold check also feeds, and
   [03-cognition.md](03-cognition.md) for the one-line prompt surface.
-- **Terraform:** `TERRAFORM_TEMPLATES` (sim_engine.py:820-858) — three templates,
+- **Terraform:** `TERRAFORM_TEMPLATES` (sim_engine/constants.py:1793-1831) — three templates,
   each funded like a build project (`needs`) and restricted to a district `kind`:
   `plant_grove` (forest; boosts wood/herbs stock ratio to 0.85), `clear_field`
   (farm; food stock ratio to 1.0), `extend_beach` (beach; fish stock ratio to 0.9,
   and can additionally found a new beach district via `found_district`). Started
   via `start_terraform`, funded via `contribute_resources`, applied by
-  `_complete_terraform` (sim_engine.py:2469+), which calls
+  `_complete_terraform` (sim_engine/mixin_world_state.py:1514), which calls
   `_apply_terraform_modifiers` to mutate district stocks per the template's
   `function.modifies` list.
 
@@ -196,7 +196,7 @@ resource) **and village kinds** (the `water` resource's `gatherZone` is
 `"village"`); market/workshop/cemetery/ocean kinds have no gatherable
 resource and are omitted. Omitted entirely when both flags are off.
 
-- `ratio` (`_district_ecology_ratio`, sim_engine.py) is the average
+- `ratio` (`_district_ecology_ratio`, sim_engine/mixin_world_state.py:1167) is the average
   `min(1.0, stock/STOCK_DEFAULT_MAX)` across that district's gatherable
   resources — the same per-resource ratio `_resource_price` and
   `_ecology_scarcity_index` already compute, just scoped to one district.
@@ -251,7 +251,7 @@ decrement ecology gather stocks).
 
 `civilization["structures"]` is a flat list of built structure instances
 (`{id, type, districtId, condition, level, visualTier, renderScale, isRuin, ...}`,
-sim_engine.py:3786-3808). In-memory and full `/state` snapshots include an
+built by `_build_active_structure`, sim_engine/mixin_structures_economy.py:1702-1739). In-memory and full `/state` snapshots include an
 optional `sprite` grid per structure when present; delta `/state` upserts omit
 `sprite` unless the structure was created, visually upgraded, or received a
 custom `submit_structure_sprite` since the client's last applied frame (the
@@ -259,11 +259,11 @@ viewer merges partial rows and keeps prior sprites). On disk (`state.db`), sprit
 grids are stored in the `structure_sprites` table, not embedded in the civ
 JSON blob — see [02-engine-core.md](02-engine-core.md#persistence).
 
-- `PROJECT_TEMPLATES` (sim_engine.py:754-765, extended by flag-gated blocks like
+- `PROJECT_TEMPLATES` (sim_engine/constants.py:1727-1738, extended by flag-gated blocks like
   `granary` under `CRAFTING_ENABLED`, `kiln`/`harbor`/`mill`/`foundry` under Path-1
   industry flags): `{name, needs: {resource: qty}, visualStyle[, tier]}` — this is
   the build-cost recipe, consumed by `start_project`/`contribute_resources`.
-- `SEED_STRUCTURE_FUNCTIONS` (sim_engine.py:769-817+): each built type's mechanical
+- `SEED_STRUCTURE_FUNCTIONS` (sim_engine/constants.py:1742-1791): each built type's mechanical
   effect vector — `houses` (population-cap contribution), `boosts` (gather/craft
   yield bonuses), `produces` (periodic resource generation), `unlocks` (craft
   stations), `stores` (storage capacity, `GOODS_ENABLED` only). Custom blueprints
@@ -285,15 +285,15 @@ and [08-systems-economy.md](08-systems-economy.md) (the "Structure decay"
 row) for the full decay-rate/threshold/repair-cost contract this reuses.
 
 **Levels/upgrades:** gated by `STRUCTURE_UPGRADES_ENABLED` (default True).
-`MAX_STRUCTURE_LEVEL = 100` (sim_engine.py:277); `LEVEL_STEP = 1` per
-`upgrade_structure` call (sim_engine.py:278). `structure["visualTier"]` (1-3,
-sim_engine.py:3451, 3548) drives which of up to 3 sprite render variants is shown,
+`MAX_STRUCTURE_LEVEL = 100` (sim_engine/constants.py:1070); `LEVEL_STEP = 1` per
+`upgrade_structure` call (sim_engine/constants.py:1071). `structure["visualTier"]` (1-3,
+initial value at sim_engine/mixin_structures_economy.py:1713/1729, updated by `_apply_visual_tier` at :1436-1437) drives which of up to 3 sprite render variants is shown,
 distinct from numeric `level`. `structure["renderScale"]` grows with level for a
 visible size cue. Decay (`condition` 0-100, disrepair threshold, ruin collapse) and
 `repair_structure` restore mechanics: [08-systems-economy.md](08-systems-economy.md).
 
 **Sprite-design turn at a visual-tier upgrade.** When an `upgrade_structure`
-call crosses a visual-tier boundary, `_upgrade_structure` (sim_engine.py)
+call crosses a visual-tier boundary, `_upgrade_structure` (sim_engine/mixin_structures_economy.py:1486)
 compares the structure's current sprite dimensions against the schema-level
 `SPRITE_GRID_MAX` (14, [03-cognition.md](03-cognition.md#structured-output)):
 if the sprite is already at the cap in **both** rows and columns, no
@@ -304,7 +304,7 @@ one dimension is at cap, that dimension's `minRows`/`minCols` is set to `0`
 (no growth required on that axis) while the other keeps its normal "must grow"
 minimum; below cap on both axes, behavior is unchanged from before. A
 sprite-design turn now expires: the shared `SimEngine._count_sprite_design_failure`
-helper counts attempts and, at `SPRITE_DESIGN_MAX_ATTEMPTS = 3` (sim_engine.py)
+helper counts attempts and, at `SPRITE_DESIGN_MAX_ATTEMPTS = 3` (sim_engine/constants.py:1075)
 failed think cycles, clears the pending turn, keeps the existing (procedural)
 sprite, and logs "`<name> gave up refining the sprite for the <structure>`" —
 previously a rejected design turn was re-offered every think cycle
@@ -327,7 +327,7 @@ guidance clears `spriteDesignTurn` in `_build_think_payload` before the prompt
 is even built, so that cycle's decision never reaches this check with a
 pending turn to count).
 
-**Restore-time sanitation for pre-fix turns.** `restore_state` (sim_engine.py)
+**Restore-time sanitation for pre-fix turns.** `restore_state` (sim_engine/mixin_persistence.py:163)
 re-applies the same cap rule above to every restored agent's
 `spriteDesignTurn`, healing worlds saved before `_upgrade_structure` learned
 to zero out a capped dimension: if a restored turn's `minRows` and `minCols`
@@ -345,20 +345,20 @@ Mechanics only — flag semantics (`TERRAIN_TILES_ENABLED`, `COMPOSABLE_BUILD_EN
 are owned by [10-path1.md](10-path1.md).
 
 - **Grid:** each district has a fixed `PATH1_GRID_COLS = 8` × `PATH1_GRID_ROWS = 8`
-  cell grid (sim_engine.py:1014-1015) at `TILE_CELL = 40` px per cell
-  (sim_engine.py:986). `_pos_to_grid(agent)` (sim_engine.py:3917-3926) converts an
+  cell grid (sim_engine/constants.py:2019-2020) at `TILE_CELL = 40` px per cell
+  (sim_engine/constants.py:1987). `_pos_to_grid(agent)` (sim_engine/mixin_diplomacy.py:67) converts an
   agent's world position to a clamped `(gx, gy)` in its current district.
 - **Terrain layer** (`district["terrain"][gx,gy] -> kind`): lazily initialized by
   `_ensure_district_terrain` to a per-kind default (`forest`→`grove`, `farm`→`soil`,
   `beach`→`sand`, `cave`→`rock`, `ocean`→`water`, else `soil`). `dig_terrain` and
-  `plant_terrain` (`_dig_terrain`/`_plant_terrain`, sim_engine.py:4082, 4150) mutate
+  `plant_terrain` (`_dig_terrain`/`_plant_terrain`, sim_engine/mixin_diplomacy.py:234, 304) mutate
   individual cells; `_find_nearby_terrain` does a bounded scan for the nearest cell
   of a given kind.
 - **Composable/build layer** (`district["tiles"][gx,gy] -> block_type`), capped at
-  `TILE_CAP_PER_DISTRICT = 200` (sim_engine.py:987) per district. `BLOCK_TYPES`
-  (sim_engine.py:1001-1006): `wall` (1 wood, shelter), `floor` (1 wood, no shelter),
+  `TILE_CAP_PER_DISTRICT = 200` (sim_engine/constants.py:1988) per district. `BLOCK_TYPES`
+  (sim_engine/constants.py:2003-2008): `wall` (1 wood, shelter), `floor` (1 wood, no shelter),
   `door` (2 wood, no shelter), `fence` (1 wood, shelter). `place_block`/
-  `remove_block` (`_place_block` sim_engine.py:4011-4047, `_remove_block`) charge/
+  `remove_block` (`_place_block` sim_engine/mixin_diplomacy.py:161-199, `_remove_block` sim_engine/mixin_diplomacy.py:200) charge/
   refund the block's resource cost and reject on unknown type, out-of-district,
   tile-cap, or occupied-cell. Shelter blocks count toward night-exposure protection
   (`NIGHT_EXPOSURE_DAMAGE`) alongside houses — see [10-path1.md](10-path1.md).
@@ -382,7 +382,7 @@ See [02-engine-core.md](02-engine-core.md#architect-zones-divine-matrix-phase-9)
 
 A deterministic, LLM-free state machine advanced on the existing
 `GOODS_TICK_FRAMES = 900` (~30s) cadence, called from `_tick_goods()`
-(`_tick_weather`, sim_engine.py) — the same tick that already hosts spoilage,
+(`_tick_weather`, sim_engine/mixin_structures_economy.py:394) — the same tick that already hosts spoilage,
 structure decay, and the disaster roll. **No new timer.**
 
 - **States** (`WEATHER_STATES`): `clear -> gathering -> storm -> clearing ->
@@ -436,7 +436,10 @@ A `god_mode` intervention kind (see [03-cognition.md](03-cognition.md) for the
 preview/apply/cancel envelope shared by every divine command) that forces the
 natural weather machine above into an operator-chosen `state` + `districts`
 for a bounded duration, then hands control back to the natural cycle. Four
-behaviors, all enforced in `sim_engine.py`:
+behaviors, enforced across `sim_engine/mixin_god_miracles.py`
+(`_god_apply_weather_override`, `_close_weather_override`) and
+`sim_engine/mixin_structures_economy.py` (`_weather_enter_forced`,
+`_weather_handoff_successor`):
 
 - **Event-authoritative clock.** `godState["activeEvents"][].expiresFrame` is
   the single source of truth for when the override ends.
@@ -495,7 +498,7 @@ Gated by `CEMETERY_ENABLED` (default True). The `cemetery_grounds` district's
 `grave_grid` (48 slots, same `{x0,y0,cols,dx,dy}` spacing convention as `build_grid`)
 holds tombstone positions distinct from its 1-slot `build_grid` (the Cemetery
 structure itself). `_grave_grid_position(district_id, index)`
-(sim_engine.py:5300+) resolves a burial slot; `_bury_agent_at` (sim_engine.py:5328+)
+(sim_engine/mixin_lifecycle.py:229) resolves a burial slot; `_bury_agent_at` (sim_engine/mixin_lifecycle.py:257)
 assigns the next free slot to a corpse via the `bury_agent` action
 ([07-actions.md](07-actions.md)). A working cemetery structure (not disrepaired)
 is required before burial succeeds; a district with `kind == "cemetery"` bypasses

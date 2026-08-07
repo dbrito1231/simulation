@@ -5,11 +5,14 @@ world. No simulation logic lives here.
 
 **Canonical for:** the thin-viewer contract, polling cadence, canvas/world
 rendering pipeline (terrain cache, day/night, zoom/minimap), sidebar panel
-inventory, `ACTION_LABELS` (display-only), and `sprites.js`'s pure drawing
-rules (structure sprite resolution order, seasonal variants).
-**Files:** `simulation/index.html` (markup shell), `simulation/viewer.css`
-(styles), `simulation/viewer.js` (polling, render loop, sidebar, Divine
-Console), `simulation/sprites.js` (stateless Canvas helpers).
+inventory, `ACTION_LABELS` (display-only), and the `sprites/*.js` files' pure
+drawing rules (structure sprite resolution order, seasonal variants).
+**Files:** `simulation/index.html` (markup shell), `simulation/css/*.css`
+(styles, split into 6 ordered files — see "css/*.css: split stylesheet"
+below), `simulation/viewer/*.js` (polling, render loop, sidebar, Divine
+Console; split into 16 ordered files — see "viewer/*.js: split viewer client
+script" below), `simulation/sprites/*.js` (stateless Canvas helpers, split
+into 8 ordered files — see "sprites/*.js: pure stateless drawing" below).
 **See also:** [01-architecture.md](01-architecture.md) for the
 server-authoritative topology this file implements the "thin viewer" half of;
 [04-http-api.md](04-http-api.md) for `/state`/`/districts.js` payload shapes;
@@ -18,21 +21,30 @@ labels.
 
 ## Thin-viewer contract
 
-`simulation/viewer.js` states its own contract in a banner comment at the top
-of the file: it is a **PURE RENDERER** — it polls `GET /state`
+`simulation/viewer/setup.js` (first of the 16 split viewer files, see
+"viewer/*.js: split viewer client script" below) states the whole viewer's
+contract in a banner comment at the top of the file: it is a **PURE
+RENDERER** — it polls `GET /state`
 (~10 Hz), keeps the latest snapshot in a module-level `world` variable, and
 draws agents/structures/sidebar from it. `simulation/index.html` is markup
-only (panels, canvas, modals, script tags); `simulation/viewer.css` holds
-layout and panel chrome. Closing the browser tab does **not**
+only (panels, canvas, modals, script tags); `simulation/css/*.css` (6 plain
+files loaded via ordered `<link>` tags — no bundler, no CSS preprocessor, in
+load order `base.css`, `panels.css`, `agents.css`, `council.css`,
+`divine.css`, `responsive.css`) holds layout and panel chrome. Closing the
+browser tab does **not**
 stop the simulation; all engine logic (decisions, movement, survival, rules,
-memes, memory, build pipeline) runs server-side only. `simulation/sprites.js`
-is a second, purely-functional file: stateless Canvas drawing helpers that
-take a `structure`/`agent` object and a context and paint pixels — it holds no
-world state beyond a cached palette/season key.
+memes, memory, build pipeline) runs server-side only. `simulation/sprites/*.js`
+(8 plain files loaded via ordered `<script>` tags — no bundler, no ES
+modules; every file shares one global scope, in load order `core.js`,
+`tiles.js`, `props.js`, `structures.js`, `agents.js`, `world.js`,
+`wildlife.js`, `shipments.js`) form a second, purely-functional layer:
+stateless Canvas drawing helpers that take a `structure`/`agent` object and a
+context and paint pixels — they hold no world state beyond a cached
+palette/season key.
 
 ## Polling and render loop
 
-- `STATE_POLL_MS = 100` (`viewer.js`, `pollState()`) drives polling: the first
+- `STATE_POLL_MS = 100` (`viewer/polling.js`, `pollState()`) drives polling: the first
   successful fetch uses `GET /state` (full snapshot); thereafter
   `GET /state?since=<lastFrameTick>` unless an error or `stateGeneration`
   mismatch forces another full fetch. The client merges deltas into module-level
@@ -64,7 +76,7 @@ world state beyond a cached palette/season key.
   `/districts.js`. When the served district-id list or `districtsEpoch`
   changes, `pollDistricts()` nulls `terrainCanvas` and rebuilds.
 - The render loop is **decoupled from polling** via `requestAnimationFrame`:
-  `tick()` (`viewer.js`) redraws every animation frame from
+  `tick()` (`viewer/renderloop.js`) redraws every animation frame from
   whatever `world` currently holds, keeping ~60fps even though network polls
   land at ~10 Hz.
 - **Render-error resilience**: `tick()` is a thin wrapper that calls the
@@ -78,23 +90,23 @@ world state beyond a cached palette/season key.
   independent `setInterval` kept fetching fresh `/state` data in the
   background that was never rendered.
 - Controls (Pause/Resume/Reset) POST to `/control/pause|resume|reset` via
-  `postControl()` (`viewer.js`) with optimistic local flips
+  `postControl()` (`viewer/controls.js`) with optimistic local flips
   reconciled by the next poll; keyboard shortcut `R` also resets
-  (`viewer.js`), ignored while focus is in an input, textarea, select, or
+  (`viewer/controls.js`), ignored while focus is in an input, textarea, select, or
   contenteditable field. Reset additionally prompts for the `SIM_RESET_PASSWORD`
   value (default `reset` when unset) after the confirm dialog; cancel/empty
   aborts, and HTTP 401 shows an alert — see [04-http-api.md](04-http-api.md).
 
 ## Canvas / world rendering
 
-- `WORLD_W = 5200`, `WORLD_H = 5400` (`viewer.js`) must match
-  `sim_engine.py`'s `WORLD_W`/`WORLD_H` (sim_engine.py:69-70) exactly — the
-  comment in `viewer.js` says so explicitly.
+- `WORLD_W = 5200`, `WORLD_H = 5400` (`viewer/setup.js`) must match
+  the `sim_engine` package's `WORLD_W`/`WORLD_H` (`constants.py:860-861`) exactly — the
+  comment in `viewer/setup.js` says so explicitly.
 - **Offscreen terrain cache**: static terrain (zones, crops, trees, dock,
   ocean) is rendered once into an offscreen `terrainCanvas` and blitted each
   frame instead of re-tiling per frame (`buildTerrainCache`/
   `scheduleTerrainCacheBuild`). Tiling uses `createPattern` in
-  `fillRectWithTile` / `fillRectWithTiles` (sprites.js): each 16×16 tile grid
+  `fillRectWithTile` / `fillRectWithTiles` (sprites/tiles.js): each 16×16 tile grid
   is rasterized once, then repeated natively; `fillRectWithTiles` pattern-fills
   the whole rect with the base tile and overdrawing `PATH_CELLS` only for
   road cells. `scheduleTerrainCacheBuild` runs the build synchronously on
@@ -105,7 +117,7 @@ world state beyond a cached palette/season key.
   `districtsKey` from `/districts.js` differs), or (`CROP_GROWTH_ENABLED`,
   living-ecosystem Phase 2) a district's `districtEcology` stage change — see
   below. Optional load-perf timings: set `VIEWER_LOAD_DEBUG = true` in
-  `viewer.js` to log build stage splits and performance marks.
+  `viewer/setup.js` to log build stage splits and performance marks.
 
 **Crop/tree growth stages (`CROP_GROWTH_ENABLED`, living-ecosystem Phase 2):**
 terrain — including crops and trees — is baked into the static
@@ -113,17 +125,18 @@ terrain — including crops and trees — is baked into the static
 a small number of discrete stages that key into the same cache-invalidation
 mechanism the season tint already uses.
 
-- `ecologyStagesForTerrain()` (`viewer.js`) reduces the top-level
+- `ecologyStagesForTerrain()` (`viewer/render.js`) reduces the top-level
   `world.districtEcology` list (a sibling of `civilization`, see
   [05-world.md](05-world.md)) to a `{districtId: stage}` map plus a
   stable string key. `buildTerrainCache()` passes the map through
-  `drawTiledWorld` → `drawStarterProps` (sprites.js) and records the key in
+  `drawTiledWorld` (sprites/world.js) → `drawStarterProps` (sprites/world.js)
+  and records the key in
   `lastEcologyStageKeyRendered`, mirroring `lastSeasonRendered`.
   `pollState()` compares the freshly computed key against
   `lastEcologyStageKeyRendered` each poll and rebuilds the cache exactly once
   on a mismatch — the same edge-triggered pattern as the season check, not a
   new timer.
-- `drawStarterProps`/`drawCrop`/`drawTree` (sprites.js) all default their new
+- `drawStarterProps` (sprites/world.js) / `drawCrop`/`drawTree` (sprites/props.js) all default their new
   `stage` parameter to `"lush"`, and the density/appearance logic at `"lush"`
   reproduces the pre-Phase-2 output exactly — so `CROP_GROWTH_ENABLED = false`
   (or an older snapshot with no `districtEcology`) renders byte-identical to
@@ -142,7 +155,7 @@ mechanism the season tint already uses.
   (`drawTreeStump`) — `lush`/`healthy` draw every spot as a full tree (mod 1,
   byte-identical to the original unconditional loop), `sparse` draws roughly
   one full tree per three spots (mod 3), `barren` draws stumps only (mod 0).
-  `drawTree` also takes `stage`; `TREE_GRIDS` (sprites.js) is keyed by
+  `drawTree` also takes `stage`; `TREE_GRIDS` (sprites/props.js) is keyed by
   `` `${season}|${stage}` `` (was season-only) and only `"sparse"` produces a
   visually distinct (shorter) canopy grid — `"healthy"`/`"lush"` reuse the
   unmodified per-season rows.
@@ -150,15 +163,17 @@ mechanism the season tint already uses.
   [05-world.md](05-world.md)) — the viewer just reads whatever `stage` string
   it's given, so a ratio hovering on a boundary can't thrash the terrain
   cache multiple times per second.
-- **Seasonal color grading** (`applySeasonTintForKind`, `viewer.js`): baked into
+- **Seasonal color grading** (`applySeasonTintForKind`, `viewer/render.js`): baked into
   the terrain cache at build time via per-district, per-terrain-kind passes —
   forest/farm/beach/quarry/village each get distinct spring/autumn/winter
   grading clipped to that district's bounds; ecology `stage` scales tint
   strength through `STAGE_TINT_FACTOR`; barren districts get an extra brown
-  overlay; farm summer gets a subtle lighter pass. Winter ground speckle and
-  tree snow caps are drawn in `sprites.js`. The terrain cache key is
+  overlay; farm summer gets a subtle lighter pass. Winter ground speckle
+  (`drawWinterGroundAccent`, sprites/core.js) and tree snow caps
+  (`drawSnowCap`, sprites/core.js) are drawn from `sprites/props.js` callers.
+  The terrain cache key is
   `season|ecologyStageKey` (`terrainVisualCacheKey`).
-- **Day/night overlay** (`nightAlpha`, `viewer.js`): ramps a navy overlay from
+- **Day/night overlay** (`nightAlpha`, `viewer/render.js`): ramps a navy overlay from
   `calendar.dayFraction` (night is the last 25% of each day). Wider twilight
   (`TWILIGHT_START = 0.62` … `TWILIGHT_END_DUSK = 0.78`, dawn from
   `TWILIGHT_START_DAWN = 0.92`); quadratic ease-in/out; peak
@@ -199,13 +214,15 @@ mechanism the season tint already uses.
   nearby in world space. Ally lines are warm and rival lines cool; alpha fades
   with distance. The pass does no all-world pair scan and is a clean no-op when
   the flag is off or an older snapshot lacks `socialTies`.
-- **Zoom**: `zoomLevel` (`viewer.js`) scales `canvas.style.width/height`
-  over the fixed-resolution backing store (`applyZoom`, `viewer.js`);
+- **Zoom**: `zoomLevel` (`viewer/setup.js`) scales `canvas.style.width/height`
+  over the fixed-resolution backing store (`applyZoom`, `viewer/setup.js`);
   +/- buttons multiply by 1.25/0.8, scroll-wheel zoom
   is wired, and "Fit" computes the zoom that fits the whole
   world.
-- **Minimap**: `#minimap` (220×160, `viewer.css`), `renderMinimap()`
-  (`viewer.js`) draws a scaled-down world plus a viewport rectangle
+- **Minimap**: `#minimap` (220×160, `css/base.css`, with a
+  `body.divine-bar-visible` bottom-offset override in `css/divine.css`),
+  `renderMinimap()`
+  (`viewer/minimap.js`) draws a scaled-down world plus a viewport rectangle
   from scroll position/`zoomLevel`; clicking it
   recenters the main view.
 - **Two side panels**, both filled by `renderSidebar()`:
@@ -216,11 +233,11 @@ mechanism the season tint already uses.
     section (`#conversationLog`) and a **Settlements** section
     (`#settlementsSection`) also live here but are **hidden by default** behind
     the client-side viewer toggles `SHOW_CONVERSATIONS` / `SHOW_SETTLEMENTS`
-    (`viewer.js`, both `false`). These are viewer-only display flags, not
+    (`viewer/setup.js`, both `false`). These are viewer-only display flags, not
     server `config.flags`; flip either to `true` to restore its section. The
     underlying `world.conversation` and `civ.settlements` data still arrives in
     `/state` regardless. `#agentsPanel` is a flex child of `#convPanel` with its
-    own `overflow-y: auto` (`viewer.css`), so a long agent roster scrolls
+    own `overflow-y: auto` (`css/council.css`), so a long agent roster scrolls
     within the section instead of being clipped by the panel's own
     `overflow: hidden`.
   - **Right panel** (`#sidebar`): the "AI Simulation World" title, LM/server
@@ -229,7 +246,9 @@ mechanism the season tint already uses.
     `flex-shrink: 0`, natural height), **Civilization** (`#civPanel`
     era/level/structures/active builds/resources), and **Activity**
     (`#activityLog`, the world-event feed, `#actList`). Civilization and
-    Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (`viewer.css`),
+    Activity are `flex: 1 1 0; min-height: 0; overflow-y: auto` (`#civPanel`
+    rules in `css/panels.css`; `#activityLog` rules — plus the `overflow-y:
+    auto` on its child `#actList` — in `css/council.css`),
     so they split the space remaining after Time equally and each
     scrolls independently. The Civilization panel's **Village resources**
     row (`#civResources` headline + `#civResourceList` chips) shows
@@ -238,7 +257,7 @@ mechanism the season tint already uses.
     render), with chip colours from `resourceRegistry`. The headline count
     (`totalVillageResources()`) is the sum of `villageResourceBreakdown()` so
     the number and chips cannot disagree. Sidebar change detection includes
-    `villageResourceBreakdown()` inside `sidebarKey` (`viewer.js`); the
+    `villageResourceBreakdown()` inside `sidebarKey` (`viewer/sidebar.js`); the
     raw `civ.stockpile` dict is intentionally **not** in the key — it is a
     ~40-key map that changes nearly every tick and would force a sidebar
     re-render on every poll; the breakdown is the stockpile's proxy in this
@@ -246,9 +265,9 @@ mechanism the season tint already uses.
     projection of top-level `world.chronicle`, distinct from the raw Activity
     feed. It preserves its scroll position across snapshot updates and is
     hidden cleanly when `CHRONICLE_ENABLED` is off.
-- **`ACTION_LABELS`** (`viewer.js`) maps each `DECISION_ACTIONS`
+- **`ACTION_LABELS`** (`viewer/sidebar.js`) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
-  `humanizeAction(agent)` (`viewer.js`) special-cases
+  `humanizeAction(agent)` (`viewer/sidebar.js`) special-cases
   dead/incapacitated/thinking agents and falls back to
   `a.replace(/_/g, " ")` for any action missing from the map. Display-only —
   not the source of truth for what actions exist (see
@@ -281,8 +300,8 @@ client already parses the full `chronicle` array every poll for the Chronicle
 panel (see above), so no additional data is needed to detect a new founding.
 
 No terrain-cache tint/highlight for newly founded districts was added (the
-plan's stretch item): the static `terrainCanvas` cache (`viewer.js`,
-  `buildTerrainCache` / `scheduleTerrainCacheBuild`)
+plan's stretch item): the static `terrainCanvas` cache (`buildTerrainCache`,
+  `viewer/render.js`; `scheduleTerrainCacheBuild`, `viewer/setup.js`)
 is invalidated only on season change and districts-list change, and adding a
 time-limited "under construction" visual state would require either a new
 per-frame cache-bust condition or extra state tracked outside that cache —
@@ -316,7 +335,7 @@ The existing Council sidebar/history continues to render bounded `councilLog`
 records. `ACTION_LABELS` adds display gerunds for `council_speak`,
 `council_propose`, and `council_vote`.
 
-The history transcript modal (`openCouncilTranscript`, `viewer.js`) reads
+The history transcript modal (`openCouncilTranscript`, `viewer/council.js`) reads
 `record.transcript` from a past `councilLog` entry, which may have been
 written by either council system — the legacy invention council
 (`proposer`/`elder`/`blueprint_name`/... fields, `type` in `convene`,
@@ -334,52 +353,127 @@ same `who`/`text`/`feeling` fallback logic as the live Assembly window's
 The modal's intro note and the "Blueprint pitches & verdict (LLM)" section
 heading are chosen per the same classification.
 
-## sprites.js: pure stateless drawing
+## css/*.css: split stylesheet
+
+`simulation/viewer.css` was split (Phase 3 of the file-modularization plan)
+into 6 plain files, loaded via ordered `<link rel="stylesheet">` tags in
+`index.html` and served from fixed Flask routes under `/css/<name>.css`
+(see [12-ops.md](12-ops.md)). There is no bundler and no CSS
+preprocessor — every file lands in the same document cascade, so load order
+matters for specificity ties exactly as it did when the rules lived in one
+file: a later file's same-specificity rule still overrides an earlier file's.
+The split is a pure move (grouped by what the rules style; the original file
+had almost no section comments to preserve) — no selector, property, or
+value was changed, and no rule was reordered relative to its neighbors.
+
+| Order | File | Contents |
+|---|---|---|
+| 1 | `css/base.css` | Reset, `#wrap`/`#canvasWrap`/`#world`, map controls (`#pauseBtn`/`#resetBtn`/`#zoomInBtn`/`#zoomOutBtn`/`#zoomFitBtn`), `#worldClockHud`, `#minimap` |
+| 2 | `css/panels.css` | `#sidebar`/`#convPanel` shared chrome (headers, `#lmStatus`, `#sidebarBody`, `.panel-section`), `#civPanel` civilization stats (project sprite, resource/custom/recipe/rule chip lists, progress bar, bench groups) |
+| 3 | `css/agents.css` | `#agentList`, `#agentRollup`, `#agentDetail`, `#agentFollowBtn`, `.agents-panel-head`, the deceased-agents modal (`#deadAgentsBtn`/`#deadAgentsModal`/`#deadAgentsDialog`/`#deadAgentsList`) |
+| 4 | `css/council.css` | Council transcript modal, `#worldLoading`, conversation/activity/chronicle lists (`#convList`/`#actList`/`#chronicleList`), council banner/panel (`#councilBanner`, `.council-card`, `#councilHistory`), the Daily Council Assembly modal (`#councilAssemblyModal` and its canvas/tally/transcript rules) |
+| 5 | `css/divine.css` | Divine Console bottom bar and modal (`.divine-bar`, `.gbtn`, `.modal`, every `.divine-*`/`.god-sight-*` rule), `#tooltip`, `#godPublicBanner`, `.chronicle-presentation-thunder` |
+| 6 | `css/responsive.css` | The two `@media (max-width: …)` blocks (900px and 620px breakpoints) |
+
+## sprites/*.js: pure stateless drawing
+
+`simulation/sprites.js` was split (Phase 2 of the file-modularization plan)
+into 8 plain files, loaded via ordered `<script>` tags in `index.html` and
+served from fixed Flask routes under `/sprites/<name>.js`
+(see [12-ops.md](12-ops.md)). There is no bundler and no ES modules — every
+file executes in the same shared global scope, so load order encodes the
+dependency order: a later file may reference a const/function from an
+earlier one, never the reverse.
+
+| Order | File | Contents |
+|---|---|---|
+| 1 | `sprites/core.js` | Shared mutable state (`spriteSeason`, `seasonalAgentAccentsEnabled`), pixel-grid primitives (`tileFromStrings`, `drawPixelGrid`, `drawPixelSprite`), tile-source canvas cache, `drawSnowCap`/`drawWinterGroundAccent`, road-edge `PATH_CELLS` plumbing |
+| 2 | `sprites/tiles.js` | Color palette `C`, path-blend tiles, `fillRectWithTile(s)`, all terrain `TILE_*` grids, ocean tile builder |
+| 3 | `sprites/props.js` | Starter-world decor: trees (`TREE_GRIDS`, `drawTree`/`drawTreeStump`), decorative house/market-stall/cave-entrance, crops, fences, dock, well, rocks |
+| 4 | `sprites/structures.js` | Agent-built `STRUCTURE_GRIDS`, `getStructureGrid` resolution, wear/ruin rendering, forge smoke, weather-particle and activity-dust helpers |
+| 5 | `sprites/agents.js` | Agent sprite palettes/grids (`AGENT_SPRITES`), accessories, `tombstoneSprite`, `BELIEF_TINTS`, `drawAgentSprite` |
+| 6 | `sprites/world.js` | `KIND_TILE`, `STARTER_DISTRICTS_JS`, `drawStarterProps`, district terrain/tile overlays, `drawTiledWorld` |
+| 7 | `sprites/wildlife.js` | Ambient wildlife: PNG-sheet blit, canvas-helper, and procedural-grid fallbacks |
+| 8 | `sprites/shipments.js` | Goods-in-motion cart/boat sprites |
 
 - Every function takes `ctx` plus plain data and paints; the only module
   state is a season mirror plus viewer-set seasonal-agent-accent gate
-  (`spriteSeason`/`seasonalAgentAccentsEnabled`, sprites.js:3-11) and a
-  per-season tree-grid cache (`TREE_GRIDS`, sprites.js:280-284, built once per
+  (`spriteSeason`/`seasonalAgentAccentsEnabled`, sprites/core.js) and a
+  per-season tree-grid cache (`TREE_GRIDS`, sprites/props.js, built once per
   season).
 - **Agent sprites**: `buildAgentSprite(palette, standRows, walkRows)`
-  (sprites.js:833) composes stand + walk-cycle frames per agent palette;
-  `genericAgentSprite(agent)` (sprites.js:1307) is the deterministic
+  (sprites/agents.js) composes stand + walk-cycle frames per agent palette;
+  `genericAgentSprite(agent)` (sprites/agents.js) is the deterministic
   fallback. Living agents tint by dominant belief id via
-  `BELIEF_TINTS[beliefIds[0]]` (sprites.js:1391-1394). Deceased/buried
+  `BELIEF_TINTS[beliefIds[0]]` (sprites/agents.js). Deceased/buried
   agents render a cached `tombstoneSprite(agent)`
-  (sprites.js:1323-1349, `_tombstoneSpriteCache` keyed by name) instead of
-  the living sprite (sprites.js:1368-1372), color-derived and deterministic
-  per agent so repeat draws don't regenerate the grid.
+  (sprites/agents.js, `_tombstoneSpriteCache` keyed by name) instead of
+  the living sprite (`drawAgentSprite`, sprites/agents.js), color-derived and
+  deterministic per agent so repeat draws don't regenerate the grid.
 - **Structure grid resolution order** — `getStructureGrid(structure)`
-  (sprites.js:719-751), in order: (1) canonical level-30 house
-  (`type === "house" && level >= 30` → `LEVEL30_HOUSE_GRID` always,
-  sprites.js:721-726); (2) persisted LLM sprite, if upgraded with a
-  non-degenerate `structure.sprite` spec (sprites.js:729-735); (3) upscaled
-  seed grid — `upgradedSeedGrid` scales the built-in `STRUCTURE_GRIDS` entry
-  by `min(visualTier, 3)` (sprites.js:705-711, 736-739); (4)
-  `STRUCTURE_GRIDS[structure.type]` tier-1 seed grid (sprites.js:740-741);
-  (5) `spriteGridFromSpec(type, sprite)` for a first-time custom sprite
-  (sprites.js:742-745); (6) `STRUCTURE_GRIDS[structure.visualStyle]`, a
-  named built-in style borrowed by a custom blueprint (sprites.js:746-749);
-  (7) procedural fallback, or `drawGenericStructure` (colored block with the
-  type's first letter, sprites.js:763-781) if nothing resolves.
+  (sprites/structures.js), in order: (1) canonical level-30 house
+  (`type === "house" && level >= 30` → `LEVEL30_HOUSE_GRID` always); (2)
+  persisted LLM sprite, if upgraded with a non-degenerate `structure.sprite`
+  spec; (3) upscaled seed grid — `upgradedSeedGrid` scales the built-in
+  `STRUCTURE_GRIDS` entry by `min(visualTier, 3)`; (4)
+  `STRUCTURE_GRIDS[structure.type]` tier-1 seed grid; (5)
+  `spriteGridFromSpec(type, sprite)` for a first-time custom sprite; (6)
+  `STRUCTURE_GRIDS[structure.visualStyle]`, a named built-in style borrowed
+  by a custom blueprint; (7) procedural fallback, or `drawGenericStructure`
+  (colored block with the type's first letter) if nothing resolves — all in
+  `sprites/structures.js`.
 - **Seasonal variants**: tree grids are cached per season
-  (`TREE_GRIDS[season]`, sprites.js:284, 341); in winter `drawSnowCap`
-  (sprites.js:83) layers onto trees, rocks, and any agent-built structure's
-  top edge (sprites.js:794-797). Seasonal agent accents also read the
-  module-level `spriteSeason` mirror rather than an explicit `season` param.
-  `setSpriteSeason(season)` (sprites.js:7) is called once per `/state` poll
-  from `pollState()` (`viewer.js`) so rendering tracks
+  (`TREE_GRIDS[season]`, sprites/props.js); in winter `drawSnowCap`
+  (sprites/core.js) layers onto trees, rocks (sprites/props.js), and any
+  agent-built structure's top edge (`drawStructure`, sprites/structures.js).
+  Seasonal agent accents also read the module-level `spriteSeason` mirror
+  rather than an explicit `season` param.
+  `setSpriteSeason(season)` (sprites/core.js) is called once per `/state` poll
+  from `pollState()` (`viewer/polling.js`) so rendering tracks
   `calendar.season`. `SEASONAL_AGENTS_ENABLED` uses the same mirror and a
   viewer-set boolean to draw small post-body seasonal accessory pixels on
   living agents (winter wool cap/scarf, spring leaf pin, summer straw brim,
   autumn scarf); turning it off leaves their base and named accessory sprites
   unchanged.
-- **`STARTER_DISTRICTS_JS`** (sprites.js:1443-1456, 12 entries) is a
+- **`STARTER_DISTRICTS_JS`** (sprites/world.js, 12 entries) is a
   client-side fallback used before the first `/districts.js` fetch resolves;
   a comment flags it **"MUST be kept in sync with sim_engine.py's
-  STARTER_DISTRICTS bounds/kind/label"** (sprites.js:1440-1442) — see
+  STARTER_DISTRICTS bounds/kind/label"** — see
   [05-world.md](05-world.md) for the server-side list it mirrors.
+
+## viewer/*.js: split viewer client script
+
+`simulation/viewer.js` was split (Phase 4 of the file-modularization plan)
+into 16 plain files, loaded via ordered `<script>` tags in `index.html`
+(after `sprites/*.js`, in the same relative position the single
+`viewer.js` tag occupied before) and served from fixed Flask routes under
+`/viewer/<name>.js` (see [12-ops.md](12-ops.md)). There is no bundler and no
+ES modules — every file executes in the same shared global scope (including
+the one `sprites/*.js` and `roles.js` already populate), so load order
+encodes the dependency order: a later file may reference a const/function
+from an earlier one, never the reverse. The split follows the original
+file's own `// ====...` banner comments (and, inside the large Divine
+Console banner, its own lighter-weight `// ---...` sub-banners) — a pure
+move, no logic changed.
+
+| Order | File | Contents |
+|---|---|---|
+| 1 | `viewer/setup.js` | Thin-viewer contract banner, canvas/DPR setup, offscreen-terrain-cache scaffolding, zoom (`zoomLevel`/`applyZoom`/`zoomFit`), all feature flags (`SURVIVAL_ENABLED` etc.), viewer-only display toggles (`SHOW_CONVERSATIONS`/`SHOW_SETTLEMENTS`) |
+| 2 | `viewer/state.js` | World snapshot: `MOCK_STATE`, module-level `world`, `mergeStateDelta()`, districts cache (`districtsData`/`districtsKey`/`districtsEpoch`), `getDistricts`/`findDistrictBounds`/`getDistrictBounds` |
+| 3 | `viewer/render.js` | Convenience accessors (`getAgents`/`getCiv`/etc.) plus drawing: terrain cache build (`buildTerrainCache`), season/night/golden-hour/weather overlays, `drawWorld`, per-agent/structure drawing (`drawAgent`, `drawStructureWithShadow`, hit-flash) |
+| 4 | `viewer/sidebar.js` | Sidebar render: `renderSidebar()`, `ACTION_LABELS`/`humanizeAction`, benchmarks, agent detail/rollup/panel, deceased-agents modal, founding/disaster banners, `renderWorldClockHud` |
+| 5 | `viewer/council.js` | Council panel (`renderCouncil`), council transcript modal (`openCouncilTranscript`), Daily Council Assembly modal, settlements |
+| 6 | `viewer/minimap.js` | Minimap render (`renderMinimap`) and click/drag-to-navigate |
+| 7 | `viewer/polling.js` | `/state` polling (`pollState`), `applyFlags`, social-tie/wildlife/shipment drawing (`drawSocialTies`, `drawWildlife`, `drawShipments`) |
+| 8 | `viewer/controls.js` | Pause/Resume/Reset controls (`postControl`, `syncPauseButton`, `doReset`), reset keyboard shortcut |
+| 9 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
+| 10 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
+| 11 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
+| 12 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers |
+| 13 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
+| 14 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
+| 15 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
+| 16 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`) |
 
 ## Civ-1 physical props
 
@@ -394,7 +488,7 @@ Reads the top-level `world.weather` projection (`{state, since, districts}`,
 see [05-world.md](05-world.md)) — a sibling of `civilization`, same
 placement as `socialTies`/`districtEcology`/`shipments`.
 
-- **Sky tint** (`weatherSkyAlpha(weather, nightAlpha)`, `viewer.js`):
+- **Sky tint** (`weatherSkyAlpha(weather, nightAlpha)`, `viewer/render.js`):
   composited in the **same full-canvas overlay stage** as the existing
   night overlay — drawn immediately after it, before the golden-hour band —
   so the two stack coherently instead of fighting. `WEATHER_SKY_ALPHA =
@@ -421,8 +515,8 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   district's `bounds` rect from `/districts.js` (`getDistrictBounds(id)`).
   The global tint reads as atmosphere; the veil reads as "the storm is here"
   while damage targeting stays localized per [08-systems-economy.md](08-systems-economy.md).
-- **Particles** (`drawWeatherParticles`, `viewer.js`; `drawWeatherParticle`,
-  sprites.js): drawn every frame (not baked into `terrainCanvas`). Active during
+- **Particles** (`drawWeatherParticles`, `viewer/render.js`; `drawWeatherParticle`,
+  sprites/structures.js): drawn every frame (not baked into `terrainCanvas`). Active during
   `storm` (full intensity), `clearing` (45% intensity), and `gathering`
   (light drizzle at intensity `0.18`). Cap **`380`**; divisors
   **`11000`/`7200`**; sheet every **6th** rain streak; **two depth layers**
@@ -436,25 +530,25 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   `min(380, floor(visibleW * visibleH / densityDiv * intensity))`, where
   `visibleW`/`visibleH` come from the same `canvasWrapEl.scrollLeft/scrollTop
   / zoomLevel` viewport math `drawWildlife`/`drawShipments` already use.
-- **Lightning** (`drawLightningFlash`, `viewer.js`): during `storm` only,
+- **Lightning** (`drawLightningFlash`, `viewer/render.js`): during `storm` only,
   deterministic rare full-canvas white/blue flashes (~8–18 display frames,
   ~130–300ms at 60fps), keyed off local `renderFrame` (rAF), not
   `frameTick`, in `LIGHTNING_BUCKET_FRAMES` (540) windows — no new
   `/state` fields. Drawn immediately after the sky tint, before golden hour;
   alpha ~0.10–0.20 so readability is preserved. ~12% of buckets may flash
   (~every ~75s at 60fps), not every second.
-- **Weather chip on World Clock HUD** (`renderWorldClockHud`, `viewer.js`,
+- **Weather chip on World Clock HUD** (`renderWorldClockHud`, `viewer/sidebar.js`,
   `WORLD_CLOCK_HUD_ENABLED`): when `WEATHER_ENABLED` and `world.weather` are
   present, appends the title-case state label after season+phase, e.g.
   `spring day · Storm`.
-- **Disaster banner** (`#disasterBanner`, `viewer.js`): mirrors the founding
+- **Disaster banner** (`#disasterBanner`, `viewer/sidebar.js`): mirrors the founding
   banner pattern — edge-detects new `world.chronicle` entries with
   `kind === "disaster"` via a first-snapshot-seen `Set` on `frame` (no replay
   on page load). Shows storm-colored slate/teal banner for 5.5s with entry
   text. Gated on `CHRONICLE_ENABLED`; edge-detection mirrors founding (runs
   whenever enabled — empty chronicle clears the seen Set).
-- **Structure hit flash** (`trackStructureConditionDeltas`,
-  `drawStructureHitFlash`, `viewer.js`): client-only diff of structure
+- **Structure hit flash** (`trackStructureConditionDeltas`, `viewer/sidebar.js`;
+  `drawStructureHitFlash`, `viewer/render.js`): client-only diff of structure
   `condition`/`isRuin` between polls; flashes when condition drops by at
   least `STRUCTURE_HIT_FLASH_MIN_DROP` (5 — enough to ignore passive decay
   ~0.025 per goods tick, still catches disasters at 40–70) or when
@@ -505,13 +599,13 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | farm | `bee` | none — decorative, not huntable |
   | beach | `fish`, `crab`, `gull`, `turtle`, `seal` | `fish` |
 
-- **Rendering (`sprites.js`):** `drawWildlifeCreature` dispatches in order:
+- **Rendering (`sprites/wildlife.js`):** `drawWildlifeCreature` dispatches in order:
   sheet blit for kinds in `WILDLIFE_SHEET_FRAMES` (all 16 when atlas present)
   → canvas silhouette helpers → procedural pixel grids — nothing ever renders
   blank.
   - **Spritesheet loader:** at module load, `preloadWildlifeSheet()` fires
-    a fire-and-forget `Image()` fetch for `/wildlife.png` (served beside
-    `sprites.js`; see [12-ops.md](12-ops.md)). `_wildlifeSheetReady` is
+    a fire-and-forget `Image()` fetch for `/wildlife.png` (served beside the
+    `sprites/*.js` files; see [12-ops.md](12-ops.md)). `_wildlifeSheetReady` is
     set only on successful load with non-zero dimensions; `onerror` or a
     missing file (404) leaves it `false` permanently for that page load.
     When ready **and** the kind has an entry in `WILDLIFE_SHEET_FRAMES`,
@@ -545,7 +639,7 @@ own and does **not** pathfind, spawn, or reposition creatures.
   | small | ≈26 px max side | 1.0 | 1 | `mouse`, `squirrel`, `fish`, `crab`, `bee` |
 
   Cosmetic motion also includes the caller-side `bob` sine offset in
-  `drawWildlife` (`viewer.js`); `frameTick` drives frame swap only and does
+  `drawWildlife` (`viewer/polling.js`); `frameTick` drives frame swap only and does
   not invent a second position.
 - **Positions** come exclusively from each `wildlife[]` entry's `x`/`y`
   (and `districtId`). The viewer does not seed positions client-side and
@@ -583,7 +677,7 @@ via `drawShipments(ctx, world.frameTick)`, called right after
   why the shape includes `path`: it lets the client stay a thin, stateless
   interpolator instead of duplicating the engine's BFS road-resolution
   logic in JS.
-- **Sprite:** `drawShipment(ctx, mode, x, y, cargoColor)` (sprites.js) picks
+- **Sprite:** `drawShipment(ctx, mode, x, y, cargoColor)` (sprites/shipments.js) picks
   `drawCart` (land) or `drawShipmentBoat` (ocean, a smaller echo of the
   moored `physicalProps` boat art, not a shared code path with it) by
   `shipment.mode`. An optional small cargo-colored square is drawn using
@@ -950,7 +1044,7 @@ conflict the same way — see this phase's report for the underlying gap.
   list items add `chronicle-presentation-thunder` when `entry.presentation ===
   "thunder"`. Cognition/prompt text is unchanged server-side.
 **Plain-language operator help (Divine Console improvements).** `DIVINE_FEATURES`
-in `viewer.js` is the source of truth for modal title, subtitle, bar tooltip,
+in `viewer/divine-bootstrap.js` is the source of truth for modal title, subtitle, bar tooltip,
 and the always-visible `#divineFeatureGuide` callout (`.divine-feature-guide`)
 inserted at the top of `#divineModalBody` on `openDivineModal()` and removed on
 `closeDivineModal()`. Guide copy uses `textContent` only. Individual controls

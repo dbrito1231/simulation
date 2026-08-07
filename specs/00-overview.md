@@ -52,12 +52,13 @@ index; [docs/REFERENCE.md](../docs/REFERENCE.md) for deep mechanics.
 
 | Path | Role |
 |---|---|
-| `simulation/sim_engine.py` | The engine: all world state, tick loop, `apply_decision`, persistence |
-| `simulation/server.py` | Flask app + cognition: routes, prompt building, LLM calls, decision validation |
+| `simulation/sim_engine/*.py` | The engine package (`SimEngine` in `core.py`): all world state, tick loop, `apply_decision`, persistence; module-level `constants.py`/`persistence.py`/`helpers.py` plus 22 `mixin_*.py` topic files exec()'d into a shared namespace — see [01-architecture.md](01-architecture.md) |
+| `simulation/server.py` | Flask app + cognition entry point: every route, `DECISION_ACTIONS`/`DECISION_SCHEMA`, prompt building, LLM calls, `if __name__ == "__main__"` |
+| `simulation/_server/*.py` | Non-route helper modules server.py imports from (validation, prompt formatting, memory store, session logging, model routing, structured-output error parsing, role data) — pure move split, no behavior change — see [01-architecture.md](01-architecture.md) |
 | `simulation/index.html` | Thin browser viewer shell — markup only |
-| `simulation/viewer.css` | Viewer stylesheet (layout, panels, Divine Console chrome) |
-| `simulation/viewer.js` | Viewer client — polls `/state`, render loop, sidebar, holds no sim state |
-| `simulation/sprites.js` | Pure stateless Canvas drawing helpers |
+| `simulation/css/*.css` | Viewer stylesheet, split into 6 ordered files (layout, panels, agents, council/chronicle, Divine Console chrome, responsive breakpoints) — see [specs/11-viewer.md](11-viewer.md) |
+| `simulation/viewer/*.js` | Viewer client — polls `/state`, render loop, sidebar, holds no sim state; split into 16 ordered files (setup, state, render, sidebar, council, minimap, polling, controls, renderloop, Divine Console × 7) — see [specs/11-viewer.md](11-viewer.md) |
+| `simulation/sprites/*.js` | Pure stateless Canvas drawing helpers, split into 8 ordered files (core primitives, tiles, props, structures, agents, world, wildlife, shipments) — see [specs/11-viewer.md](11-viewer.md) |
 | `simulation/roles.json` | Single source of truth for role definitions |
 | `simulation/logs/<timestamp>/` | Per-run JSONL logs (gitignored) |
 | `specs/` | This spec set — canonical, rebuild-from-scratch documentation |
@@ -89,7 +90,7 @@ the Ollama dependency): [CLAUDE.md](../CLAUDE.md#commands).
 | [08-systems-economy.md](08-systems-economy.md) | Survival, crafting, goals, structure effects, goods, economy |
 | [09-systems-society.md](09-systems-society.md) | Tech tree, Daily Council/governance and voting, memes, culture, benchmarks |
 | [10-path1.md](10-path1.md) | Path 1 bundle: industry, tools, terrain, diplomacy, pressure loop |
-| [11-viewer.md](11-viewer.md) | Thin-viewer contract, viewer.js/viewer.css, sprites.js rendering |
+| [11-viewer.md](11-viewer.md) | Thin-viewer contract, viewer/*.js/css/*.css, sprites/*.js rendering |
 | [12-ops.md](12-ops.md) | SessionLogger, log ingestion, scripts/ tools |
 
 ## Spec-driven development contract

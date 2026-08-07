@@ -3,7 +3,7 @@
 The Flask route surface: every endpoint the browser or external tools call,
 what it does, and its request/response shape.
 
-**Canonical for:** the full route table (28 routes), `/state` top-level
+**Canonical for:** the full route table (55 routes), `/state` top-level
 payload key inventory, server startup/shutdown behavior. **See also:**
 [specs/01-architecture.md](01-architecture.md) (data flow, thin-viewer
 contract), [specs/03-cognition.md](03-cognition.md) (what `run_agent_decision`
@@ -13,21 +13,40 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 
 ## Route table
 
-28 routes total (`@app.route` count in `simulation/server.py`; no other
-route-registration mechanism is used) — 23 always-registered routes plus the
-5 `/control/god/*` routes added in Phase 2, which are registered
+55 routes total in `simulation/server.py`: 25 from their own `@app.route`
+decorator, plus 30 more registered programmatically by three small
+`add_url_rule` loops — `_register_sprite_route()` (called once per file in
+`_SPRITE_FILES`, 8 iterations, serving `/sprites/<name>.js`),
+`_register_css_route()` (called once per file in `_CSS_FILES`, 6 iterations,
+serving `/css/<name>.css`), and `_register_viewer_route()` (called once per
+file in `_VIEWER_FILES`, 16 iterations, serving `/viewer/<name>.js`) — added
+by the Phase 2 (sprites), Phase 3 (CSS), and Phase 4 (viewer.js)
+file-modularization splits. Of the 55, 6 are the `/control/god/*` routes
+added in Phase 2 of Sovereign God mode (all `@app.route`-decorated); the
+other 49 are always-registered non-god routes (25 decorated minus the 6 god
+ones = 19, plus the 30 `add_url_rule` routes = 49). The god routes are registered
 unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
-(sim_engine.py) is configured at startup and, when `GOD_AUTH_REQUIRED` is
+(`constants.py:644`) is configured at startup and, when `GOD_AUTH_REQUIRED` is
 True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
 configured; see "Sovereign God mode" below.
+
+The single-file `/viewer.css`, `/sprites.js`, and `/viewer.js` routes
+described in earlier revisions of this spec no longer exist — all three now
+return 404. The stylesheet, Canvas renderer, and viewer client script are
+each served as several small files instead; the full per-file route/path/
+content table lives in [specs/12-ops.md](12-ops.md#viewer-static-assets)
+(also covered, with per-file content summaries, in specs/11-viewer.md's
+"css/*.css: split stylesheet", "sprites/*.js: pure stateless drawing", and
+"viewer/*.js: split viewer client script" sections) rather than duplicated
+below.
 
 | Path | Method | Purpose | Request | Response |
 |---|---|---|---|---|
 | `/` | GET | Serve the viewer shell | — | `index.html` |
-| `/viewer.css` | GET | Serve the viewer stylesheet | — | `viewer.css` |
-| `/viewer.js` | GET | Serve the viewer client script | — | `viewer.js` |
-| `/sprites.js` | GET | Serve the pure Canvas renderer | — | `sprites.js` |
-| `/wildlife.png` | GET | Serve the wildlife spritesheet PNG (variable-size atlas from user PNGs; 404 falls back to canvas helpers / procedural grids in `sprites.js`) | — | `wildlife.png` |
+| `/css/<name>.css` | GET | Serve one of the 6 split viewer stylesheets (`base.css`, `panels.css`, `agents.css`, `council.css`, `divine.css`, `responsive.css`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.css` file |
+| `/viewer/<name>.js` | GET | Serve one of the 16 split viewer client script files (`setup.js`, `state.js`, `render.js`, `sidebar.js`, `council.js`, `minimap.js`, `polling.js`, `controls.js`, `renderloop.js`, `divine-bootstrap.js`, `divine-auth-sight.js`, `divine-modal.js`, `divine-sight-voice.js`, `divine-voice.js`, `divine-miracles-story.js`, `divine-history.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
+| `/sprites/<name>.js` | GET | Serve one of the 8 split pure Canvas renderer files (`core.js`, `tiles.js`, `props.js`, `structures.js`, `agents.js`, `world.js`, `wildlife.js`, `shipments.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
+| `/wildlife.png` | GET | Serve the wildlife spritesheet PNG (variable-size atlas from user PNGs; 404 falls back to canvas helpers / procedural grids in `sprites/wildlife.js`) | — | `wildlife.png` |
 | `/wildlife_refsheet.html` | GET | Dev/debug — labeled 4×4 grid calling live `drawWildlifeCreature`; not part of the sim viewer loop | — | `wildlife_refsheet.html` |
 | `/roles.js` | GET | Serve role data as a JS global | — | `const ROLES = {...};` (`application/javascript`), sourced from the same `ROLES` dict server.py derives its maps from — `roles.json` stays the single edit point |
 | `/log/event` | POST | Ingest a browser-origin activity/conversation event | `{type: "activity"\|"conversation", message/from/to, frame_tick, kind?, outcome?}` | `("", 204)` always |
@@ -53,8 +72,8 @@ configured; see "Sovereign God mode" below.
 | `/control/god/compile` | POST | Optional Phase 8: compile free operator prose into a DRAFT `story_event` preview (requires God auth when `GOD_AUTH_REQUIRED`; also requires `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`, otherwise a clean rejection) | `{prose}` (string, up to `GOD_COMPILER_PROSE_MAX_CHARS = 800` chars) | `engine.god_compile_prose(prose)` — `{compileOk, previewId, commandDigest, previewOutcome, normalizedCommand, reversibilityClass, expiresAt}` or `{compileOk: false, reason}` |
 
 `/agent/think` is legacy: the server-authoritative engine never calls it over
-HTTP. Instead, `_ENGINE_DEPS["llm_decide"]` (server.py:3233-3254) is wired
-directly to a thin in-process wrapper `_llm_decide()` (server.py:3228-3230)
+HTTP. Instead, `_ENGINE_DEPS["llm_decide"]` (server.py:2604-2633) is wired
+directly to a thin in-process wrapper `_llm_decide()` (server.py:2599-2601)
 that calls `run_agent_decision()` directly — the engine's think worker pool
 invokes this Python function in-process, never round-tripping through Flask.
 The route is kept only for external/manual testing.
@@ -90,8 +109,8 @@ Partial rules: dirty agents only in `agents[]`; dirty civ subkeys only (structur
 
 ## `/state` payload — top-level keys
 
-From `SimEngine.snapshot()` / `SimEngine.snapshot_delta()` (sim_engine.py),
-returned under the engine lock for a consistent read. Full responses include
+From `SimEngine.snapshot()` (`mixin_snapshot.py:379-388`) / `SimEngine.snapshot_delta()`
+(`mixin_snapshot.py:389+`), returned under the engine lock for a consistent read. Full responses include
 every key below; delta responses omit unchanged keys (client merges — see
 [specs/11-viewer.md](11-viewer.md)). Both modes always include `frameTick`
 and `stateGeneration`; full snapshots also set `full: true`.
@@ -121,12 +140,12 @@ Host/port: `SIM_HOST` env var (default `0.0.0.0`, binds all LAN interfaces —
 intended for a trusted home LAN only) and `SIM_PORT` env var (default `5001`;
 never use 5000 — macOS AirPlay claims it and returns 403). `app.run(...,
 threaded=True)` so request handlers run concurrently alongside the engine's own
-tick thread (server.py:3403-3443).
+tick thread (server.py:3745-3788, the `if __name__ == "__main__":` block).
 
 Startup order: `engine.start()` (spins up the 30/s tick daemon thread) runs
 *before* `app.run()`, so the world ticks headless even before the HTTP server
 accepts connections. Roster size at cold start comes from the `SIM_AGENTS`
-env var (default 8, server.py:3256-3262) — distinct from the `/control/reset`
+env var (default 8, server.py:2635-2639) — distinct from the `/control/reset`
 body field, which only takes effect on an explicit reset.
 
 **Reset password:** `POST /control/reset` requires a JSON `password` field
@@ -137,7 +156,7 @@ or blank). Wrong or missing password returns `401 {"ok": false, "error":
 from Sovereign God mode token auth (`SIM_GOD_TOKEN` / `X-God-Token`).
 
 Graceful shutdown: `atexit.register(_flush_on_exit)` plus `SIGINT`/`SIGTERM`
-handlers (server.py:3421-3441) both call a `threading.Event`-guarded
+handlers (server.py:3766-3786) both call a `threading.Event`-guarded
 `_flush_on_exit()` exactly once, which stops the engine and calls
 `engine.save_state()` to flush the full world to `simulation/state.db`
 before the process exits — covers both normal exit (atexit doesn't fire on a
@@ -163,7 +182,7 @@ The five `/control/god/*` routes (docs/plan-sovereign-god-mode-v2.md) form a
 deliberately separate, optional control plane. All five share one gate and
 one uniform failure shape:
 
-- **Gate:** `GOD_MODE_ENABLED` (sim_engine.py, env-backed `SIM_GOD_MODE`,
+- **Gate:** `GOD_MODE_ENABLED` (`constants.py:644`, env-backed `SIM_GOD_MODE`,
   read once at import — see [01-architecture.md](01-architecture.md)) must
   be configured. When `GOD_AUTH_REQUIRED` is also True (env-backed
   `SIM_GOD_AUTH`, default **False** — see [12-ops.md](12-ops.md)), a

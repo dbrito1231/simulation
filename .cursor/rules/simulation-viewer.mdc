@@ -1,13 +1,13 @@
 ---
 description: Thin-viewer contract — no simulation logic in the browser
-globs: simulation/index.html,simulation/viewer.js,simulation/viewer.css,simulation/sprites.js
+globs: simulation/index.html,simulation/viewer/**,simulation/css/*.css,simulation/sprites/*.js
 alwaysApply: false
 ---
 
 # Viewer
 
 - Pure renderer: poll `/state`, draw `world`. No decisions, movement, or mutation.
-- `index.html` is markup shell only; logic lives in `viewer.js`; styles in `viewer.css`.
-- `sprites.js` is stateless Canvas helpers only.
+- `index.html` is markup shell only; logic lives in `viewer/*.js` (16 split files); styles in `css/*.css` (6 split files).
+- `sprites/*.js` (8 split files) is stateless Canvas helpers only.
 - Keep `WORLD_W`/`WORLD_H` and `ACTION_LABELS` in sync with the engine (labels = display only).
 - Workflow: [AGENTS.md](AGENTS.md). Spec: [specs/11-viewer.md](specs/11-viewer.md).

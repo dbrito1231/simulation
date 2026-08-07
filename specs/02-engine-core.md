@@ -12,7 +12,7 @@ think job's network call.
 
 ## Tick loop
 
-`_tick_once()` (sim_engine.py:9388) runs under `self.lock` once per
+`_tick_once()` (sim_engine/mixin_think_job.py:1446) runs under `self.lock` once per
 `TICK_DT = 1/30 s` (`TICKS_PER_SEC = 30`). If `self.paused`, it returns
 immediately — the sim clock (`frameTick`) freezes entirely. Otherwise
 `frameTick` advances by 1 and, per frame `ft`, these flag-gated systems run on
@@ -64,7 +64,7 @@ future while holding the tick lock.
 ## Time model
 
 All calendar fields are **derived from `frameTick`** — nothing calendar-shaped is
-persisted separately. `_calendar()` (sim_engine.py) is a pure function of
+persisted separately. `_calendar()` (sim_engine/mixin_structures_economy.py:293) is a pure function of
 `frameTick`: returns `year`, `season`, `dayOfSeason`, `daysPerSeason`, `isNight`,
 `dayFraction`. The `/state` JSON shape is unchanged across the retune.
 
@@ -89,7 +89,7 @@ lengthening. Ratios preserved: **24 days per year**, **6 days per season**,
 | Days per year | 24 | 24 | — | — |
 | Days per season | 6 | 6 | — | — |
 
-**Canonical constants (sim_engine.py:1032, 1096–1097):**
+**Canonical constants (sim_engine/constants.py:1029 `TICKS_PER_SEC`, :1386 `DAY_FRAMES`, :1450-1451 `YEAR_FRAMES`/`SEASON_FRAMES`):**
 
 - `TICKS_PER_SEC = 30`; `DAY_FRAMES = 18000` — one day/night cycle = 600 s
   (10.0 min real time at 30/s).
@@ -108,16 +108,16 @@ lengthening. Ratios preserved: **24 days per year**, **6 days per season**,
 | `RUIN_CULL_AGE_FRAMES` | 13,500 (~7.5 min) | 18,000 (~10 min) |
 | Ecology `SEASON_REGROW_MULT` | unchanged per-season mults | same mults, longer seasons |
 
-`AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES` (sim_engine.py:1223) —
+`AGE_YEARS_PER_TICK = LIFECYCLE_TICK_FRAMES / YEAR_FRAMES` (sim_engine/constants.py:1577) —
 **exactly one in-world year per `YEAR_FRAMES`**, so agent aging, the season clock,
 and the GUI calendar stay locked to the same canonical year. With today's constants
 that is `1/1440` per lifecycle gate (~10 s at 30/s).
 
-- `NIGHT_FRACTION = 0.25` (sim_engine.py): `_is_night()` is true for the last
+- `NIGHT_FRACTION = 0.25` (sim_engine/constants.py:2009): `_is_night()` is true for the last
   quarter of each `DAY_FRAMES` cycle, but only when `PRESSURE_LOOP_ENABLED` — night
   otherwise never triggers.
 - `SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}`
-  (sim_engine.py:1099): ecology regrowth is doubled in spring and fully halted in
+  (sim_engine/constants.py:1453): ecology regrowth is doubled in spring and fully halted in
   winter (`_tick_ecology_regrow`, applied only when `ECOLOGY_ENABLED`).
 - A scheduled Daily Council may convene once at the deterministic day boundary
   (`frameTick % DAY_FRAMES == 0`) when `DAILY_COUNCIL_ENABLED` is on. A leaderless
@@ -129,7 +129,7 @@ that is `1/1440` per lifecycle gate (~10 s at 30/s).
 
 ## Roster / cold start
 
-`AGENT_DEFS` (sim_engine.py:1316) is 12 hand-written entries (name, role,
+`AGENT_DEFS` (sim_engine/helpers.py:46) is 12 hand-written entries (name, role,
 personality, color, starting district). `MAX_ROSTER_SIZE = 20` is the hard
 ceiling for `roster_size` — a Sid-parity Phase 6 headroom increase from the
 8-12 agent range, *not* a bid at Project Sid's ~500-agent scale (explicit
@@ -154,7 +154,7 @@ clamps to `[1, MAX_ROSTER_SIZE]` and resolves the active def list:
   `civilization["basePopulation"]` reflects the full `roster_size` (clamped to
   `MAX_ROSTER_SIZE`, not `len(AGENT_DEFS)`), so the Structure-Effects house
   population cap (specs/08) computes correctly above 12 agents too.
-- `_maybe_welcome_newcomer` (sim_engine.py, the house-driven backstop in the
+- `_maybe_welcome_newcomer` (sim_engine/mixin_backstops.py:653, the house-driven backstop in the
   150-tick batch — see the gate table above) grows a running village that
   never cold-started above 12 agents: it draws the next unused `AGENT_DEFS`
   entry first, and once all 12 are occupied, falls back to the same
@@ -170,15 +170,15 @@ clamps to `[1, MAX_ROSTER_SIZE]` and resolves the active def list:
 
 Each agent gets a staggered `thinkInterval` at construction:
 `thinkInterval = 360 + i*60` for the i-th agent, overridden to `240` for the
-elder role (sim_engine.py:1381-1384); `thinkTimer` starts at `i*30` so agents
-don't all think on the same frame. `_schedule_think` (sim_engine.py:9362) only
+elder role (sim_engine/core.py:376-378); `thinkTimer` starts at `i*30` so agents
+don't all think on the same frame. `_schedule_think` (sim_engine/mixin_think_job.py:1417) only
 actually dispatches a job if: the agent isn't already in `self._inflight`,
 `len(self._inflight) < MAX_CONCURRENT_LLM` (3), the global LLM cooldown has
 expired, and at least `LLM_MIN_GAP_MS = 250` ms have passed since the last
 dispatch. If any of these block it, the caller retries after
 `THINK_RETRY_FRAMES = 15` frames (0.5 s) instead of waiting a full interval.
 `self._inflight` is a set of agent names with a job in flight; entries are added
-on dispatch and discarded in the job's `finally` block (sim_engine.py:9360).
+on dispatch and discarded in the job's `finally` block (sim_engine/mixin_think_job.py:1409-1415, in `_think_job`).
 
 **Dispatch fairness (Phase 6).** `MAX_CONCURRENT_LLM`/`LLM_MIN_GAP_MS` remain
 the de facto global throughput cap (unchanged); the gap Phase 6 closes is
@@ -218,7 +218,7 @@ over the roster, so a flat `for o in self.agents` scan is O(n) per call
   have found. The candidate pool for an agent is its own district's bucket
   plus every adjacent district's bucket — provably equivalent to the flat
   O(n) scan for any hand-placed position (see
-  `scripts/sid_parity_smoke.py::test_district_bucket_matches_flat_scan`),
+  `scripts/_sid_parity_smoke/scale_headroom.py::test_district_bucket_matches_flat_scan`),
   just computed over a much smaller candidate set at roster 20.
 - `_find_nearest_agent` (used only for the reactive `move_to_agent` fallback
   when no explicit target is given, not the hot think-payload path)
@@ -228,9 +228,9 @@ over the roster, so a flat `for o in self.agents` scan is O(n) per call
 
 ## Pause / resume / reset
 
-- `pause()` / `resume()` (sim_engine.py:9883-9889) just flip `self.paused` under
+- `pause()` / `resume()` (sim_engine/mixin_snapshot.py:40, 46) just flip `self.paused` under
   the lock; `_tick_once` early-returns while paused, freezing `frameTick`.
-- `reset(roster_size=None)` (sim_engine.py:9891) rebuilds the world
+- `reset(roster_size=None)` (sim_engine/mixin_snapshot.py:52) rebuilds the world
   (`_reset_world`), clears the in-process memory store, then deletes and
   immediately rewrites `state.db` via `clear_state()` + `save_state()` so a
   reset persists cleanly. The HTTP route `POST /control/reset` (server.py)
@@ -239,20 +239,20 @@ over the roster, so a flat `for o in self.agents` scan is O(n) per call
 
 ## Sage emergency
 
-`_sage_emergency()` (sim_engine.py:1884) returns a target agent needing rescue,
+`_sage_emergency()` (sim_engine/mixin_world_state.py:800) returns a target agent needing rescue,
 or `None`, only when `SURVIVAL_ENABLED`. It finds the living elder (`role ==
 "elder"` and not dead); if the elder is not incapacitated and
-`health >= SAGE_CRITICAL_HEALTH` (30, sim_engine.py:350), there's no emergency.
+`health >= SAGE_CRITICAL_HEALTH` (30, sim_engine/constants.py:1156), there's no emergency.
 Otherwise the target is the healer (if the healer is also incapacitated) or the
-elder itself. `_sage_responders(target)` (sim_engine.py:1903) picks the
+elder itself. `_sage_responders(target)` (sim_engine/mixin_world_state.py:819) picks the
 non-incapacitated healer (if not the target) plus the nearest other
 non-incapacitated agent. Each tick, a designated responder skips normal
-thinking/goal logic entirely and instead steps `_rush_to_heal` (sim_engine.py:1919)
+thinking/goal logic entirely and instead steps `_rush_to_heal` (sim_engine/mixin_world_state.py:835)
 every `GOAL_STEP_FRAMES` — moving toward the target, then issuing a hardcoded
 `heal_agent` decision once within 80 px.
 
 **In-flight LLM decision discard:** if a think job's LLM response comes back
-(sim_engine.py:9264-9279) and, in the meantime, a Sage emergency began *and*
+(sim_engine/mixin_think_job.py:1314-1320, in `_think_job`) and, in the meantime, a Sage emergency began *and*
 this agent is now a designated responder, the just-returned decision is
 discarded entirely and `_rush_to_heal` runs instead — the emergency always wins
 over a stale in-flight decision.
@@ -261,9 +261,9 @@ over a stale in-flight decision.
 
 World state is persisted to a SQLite database at `DB_PATH` (`<module dir>/
 state.db`), replacing the earlier monolithic `state.json` file. `_serialize_state()`
-(sim_engine.py:9531) still builds the save payload under the lock, with the
+(sim_engine/mixin_persistence.py:50) still builds the save payload under the lock, with the
 same shape as before: top-level keys `version` (`STATE_VERSION = 3`,
-sim_engine.py:39; restore also accepts `2` once for embedded-sprite migration),
+sim_engine/persistence.py:37; restore also accepts `2` once for embedded-sprite migration),
 `frameTick`, `savedAt` (UTC ISO timestamp), `roster_size`,
 `civilization`, `agents`, `memory`, `council_transcript` (sets are serialized as sorted arrays,
 `isThinking` is dropped, memory rows are vec-stripped for storage and
@@ -312,7 +312,7 @@ shutdown.
 
 `_read_state_db(path)` checks the file exists, connects, and returns the same
 payload dict shape as `_serialize_state()` produced, or `None` if the file is
-missing or `meta.version` isn't present. `restore_state()` (sim_engine.py:9613)
+missing or `meta.version` isn't present. `restore_state()` (sim_engine/mixin_persistence.py:163)
 accepts `STATE_VERSION` `3` and still accepts `2` once — v2 DBs may embed
 sprites inside `civilization["structures"]`; restore merges those into memory
 and marks them persist-dirty so the next save splits them into
@@ -338,7 +338,7 @@ This audit table is never folded into an LLM prompt; the bounded digest in the
 
 ## Sovereign God mode (Phase 2 — secure kernel)
 
-`GOD_MODE_ENABLED` (sim_engine.py, env-backed via `SIM_GOD_MODE`, read once at
+`GOD_MODE_ENABLED` (sim_engine/constants.py:644, env-backed via `SIM_GOD_MODE`, read once at
 import — see [01](01-architecture.md)) gates a second, optional control plane.
 Every entry point below re-checks the flag itself and no-ops with
 `{"ok": False, "reason": "god mode disabled"}` when it is off; the token

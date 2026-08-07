@@ -1,0 +1,272 @@
+  #councilTranscriptModal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(0, 0, 0, 0.55);
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  #councilTranscriptModal.open { display: flex; }
+  #councilTranscriptDialog {
+    width: min(520px, 100%);
+    max-height: min(80vh, 640px);
+    background: #14141c;
+    border: 1px solid #2a2a35;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  }
+  #councilTranscriptDialog header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid #2a2a35;
+    gap: 8px;
+  }
+  #councilTranscriptDialog header h3 {
+    margin: 0;
+    font-size: 14px;
+    color: #fff;
+    flex: 1;
+    min-width: 0;
+  }
+  #councilTranscriptCloseBtn {
+    padding: 4px 10px;
+    font: 12px sans-serif;
+    background: #333;
+    color: #fff;
+    border: 1px solid #666;
+    border-radius: 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  #councilTranscriptBody {
+    padding: 12px 14px 14px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #bbb;
+  }
+  #councilTranscriptBody .ct-section {
+    margin-bottom: 14px;
+  }
+  #councilTranscriptBody .ct-section h4 {
+    margin: 0 0 6px;
+    font-size: 11px;
+    color: #8a8a99;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  #councilTranscriptBody .ct-entry {
+    padding: 6px 0;
+    border-bottom: 1px solid #22222c;
+  }
+  #councilTranscriptBody .ct-entry:last-child { border-bottom: 0; }
+  #councilTranscriptBody .ct-time {
+    display: block;
+    font-size: 10px;
+    color: #6e6e7a;
+    margin-bottom: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  #councilTranscriptBody .ct-who { color: #7ec8e3; font-weight: 600; }
+  #councilTranscriptBody .ct-action { color: #e3c87e; }
+  #councilTranscriptBody .ct-reasoning {
+    color: #9a9aa8;
+    font-style: italic;
+    margin-top: 2px;
+    display: block;
+  }
+  #councilTranscriptBody .ct-note {
+    color: #8a8a99;
+    font-size: 11px;
+    font-style: italic;
+    margin-bottom: 8px;
+  }
+  #councilTranscriptBody .council-card { cursor: default; margin-bottom: 6px; }
+  #worldLoading {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #1b1b1b;
+    color: #ccc;
+    font: 14px system-ui, sans-serif;
+    pointer-events: none;
+    transition: opacity 0.25s ease;
+  }
+  #worldLoading.hidden {
+    opacity: 0;
+    visibility: hidden;
+  }
+  #conversationLog {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  #convList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    flex: 1;
+    font-family: ui-monospace, monospace;
+    font-size: 15px;
+    line-height: 1.65;
+  }
+  #convList li {
+    padding: 7px 0;
+    border-bottom: 1px solid #22222c;
+    word-break: break-word;
+  }
+  #convList .from { color: #7ec8e3; font-weight: 600; }
+  #convList .arrow { color: #888; }
+  #convList .to { color: #e3a87e; font-weight: 600; }
+  #convList .msg { color: #bbb; }
+  #convList .msg.muted { color: #666; font-style: italic; }
+  #convList .kind { color: #9a7ec8; font-weight: 600; }
+  #activityLog, #chronicleLog {
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding-bottom: 12px;
+  }
+  /* Activity moved into #sidebarBody, which now splits space between
+     Civilization and Activity -- see #sidebarBody rules above. */
+  /* Agents is now the primary (and only unbounded) content left in
+     #convPanel, so it needs its own scroll region rather than relying on
+     unconstrained natural height (the old cause of Activity being squeezed). */
+  #agentsPanel {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+  }
+  #actList, #chronicleList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    flex: 1;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #aaa;
+  }
+  #actList li, #chronicleList li { padding: 3px 0; }
+  #chronicleList .chronicle-kind { color: #d9b96e; font-weight: 600; }
+  #chronicleList .chronicle-frame { color: #777; font-size: 10px; }
+  /* --- Phase D: council banner + Council panel (lives in the left convPanel column) --- */
+  #councilBanner {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    padding: 6px 18px; font: 600 13px system-ui, sans-serif;
+    background: rgba(90, 62, 20, 0.92); color: #ffe9b0;
+    border: 1px solid #c8a24a; border-radius: 4px;
+    z-index: 11; display: none; pointer-events: none;
+  }
+  #foundingBanner {
+    position: fixed; top: 48px; left: 50%; transform: translateX(-50%);
+    padding: 6px 18px; font: 600 13px system-ui, sans-serif;
+    background: rgba(30, 66, 46, 0.92); color: #c9f5d6;
+    border: 1px solid #4ac882; border-radius: 4px;
+    z-index: 11; display: none; pointer-events: none;
+  }
+  #disasterBanner {
+    position: fixed; top: 78px; left: 50%; transform: translateX(-50%);
+    padding: 6px 18px; font: 600 13px system-ui, sans-serif;
+    background: rgba(22, 48, 52, 0.92); color: #b8e8f0;
+    border: 1px solid #3a9aaa; border-radius: 4px;
+    z-index: 11; display: none; pointer-events: none;
+  }
+  #councilPanel summary {
+    cursor: pointer; font-size: 13px; font-weight: 600; color: #fff;
+    margin-bottom: 6px; outline: none;
+  }
+  #councilCards { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .council-card {
+    flex: 1 1 45%; min-width: 130px; box-sizing: border-box;
+    background: #1b1b26; border: 1px solid #2a2a35; border-radius: 4px;
+    padding: 6px 8px; font-size: 11px; line-height: 1.45; color: #bbb;
+    cursor: pointer;
+  }
+  .council-card .cc-name { color: #e3c87e; font-weight: 600; }
+  .council-card .cc-by { color: #7ec8e3; }
+  .council-card .cc-fn { color: #9a9aa8; display: block; }
+  .council-card .cc-reason { color: #c0867e; display: block; font-style: italic; }
+  .council-card.winner { border-color: #4CAF50; background: #16211a; }
+  .council-card.winner .cc-verdict { color: #7bd88a; font-weight: 600; }
+  .council-card.loser { opacity: 0.62; }
+  #councilMeta { font-size: 11px; color: #8a8a99; margin-bottom: 6px; }
+  #councilHistory {
+    list-style: none; margin: 0; padding: 0;
+    font-size: 11px; color: #8a8a99; max-height: 110px; overflow-y: auto;
+  }
+  #councilHistory li {
+    padding: 2px 0;
+    border-bottom: 1px solid #22222c;
+    cursor: pointer;
+  }
+  #councilHistory li:hover { color: #ccc; }
+  #councilMeta.council-clickable { cursor: pointer; }
+  #councilMeta.council-clickable:hover { color: #aaa; }
+  /* Daily Council Assembly is a separate, live projection.  It deliberately
+     has its own canvas: the map's world coordinates are not reused as viewer
+     layout state. */
+  #councilAssemblyModal {
+    display: none; position: fixed; inset: 0; z-index: 110;
+    background: rgba(0, 0, 0, 0.68); align-items: center; justify-content: center;
+    padding: 18px; box-sizing: border-box;
+  }
+  #councilAssemblyModal.open { display: flex; }
+  #councilAssemblyDialog {
+    width: min(1180px, 100%); height: min(850px, calc(100vh - 36px));
+    background: #14141c; color: #d8d5c9; border: 1px solid #735c32;
+    border-radius: 10px; box-shadow: 0 16px 52px rgba(0,0,0,.55);
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  #councilAssemblyDialog header { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid #3d3424; }
+  #councilAssemblyDialog h3 { margin:0; color:#ffe4a1; font-size:16px; flex:1; }
+  #councilAssemblyPhase { color:#a99b7b; font-size:12px; text-transform:uppercase; letter-spacing:.06em; }
+  #councilAssemblyCloseBtn, #councilAssemblyReopenBtn { padding:5px 10px; font:12px sans-serif; background:#352f29; color:#fff; border:1px solid #806941; border-radius:4px; cursor:pointer; }
+  #councilAssemblyCloseBtn:hover, #councilAssemblyReopenBtn:hover { background:#4a4033; }
+  #councilAssemblyBody { display:grid; grid-template-columns:minmax(0, 1.35fr) minmax(300px, .65fr); min-height:0; flex:1 1 auto; overflow:hidden; }
+  #councilTableWrap { min-width:0; min-height:0; padding:14px; display:flex; align-items:center; justify-content:center; overflow:hidden; background:radial-gradient(circle at center, #30261c, #1a191b 68%); }
+  /* Keep the whole ring visible: the table consumes available viewport height
+     before it consumes its preferred 760px size.  Tall viewports still get
+     the readable 640px+ target; short ones scale the canvas instead. */
+  #councilAssemblyCanvas { width:min(100%, 760px, calc(100vh - 116px)); height:auto; aspect-ratio:1; min-width:0; image-rendering:pixelated; image-rendering:crisp-edges; }
+  #councilAssemblyInfo {
+    min-height:0; padding:14px; overflow:hidden; border-left:1px solid #3d3424;
+    font-size:12px; line-height:1.45; display:flex; flex-direction:column;
+  }
+  .assembly-section { margin-bottom:16px; flex:0 0 auto; }
+  .assembly-section h4 { margin:0 0 6px; color:#d6bc78; font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  #councilAssemblyAgenda { margin:0; padding-left:18px; color:#c9c5bb; }
+  #councilAssemblyAgenda li { margin-bottom:4px; }
+  /* Live discussion is the last section: it flex-grows to consume whatever
+     vertical space Agenda/Ballot/Verdict don't need, instead of being capped
+     to a fixed height, and owns the only scrollbar in the info column so
+     autoscroll-to-latest has one unambiguous scroll container to target. */
+  #councilAssemblyTranscriptSection { flex:1 1 auto; min-height:0; margin-bottom:0; display:flex; flex-direction:column; }
+  #councilAssemblyTranscript { flex:1 1 auto; min-height:0; overflow-y:auto; border:1px solid #302b29; border-radius:5px; background:#101015; }
+  .assembly-entry { padding:7px 8px; border-bottom:1px solid #28252a; }
+  .assembly-entry:last-child { border-bottom:0; }
+  .assembly-time { display:block; font-size:10px; color:#6e6e7a; margin-bottom:2px; font-variant-numeric:tabular-nums; }
+  .assembly-who { color:#8ed2ed; font-weight:600; }
+  .assembly-feeling { color:#d8a9d8; font-style:italic; }
+  #councilAssemblyTally { display:grid; grid-template-columns:repeat(3, 1fr); gap:5px; }
+  .assembly-vote { padding:5px; border-radius:4px; background:#202026; text-align:center; }
+  .assembly-vote.yes { border:1px solid #447b4b; color:#aee6b5; }
+  .assembly-vote.no { border:1px solid #864949; color:#efb0b0; }
+  .assembly-vote.abstain { border:1px solid #665f50; color:#d4c9a8; }
+  #councilAssemblyVerdict { padding:9px; border:1px solid #b99446; border-radius:5px; background:#302718; color:#ffe4a1; }
+  #councilAssemblyReopenBtn { display:none; position:fixed; right:18px; bottom:18px; z-index:109; box-shadow:0 4px 18px rgba(0,0,0,.45); }
+  #councilAssemblyReopenBtn.visible { display:block; }

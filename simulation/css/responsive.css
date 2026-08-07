@@ -1,0 +1,24 @@
+  @media (max-width: 900px) {
+    #wrap { flex-direction: column; height: auto; padding: 0; }
+    #world { height: auto; max-height: 70vh; width: 100%; }
+    #sidebar { width: 100%; flex-shrink: 1; height: 420px; border-left: 0; border-top: 1px solid #2a2a35; }
+    #convPanel { width: 100%; flex-shrink: 1; height: 520px; border-right: 0; border-top: 1px solid #2a2a35; order: 3; }
+    /* convPanel/sidebar stack full-width here instead of flanking the map,
+       so the desktop right:380px offset (sized to dodge #sidebar's column)
+       no longer applies -- fall back to the viewport corner. */
+    #minimap { right: auto; left: 18px; }
+    #worldClockHud { right: 18px; }
+    #councilAssemblyBody { grid-template-columns:1fr; }
+    #councilAssemblyInfo { border-left:0; border-top:1px solid #3d3424; }
+    #councilAssemblyCanvas { min-width:0; }
+    .bar-brand { display: none; }
+    .gbtn { min-width: 0; flex: 1 1 auto; }
+    /* height:auto overrides the desktop calc; margin clears the fixed bar. */
+    body.divine-bar-visible #wrap {
+      height: auto;
+      margin-bottom: var(--divine-bar-clearance);
+    }
+  }
+  @media (max-width: 620px) {
+    .gbtn span.lbl { display: none; }
+  }

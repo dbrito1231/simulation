@@ -33,14 +33,14 @@ pip install flask flask-cors requests
    ```
 
    > **Context length vs. parallel slots:** the engine queues up to `MAX_CONCURRENT_LLM`
-   > (3, `simulation/sim_engine.py`) think requests at once, and each request's prompt is
+   > (3, `simulation/sim_engine/constants.py`) think requests at once, and each request's prompt is
    > ~3,100 tokens. Ollama divides `num_ctx` across `OLLAMA_NUM_PARALLEL` slots, so if
    > `num_ctx ÷ parallel` is smaller than that, requests risk the `exceed_context_size_error`
    > overflow response under load (the app recovers gracefully with a slimmed-prompt retry,
    > but agents can still lose a turn). `ollama/Modelfile.smart` ships `num_ctx 20480` at
    > `OLLAMA_NUM_PARALLEL=3` (~6,827 tokens/slot) — `scripts/ollama_setup.py` applies this
    > canonical target config directly. If you can't raise `num_ctx`, lower
-   > `MAX_CONCURRENT_LLM` in `simulation/sim_engine.py` instead. Full detail:
+   > `MAX_CONCURRENT_LLM` in `simulation/sim_engine/constants.py` instead. Full detail:
    > [specs/03-cognition.md](specs/03-cognition.md).
 
 2. Start the simulation server:
@@ -59,10 +59,13 @@ Each server run writes session logs under `simulation/logs/` (gitignored).
 
 | Path | Purpose |
 |------|---------|
-| `simulation/sim_engine.py` | The engine — all world state, 30/s tick loop, `apply_decision`, persistence |
-| `simulation/server.py` | Flask API, prompt building, Ollama integration, decision validation |
-| `simulation/index.html` | Browser client and render loop |
-| `simulation/sprites.js` | Pixel-art drawing helpers |
+| `simulation/sim_engine/*.py` | The engine package — all world state, 30/s tick loop, `apply_decision`, persistence (`core.py` + `constants.py`/`persistence.py`/`helpers.py` + 22 `mixin_*.py` topic files) |
+| `simulation/server.py` | Flask API entry point — every route, `DECISION_ACTIONS`/`DECISION_SCHEMA`, prompt building, Ollama integration |
+| `simulation/_server/*.py` | Non-route helper modules server.py imports from — decision/blueprint/role/sprite validation, prompt formatting, memory store, session logging, model routing |
+| `simulation/index.html` | Browser client shell (markup only) |
+| `simulation/viewer/*.js` | Split viewer client script — polling, render loop, sidebar, Divine Console (16 files) |
+| `simulation/sprites/*.js` | Pixel-art drawing helpers (8 files) |
+| `simulation/css/*.css` | Split viewer stylesheet (6 files) |
 | `simulation/roles.json` | Single source of truth for role definitions |
 | `specs/` | Architecture and feature specifications |
 

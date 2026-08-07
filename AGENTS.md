@@ -21,7 +21,7 @@ This repo follows **spec-driven development**. [`specs/`](specs/) is the source 
 
 - For every change: **update owning spec(s) first (or in the same change), then code** — specs must never drift.
 - Find ownership via the index and “Canonical for” lines in the 13 specs (`00`–`12`): [`specs/00-overview.md`](specs/00-overview.md).
-- Action changes must also keep `server.py` / `sim_engine.py` / `viewer.js` / `specs/07-actions.md` in sync ([`specs/01-architecture.md`](specs/01-architecture.md)).
+- Action changes must also keep `server.py` / `sim_engine.py` / `viewer/sidebar.js` / `specs/07-actions.md` in sync ([`specs/01-architecture.md`](specs/01-architecture.md)).
 
 ## Development loop
 
@@ -66,7 +66,10 @@ Hard rules:
 
 ## Manual start
 
-Manually start or re-enter the loop by invoking the project skill **`loop-in-devs`** (`.cursor/skills/loop-in-devs/`). That skill is an entry point only; this file remains the workflow contract. Cursor rules under `.cursor/rules/` reinforce this file; Claude agents live in `.claude/agents/`.
+- Full loop: project skill **`loop-in-devs`**.
+- Single role: **`orchestrator`**, **`implementer`**, or **`reviewer`** — e.g. `/orchestrator`, `/implementer`, `/reviewer`.
+
+All four exist on both sides — Cursor at `.cursor/skills/<name>/`, Claude Code at `.claude/skills/<name>/` — and must be kept in sync. Those skills are entry points only; this file remains the workflow contract. Cursor rules under `.cursor/rules/` reinforce this file; Claude subagents (dispatch targets for an orchestrator) live in `.claude/agents/`.
 
 ## How to verify
 

@@ -13,8 +13,8 @@ index; [07-actions.md](07-actions.md) for action params/preconditions;
 
 ## SURVIVAL_ENABLED
 
-Runs every tick via `_update_survival(agent)` (sim_engine.py:1837), gated
-`SURVIVAL_TICK_FRAMES = 30` (sim_engine.py:244) at the call site.
+Runs every tick via `_update_survival(agent)` (sim_engine/mixin_world_state.py:733), gated
+`SURVIVAL_TICK_FRAMES = 30` (sim_engine/constants.py:1035) at the call site.
 
 | Constant | Value | Meaning |
 |---|---|---|
@@ -42,7 +42,7 @@ entirely). Collapse regen continues even while incapacitated; crossing
 `COLLAPSE_REVIVE_HEALTH` clears `incapacitated` and floors hunger at
 `REVIVE_HUNGER`.
 
-**Sage emergency:** `_sage_emergency()` (sim_engine.py:1884) returns the
+**Sage emergency:** `_sage_emergency()` (sim_engine/mixin_world_state.py:800) returns the
 elder (or the healer, if the healer is the one incapacitated) whenever the
 living elder is incapacitated or `health < SAGE_CRITICAL_HEALTH`. While a
 target is returned, `_sage_responders()` picks the healer (if free) plus the
@@ -82,7 +82,7 @@ priced-market paths as the other edibles. `BASE_PRICE` treats `meat` like
 Grant uses the same carry-cap / overflow-to-stockpile split every other
 resource-gain path uses.
 
-**Hunt damage (retuned).** Multi-hit combat constants (sim_engine.py, Phase 2b
+**Hunt damage (retuned).** Multi-hit combat constants (sim_engine/constants.py:533-537, Phase 2b
 implements):
 
 | Constant | Value | Role |
@@ -219,13 +219,13 @@ agent in one batch pass.
 
 ## CRAFTING_ENABLED
 
-Adds a recipe registry (`SEED_RECIPES`, sim_engine.py:876) and crafted
-resources (`CRAFTED_RESOURCES`, sim_engine.py:871): `planks` (1 wood),
+Adds a recipe registry (`SEED_RECIPES`, sim_engine/constants.py:1856) and crafted
+resources (`CRAFTED_RESOURCES`, sim_engine/constants.py:1851): `planks` (1 wood),
 `bricks` (2 stone), `tools` (2 wood + 1 stone) — all `station: "workshop"`.
 `INDUSTRY_ENABLED` (path1) extends the registry with charcoal/ingots/
-rope/cloth/tool-tier picks at the workshop or kiln (sim_engine.py:1036).
+rope/cloth/tool-tier picks at the workshop or kiln (sim_engine/constants.py:2022).
 
-`_craft_item(agent, recipe_id)` (sim_engine.py:4658) gate order: station
+`_craft_item(agent, recipe_id)` (sim_engine/mixin_crafting_rules.py:73) gate order: station
 built and working (`_craft_station_unlocked`, requires ≥1 working structure
 whose function block `unlocks` a `craft` kind for that station) → tech-tier
 gate (`TECH_TREE_ENABLED`: recipe `tier` ≤ `_village_tech_tier()`) → has
@@ -236,7 +236,7 @@ count/`WORKSHOPS_PER_CRAFT_BONUS`, capped) + `CULTURE_ENABLED` skill bonus.
 
 Custom recipes: `propose_recipe`/`approve_recipe`/`reject_recipe` mirror the
 blueprint flow (no Sage two-stage review). `_validate_recipe`
-(sim_engine.py:4728) caps proposals: `MAX_PENDING_BLUEPRINTS` pending slot
+(sim_engine/mixin_crafting_rules.py:147) caps proposals: `MAX_PENDING_BLUEPRINTS` pending slot
 shared with blueprints, `MAX_CUSTOM_RECIPES = 12` approved custom recipes,
 1–6 inputs each drawn from `resourceRegistry`, id/name format checks,
 rejection blacklist (`rejectedRecipeIds`).
@@ -245,9 +245,9 @@ rejection blacklist (`rejectedRecipeIds`).
 
 Deterministic goal-stepping that runs *between* LLM think calls so routine
 multi-tick actions (travel, relocate-and-retry) don't cost a think dispatch
-each tick. In the main loop (sim_engine.py:9492): when an agent's think
+each tick. In the main loop (sim_engine/mixin_think_job.py:1603): when an agent's think
 timer elapses and it already holds a `goal` dict and has no unread inbox
-message, `_step_goal(agent)` (sim_engine.py:8450) runs instead of
+message, `_step_goal(agent)` (sim_engine/mixin_decisions.py:1111) runs instead of
 `_schedule_think`, and `thinkTimer` resets to `GOAL_STEP_FRAMES = 45`
 (~1.5s) while the goal continues, or `1` (immediate re-think) once it ends.
 Every goal carries a `ttl` that decrements each step; expiry silently clears
@@ -272,10 +272,10 @@ Every built structure type carries a **function block** (`produces`,
 `boosts`, `unlocks`, `stores`, `houses`, `modifies`, and — when
 `ENV_EFFECTS_ENABLED` — `shelter`, `light`, `upkeep`) from
 `SEED_STRUCTURE_FUNCTIONS`/`PROJECT_TEMPLATES` or a custom blueprint's own
-declaration; `_get_structure_function(type_)` (sim_engine.py:2541) resolves
+declaration; `_get_structure_function(type_)` (sim_engine/mixin_structures_economy.py:75) resolves
 it (empty dict, i.e. no effect, when the flag is off).
 
-**Tick-time (`produces`):** `_tick_structure_effects()` (sim_engine.py:3040)
+**Tick-time (`produces`):** `_tick_structure_effects()` (sim_engine/mixin_structures_economy.py:790)
 runs every `EFFECT_TICK_FRAMES = 150` ticks (~5s). Per built type with a
 `produces` entry, fires once its own `every_ticks` interval has elapsed
 (tracked per `type:resource:scope` key in `civilization["effectLastFire"]`),
@@ -333,7 +333,7 @@ Hearth/Lighthouse instance but lost its registry entry, restore reconstructs a
 minimal registry entry from that instance, so `repair_structure` restores both
 the structure and its light behavior.
 
-**Saturation:** `_type_saturated(type_)` (sim_engine.py:3705) flags a
+**Saturation:** `_type_saturated(type_)` (sim_engine/mixin_structures_economy.py:1628) flags a
 structure type as not worth building more of once its effect is maxed —
 houses beyond current cap headroom, farm-boost structures beyond
 `every_n * max_bonus * farm_districts`, craft-boost structures beyond
@@ -347,7 +347,7 @@ Related actions: `build_structure`, `upgrade_structure`, `craft_item`,
 
 ## GOODS_ENABLED
 
-Slow tick `_tick_goods()` (sim_engine.py:3088), gated
+Slow tick `_tick_goods()` (sim_engine/mixin_structures_economy.py:838), gated
 `GOODS_TICK_FRAMES = 900` (~30s), runs season bookkeeping + three
 sub-systems, all deterministic (no LLM).
 
@@ -365,7 +365,7 @@ Composable-build blocks with `shelter: True` (`wall`, `fence` — see
 `_composable_shelter_count`.
 
 **Disasters, storm-gated (`WEATHER_ENABLED`, living-ecosystem Phase 4).**
-`_maybe_disaster` (sim_engine.py) has two mutually exclusive branches:
+`_maybe_disaster` (sim_engine/mixin_structures_economy.py:1005) has two mutually exclusive branches:
 
 - **`WEATHER_ENABLED = False`:** legacy random branch — `DISASTER_PROB =
   0.002` chance per goods tick (≈once/250 real min) of damage
@@ -432,7 +432,7 @@ the ordinary `repair_structure` action path (same funding, narration, and
 |---|---:|---|
 | `REPAIR_CAMPAIGN_RUIN_RATIO` | `0.15` | `_village_repair_pressure()` returns campaign pressure when `ruined / total >= 0.15` **or** `working / total < REPAIR_CAMPAIGN_WORKING_FRAC`. |
 | `REPAIR_CAMPAIGN_WORKING_FRAC` | `0.5` | Same helper — also fires when fewer than half of all structures are working (`condition >= STRUCTURE_DISREPAIR_THRESHOLD` and not a ruin). |
-| `REPAIR_CAMPAIGN_MAX_ASSIGN` | `2` | `_maybe_repair_campaign` (sim_engine.py, RULES_TICK `150` batch, gated `GOODS_ENABLED`) assigns at most two living, non-incapacitated agents per call. |
+| `REPAIR_CAMPAIGN_MAX_ASSIGN` | `2` | `_maybe_repair_campaign` (sim_engine/mixin_lifecycle.py:623, RULES_TICK `150` batch, gated `GOODS_ENABLED`) assigns at most two living, non-incapacitated agents per call. |
 
 Each assigned agent receives `goal = {"kind": "repair", "target": structureId,
 "ttl": ...}`; goal synthesis routes to `repair_structure` until success,
@@ -443,7 +443,7 @@ critical categories (`house`, `market`, `workshop`, `foundry`, `granary`,
 the same unconditional `150`-frame batch as `_maybe_repair_critical`
 ([02-engine-core.md](02-engine-core.md)).
 
-**Critical-structure repair backstop.** `_maybe_repair_critical` (sim_engine.py,
+**Critical-structure repair backstop.** `_maybe_repair_critical` (sim_engine/mixin_lifecycle.py:576,
 called unconditionally once per RULES_TICK gate, [02-engine-core.md](02-engine-core.md))
 is a deterministic escape for when an entire structure category has zero
 working instances village-wide — `repair_structure` is reachable by the LLM
@@ -474,7 +474,7 @@ priority order:
 Related actions: `repair_structure`, `upgrade_structure`, `craft_item`
 (cart/wagon recipes) — [07-actions.md](07-actions.md).
 
-**Ruin cull (in-sim registry deletion).** `_maybe_cull_ruins()` (sim_engine.py,
+**Ruin cull (in-sim registry deletion).** `_maybe_cull_ruins()` (sim_engine/mixin_lifecycle.py:705,
 same RULES_TICK `150` batch and `GOODS_ENABLED` gate as `_maybe_repair_campaign`)
 deterministically removes aged, unaffordable ruins from
 `civilization["structures"]` so routine soak runs do not require offline
@@ -505,7 +505,7 @@ decay/disaster damage still produces ruins (never auto-deletes); only
 or offline `prune_ruins.py` may delete registry entries.
 
 **`structure_health` benchmark.** `_tick_structure_health_benchmark`
-(sim_engine.py) logs a `structure_health` benchmark every `GOODS_TICK_FRAMES`
+(sim_engine/mixin_structures_economy.py:975) logs a `structure_health` benchmark every `GOODS_TICK_FRAMES`
 goods tick (same cadence as `_tick_goods`/`_tick_structure_decay`), gated on
 `GOODS_ENABLED`, so mass structural decay shows up in `benchmarks.jsonl`
 automatically during any soak or test run instead of requiring an ad-hoc
@@ -650,8 +650,9 @@ known settlement so old saves gain the field without inventing goods.
 - **Caravan delivery** — credits destination `settlementStores`; debits
   the traveler's held bundle (vehicles and personal `EDIBLE_RESERVE` exempt).
 
-**Delivery pipeline** (`_caravan_trade_bundle`, `_deliver_caravan`,
-sim_engine.py — wired from `_maybe_caravan_goal` on arrival and from the
+**Delivery pipeline** (`_caravan_trade_bundle` sim_engine/mixin_diplomacy.py:466,
+`_deliver_caravan` sim_engine/mixin_diplomacy.py:479 — wired from
+`_maybe_caravan_goal` (sim_engine/mixin_diplomacy.py:677) on arrival and from the
 `deliver_caravan` action):
 1. `_caravan_trade_bundle(agent, dest_settlement_id)` — selects transferable
    held resources (positive qty, not cart/wagon, respecting edible reserve).

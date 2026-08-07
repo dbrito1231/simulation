@@ -1,6 +1,6 @@
 ---
 description: Keep decision actions synced across server, engine, viewer, and specs
-globs: simulation/server.py,simulation/sim_engine.py,simulation/viewer.js,specs/07-actions.md
+globs: simulation/server.py,simulation/sim_engine/*.py,simulation/viewer/*.js,specs/07-actions.md
 alwaysApply: false
 ---
 
@@ -9,8 +9,8 @@ alwaysApply: false
 Update **all** of these when adding/changing an action ([specs/07-actions.md](specs/07-actions.md)):
 
 1. `DECISION_ACTIONS`, `DECISION_SCHEMA`, `SYSTEM_PROMPT` — `server.py`
-2. `apply_decision`, `available_actions` — `sim_engine.py`
-3. `ACTION_LABELS` — `viewer.js` (display only)
+2. `apply_decision`, `available_actions` — `sim_engine/` (mixin_decisions.py, mixin_think_job.py)
+3. `ACTION_LABELS` — `viewer/sidebar.js` (display only)
 4. Spec entry in `07-actions.md` + `normalize_decision` validation if needed
 
 Workflow: [AGENTS.md](AGENTS.md).

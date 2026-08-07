@@ -17,8 +17,8 @@ bundle extends.
 
 ## `PATH1_ENABLED` and `path1_on()`
 
-`PATH1_ENABLED = True` is the master bundle switch (sim_engine.py:725);
-`path1_on(subflag=None)` (sim_engine.py:735) returns `True` unconditionally
+`PATH1_ENABLED = True` is the master bundle switch (sim_engine/constants.py:1693);
+`path1_on(subflag=None)` (sim_engine/constants.py:1708) returns `True` unconditionally
 when `PATH1_ENABLED` is set, else falls back to the named sub-flag's own
 value. All seven sub-flags (`INDUSTRY_ENABLED`, `TOOL_TIERS_ENABLED`,
 `COMPOSABLE_BUILD_ENABLED`, `TERRAIN_TILES_ENABLED`,
@@ -31,7 +31,7 @@ flag off disables the whole bundle regardless of sub-flag state.
 
 Extends `BASE_RESOURCES` with clay/sand (beach) and copper/iron ore (cave),
 and `CRAFTED_RESOURCES` with charcoal, copper/iron ingots, rope, cloth, and
-three tool tiers (sim_engine.py:1017-1047). New workshop recipes: charcoal
+three tool tiers (sim_engine/constants.py:2022-2062). New workshop recipes: charcoal
 (2 wood), copper/iron ingot (1 ore + 1 charcoal), rope (1 wood), cloth
 (2 herbs), wooden/stone/iron pick. Adds the **Kiln** structure (needs 3
 stone + 2 wood, tier 1): unlocks `craft` at station `kiln`, produces 1
@@ -47,7 +47,7 @@ registry.
 Gates certain gathers on a held tool. `TOOL_TIER_ORDER = ("wooden_pick",
 "stone_pick", "iron_pick")`, `TOOL_TIER_LEVEL` = 1/2/3.
 `RESOURCE_MIN_TOOL` = `{"stone": "wooden_pick", "copper_ore": "stone_pick",
-"iron_ore": "iron_pick"}`. `_can_gather_resource` (sim_engine.py:3898)
+"iron_ore": "iron_pick"}`. `_can_gather_resource` (sim_engine/mixin_diplomacy.py:48)
 compares `_gather_tool_tier(agent)` (highest-tier pick currently held)
 against the resource's requirement; below it, the gather is refused with a
 named reason ("`<resource>` needs a `<tool>` (you have tier `<n>` tools)").
@@ -55,7 +55,7 @@ named reason ("`<resource>` needs a `<tool>` (you have tier `<n>` tools)").
 meeting the minimum) adds a small yield bonus on top of `_gather_yield_bonus`.
 
 When `TOOL_TIERS_ENABLED` and `TERRAIN_TILES_ENABLED` are both on,
-`_pickless_stone_route` (sim_engine.py:3971) reroutes a stone-seeker without
+`_pickless_stone_route` (sim_engine/mixin_diplomacy.py:121) reroutes a stone-seeker without
 a pick to dig terrain directly (stone's nominal cave gather zone has no
 diggable ground) instead of bouncing between cave and farm forever — the
 bootstrap escape for a fresh world with no Workshop yet (digging itself is
@@ -66,17 +66,17 @@ deliberately tool-free).
 Free-form single-tile placement on a per-district 8×8 grid
 (`PATH1_GRID_COLS = PATH1_GRID_ROWS = 8`, cell size `TILE_CELL = 40` —
 geometry detail cross-linked from [05-world.md](05-world.md)).
-`BLOCK_TYPES` (sim_engine.py:1001): `wall` (1 wood, shelter), `floor`
+`BLOCK_TYPES` (sim_engine/constants.py:2003-2008): `wall` (1 wood, shelter), `floor`
 (1 wood), `door` (2 wood), `fence` (1 wood, shelter).
 
-`place_block` (`_place_block`, sim_engine.py:4011): resolves target cell
+`place_block` (`_place_block`, sim_engine/mixin_diplomacy.py:161): resolves target cell
 (explicit `gx,gy` or the agent's current cell via `_pos_to_grid`), rejects
 on unknown block type, no district, the district's `TILE_CAP_PER_DISTRICT
 = 200` reached, the target cell already occupied, or insufficient
 resources for the block's cost (each rejection sets `lastBlockRejection`
 with a reason, read by the next prompt). On success, deducts cost, stores
 the block in `district["tiles"][gx,gy]`, logs a `composable_placements`
-benchmark. `remove_block` (`_remove_block`, sim_engine.py:4049) clears a
+benchmark. `remove_block` (`_remove_block`, sim_engine/mixin_diplomacy.py:200) clears a
 tile; `BLOCK_REFUND_RATIO = 0.5` refunds half the placement cost.
 Shelter-flagged blocks (`wall`/`fence`) count toward night shelter capacity
 via `_composable_shelter_count` (see [08](08-systems-economy.md)).
@@ -84,14 +84,14 @@ via `_composable_shelter_count` (see [08](08-systems-economy.md)).
 ## TERRAIN_TILES_ENABLED
 
 Each district lazily gets a per-cell terrain grid
-(`_ensure_district_terrain`, sim_engine.py:4001) over the same 8×8 grid,
+(`_ensure_district_terrain`, sim_engine/mixin_diplomacy.py:151) over the same 8×8 grid,
 defaulting by district kind: forest→grove, farm→soil, beach→sand,
 cave→rock, ocean→water, else soil. `TERRAIN_TYPES = ("soil", "rock",
 "grove", "water")`. `NON_DIGGABLE_DISTRICT_KINDS = {"forest", "beach",
 "cave", "ocean"}` — these kinds' grids never contain soil, so
 `dig_terrain` there always fails or relocates.
 
-`dig_terrain` (`_dig_terrain`, sim_engine.py:4082): grove→soil (clears a
+`dig_terrain` (`_dig_terrain`, sim_engine/mixin_diplomacy.py:234): grove→soil (clears a
 grove tile, no yield); soil→rock (yields 1 stone up to carry cap); any
 other current terrain (already rock/sand/water) is exhausted — the agent is
 routed to the nearest fresh soil tile in the same district
@@ -102,14 +102,14 @@ goal (`USE_GOALS`) so the trip completes deterministically rather than
 re-deciding every LLM think. Successful digs log a `terrain_mutations`
 benchmark.
 
-`plant_terrain` (`_plant_terrain`, sim_engine.py:4150): costs 1 wood,
+`plant_terrain` (`_plant_terrain`, sim_engine/mixin_diplomacy.py:304): costs 1 wood,
 converts the agent's current tile toward `grove` (farm districts use this
 to counteract dig-driven grove loss; `_maybe_expand_field` auto-assigns a
 `plant_terrain` goal when a farm district's grove ratio drops below 0.3).
 
 ## PATH1_DIPLOMACY_ENABLED
 
-`_init_settlements()` (sim_engine.py:5723) seeds a single `"home"`
+`_init_settlements()` (sim_engine/mixin_diplomacy.py:353) seeds a single `"home"`
 settlement owning every starter district. `_maybe_found_settlement()`
 (tick-gated backstop) founds a second settlement — `"outpost"`, on a
 claimed frontier plot — once `structures ≥ SETTLEMENT_STRUCT_THRESHOLD = 5`
@@ -130,13 +130,13 @@ Think payload and `/state` expose per-settlement stores when this flag is on.
 **Treaties:** `RULE_KINDS` gains `"treaty"` under this flag (see
 [09-systems-society.md](09-systems-society.md) for the shared propose/vote
 scaffold). `propose_treaty`/`vote_treaty`
-(`_propose_treaty`/`_vote_treaty`, sim_engine.py:5908) reuse the rules
+(`_propose_treaty` sim_engine/mixin_diplomacy.py:814/`_vote_treaty` sim_engine/mixin_diplomacy.py:839) reuse the rules
 `pendingRules`/`_tally_and_maybe_enact` machinery directly — a treaty is a
 rule with `kind: "treaty"`, requiring `id`/`name` on the proposal. Enacted
 treaties may carry an optional `tariff` fraction (`0`–`0.25`, default `0`);
 see [Treaty tariffs](#treaty-tariffs) below.
 
-**Caravans:** `_maybe_caravan_goal` (sim_engine.py:5781) — an agent holding
+**Caravans:** `_maybe_caravan_goal` (sim_engine/mixin_diplomacy.py:677) — an agent holding
 a cart/wagon (raising `_carry_cap`) and at least `CARAVAN_CARRY_MIN = 3`
 total resources, once a second settlement exists, is assigned a `caravan`
 goal (`USE_GOALS`) to walk to the other settlement's first district. On
@@ -197,7 +197,7 @@ it. Idempotent.
 
 ## TIER3_CONTENT_ENABLED
 
-Layered on top of `INDUSTRY_ENABLED` (sim_engine.py:1058): three tier-2/3
+Layered on top of `INDUSTRY_ENABLED` (sim_engine/constants.py:1694): three tier-2/3
 structures — **Harbor** (beach district, tier 2: produces +1 fish/1500
 ticks/district, boosts fish gather up to +2), **Mill** (village, tier 2:
 boosts edible gather up to +2/district), **Foundry** (village, tier 3:
@@ -207,7 +207,7 @@ Extends `ERA_LADDER` with Harbor Era and Mill Era
 
 ## PRESSURE_LOOP_ENABLED
 
-**Night exposure:** `_tick_night_pressure` (sim_engine.py:4327) runs every 30 ticks while
+**Night exposure:** `_tick_night_pressure` (sim_engine/mixin_wildlife.py:136) runs every 30 ticks while
 `_is_night()` is true (night = `NIGHT_FRACTION = 0.25` of each
 `DAY_FRAMES` cycle — see [02-engine-core.md](02-engine-core.md) for the
 canonical day/night/season clock). Computes total shelter slots (working
@@ -238,7 +238,7 @@ pressure helper is unrelated to huntable fauna
 [02-engine-core.md](02-engine-core.md), [05-world.md](05-world.md)); do not
 reuse or conflate them.
 
-**Shelter-seeking:** `_maybe_seek_shelter(agent)` (sim_engine.py:4387) — at night, an
+**Shelter-seeking:** `_maybe_seek_shelter(agent)` (sim_engine/mixin_wildlife.py:764) — at night, an
 unsheltered agent with no active goal is assigned a `seek_shelter` goal
 (`USE_GOALS`) toward the nearest district offering shelter capacity.
 

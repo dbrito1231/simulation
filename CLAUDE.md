@@ -24,7 +24,7 @@ Hard rules:
 - **No hallucinations, unproven theories, or AI slop.** Ground every claim in a spec, a code path, or verified runtime evidence (smokes, logs). Reviewers treat invented claims as FAIL material.
 - **Escalation:** implementer/reviewer doubts go to the orchestrator, who asks the user. Never invent an answer; never ask the user directly from a subagent.
 
-Manual entry/resume: the `loop-in-devs` skill (`.cursor/skills/loop-in-devs/`). Cursor rules in `.cursor/rules/` (`agents-loop`, `agents-sdd`, `agents-model-policy`, plus per-surface action-sync/engine/viewer rules) reinforce the same contract.
+Manual entry/resume: type **`/loop-in-devs`** for the full loop, or **`/orchestrator`** / **`/implementer`** / **`/reviewer`** to assume a single role in this session (`.claude/skills/<name>/`; Cursor twins under `.cursor/skills/` — keep both sides in sync). Cursor rules in `.cursor/rules/` (`agents-loop`, `agents-sdd`, `agents-model-policy`, plus per-surface action-sync/engine/viewer rules) reinforce the same contract.
 
 ## Commands
 
@@ -48,29 +48,29 @@ uv run python simulation/server.py   # start server, then open http://127.0.0.1:
 
 **Server-authoritative**: the world runs headless in Python; the browser is a thin viewer holding no simulation state.
 
-- **[simulation/sim_engine.py](simulation/sim_engine.py)** — the engine (`SimEngine`). Owns ALL world state, runs the 30/s tick loop, applies decisions via `apply_decision()`, runs every deterministic system, dispatches LLM think jobs to a bounded worker pool, persists to `simulation/state.db`.
-- **[simulation/server.py](simulation/server.py)** — Flask app + cognition. Serves viewer/state/controls; `run_agent_decision()` prompts Ollama, extracts JSON; `normalize_decision()` + `role_fallback_action()` reject invalid actions. `SessionLogger` writes per-session JSONL.
+- **[simulation/sim_engine/](simulation/sim_engine/)** — the engine package (`SimEngine`, defined in `core.py`). Owns ALL world state, runs the 30/s tick loop, applies decisions via `apply_decision()`, runs every deterministic system, dispatches LLM think jobs to a bounded worker pool, persists to `simulation/state.db`. Module-level `constants.py`/`persistence.py`/`helpers.py` plus 22 `mixin_*.py` topic files are `exec()`'d into a shared namespace by `__init__.py` — a former 24,324-line single file, pure move split, no behavior change.
+- **[simulation/server.py](simulation/server.py)** — Flask app + cognition entry point. Serves viewer/state/controls; `run_agent_decision()` prompts Ollama, extracts JSON. Directly-runnable, and the single source for every route, `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT`. Imports non-route helper logic (`normalize_decision()`/`role_fallback_action()`, `SessionLogger`, `MemoryStore`, model routing, blueprint/role/sprite validation) from **[simulation/_server/](simulation/_server/)** — a sibling package split out of this former 6,192-line file (pure move, no behavior change); `import server` still re-exports every name external callers rely on.
 - **[simulation/index.html](simulation/index.html)** — thin viewer shell (markup only).
-- **[simulation/viewer.js](simulation/viewer.js)** — polling, render loop, sidebar, Divine Console.
-- **[simulation/viewer.css](simulation/viewer.css)** — viewer layout and panel chrome.
-- **[simulation/sprites.js](simulation/sprites.js)** — pure, stateless Canvas drawing.
+- **[simulation/viewer/](simulation/viewer/)** — split viewer client script (16 files: `setup.js`, `state.js`, `render.js`, `sidebar.js`, `council.js`, `minimap.js`, `polling.js`, `controls.js`, `renderloop.js`, `divine-bootstrap.js`, `divine-auth-sight.js`, `divine-modal.js`, `divine-sight-voice.js`, `divine-voice.js`, `divine-miracles-story.js`, `divine-history.js`) — polling, render loop, sidebar, Divine Console.
+- **[simulation/css/](simulation/css/)** — split viewer stylesheet (6 files: `base.css`, `panels.css`, `agents.css`, `council.css`, `divine.css`, `responsive.css`) — layout and panel chrome.
+- **[simulation/sprites/](simulation/sprites/)** — split pure, stateless Canvas drawing (8 files: `core.js`, `tiles.js`, `props.js`, `structures.js`, `agents.js`, `world.js`, `wildlife.js`, `shipments.js`).
 - **[simulation/roles.json](simulation/roles.json)** — **single source of truth for role definitions**; edit role data here, never in code maps.
 
 Data flow: tick thread advances world → think timer fires → `_build_think_payload()` snapshots context under the lock → `run_agent_decision()` (server.py) → validated decision → `apply_decision()` mutates world under the lock. Browser only polls and renders.
 
 ## Critical invariants
 
-- New actions must stay in sync across `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT` (server.py), `apply_decision()` + payload `available_actions` (sim_engine.py), and `ACTION_LABELS` (viewer.js, display only) — [specs/01-architecture.md](specs/01-architecture.md#action-sync-invariant), [specs/07-actions.md](specs/07-actions.md).
+- New actions must stay in sync across `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT` (server.py), `apply_decision()` + payload `available_actions` (sim_engine/mixin_decisions.py, sim_engine/mixin_think_job.py), and `ACTION_LABELS` (viewer/sidebar.js, display only) — [specs/01-architecture.md](specs/01-architecture.md#action-sync-invariant), [specs/07-actions.md](specs/07-actions.md).
 - The engine mutates world state only under its lock, and LLM calls stay outside it; full world persists to `simulation/state.db` (autosave + graceful-exit flush; `restore_state()` resumes old saves) — [specs/02-engine-core.md](specs/02-engine-core.md).
-- `MAX_CONCURRENT_LLM = 3` (sim_engine.py); Ollama's `num_ctx` must cover ~3,400 tokens × parallel slots (`uv run python scripts/ollama_setup.py` applies target config; see [ollama_config.md](ollama_config.md)) — [specs/03-cognition.md](specs/03-cognition.md).
-- Viewer is a pure renderer — no decisions, movement, or mutation in the browser; keep `WORLD_W`/`WORLD_H` matched between `sim_engine.py` and `viewer.js` — [specs/11-viewer.md](specs/11-viewer.md).
+- `MAX_CONCURRENT_LLM = 3` (sim_engine/constants.py); Ollama's `num_ctx` must cover ~3,400 tokens × parallel slots (`uv run python scripts/ollama_setup.py` applies target config; see [ollama_config.md](ollama_config.md)) — [specs/03-cognition.md](specs/03-cognition.md).
+- Viewer is a pure renderer — no decisions, movement, or mutation in the browser; keep `WORLD_W`/`WORLD_H` matched between `sim_engine/constants.py` and `viewer/setup.js` — [specs/11-viewer.md](specs/11-viewer.md).
 - God routes (`/control/god/*`) are control endpoints, not decision actions; audited via `divine.jsonl` — [specs/12-ops.md](specs/12-ops.md).
 - Core loop is the build pipeline: `start_project` → gather → contribute → `build_structure`, plus a blueprint flow where elder Sage approves new types; Sage's survival is protected by a deterministic emergency system — [specs/07-actions.md](specs/07-actions.md), [specs/02-engine-core.md](specs/02-engine-core.md#sage-emergency).
 - **specs/ must always match the repo.** Any code change that alters behavior, actions, flags, routes, constants, or data shapes MUST update the owning spec in the same change (SDD: specs first, code second).
 
 ## Feature flags
 
-~30 module-level flags in `simulation/sim_engine.py`; most echoed to the viewer via `/state` `config.flags`. Complete index: [specs/01-architecture.md](specs/01-architecture.md#flag-index-complete--30-module-level-flags-sim_enginepy). Semantics per flag: [specs/02](specs/02-engine-core.md), [03](specs/03-cognition.md), [08](specs/08-systems-economy.md), [09](specs/09-systems-society.md), [10](specs/10-path1.md).
+~30 module-level flags in `simulation/sim_engine/constants.py`; most echoed to the viewer via `/state` `config.flags`. Complete index: [specs/01-architecture.md](specs/01-architecture.md#flag-index-complete--30-module-level-flags-sim_enginepy). Semantics per flag: [specs/02](specs/02-engine-core.md), [03](specs/03-cognition.md), [08](specs/08-systems-economy.md), [09](specs/09-systems-society.md), [10](specs/10-path1.md).
 
 ## Logs
 

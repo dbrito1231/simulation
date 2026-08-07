@@ -66,7 +66,7 @@ thinking/sampling for each, independent of the (now-constant) model choice.
 
 Phase 3 input-size sanity check (all against `sim-fast`'s `num_ctx=4096`):
 the largest background call is the wiki-memory merge
-(`sim_engine.py:_run_wiki_memory_merge`, `max_tokens=220`) — its prompt is 3
+(`mixin_decisions.py:_run_wiki_memory_merge`, `max_tokens=220`) — its prompt is 3
 wiki sections (`WIKI_SECTION_CHAR_CAP=300` chars each, ~225 tokens) plus up to
 12 recent memories (each capped at 280 chars on store, ~840 tokens) plus a
 ~180-token system prompt, roughly 1,250 input tokens. The meta/autobiography
@@ -152,12 +152,16 @@ history note).
 
 ## Structured output
 
-`STRUCTURED_OUTPUT_MODE = "json_schema"` (server.py:743). `build_response_format()`
-(server.py:861-872) returns `{"type": "json_schema", "json_schema": {"name":
+`STRUCTURED_OUTPUT_MODE = "json_schema"` (server.py:313). `build_response_format()`
+(server.py:592-624) returns `{"type": "json_schema", "json_schema": {"name":
 "agent_decision", "schema": DECISION_SCHEMA}}`, or `{"type": "json_object"}` if
 the mode were `"json_object"`, or `None` if `"off"` or auto-disabled.
+`build_response_format` itself stays in server.py (not split into
+`simulation/_server/`) because it reads `DECISION_SCHEMA` directly and the
+action-sync invariant requires `DECISION_SCHEMA` stay in server.py — see
+[01-architecture.md](01-architecture.md).
 
-`DECISION_SCHEMA` (server.py:780-839): `additionalProperties: False`;
+`DECISION_SCHEMA` (server.py:357-527): `additionalProperties: False`;
 `required: ["action", "reasoning"]`. Key properties: `action` (enum =
 `DECISION_ACTIONS`, 43 entries — see specs/07-actions.md, not repeated here),
 `divine_response` (nullable object, **required on every decision turn while
@@ -170,7 +174,7 @@ visual_style/sprite/function), `recipe` (nullable object: id/name/inputs/
 station), `rule` (nullable object: id/name/kind/value/description), `vote`
 (nullable string), `sage_decision` (nullable enum approve/deny), `sprite`
 (nullable object: palette/grid — **bounded**, see below). **TECH_TREE_ENABLED import-time addition**
-(server.py:3208-3215, applied only if the engine flag is on so flag-off
+(server.py:2584-2591, applied only if the engine flag is on so flag-off
 prompts stay byte-identical): adds `verdict` (nullable object with
 `rejections`) and `blueprint.tier` (nullable integer) to the schema, and
 rewrites `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM` to document the tier field.
@@ -228,7 +232,7 @@ the one `TECH_TREE_ENABLED`-gated rewrite (documents the optional blueprint
 prints — both now fire at `prompts.py`'s import time (which server.py triggers
 near the top of its own module, before Flask is constructed), not at the
 bottom of server.py where they used to live. `prompts.py` is importable on its
-own (it only imports `sim_engine.py` for the `TECH_TREE_ENABLED` flag, which
+own (it only imports the `sim_engine` package for the `TECH_TREE_ENABLED` flag, which
 has no import-time side effects) without importing `server.py` — `server.py`
 has module-level side effects on import (opens a new session log directory,
 constructs the live `SimEngine`) that make it unsafe for a setup script to
@@ -245,25 +249,26 @@ knowledge/culture (skill teaching), followed by the JSON output contract and
 worked examples per action family (rest, contribute, talk, propose_blueprint,
 sage_review_blueprint, approve_blueprint).
 
-`SYSTEM_PROMPT_SLIM` (server.py:1119-1122): `SYSTEM_PROMPT` sliced at the
-first `"\nEXAMPLE ("` marker — same rules and JSON schema, no worked examples.
-Used for the context-overflow retry (see Retries).
+`SYSTEM_PROMPT_SLIM` is defined in `simulation/prompts.py` and re-exported at
+server.py:33 (`SYSTEM_PROMPT_SLIM = _prompts.SYSTEM_PROMPT_SLIM`): `SYSTEM_PROMPT`
+sliced at the first `"\nEXAMPLE ("` marker — same rules and JSON schema, no
+worked examples. Used for the context-overflow retry (see Retries).
 
-`INVENTION_SYSTEM_PROMPT` (server.py:1135-1174): a dedicated, ~85%-smaller
+`INVENTION_SYSTEM_PROMPT` (server.py:647-686): a dedicated, ~85%-smaller
 system prompt for invention-only turns — output-format contract + blueprint
 schema/example only, no village rulebook (irrelevant to authoring a blueprint
 and was wasting the token budget on every council member's turn).
 
-`SPRITE_UPGRADE_SYSTEM_PROMPT` (server.py:2667+): a dedicated prompt for the
+`SPRITE_UPGRADE_SYSTEM_PROMPT` (server.py:1388+): a dedicated prompt for the
 sprite-design-only turn that follows a blueprint's mechanical approval.
 
-`USER_PROMPT_TEMPLATE` (server.py:1176-1213): ordered sections — identity
+`USER_PROMPT_TEMPLATE` (server.py:689-732): ordered sections — identity
 (name/role/skill/personality/memory), vitals (resources/hunger/health/
 relationships/beliefs), spatial (nearby agents/zone/district/known districts/
 local stocks/terraform targets), flag-gated single lines (`season_line`,
 `prices_line`, `weather_line`, `chronicle_line`, `path1_lines`, `level_line` —
 each renders empty when its owning flag is off so prompts stay byte-identical
-across flag states, per `build_user_prompt` server.py:2787-2904), build state
+across flag states, per `build_user_prompt` server.py:1542-1732), build state
 (structures/active project/progress), civilization state (directive,
 `divine_lines` — see Sovereign God mode below, invention status, commitment,
 idle agents, known resources/recipes, pending/rejected blueprints/recipes/
@@ -271,7 +276,7 @@ rules, reserved structure ids), social (recent conversations, inbox, module
 reports), a `behavior_nudge` line, and finally `available_actions`.
 
 `weather_line` (living-ecosystem Phase 5, `WEATHER_GOVERNANCE_ENABLED`):
-`_weather_prompt_line()` (sim_engine.py) returns one short "Weather: ..."
+`_weather_prompt_line()` (`mixin_structures_economy.py:433`) returns one short "Weather: ..."
 line — but only while `civilization["weather"]["state"]` is `"storm"` or
 `"clearing"`; `None` (and so an empty template slot) the rest of the time,
 including whenever the flag or `WEATHER_ENABLED` is off. Follows the exact
@@ -283,7 +288,7 @@ storm conditions in council.
 ### Sovereign God mode (Phase 3): Voice binding guidance
 
 `_build_think_payload` computes `divine_public_line`/`divine_private_line` per
-agent via `_divine_prompt_lines(agent)` (sim_engine.py) — placed immediately
+agent via `_divine_prompt_lines(agent)` (`mixin_divine_matrix.py:44`) — placed immediately
 next to `directive` in the payload but returned by a separate helper and
 carried in **separate keys**, never folded into or read from
 `civilization["directive"]`. `_divine_prompt_lines` re-checks
@@ -346,8 +351,8 @@ signal for operators, not a hard fallback to `rest`.
 
 **Acknowledgement and the skip cap.** A turn with a **genuine** (non-
 synthetic) `divine_response` acks its guidance entry immediately, same as
-before. A **synthetic** response no longer auto-acks — `sim_engine.py`'s
-`_record_divine_response_adherence` increments a per-guidance skip counter
+before. A **synthetic** response no longer auto-acks — `mixin_divine_matrix.py`'s
+`_record_divine_response_adherence` (line 196) increments a per-guidance skip counter
 instead (providence's `skipCounts[agentIdStr]`, or the private omen's
 `skipCount` — see [02-engine-core.md](02-engine-core.md)) via
 `_bump_voice_guidance_skip`. Only once that counter reaches
@@ -380,7 +385,7 @@ removes matching `MemoryStore` rows and keyword-matching local tier lines.
 These are distinct from private omens: false memories are ordinary recall
 lines immediately, not deferred until omen closure.
 characters (`GOD_TEXT_MAX_BYTES = 600` bytes) by `_normalize_divine_text` at
-write time (sim_engine.py, [02](02-engine-core.md)), so the two lines add a
+write time (`mixin_persistence.py:1149`, [02](02-engine-core.md)), so the two lines add a
 small, precisely bounded amount of prompt text even at maximum omen length —
 no raw intervention history, no Chronicle duplication of private content ever
 enters a prompt. The elder `directive` line is completely unaffected: both
@@ -525,7 +530,7 @@ thread for up to `GOD_COMPILER_TIMEOUT_SEC = 10.0` seconds (an aggressive
 timeout specifically to bound that exposure) and consumes one of
 `sim-smart`'s own `OLLAMA_NUM_PARALLEL` slots — the same slots agent
 decisions use — for the duration of the call. `GOD_COMPILER_MIN_INTERVAL_SEC
-= 5.0` and `GOD_COMPILER_SESSION_CAP = 60` (module constants, sim_engine.py)
+= 5.0` and `GOD_COMPILER_SESSION_CAP = 60` (module constants, `constants.py:746-747`)
 bound how often this can happen; there is no queue — an over-budget compile
 request is rejected immediately, never buffered.
 
@@ -602,7 +607,7 @@ valid `rule`/`blueprint`/idea payload per `kind`). Per-turn/per-phase
 eligibility (is the ballot actually open right now, has discussion ended,
 etc.) is deliberately **not** re-checked here — `council_turn`/`phase` were
 snapshotted before the LLM call and can go stale while the model thinks;
-`apply_decision()`'s `_daily_council_actor()` (sim_engine.py) is the live
+`apply_decision()`'s `_daily_council_actor()` (`mixin_council_growth.py:399`) is the live
 authority and rejects non-fatally on a stale snapshot. See
 [07-actions.md](07-actions.md) for the full phase/seating-authority split.
 
@@ -614,10 +619,10 @@ in the same bounded context area as Chronicle history. The full
 continuity available to every agent, including agents who did not attend or
 arrived later, while bounding context growth.
 
-**`behavior_nudge` composition** (`_build_think_payload`, sim_engine.py
-~8888-9330): candidate nudges are collected as `(priority, text)` pairs via a
+**`behavior_nudge` composition** (`_build_think_payload`, `mixin_think_job.py:35-878`):
+candidate nudges are collected as `(priority, text)` pairs via a
 local `note(prio, text)` helper, then capped to `MAX_BEHAVIOR_NUDGES = 3`
-(sim_engine.py:467) — all P0 nudges are kept, then remaining slots fill from
+(`constants.py:1142`) — all P0 nudges are kept, then remaining slots fill from
 P1/P2/P3 in ascending priority order (stable sort preserves emission order
 within a class). Lower number = more urgent: P0 emergency/survival, P1
 governance/commitment (succession vote, ruin-pressure), P2 rejection-recovery/
@@ -637,8 +642,8 @@ THRESHOLD` and not a ruin) — it names up to the 3 worst (lowest-condition)
 structures village-wide with their `districtId` so an agent elsewhere can
 travel and `repair_structure`.
 
-**Per-kind rejection-nudge cooldown** (`_should_renudge`, sim_engine.py, just
-above `_build_think_payload`): P2 rejection-recovery notes (gather, craft,
+**Per-kind rejection-nudge cooldown** (`_should_renudge`, `mixin_decisions.py:1273`):
+P2 rejection-recovery notes (gather, craft,
 project, trade, recipe, upgrade, repair) previously re-fired identically on
 every think turn for the full `DIRECTIVE_TTL_FRAMES` window even when nothing
 about the rejection had changed, permanently crowding out the other 2 nudge
@@ -651,7 +656,7 @@ Other P2/P3 nudges (spoilage, shelter, homeless, blueprint/terraform/sprite/
 quota/rationing/burial/abandonment rejections, idle/opportunity notes) are
 unaffected.
 
-**Persona-at-top-of-user-message rationale** (server.py:2923-2927): the
+**Persona-at-top-of-user-message rationale** (server.py:1832-1837): the
 per-agent persona line is prepended to the *user* message, not appended to the
 system prompt, because Ollama (llama.cpp-based, same as LM Studio) reuses KV
 cache by longest common prefix per slot — per-agent text inside the system
@@ -672,14 +677,14 @@ above — see the rationale note just above this one).
 - **Audit result:** every per-agent/per-tick/per-request value (name, role,
   hunger, resources, nearby agents, timestamps, districts, etc.) is rendered
   by `build_user_prompt`/`USER_PROMPT_TEMPLATE` into the *user* message only.
-  `build_decision_payload` (server.py:~3361) never concatenates request data
+  `build_decision_payload` (server.py:1779) never concatenates request data
   into `system_content`; `system_content` is always one of the four static
   module-level string constants (`SYSTEM_PROMPT`, `SYSTEM_PROMPT_SLIM`,
   `INVENTION_SYSTEM_PROMPT`, `SPRITE_UPGRADE_SYSTEM_PROMPT`).
-- **The one SYSTEM_PROMPT reassignment** (server.py:~3750, gated on
+- **The one SYSTEM_PROMPT reassignment** (`simulation/prompts.py:415`, gated on
   `TECH_TREE_ENABLED`) rewrites `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM` once via
   `.replace()` to document the optional blueprint `"tier"` field.
-  `TECH_TREE_ENABLED` is a hardcoded module constant in sim_engine.py (never
+  `TECH_TREE_ENABLED` is a hardcoded module constant in `constants.py` (never
   flipped by a route or control endpoint), and this code runs at module
   import time, before the Flask app serves any request — so the rewrite
   cannot fire mid-session; whatever `SYSTEM_PROMPT` is after import is what
@@ -762,21 +767,30 @@ inactive pending an A/B soak.
 Measured prompt size: ~3,100-3,400 prompt tokens per routine decision call
 (docs/REFERENCE.md:40); invention-only prompts run larger due to the
 function-block schema and sprite few-shot example (worst case ~6,163 tokens
-measured, per the `HIGH_STAKES_MAX_TOKENS` comment, server.py:120-122).
+measured, per the `HIGH_STAKES_MAX_TOKENS` comment, server.py:223-232).
 
-`MEMORY_PROMPT_CHAR_BUDGET = 900` (server.py, raised from 600 — see
-[Wiki-style compounding memory](#wiki-memory) below) caps the composed
-"Recent memory:" line; `compose_memory()` (server.py:1238-1271) merges the
-client's compacted memory slice with up to 4 salient entries retrieved from
-the in-process hashing-trick vector store (128-dim, `MEMORY_DIM`), dropping
-oldest lines first and hard-truncating if still over budget.
+`MEMORY_PROMPT_CHAR_BUDGET = 900` (`simulation/_server/prompt_format.py`,
+raised from 600 — see [Wiki-style compounding memory](#wiki-memory) below)
+caps the composed "Recent memory:" line; `compose_memory()`
+(`simulation/_server/prompt_format.py`) merges the client's compacted memory
+slice with up to 4 salient entries retrieved from the in-process
+hashing-trick vector store (128-dim, `MEMORY_DIM`), dropping oldest lines
+first and hard-truncating if still over budget. `compose_memory` reads the
+live `memory_store` singleton via a module-attribute injected by server.py
+right after construction (`_prompt_format.memory_store = memory_store`) —
+`server.py` imports `compose_memory` FROM `_server/prompt_format.py`, so the
+reverse import would be circular; see that module's docstring.
 
 ### MemoryStore persistence (restart-stable, Phase 1 TASKS_PENDING #1)
 
-`MemoryStore` (server.py:416) is constructed against `MEMORY_STORE_PATH =
-simulation/memory_store.json` (server.py, next to `state.db`'s own
-`os.path.dirname(os.path.abspath(__file__))` derivation) — a restart-stable
-path, not the per-session log directory. This matters because `agent
+`MemoryStore` (the class: `simulation/_server/memory_store.py:112`; the
+`memory_store` singleton: server.py:288) is constructed against
+`MEMORY_STORE_PATH = simulation/memory_store.json` (server.py:286, next to
+`state.db`'s own `os.path.dirname(os.path.abspath(__file__))` derivation) —
+a restart-stable path, not the per-session log directory. The singleton
+construction stays in server.py (not `_server/memory_store.py`) because its
+`mirror_path` depends on `session_logger.dir`, a server.py bootstrap value —
+see [01-architecture.md](01-architecture.md). This matters because `agent
 ["memory"]` tiers persist via `state.db` already, but the *semantic-recall
 embedding index* (`memory_store`) previously lived only in
 `simulation/logs/<timestamp>/memory.json`, so every server restart silently
@@ -804,7 +818,7 @@ started the index empty even though agent-visible memory survived.
   log dir's `memory.json` for human inspection. The mirror write is wrapped
   in its own `try/except OSError` — a failed mirror write never affects the
   stable store.
-- **Reset semantics.** `/control/reset` → `SimEngine.reset()` (sim_engine.py)
+- **Reset semantics.** `/control/reset` → `SimEngine.reset()` (`mixin_snapshot.py:52`)
   calls `memory_store.clear()`, which wipes in-memory entries AND flushes
   the now-empty store to `MEMORY_STORE_PATH` (matching the existing
   `_piano_module_cache` wipe-on-reset precedent) — a reset drops the whole
@@ -820,7 +834,7 @@ adding any new LLM call site or timer — it upgrades what
 
 - **Structure.** `agent["memoryWiki"]` is a dict of three named sections —
   `relationships`, `goals`, `lessons` — each hard-capped at
-  `WIKI_SECTION_CHAR_CAP = 300` chars (sim_engine.py, next to `LONG_MEM_CAP`).
+  `WIKI_SECTION_CHAR_CAP = 300` chars (`constants.py`, next to `LONG_MEM_CAP`).
   Always present (`{}` initial shape, populated only when the flag is on) so
   persistence via `state.db` is free — same pattern as `moduleReports`. See
   [06-agents.md](06-agents.md#wiki-style-compounding-memory-wiki_memory-default-false)
@@ -867,7 +881,7 @@ adding any new LLM call site or timer — it upgrades what
   being the first thing `_cap_memory_text`'s oldest-first eviction drops
   (wiki lines are prepended, i.e. logically "oldest" in list order).
 - **`/state` echo.** `WIKI_MEMORY` is echoed in `config.flags` alongside the
-  other cognition flags (sim_engine.py `_serialize_state`-adjacent state
+  other cognition flags (`mixin_persistence.py`'s `_serialize_state`-adjacent state
   payload build).
 
 ## Decision handling
@@ -883,7 +897,8 @@ even the action regex fails. `lm_message_text()` (server.py) reads Ollama's
 should already be clean JSON, but as defense in depth any `<think>...</think>`
 block that leaks in anyway is stripped rather than fed to the JSON parser.
 
-`normalize_decision(decision, agent_data)` (server.py:2025-2173) — per-action
+`normalize_decision(decision, agent_data)` (`simulation/_server/decision_validation.py:928`,
+imported into server.py's namespace — see [01-architecture.md](01-architecture.md)) — per-action
 validation, each failure substituting `role_fallback_action()` with a note
 appended to `reasoning` (and often a `*_rejection_note` field the engine
 surfaces to the agent's next prompt):
@@ -903,7 +918,8 @@ surfaces to the agent's next prompt):
 | `divine_response` (when active Voice guidance is unacknowledged) | must be an object with `stance` in `follow`/`continue` and a non-empty `reason` string; the JSON schema now *requires* the field's presence (as a non-null object) for this request via `build_response_format(require_divine_response=True)`, but missing/invalid *values* are still **not** rejected as a hard fallback to `rest` — instead of an immediate ack, non-response is now capped: it increments a per-guidance skip counter and only force-acks after `GOD_VOICE_ACK_SKIP_CAP` consecutive synthetic turns — see Voice binding guidance above |
 | every other action | passed through as-is (any `blueprint` key stripped unless the action is one of the blueprint-carrying ones) |
 
-`role_fallback_action(role, agent_data)` (server.py:1890-2022) priority
+`role_fallback_action(role, agent_data)` (`simulation/_server/decision_validation.py:527`,
+imported into server.py's namespace) priority
 ladder: (1) `switch_role` if the village needs a role this agent can fill and
 it isn't already elder/builder/healer; (2) elder-only: resume a pending
 blueprint review (`approve_blueprint` if a review is ready, else
@@ -1100,11 +1116,11 @@ candidate-choice step key off of.
 **Four server-side cognition flags.** `DECISION_RETRY_ENABLED`,
 `FALLBACK_AI_CHOICE_ENABLED`, `FALLBACK_AI_CHOICE_TIMEOUT_S`, and
 `LLM_CALLS_PER_TURN_MAX` are module-level constants in `server.py`, not
-`sim_engine.py` — they are **not** part of the
+the `sim_engine` package — they are **not** part of the
 [01-architecture.md](01-architecture.md#flag-index-complete--52-module-level-flags-sim_enginepy)
-module-level flag index, which is specifically the `sim_engine.py` engine
+module-level flag index, which is specifically the `sim_engine` engine
 flag list. `SPRITE_DESIGN_MAX_ATTEMPTS = 3` is the one related constant that
-**is** engine-side (`sim_engine.py`, gates sprite-design-turn retirement —
+**is** engine-side (`constants.py:1075`, gates sprite-design-turn retirement —
 see [05-world.md](05-world.md#structures) and
 [07-actions.md](07-actions.md)).
 
@@ -1117,32 +1133,39 @@ three highest preserved skill records and two newest chronicle entries, with a
 
 ## Routing
 
-`model_for_decision(data)` = `MODEL_SMART` unconditionally (server.py) —
-every decision turn, routine or high-stakes, routes to `sim-smart`.
-`is_high_stakes_turn(data)` is still computed and still fully controls
-timeout/max_tokens/thinking-sampling selection (see the Ollama call settings
-table); it no longer affects which model id is used. No fallback id — see
-Retries for what happens if the routed id isn't created in Ollama.
-`_base_high_stakes(data)` (server.py, unbudgeted): `sprite_design_only`,
-`invention_only`, `role=="elder"`, or `invention_status` starting with
-`"REQUIRED"`. `HIGH_STAKES_ENABLED_REASONS = {"emergency", "election",
-"treaty_vote"}` (server.py:160) — extra reasons that ALSO route to
+Model routing (`MODEL_SMART`/`MODEL_FAST`, `is_high_stakes_turn`/
+`_base_high_stakes`/`resolve_high_stakes`/`model_for_decision`) lives in
+`simulation/_server/model_routing.py`, imported into server.py's namespace —
+see [01-architecture.md](01-architecture.md).
+
+`model_for_decision(data)` (`_server/model_routing.py:153`) = `MODEL_SMART`
+unconditionally — every decision turn, routine or high-stakes, routes to
+`sim-smart`. `is_high_stakes_turn(data)` is still computed and still fully
+controls timeout/max_tokens/thinking-sampling selection (see the Ollama call
+settings table); it no longer affects which model id is used. No fallback id
+— see Retries for what happens if the routed id isn't created in Ollama.
+`_base_high_stakes(data)` (`_server/model_routing.py:94`, unbudgeted):
+`sprite_design_only`, `invention_only`, `role=="elder"`, or
+`invention_status` starting with `"REQUIRED"`.
+`HIGH_STAKES_ENABLED_REASONS = {"emergency", "election", "treaty_vote"}`
+(`_server/model_routing.py:66`) — extra reasons that ALSO route to
 `THINKING_TIMEOUT_S`/thinking-on, gated by a rolling-window limiter:
 `EXTRA_THINKING_PER_WINDOW=4` per `EXTRA_THINKING_WINDOW_S=60` seconds
-(server.py:168-185), thread-safe via `_extra_thinking_lock`. Deliberately
-excluded from the enabled-reasons set: `elder_blueprint_review` (redundant —
-already high-stakes via the elder-role check) and `repeated_rejections` (too
-frequent, would dominate the budget).
+(`_server/model_routing.py:74-76`), thread-safe via `_extra_thinking_lock`.
+Deliberately excluded from the enabled-reasons set: `elder_blueprint_review`
+(redundant — already high-stakes via the elder-role check) and
+`repeated_rejections` (too frequent, would dominate the budget).
 
-`resolve_high_stakes(data)` (server.py:221-241) resolves `is_high_stakes_turn`
-exactly ONCE per request and stamps `data["_high_stakes_resolved"]`, because
-the reasons budget is stateful and `is_high_stakes_turn()` is called from
-multiple sites per request (payload build, timeout choice, the context-
-overflow retry) that must all agree without re-consuming the budget.
+`resolve_high_stakes(data)` (`_server/model_routing.py:130`) resolves
+`is_high_stakes_turn` exactly ONCE per request and stamps
+`data["_high_stakes_resolved"]`, because the reasons budget is stateful and
+`is_high_stakes_turn()` is called from multiple sites per request (payload
+build, timeout choice, the context-overflow retry) that must all agree
+without re-consuming the budget.
 
 ## Concurrency & context sizing
 
-`MAX_CONCURRENT_LLM = 3` (sim_engine.py, `ThreadPoolExecutor` bound on the
+`MAX_CONCURRENT_LLM = 3` (`constants.py:1300`, `ThreadPoolExecutor` bound on the
 engine's decision-think worker pool, `self._executor`) — matches
 `OLLAMA_NUM_PARALLEL=3` (ollama_config.md). `LLM_MIN_GAP_MS = 250` (minimum
 spacing between decision dispatches). `LLM_ORPHAN_TIMEOUT_THRESHOLD = 3` and
@@ -1161,7 +1184,7 @@ combined pool). Decision-call prompts (~3,100-3,400 routine tokens, up to
 `exceed_context_size_error` (see Retries) is the enforced backstop if a
 prompt exceeds it.
 
-`PIANO_MODULES` (sim_engine.py, default `True` since Sid-parity Phase 1) — the
+`PIANO_MODULES` (`constants.py:483`, default `True` since Sid-parity Phase 1) — the
 Perception/Social/Desire/Reflection module fan-out is the default cognition
 path, not experimental. Module calls run on their own pool,
 `self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`), bounded independently of
@@ -1306,7 +1329,7 @@ specs/04-http-api.md), not a URL query parameter, or via the `SIM_AGENTS`
 environment variable at server startup (server.py, default 8, clamped to
 `MAX_ROSTER_SIZE = 20` — see specs/02-engine-core.md and specs/06-agents.md).
 
-`META_SYSTEM` (sim_engine.py, default `True` since Sid-parity Phase 3) —
+`META_SYSTEM` (`constants.py:488`, default `True` since Sid-parity Phase 3) —
 autobiography/persona meta update, still bounded by `MAX_CONCURRENT_LLM`
 (runs inline on the decision path, not on `piano_workers`). Authored beliefs
 and adoption events give the rotating autobiography update material to

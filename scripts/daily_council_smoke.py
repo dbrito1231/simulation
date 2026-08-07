@@ -602,9 +602,27 @@ def exercise_digest_prompt_and_sync(checks):
 
     server_source = (ROOT / "simulation" / "server.py").read_text(encoding="utf-8")
     prompts_source = (ROOT / "simulation" / "prompts.py").read_text(encoding="utf-8")
-    engine_source = (ROOT / "simulation" / "sim_engine.py").read_text(encoding="utf-8")
-    viewer_js_source = (ROOT / "simulation" / "viewer.js").read_text(encoding="utf-8")
-    viewer_css_source = (ROOT / "simulation" / "viewer.css").read_text(encoding="utf-8")
+    # sim_engine.py was split into a package under simulation/sim_engine/
+    # (Phase 6a); concatenate for this source-scan check (order doesn't
+    # matter here).
+    engine_source = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((ROOT / "simulation" / "sim_engine").glob("*.py"))
+    )
+    # viewer.js was split into ordered files under simulation/viewer/ (see
+    # index.html's <script> tag order and specs/11-viewer.md); concatenate
+    # them all for this source-scan check (order doesn't matter here).
+    viewer_js_source = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((ROOT / "simulation" / "viewer").glob("*.js"))
+    )
+    # viewer.css was split into ordered files under simulation/css/ (see
+    # index.html's <link> tag order and specs/11-viewer.md); concatenate
+    # them all for this source-scan check in load order.
+    viewer_css_source = "\n".join(
+        (ROOT / "simulation" / "css" / name).read_text(encoding="utf-8")
+        for name in ("base.css", "panels.css", "agents.css", "council.css", "divine.css", "responsive.css")
+    )
     tree = ast.parse(server_source)
     action_names = None
     for node in tree.body:

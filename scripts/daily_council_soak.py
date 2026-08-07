@@ -37,7 +37,9 @@ from daily_council_smoke import make_engine, seat_everyone  # noqa: E402
 
 
 SOURCE_GUARDS = (
-    ROOT / "simulation" / "sim_engine.py",
+    # sim_engine.py was split into a package under simulation/sim_engine/
+    # (Phase 6a) -- guard each file in it individually.
+    *sorted((ROOT / "simulation" / "sim_engine").glob("*.py")),
     ROOT / "simulation" / "server.py",
     ROOT / "simulation" / "prompts.py",
     ROOT / "simulation" / "roles.json",

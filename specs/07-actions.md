@@ -26,7 +26,7 @@ structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 
 ## Action table
 
-| Action | Key params | Flag gate / precondition | Effect (`apply_decision`, sim_engine.py) |
+| Action | Key params | Flag gate / precondition | Effect (`apply_decision`, `mixin_decisions.py:346+`) |
 |---|---|---|---|
 | `move_to_district` | `target` or `target_district` | none | Sets movement target to the resolved district; accepts either param since models commonly put the id in `target_district` |
 | `move_to_agent` | `target` (agent name) | none | Moves toward the named agent, or the nearest agent if `target` is missing/unresolved |
@@ -47,7 +47,7 @@ structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 | `approve_blueprint` | `target` (blueprint id), `target_district` (optional) | actor role `elder`; `SAGE_REVIEW_ENABLED` requires `sageReview` already `approved`/`skipped` | Registers the new structure/resource type, pops the pending blueprint, starts a district project for it (or applies as a structure upgrade if `duplicateOf` an existing type) |
 | `reject_blueprint` | `target` (blueprint id) | actor role `elder` | Pops the pending blueprint into `rejectedBlueprintIds` (amnesty-expiring — [09](09-systems-society.md)) |
 | `sage_review_blueprint` | `target` (blueprint id), `sage_decision` (`approve`/`deny`) | actor is the Sage reviewer; blueprint pending; `sage_decision` valid (enforced by `normalize_decision`) | Marks `sageReview` `approved`/`denied`, gating `approve_blueprint` |
-| `assign_task` | `target` (agent name), `message` (task text) | actor role `elder`; target idle | Sets `target["assignedTask"]`, delivers a directive message (deliberately not broadcast — see sim_engine.py:8273-8276) |
+| `assign_task` | `target` (agent name), `message` (task text) | actor role `elder`; target idle | Sets `target["assignedTask"]`, delivers a directive message (deliberately not broadcast — see `mixin_decisions.py:871-880`) |
 | `change_role` | `new_role` | none (unconditional) | Sets `agent["role"]` directly — the manual/LLM-chosen counterpart to `switch_role`'s auto-eligible flow |
 | `rest` | — | none — the universal safe fallback | No-op; `summary = "<agent> rested"` |
 | `heal_agent` | `target` (agent name, optional) | actor typically role `healer` for the yield bonus, but any agent may act | Restores health (`HEAL_AMOUNT`, doubled for `healer` role, + skill bonus if `CULTURE_ENABLED`); revives an incapacitated patient; cannot target a dead (unburied) agent |
@@ -73,7 +73,7 @@ structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 | `council_propose` | `kind` (`rule`/`blueprint`/`idea`), then existing `rule` or `blueprint` payload, or `title` + `detail` for an idea | active Daily Council; actor seated; rule/blueprint must pass the existing validators | Opens the council ballot and transitions to voting. Rule and blueprint proposals retain all existing validation; an idea is advisory-only and has no direct mechanical effect |
 | `council_vote` | ordinary ballot: `vote` (`yes`/`no`/`abstain`); succession ballot: `candidate` (current candidate name) or `vote: "abstain"` | active Daily Council; actor seated; ballot open | Ordinary ballots retain majority/elder-tie behavior and validated enactment paths. Succession records one candidate choice per voter in the normal transcript/tally; after all eligible votes or TTL, highest votes wins and an exact tie uses lowest stable agent id. The leaderless village declares the result and office changes only through `_enact_succession_winner()` |
 
-`available_actions` in the think payload (sim_engine.py:9143-9152) further filters
+`available_actions` in the think payload (`mixin_think_job.py:667-691`) further filters
 this list per-agent by live flag state: `start_terraform` requires
 `ECOLOGY_ENABLED`; `repair_structure` requires `GOODS_ENABLED`; `bury_agent`
 requires `CEMETERY_ENABLED`; `repeal_rule` requires `RULES_ENABLED`;
@@ -116,7 +116,7 @@ requires a valid `rule`/`blueprint`/idea payload per `kind`) is still checked.
 eligibility (e.g. whether the ballot is currently open, or the discussion
 phase has ended) — those were snapshotted before the LLM call and can go
 stale while the model thinks. Live phase/turn authority is
-`apply_decision()`'s `_daily_council_actor()` (sim_engine.py), which
+`apply_decision()`'s `_daily_council_actor()` (`mixin_council_growth.py:399`), which
 re-checks eligibility at apply time and rejects non-fatally if the snapshot
 went stale.
 
@@ -175,7 +175,8 @@ Sage-emergency interaction, safeguards against runaway proposal spam):
 ## Action-sync invariant reminder
 
 Any change to this catalog must be mirrored across `DECISION_ACTIONS`,
-`DECISION_SCHEMA`, `SYSTEM_PROMPT` (server.py), `apply_decision` +
-`available_actions` (sim_engine.py), and `ACTION_LABELS` (viewer.js, display
+`DECISION_SCHEMA`, `SYSTEM_PROMPT` (server.py), `apply_decision`
+(`mixin_decisions.py`) + `available_actions` (`mixin_think_job.py`), and
+`ACTION_LABELS` (viewer/sidebar.js, display
 only) — see [01-architecture.md](01-architecture.md#action-sync-invariant) for the
 full table of locations.

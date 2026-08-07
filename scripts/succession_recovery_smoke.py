@@ -278,8 +278,12 @@ def test_prompt_and_restore_roundtrip():
     finally:
         se.DB_PATH = old_db
 
-    viewer = (Path(__file__).resolve().parents[1] / "simulation" / "viewer.js").read_text(
-        encoding="utf-8",
+    # viewer.js was split into ordered files under simulation/viewer/ (see
+    # index.html's <script> tag order and specs/11-viewer.md); concatenate
+    # them all for this source-scan check (order doesn't matter here).
+    viewer = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in sorted((Path(__file__).resolve().parents[1] / "simulation" / "viewer").glob("*.js"))
     )
     assert_true('ballot.kind === "succession"' in viewer
                 and "Village verdict" in viewer,

@@ -11,15 +11,32 @@ for the action catalog.
 
 ## Topology
 
-- `simulation/sim_engine.py` (`SimEngine`) holds ALL world state (the `civilization`
-  dict + `agents` list + `frameTick`/`paused`) behind a single `threading.RLock`
-  (`self.lock`). It runs a fixed-timestep daemon thread and dispatches LLM "think"
-  jobs to a bounded worker pool.
+- `simulation/sim_engine/` (`SimEngine`, defined in `core.py`) holds ALL world
+  state (the `civilization` dict + `agents` list + `frameTick`/`paused`) behind
+  a single `threading.RLock` (`self.lock`). It runs a fixed-timestep daemon
+  thread and dispatches LLM "think" jobs to a bounded worker pool. The package
+  splits module-level data (`constants.py`, `persistence.py`, `helpers.py`)
+  from `SimEngine` behavior: `core.py` holds construction only, and 22
+  `mixin_*.py` topic files (e.g. `mixin_think_job.py`, `mixin_decisions.py`,
+  `mixin_world_state.py`) are `exec()`'d into a shared namespace by
+  `__init__.py` so every method still resolves as `self.<name>` on one
+  `SimEngine` instance — a pure move split, no behavior change.
 - `simulation/server.py` is the Flask app plus the cognition layer: it builds
   prompts, calls Ollama, validates the response, and hands a decision back to the
-  engine.
-- `simulation/index.html` (shell) + `simulation/viewer.js` + `simulation/sprites.js`
-  poll `GET /state` (~10 Hz, delta after the first full snapshot) and render;
+  engine. It is the directly-runnable entry point and stays the single source
+  for every `@app.route`/`add_url_rule` handler, `DECISION_ACTIONS`,
+  `DECISION_SCHEMA`, and `SYSTEM_PROMPT`/`SYSTEM_PROMPT_SLIM`. Non-route helper
+  logic (decision/blueprint/role/sprite validation, prompt-context formatting,
+  the in-process memory store, per-session JSONL logging, model routing,
+  Ollama structured-output error parsing, and the roles.json loader) lives in
+  sibling modules under `simulation/_server/` that server.py imports from and
+  re-exports at module level, so `import server; server.<name>` still resolves
+  every name external callers (scripts/) rely on — pure move split, no
+  behavior change.
+- `simulation/index.html` (shell) + `simulation/viewer/*.js` (16 files) +
+  `simulation/sprites/*.js` (8 files) + `simulation/css/*.css` (6 files) poll
+  `GET /state` (~10 Hz, delta
+  after the first full snapshot) and render;
   closing the browser tab does not stop the simulation. Delta responses include
   only keys whose server-side `lastMod` frame is greater than the client's
   `?since=` value (within `STATE_DELTA_MAX_GAP`); maps are pruned, not cleared
@@ -32,14 +49,16 @@ The engine mutates state only under `self.lock`; the full world is persisted to
 ## Data flow (one agent's think cycle)
 
 1. Tick thread decrements `thinkTimer`; at 0 (and not already in-flight),
-   `_schedule_think` submits a job to the executor (sim_engine.py:9362).
-2. `_build_think_payload(agent)` (sim_engine.py:8527) snapshots the agent's
+   `_schedule_think` submits a job to the executor (sim_engine/mixin_think_job.py:1417).
+2. `_build_think_payload(agent)` (sim_engine/mixin_think_job.py:35) snapshots the agent's
    context **under the lock**, then releases the lock before the network call.
-3. `run_agent_decision(payload)` (server.py:2978) prompts Ollama and extracts
+3. `run_agent_decision(payload)` (server.py:2006) prompts Ollama and extracts
    JSON.
-4. `normalize_decision` (server.py:2025) + `role_fallback_action` (server.py:1890)
-   reject invalid actions and substitute a safe fallback.
-5. Back inside `self.lock`, `apply_decision(agent, decision)` (sim_engine.py:7885)
+4. `normalize_decision` (`_server/decision_validation.py:928`) +
+   `role_fallback_action` (`_server/decision_validation.py:527`) reject invalid
+   actions and substitute a safe fallback (imported into server.py's
+   namespace; see Topology above).
+5. Back inside `self.lock`, `apply_decision(agent, decision)` (sim_engine/mixin_decisions.py:346)
    mutates the world.
 
 Network calls (step 3) always happen **outside** the lock so one agent's LLM latency
@@ -49,12 +68,12 @@ never blocks the tick thread or other agents' movement/mutation.
 
 - Tick daemon: `SimEngine.start()` spawns a `SimEngine` thread running `_run_loop`,
   which calls `_tick_once()` once per `TICK_DT = 1.0 / TICKS_PER_SEC` seconds
-  (`TICKS_PER_SEC = 30`, sim_engine.py:238-239).
+  (`TICKS_PER_SEC = 30`, sim_engine/constants.py:1029).
 - A second daemon thread (`SimSaver`) autosaves on its own timer — see
   [02-engine-core.md](02-engine-core.md).
 - LLM dispatch: `self._executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_LLM)`
-  (sim_engine.py:1267), with `MAX_CONCURRENT_LLM = 3` (sim_engine.py:444). An
-  in-flight set (`self._inflight`) plus `LLM_MIN_GAP_MS = 250` (sim_engine.py:445)
+  (sim_engine/core.py:182), with `MAX_CONCURRENT_LLM = 3` (sim_engine/constants.py:1300). An
+  in-flight set (`self._inflight`) plus `LLM_MIN_GAP_MS = 250` (sim_engine/constants.py:1343)
   throttle dispatch further.
 - **Lock discipline invariant:** every read/write of `civilization`/`agents`/
   `frameTick`/`paused` happens under `self.lock`. The only code that runs outside
@@ -68,12 +87,12 @@ locations, or the engine and the LLM-facing schema will silently diverge:
 
 | Location | File | What it defines |
 |---|---|---|
-| `DECISION_ACTIONS` | server.py:752 | The canonical action name list |
-| `DECISION_SCHEMA` | server.py:780 | JSON-schema structured-output shape sent to Ollama |
-| `SYSTEM_PROMPT` | server.py:885 | Prose description of each action for the model |
-| `apply_decision` | sim_engine.py:7885 | Server-side effect when an action is chosen |
-| `available_actions` (payload) | sim_engine.py:9143 | Flag-filtered action list actually offered to an agent this think |
-| `ACTION_LABELS` | viewer.js | Human-readable label shown in the viewer (display only, no logic) |
+| `DECISION_ACTIONS` | server.py:322 | The canonical action name list |
+| `DECISION_SCHEMA` | server.py:357 | JSON-schema structured-output shape sent to Ollama |
+| `SYSTEM_PROMPT` | server.py:32 (re-exported from prompts.py) | Prose description of each action for the model |
+| `apply_decision` | sim_engine/mixin_decisions.py:346 | Server-side effect when an action is chosen |
+| `available_actions` (payload) | sim_engine/mixin_think_job.py:667 | Flag-filtered action list actually offered to an agent this think |
+| `ACTION_LABELS` | viewer/sidebar.js | Human-readable label shown in the viewer (display only, no logic) |
 
 Full action-by-action detail (params, gates, effects) lives in
 [07-actions.md](07-actions.md) — this file only states the invariant.
@@ -89,7 +108,7 @@ registry.
 
 A second, deliberately separate control plane exists alongside the normal
 agent think cycle above: `/control/god/*` (server.py), gated by
-`GOD_MODE_ENABLED` (sim_engine.py, always required) and, when
+`GOD_MODE_ENABLED` (sim_engine/constants.py:644, always required) and, when
 `GOD_AUTH_REQUIRED` is True (default False), a token check (server.py). It never
 enters `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT`/`apply_decision`/
 `available_actions`/`ACTION_LABELS` — the action-sync invariant above does not
@@ -116,18 +135,19 @@ decision action-sync set.
   and [12-ops.md](12-ops.md#optional-phase-8-free-prose-story-compiler).
 
 `GOD_MODE_ENABLED` is also the **first** env-var-backed flag in
-`sim_engine.py` (`os.environ.get("SIM_GOD_MODE", ...)`, read once at import).
-`GOD_AUTH_REQUIRED` is likewise env-backed in sim_engine.py (`SIM_GOD_AUTH`,
+`sim_engine/constants.py:644` (`os.environ.get("SIM_GOD_MODE", ...)`, read once at import).
+`GOD_AUTH_REQUIRED` is likewise env-backed in sim_engine/constants.py:650 (`SIM_GOD_AUTH`,
 default False). Every prior env-var precedent (`SIM_HOST`, `SIM_PORT`,
-`SIM_AGENTS`, `SIM_LOG_RETENTION`) lives only in server.py; sim_engine.py
-previously read no environment state at all. The companion `SIM_GOD_TOKEN`
-env var stays in server.py only, since the token check itself lives there.
+`SIM_AGENTS`, `SIM_LOG_RETENTION`) lives only in server.py; sim_engine's
+`constants.py` previously read no environment state at all. The companion
+`SIM_GOD_TOKEN` env var stays in server.py only, since the token check itself
+lives there.
 
 ## Flag index (complete — 52 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
-`config.flags` (sim_engine.py:10023-10047).
+`config.flags` (sim_engine/mixin_snapshot.py:256-298, built by `_build_snapshot_config`).
 
 | Flag | Default | Echoed to viewer | Owning spec |
 |---|---|---|---|
