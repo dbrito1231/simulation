@@ -65,13 +65,23 @@ index; [docs/REFERENCE.md](../docs/REFERENCE.md) for deep mechanics.
 
 ## Running it
 
+**Supported primary path — Docker** (foreground container, host-native Ollama via
+`SIM_OLLAMA_HOST=host.docker.internal:11434`; bind mounts for `state.db`,
+`simulation/logs/`, `memory_store.json`):
+
 ```
-uv sync
-uv run python simulation/server.py   # http://127.0.0.1:5001
+docker build -t gitserv-sim .
+# pre-create bind targets, then docker run — see CLAUDE.md
 ```
 
-Full run/restart recipe (including the required titled-window restart convention and
-the Ollama dependency): [CLAUDE.md](../CLAUDE.md#commands).
+Full build/run recipe (bind-mount prep, titled-window `docker run`, single-instance
+checks, Ollama on host): [CLAUDE.md](../CLAUDE.md#commands).
+
+**Native fallback:**
+
+```
+uv sync && uv run python simulation/server.py   # http://127.0.0.1:5001
+```
 
 ## Spec index
 

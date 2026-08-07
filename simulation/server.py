@@ -100,7 +100,7 @@ CORS(app)
 # /v1/chat/completions endpoint silently ignores it and would reintroduce the
 # thinking-leak epidemic), so this repo targets it exclusively. See
 # ollama_config.md for the full settings contract.
-OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
+OLLAMA_CHAT_URL = f"http://{os.environ.get('SIM_OLLAMA_HOST', 'localhost:11434')}/api/chat"
 
 # Model routing (which turns go to MODEL_SMART vs MODEL_FAST, and why) is
 # documented in _server/model_routing.py's module docstring -- MODEL_SMART/
