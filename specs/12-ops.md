@@ -15,9 +15,16 @@ for the no-test-suite verification workflow this spec elaborates.
 
 `SessionLogger` (`simulation/_server/logging_session.py:61`) is constructed once at import time —
 `session_logger = SessionLogger(...)` (server.py:269) — so every server
-process (`uv run python simulation/server.py`) gets exactly one session
-folder for its lifetime.
+process (Docker container or `uv run python simulation/server.py`) gets
+exactly one session folder for its lifetime. A new container start or native
+launch is a new server process and therefore a new `session_id` folder (same
+as any server restart today).
 
+- **Docker bind mounts:** when run via the supported Docker path, `simulation/logs/`
+  is bind-mounted to the host repo path — JSONL files land at the same
+  `simulation/logs/<session_id>/` locations as native runs; no `docker cp` is
+  needed for debugging. `state.db` and `memory_store.json` use the same
+  host bind-mount pattern (see [CLAUDE.md](../CLAUDE.md#commands)).
 - **Folder naming**: `simulation/logs/<session_id>/` where `session_id =
   datetime.now().strftime("%Y-%m-%dT%H-%M-%S")` (`simulation/_server/logging_session.py:65-66`), e.g.
   `simulation/logs/2026-07-15T09-30-00/`. The whole `logs/` tree is
@@ -393,9 +400,10 @@ operator can Apply without re-Previewing. Default remains **off**
 ## Debugging workflow
 
 There is **no automated test suite or linter** in this repo. Verification is
-by observation: run the server (own titled window per
-[CLAUDE.md](../CLAUDE.md#commands)), watch the browser render, and read the
-JSONL logs for the current session. `llm.jsonl` is the **primary
+by observation: run the server (Docker foreground container or native — own
+titled window per [CLAUDE.md](../CLAUDE.md#commands)), watch the browser
+render, and read the JSONL logs for the current session on the host under
+`simulation/logs/<session_id>/`. `llm.jsonl` is the **primary
 debugging surface** — every record carries the exact `request` payload, the
 raw `response`, and the resulting `decision`, answering "what did the model
 return, and which fallback (if any) fired" without reproducing the call.

@@ -6,59 +6,65 @@ Inspired by the multi-agent civilization research in Project Sid, kept intention
 
 ## Prerequisites
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) (recommended) or pip
-- [Ollama](https://ollama.com/) running locally with the `sim-smart`/`sim-fast` models created (`uv run python scripts/ollama_setup.py`)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (supported primary run path)
+- [Ollama](https://ollama.com/) running **on the host** (not containerized) with `sim-smart`/`sim-fast` models — run on the host: `uv run python scripts/ollama_setup.py` (see [ollama_config.md](ollama_config.md))
+- Port **5001** free (macOS AirPlay uses port 5000 and can return 403 — this project uses **5001** on purpose)
+- For **native fallback** only: Python 3.12+ and [uv](https://docs.astral.sh/uv/) (also needed for host-side `scripts/` tools either way)
 
-## Setup
+## Run (Docker — supported)
+
+From the repo root:
+
+1. Build the image:
+
+   ```bash
+   docker build -t gitserv-sim .
+   ```
+
+2. **Pre-create bind-mount targets** before the first run. On Docker Desktop Windows, mounting a missing path can create a **directory** instead of a file and break SQLite/JSON:
+
+   ```powershell
+   New-Item -ItemType Directory -Force simulation\logs
+   New-Item -ItemType File -Force simulation\state.db
+   Set-Content simulation\memory_store.json '{}'
+   ```
+
+   Omit `-v` mounts for `state.db-wal` / `state.db-shm` unless those paths already exist as **files** on the host.
+
+3. Confirm at most one server instance (container **or** native Python) — see [CLAUDE.md](CLAUDE.md#commands) for the full check/stop recipe.
+
+4. Start in a titled `cmd` window (foreground; no `-d`, no `--restart`):
+
+   ```powershell
+   Start-Process cmd.exe -ArgumentList '/k', 'title simserver && docker run --name gitserv-sim -p 5001:5001 -e SIM_OLLAMA_HOST=host.docker.internal:11434 -v "%CD%\simulation\state.db:/app/simulation/state.db" -v "%CD%\simulation\logs:/app/simulation/logs" -v "%CD%\simulation\memory_store.json:/app/simulation/memory_store.json" gitserv-sim' -WorkingDirectory $PWD
+   ```
+
+5. Open http://127.0.0.1:5001 in Chrome or Firefox.
+
+Ollama stays host-native; the container reaches it via `SIM_OLLAMA_HOST=host.docker.internal:11434` (host:port only — see [specs/03-cognition.md](specs/03-cognition.md)).
+
+## Run natively (fallback)
 
 ```bash
 uv sync
-```
-
-Or with pip:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install flask flask-cors requests
-```
-
-## Run
-
-1. Start Ollama and run the setup script, which creates/warms the `sim-smart`/`sim-fast` models and sets the required env vars. The server targets native `http://localhost:11434/api/chat`.
-
-   ```bash
-   uv run python scripts/ollama_setup.py
-   ```
-
-   > **Context length vs. parallel slots:** the engine queues up to `MAX_CONCURRENT_LLM`
-   > (3, `simulation/sim_engine/constants.py`) think requests at once, and each request's prompt is
-   > ~3,100 tokens. Ollama divides `num_ctx` across `OLLAMA_NUM_PARALLEL` slots, so if
-   > `num_ctx ÷ parallel` is smaller than that, requests risk the `exceed_context_size_error`
-   > overflow response under load (the app recovers gracefully with a slimmed-prompt retry,
-   > but agents can still lose a turn). `ollama/Modelfile.smart` ships `num_ctx 20480` at
-   > `OLLAMA_NUM_PARALLEL=3` (~6,827 tokens/slot) — `scripts/ollama_setup.py` applies this
-   > canonical target config directly. If you can't raise `num_ctx`, lower
-   > `MAX_CONCURRENT_LLM` in `simulation/sim_engine/constants.py` instead. Full detail:
-   > [specs/03-cognition.md](specs/03-cognition.md).
-
-2. Start the simulation server:
-
-```bash
+uv run python scripts/ollama_setup.py
 uv run python simulation/server.py
 ```
 
-3. Open http://127.0.0.1:5001 in Chrome or Firefox.
+Then open http://127.0.0.1:5001. For the titled-window restart convention and combined single-instance checks, see [CLAUDE.md](CLAUDE.md#commands).
 
-> macOS AirPlay uses port 5000 and can return 403 — this project uses port **5001** on purpose.
+> **Context length vs. parallel slots:** the engine queues up to `MAX_CONCURRENT_LLM` (3) think requests at once (~3,100 tokens each). `scripts/ollama_setup.py` applies the canonical Ollama config (`num_ctx` ÷ parallel must cover each slot). Full detail: [specs/03-cognition.md](specs/03-cognition.md), [ollama_config.md](ollama_config.md).
 
-Each server run writes session logs under `simulation/logs/` (gitignored).
+## Logs and state
+
+`state.db`, `memory_store.json`, and `simulation/logs/` are bind-mounted to the same host paths in Docker — no `docker cp` needed for debugging. Each new server process (container start or native launch) creates a new session folder under `simulation/logs/<timestamp>/` (gitignored). See [specs/12-ops.md](specs/12-ops.md).
 
 ## Project layout
 
 | Path | Purpose |
 |------|---------|
+| `Dockerfile` | Single-container image for the Flask server (host-native Ollama via `SIM_OLLAMA_HOST`) |
+| `.dockerignore` | Build context exclusions (logs, `state.db`, etc.) |
 | `simulation/sim_engine/*.py` | The engine package — all world state, 30/s tick loop, `apply_decision`, persistence (`core.py` + `constants.py`/`persistence.py`/`helpers.py` + 22 `mixin_*.py` topic files) |
 | `simulation/server.py` | Flask API entry point — every route, `DECISION_ACTIONS`/`DECISION_SCHEMA`, prompt building, Ollama integration |
 | `simulation/_server/*.py` | Non-route helper modules server.py imports from — decision/blueprint/role/sprite validation, prompt formatting, memory store, session logging, model routing |

@@ -28,20 +28,42 @@ Manual entry/resume: type **`/loop-in-devs`** for the full loop, or **`/orchestr
 
 ## Commands
 
+**Supported primary path — Docker** (foreground container in a titled `cmd` window; Ollama stays host-native):
+
 ```bash
-uv sync                              # install deps (flask, flask-cors, requests)
-uv run python simulation/server.py   # start server, then open http://127.0.0.1:5001
+docker build -t gitserv-sim .   # from repo root
 ```
 
-- **Restarting/starting the server:** always run it in its own visible, titled `cmd` window (never backgrounded/detached) — from PowerShell:
+Pre-create bind-mount targets before first run (empty `simulation/state.db` file, `simulation/memory_store.json` as `{}`, `simulation/logs/` directory). On Docker Desktop Windows, a missing mount path can become a **directory** and break SQLite/JSON. Omit `state.db-wal` / `state.db-shm` mounts unless those paths already exist as **files** on the host.
+
+```powershell
+Start-Process cmd.exe -ArgumentList '/k', 'title simserver && docker run --name gitserv-sim -p 5001:5001 -e SIM_OLLAMA_HOST=host.docker.internal:11434 -v "%CD%\simulation\state.db:/app/simulation/state.db" -v "%CD%\simulation\logs:/app/simulation/logs" -v "%CD%\simulation\memory_store.json:/app/simulation/memory_store.json" gitserv-sim' -WorkingDirectory $PWD
+```
+
+No `-d`, no `--restart` (provisional — see `.claude/plans/docker-phase3-soak-notes.md`). Then open `http://127.0.0.1:5001`.
+
+**Native fallback** (when not using Docker):
+
+```bash
+uv sync
+uv run python simulation/server.py   # then open http://127.0.0.1:5001
+```
+
+Titled-window native start (optional):
+
+```powershell
+Start-Process cmd.exe -ArgumentList '/k', 'title simserver && uv run python simulation\server.py' -WorkingDirectory $PWD
+```
+
+- **Single-instance rule:** multiple server instances (Docker container **or** native `simulation/server.py`) have repeatedly ended up running at once, all fighting over port 5001 and `state.db`. As the **last step of every implementation task** that starts, restarts, or touches the server, verify **at most one** is running before reporting done:
   ```powershell
-  Start-Process cmd.exe -ArgumentList '/k', 'title simserver && cd /d C:\Users\dbadmin\Desktop\GitServ\simulation && uv run python simulation\server.py' -WorkingDirectory 'C:\Users\dbadmin\Desktop\GitServ\simulation'
+  docker ps -a --filter name=gitserv-sim
+  Get-CimInstance Win32_Process -Filter "name='python.exe'" | Where-Object { $_.CommandLine -match 'simulation.server' }
   ```
-  Kill any prior instance first (`pkill -f "simulation/server.py"` from Bash, or close the `simserver` window).
-- **Single-instance rule:** multiple `simulation/server.py` processes have repeatedly ended up running at once (stale terminal, forgotten restart, etc.), all fighting over port 5001 and `state.db`. As the **last step of every implementation task** that starts, restarts, or touches the server, verify only one instance is running before reporting done — e.g. `pgrep -fa "simulation/server.py"` (Bash) or `Get-CimInstance Win32_Process -Filter "name='python.exe'" | Where-Object { $_.CommandLine -match 'simulation.server' }` (PowerShell) — and kill any extras, keeping the most recently started one. Note `uv run` shows a wrapper + interpreter pair; that parent/child pair is **one** instance.
-- Ollama must be running at `http://localhost:11434` with the `sim-smart`/`sim-fast` models loaded (native `/api/chat`); canonical loader is `uv run python scripts/ollama_setup.py` (sets env vars, creates/warms both models, verifies dual residency — see [ollama_config.md](ollama_config.md)). Without Ollama, decisions fall back to `rest` but the server stays up.
+  Stop an existing container: `docker stop gitserv-sim && docker rm gitserv-sim`. Kill extra native processes (Bash: `pgrep -fa "simulation/server.py"`; close the `simserver` window). Note `uv run` shows a wrapper + interpreter pair; that parent/child pair is **one** native instance.
+- Ollama must be running on the **host** at `http://localhost:11434` with the `sim-smart`/`sim-fast` models loaded (native `/api/chat`); canonical loader is `uv run python scripts/ollama_setup.py` (sets env vars, creates/warms both models, verifies dual residency — see [ollama_config.md](ollama_config.md)). In Docker, the container uses `SIM_OLLAMA_HOST=host.docker.internal:11434`. Without Ollama, decisions fall back to `rest` but the server stays up.
 - Port is **5001** on purpose — open `http://127.0.0.1:5001`, never `index.html` as a file.
-- **No test suite, linter, or build step.** Verify by running the server, watching the browser + JSONL logs. Deterministic smokes (no Ollama needed): `uv run python scripts/sid_parity_smoke.py` and `uv run python scripts/path1_smoke.py`. `scripts/` also holds targeted smokes/soaks per subsystem (god mode, blueprints, daily council, hunting, log retention, succession, town integrity) — run the one that covers the surface you touched.
+- **No test suite, linter, or build step.** Verify by running the server, watching the browser + JSONL logs. Deterministic smokes (no Ollama needed; run on the **host** with `uv run`): `uv run python scripts/sid_parity_smoke.py` and `uv run python scripts/path1_smoke.py`. `scripts/` also holds targeted smokes/soaks per subsystem (god mode, blueprints, daily council, hunting, log retention, succession, town integrity) — run the one that covers the surface you touched.
 - Never commit credentials, `simulation/logs/`, or `simulation/state.db`.
 
 ## Architecture

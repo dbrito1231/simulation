@@ -1,0 +1,10 @@
+.venv/
+.git/
+simulation/logs/
+simulation/state.db*
+simulation/memory_store.json*
+simulation/_vendor/
+docs/archive/
+scripts/out/
+__pycache__/
+*.pyc
