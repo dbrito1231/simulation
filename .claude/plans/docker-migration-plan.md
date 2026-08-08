@@ -1,6 +1,6 @@
 # Docker migration plan
 
-Status: **planning only — no Docker environment has been created.** This document and its companion Gordon brief are the deliverable; building the actual `Dockerfile`/compose files is a separate, future, user-approved step.
+Status: **Phases 1–4 complete on PR #14** (`worktree-docker-migration`). `Dockerfile`, `.dockerignore`, `SIM_OLLAMA_HOST`, and docs/spec cutover are landed. **D8 (`--restart` policy) remains provisional** — deferred to soak evidence per [docker-phase3-soak-notes.md](docker-phase3-soak-notes.md).
 
 **Worktree/branch:** whoever initiates this plan creates the worktree and branch — it is deliberately *not* created as part of authoring the plan. Do all implementation phases there, never on `main`.
 
@@ -116,7 +116,7 @@ Explicit limits Gordon's output must respect (also stated in the brief):
 
 ## 5. Phases
 
-This plan stops at the end of Phase 0. Phases 1+ are listed so the next approved step is unambiguous, but **none of them are authorized by this task** — each needs its own approval and its own AGENTS.md loop pass.
+This plan originally stopped at Phase 0; Phases 1–4 have since shipped on this branch. Each phase below records what was done; D8 restart policy is the only deliberate deferral still open.
 
 Every phase below follows the manual-step policy in §8: the agent doing the work attempts each step itself first and only asks the user to act where the step is categorically outside what the agent can do.
 
@@ -124,10 +124,10 @@ Every phase below follows the manual-step policy in §8: the agent doing the wor
 |---|---|---|---|---|
 | **Phase 0 — Plan** (this task) | Decisions, prerequisites, repo review, KISS boundaries, Gordon brief | **Complete — this deliverable** | Everything | Answered the D1–D8 decisions |
 | **Phase 0.5 — Worktree/branch** | Create the isolated worktree + branch this migration runs in | **Complete** — `worktree-docker-migration` at `.claude/worktrees/docker-migration` | Created directly (`EnterWorktree`) — reversing the plan's original "user creates this" note, per explicit later instruction | Told the agent to do it instead |
-| Phase 1 — Add `SIM_OLLAMA_HOST` (D1, D6) | Full AGENTS.md loop: update owning spec ([specs/03-cognition.md](../../specs/03-cognition.md)) + `ollama_config.md`'s "Related sim knobs" entry, then the one-line `simulation/server.py` change from §2.1; verify the native run is unaffected with no env var set. **Blocks Phase 2.** | Not started | Spec edits, code edit, implementer + reviewer dispatch, verification | Approve the phase result (SUCCESS/FAIL per AGENTS.md) |
-| Phase 2 — Gordon-assisted scaffold | Run `docker ai` using `docker-gordon-brief.md` as the instruction set; review every proposed file before finalizing. Gordon justifies its `compose.yaml` call (D3) | Not started | Invoke `docker ai "<brief>"` directly (confirmed scriptable: `docker ai --help` shows a one-shot `docker ai "<prompt>"` form, not only an interactive REPL); check proposed files against the 15 constraints | Confirm before the agent spends Docker AI credits by invoking Gordon; review the final diff if the agent flags anything ambiguous |
-| Phase 3 — Manual verification + soak | Build image; run container (foreground, titled window, per D7) with the bind mounts/port/env from §1 and §2.3; hit `http://127.0.0.1:5001`; confirm host Ollama reachable via `host.docker.internal:11434`; confirm `state.db` persists across restart; confirm exactly one instance running. **Then soak it under normal 24/7 use and record whether a `--restart` policy is warranted (D8) — this decision must be written down, not left implicit.** | Not started | `docker build`/`docker run`, all verification checks, stopping/restarting the native server around the test window, scheduling periodic soak check-ins and logging results | **Explicit go-ahead before the live 24/7 sim is stopped** — the agent will not kill it unprompted |
-| Phase 4 — Cutover + SDD sync (D4, D5, mandatory) | Docker becomes the supported run path *while the native path stays documented as a fallback*: rewrite `README.md` setup/run with both paths clearly ranked; update `CLAUDE.md` Commands — the titled-window restart recipe becomes a foreground `docker run` in a titled window (D7), and the single-instance check must cover container **and** native; update owning specs — at minimum [specs/00-overview.md](../../specs/00-overview.md) "Running it" and [specs/12-ops.md](../../specs/12-ops.md) for log paths under a bind mount | Not started | Everything — doc/spec rewrite is a normal implementer task | Review |
+| Phase 1 — Add `SIM_OLLAMA_HOST` (D1, D6) | Full AGENTS.md loop: update owning spec ([specs/03-cognition.md](../../specs/03-cognition.md)) + `ollama_config.md`'s "Related sim knobs" entry, then the one-line `simulation/server.py` change from §2.1; verify the native run is unaffected with no env var set. **Blocks Phase 2.** | **Complete** | Spec edits, code edit, implementer + reviewer dispatch, verification | Approve the phase result (SUCCESS/FAIL per AGENTS.md) |
+| Phase 2 — Gordon-assisted scaffold | Run `docker ai` using `docker-gordon-brief.md` as the instruction set; review every proposed file before finalizing. Gordon justifies its `compose.yaml` call (D3) | **Complete** — `Dockerfile` + `.dockerignore` landed; no `compose.yaml` (plain `docker run` sufficient per D3) | Invoke `docker ai "<brief>"` directly (confirmed scriptable: `docker ai --help` shows a one-shot `docker ai "<prompt>"` form, not only an interactive REPL); check proposed files against the 15 constraints | Confirm before the agent spends Docker AI credits by invoking Gordon; review the final diff if the agent flags anything ambiguous |
+| Phase 3 — Manual verification + soak | Build image; run container (foreground, titled window, per D7) with the bind mounts/port/env from §1 and §2.3; hit `http://127.0.0.1:5001`; confirm host Ollama reachable via `host.docker.internal:11434`; confirm `state.db` persists across restart; confirm exactly one instance running. **Then soak it under normal 24/7 use and record whether a `--restart` policy is warranted (D8) — this decision must be written down, not left implicit.** | **Complete** (soak ongoing; D8 restart policy still provisional — see [docker-phase3-soak-notes.md](docker-phase3-soak-notes.md)) | `docker build`/`docker run`, all verification checks, stopping/restarting the native server around the test window, scheduling periodic soak check-ins and logging results | **Explicit go-ahead before the live 24/7 sim is stopped** — the agent will not kill it unprompted |
+| Phase 4 — Cutover + SDD sync (D4, D5, mandatory) | Docker becomes the supported run path *while the native path stays documented as a fallback*: rewrite `README.md` setup/run with both paths clearly ranked; update `CLAUDE.md` Commands — the titled-window restart recipe becomes a foreground `docker run` in a titled window (D7), and the single-instance check must cover container **and** native; update owning specs — at minimum [specs/00-overview.md](../../specs/00-overview.md) "Running it" and [specs/12-ops.md](../../specs/12-ops.md) for log paths under a bind mount | **Complete** | Everything — doc/spec rewrite is a normal implementer task | Review |
 
 **Phase 4 is the largest documentation change in this plan.** D4 means the run instructions in `README.md`, `CLAUDE.md`, and `specs/00-overview.md` all currently describe a path that will no longer be primary. Per the SDD contract, those updates ship *with* the change, not after it.
 
@@ -139,11 +139,11 @@ Every phase below follows the manual-step policy in §8: the agent doing the wor
 |---|---|
 | Prerequisites identified and stated | §1 (9 items, including the two added by D1/D4) |
 | Repo review to identify Docker-migratable pieces | §2, including the blocking `OLLAMA_CHAT_URL` gap found during review (§2.1) |
-| Gordon AI utilized to create the environment | §3; execution deferred to Phase 2 — not run yet |
+| Gordon AI utilized to create the environment | §3; executed in Phase 2 — `Dockerfile` + `.dockerignore` landed |
 | `.md` file for Gordon AI to build the environment | [docker-gordon-brief.md](docker-gordon-brief.md) |
 | KISS at all times | §4, and reflected throughout §2/§5 |
 | Own worktree and branch | `worktree-docker-migration` at `.claude/worktrees/docker-migration` — not created during planning (Phase 0), created afterward once the user asked the agent to do it (Phase 0.5) |
-| No Docker environment created | No `Dockerfile`/`compose.yaml`/`.dockerignore` written by this task — only these two planning `.md` files |
+| Docker environment created | `Dockerfile` + `.dockerignore` at repo root (Phase 2); docs/spec cutover in Phase 4 |
 | No vague Gordon brief | Brief specifies exact paths, port, bind mounts, the exact env var names and values, the §2.1 precondition, run-window shape, and explicit non-goals |
 | No excessive resource hogs | Ollama excluded from containerization (D2, §2.4, §4); single-container/no-orchestration design (§4); no restart policy (D8) |
 | No overengineering | §4 KISS boundaries; D3 forces Gordon to justify compose rather than add it by default; D8 defers the restart policy to evidence rather than adding it speculatively |
@@ -153,10 +153,10 @@ Every phase below follows the manual-step policy in §8: the agent doing the wor
 
 All decisions raised during planning (D1–D8) are settled. Two items are deliberately deferred to evidence rather than left unanswered:
 
-1. **`--restart` policy** — deferred to the Phase 3 soak by D8. Must be explicitly recorded when decided.
-2. **Whether `compose.yaml` earns its place** — delegated to Gordon by D3, subject to reviewer approval in Phase 2.
+1. **`--restart` policy** — deferred to the Phase 3 soak by D8. Must be explicitly recorded when decided. **Still open** — soak notes record provisional "no restart" pending more evidence.
+2. **Whether `compose.yaml` earns its place** — delegated to Gordon by D3, subject to reviewer approval in Phase 2. **Resolved:** Gordon skipped compose; plain `docker run` is the supported path.
 
-Nothing else in this plan requires a user decision before Phase 1 can begin.
+Nothing else in this plan requires a user decision before follow-up work (e.g. D8 closure) can proceed.
 
 ## 8. Manual step policy
 

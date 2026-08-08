@@ -680,8 +680,11 @@ These live in code; Phase 2 has landed, so they now target Ollama:
 - `INVENTION_MAX_TOKENS = 1024`, `INVENTION_TEMPERATURE = 0.6` —
   `simulation/server.py`
 - `SIM_OLLAMA_HOST` (host:port, default `localhost:11434`) composes
-  `OLLAMA_CHAT_URL` as `http://{SIM_OLLAMA_HOST}/api/chat` (path fixed) /
-  `is_context_overflow_error` — `simulation/server.py` (successor to the
+  `OLLAMA_CHAT_URL` as `http://{SIM_OLLAMA_HOST}/api/chat` (path fixed).
+  Import-time validation in `simulation/server.py` rejects empty/whitespace,
+  schemes (`://`), paths (`/`), auth (`@`), or a missing port — raises
+  `ValueError` on misconfiguration (fail-fast, same class as bad `SIM_PORT`).
+  Also: `is_context_overflow_error` — `simulation/server.py` (successor to the
   former `LM_STUDIO_URL` / error-string-sniffing call sites; see the plan's
   Phase 2 for the cutover this replaced)
 

@@ -20,7 +20,10 @@ catalog — not repeated here).
 > procedure). This spec documents what `simulation/server.py` sends: native
 > `POST …/api/chat` (`OLLAMA_CHAT_URL`), `stream:false`. Host:port comes from
 > `SIM_OLLAMA_HOST` (default `localhost:11434`); `/api/chat` is fixed in code
-> (not configurable). Unset env → `http://localhost:11434/api/chat`.
+> (not configurable). Unset env → `http://localhost:11434/api/chat`. At import,
+> `server.py` validates `SIM_OLLAMA_HOST` is **host:port only** (rejects empty/
+> whitespace, schemes, paths, or a missing port) and raises `ValueError` on
+> misconfiguration — same fail-fast class as a bad `SIM_PORT`.
 > `MODEL_SMART = "sim-smart"` (qwen3.5 9B, `num_ctx=20480`) and
 > `MODEL_FAST = "sim-fast"` (`llama3.2:3b`, `num_ctx=4096`) are distinct
 > models split **by workload kind, not by decision stakes**: ALL decision

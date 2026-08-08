@@ -1,7 +1,8 @@
 # GitServ simulation — single Flask container (host-native Ollama via SIM_OLLAMA_HOST).
 FROM python:3.12-slim
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# uv 0.9.5 — matches host toolchain; pin tag for reproducible builds.
+COPY --from=ghcr.io/astral-sh/uv:0.9.5 /uv /uvx /bin/
 
 WORKDIR /app
 
@@ -26,7 +27,7 @@ EXPOSE 5001
 #   Get-CimInstance Win32_Process -Filter "name='python.exe'" | Where-Object { $_.CommandLine -match 'simulation.server' }
 # Stop an existing container: docker stop gitserv-sim && docker rm gitserv-sim
 #
-# Start-Process cmd.exe -ArgumentList '/k', 'title simserver && docker run --name gitserv-sim -p 5001:5001 -e SIM_OLLAMA_HOST=host.docker.internal:11434 -v "%CD%\simulation\state.db:/app/simulation/state.db" -v "%CD%\simulation\logs:/app/simulation/logs" -v "%CD%\simulation\memory_store.json:/app/simulation/memory_store.json" gitserv-sim' -WorkingDirectory 'C:\Users\dbadmin\Desktop\GitServ\simulation'
+# Start-Process cmd.exe -ArgumentList '/k', 'title simserver && docker run --name gitserv-sim -p 5001:5001 -e SIM_OLLAMA_HOST=host.docker.internal:11434 -v "%CD%\simulation\state.db:/app/simulation/state.db" -v "%CD%\simulation\logs:/app/simulation/logs" -v "%CD%\simulation\memory_store.json:/app/simulation/memory_store.json" gitserv-sim' -WorkingDirectory $PWD
 #
 # Optional pass-through (defaults in server.py): -e SIM_HOST=0.0.0.0 -e SIM_PORT=5001 -e SIM_AGENTS=12
 

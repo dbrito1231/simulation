@@ -37,7 +37,7 @@ docker build -t gitserv-sim .   # from repo root
 Pre-create bind-mount targets before first run (empty `simulation/state.db` file, `simulation/memory_store.json` as `{}`, `simulation/logs/` directory). On Docker Desktop Windows, a missing mount path can become a **directory** and break SQLite/JSON. Omit `state.db-wal` / `state.db-shm` mounts unless those paths already exist as **files** on the host.
 
 ```powershell
-Start-Process cmd.exe -ArgumentList '/k', 'title simserver && docker run --name gitserv-sim -p 5001:5001 -e SIM_OLLAMA_HOST=host.docker.internal:11434 -v "%CD%\simulation\state.db:/app/simulation/state.db" -v "%CD%\simulation\logs:/app/simulation/logs" -v "%CD%\simulation\memory_store.json:/app/simulation/memory_store.json" gitserv-sim' -WorkingDirectory 'C:\Users\dbadmin\Desktop\GitServ\simulation'
+Start-Process cmd.exe -ArgumentList '/k', 'title simserver && docker run --name gitserv-sim -p 5001:5001 -e SIM_OLLAMA_HOST=host.docker.internal:11434 -v "%CD%\simulation\state.db:/app/simulation/state.db" -v "%CD%\simulation\logs:/app/simulation/logs" -v "%CD%\simulation\memory_store.json:/app/simulation/memory_store.json" gitserv-sim' -WorkingDirectory $PWD
 ```
 
 No `-d`, no `--restart` (provisional — see `.claude/plans/docker-phase3-soak-notes.md`). Then open `http://127.0.0.1:5001`.
@@ -52,7 +52,7 @@ uv run python simulation/server.py   # then open http://127.0.0.1:5001
 Titled-window native start (optional):
 
 ```powershell
-Start-Process cmd.exe -ArgumentList '/k', 'title simserver && cd /d C:\Users\dbadmin\Desktop\GitServ\simulation && uv run python simulation\server.py' -WorkingDirectory 'C:\Users\dbadmin\Desktop\GitServ\simulation'
+Start-Process cmd.exe -ArgumentList '/k', 'title simserver && uv run python simulation\server.py' -WorkingDirectory $PWD
 ```
 
 - **Single-instance rule:** multiple server instances (Docker container **or** native `simulation/server.py`) have repeatedly ended up running at once, all fighting over port 5001 and `state.db`. As the **last step of every implementation task** that starts, restarts, or touches the server, verify **at most one** is running before reporting done:

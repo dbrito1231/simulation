@@ -100,7 +100,36 @@ CORS(app)
 # /v1/chat/completions endpoint silently ignores it and would reintroduce the
 # thinking-leak epidemic), so this repo targets it exclusively. See
 # ollama_config.md for the full settings contract.
-OLLAMA_CHAT_URL = f"http://{os.environ.get('SIM_OLLAMA_HOST', 'localhost:11434')}/api/chat"
+
+
+def _resolve_ollama_host():
+    """Return SIM_OLLAMA_HOST as host:port only; fail fast on misconfiguration."""
+    raw = os.environ.get("SIM_OLLAMA_HOST")
+    if raw is None:
+        return "localhost:11434"
+    host = raw.strip()
+    if not host:
+        raise ValueError(
+            "SIM_OLLAMA_HOST must be host:port (e.g. localhost:11434), "
+            "got empty/whitespace"
+        )
+    if "://" in host or "/" in host or "@" in host:
+        raise ValueError(
+            f"SIM_OLLAMA_HOST must be host:port only (no scheme/path), got: {raw!r}"
+        )
+    if ":" not in host:
+        raise ValueError(
+            f"SIM_OLLAMA_HOST must include a port (host:port), got: {raw!r}"
+        )
+    hostname, _, port = host.rpartition(":")
+    if not hostname or not port:
+        raise ValueError(
+            f"SIM_OLLAMA_HOST must be host:port, got: {raw!r}"
+        )
+    return host
+
+
+OLLAMA_CHAT_URL = f"http://{_resolve_ollama_host()}/api/chat"
 
 # Model routing (which turns go to MODEL_SMART vs MODEL_FAST, and why) is
 # documented in _server/model_routing.py's module docstring -- MODEL_SMART/
