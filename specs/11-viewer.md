@@ -391,7 +391,7 @@ earlier one, never the reverse.
 | 2 | `sprites/tiles.js` | Color palette `C`, path-blend tiles, `fillRectWithTile(s)`, all terrain `TILE_*` grids, ocean tile builder |
 | 3 | `sprites/props.js` | Starter-world decor: trees (`TREE_GRIDS`, `drawTree`/`drawTreeStump`), decorative house/market-stall/cave-entrance, crops, fences, dock, well, rocks |
 | 4 | `sprites/structures.js` | Agent-built `STRUCTURE_GRIDS`, `getStructureGrid` resolution, wear/ruin rendering, forge smoke, weather-particle and activity-dust helpers |
-| 5 | `sprites/agents.js` | Agent sprite palettes/grids (`AGENT_SPRITES`), accessories, `tombstoneSprite`, `BELIEF_TINTS`, `drawAgentSprite` |
+| 5 | `sprites/agents.js` | Role-keyed 24×32 generator (`ROLE_SPRITE_DEFS`, `_roleSpriteCache`), legacy name grids (`AGENT_SPRITES`), accessories, `tombstoneSprite`, `BELIEF_TINTS`, `drawAgentSprite` |
 | 6 | `sprites/world.js` | `KIND_TILE`, `STARTER_DISTRICTS_JS`, `drawStarterProps`, district terrain/tile overlays, `drawTiledWorld` |
 | 7 | `sprites/wildlife.js` | Ambient wildlife: PNG-sheet blit, canvas-helper, and procedural-grid fallbacks |
 | 8 | `sprites/shipments.js` | Goods-in-motion cart/boat sprites |
@@ -401,15 +401,19 @@ earlier one, never the reverse.
   (`spriteSeason`/`seasonalAgentAccentsEnabled`, sprites/core.js) and a
   per-season tree-grid cache (`TREE_GRIDS`, sprites/props.js, built once per
   season).
-- **Agent sprites**: `buildAgentSprite(palette, standRows, walkRows)`
-  (sprites/agents.js) composes stand + walk-cycle frames per agent palette;
-  `genericAgentSprite(agent)` (sprites/agents.js) is the deterministic
-  fallback. Living agents tint by dominant belief id via
-  `BELIEF_TINTS[beliefIds[0]]` (sprites/agents.js). Deceased/buried
-  agents render a cached `tombstoneSprite(agent)`
-  (sprites/agents.js, `_tombstoneSpriteCache` keyed by name) instead of
-  the living sprite (`drawAgentSprite`, sprites/agents.js), color-derived and
-  deterministic per agent so repeat draws don't regenerate the grid.
+- **Agent sprites**: living agents resolve in `drawAgentSprite`
+  (sprites/agents.js) in order: (1) `tombstoneSprite(agent)` when
+  `deceased && buried` (16×16 grid, scale 2 → 32px); (2) role-keyed sprite via
+  `ROLE_SPRITE_DEFS[agent.role]` + lazy `_roleSpriteCache` per role and
+  stand/walk frame (24×32 generator ported from Claude Design, hue 0, scale 1 →
+  32px); (3) `AGENT_SPRITES[agent.name]`; (4) `genericAgentSprite(agent)`.
+  Steps 3–4 use the legacy 16×16 ASCII body at scale 2. Role sprites suppress
+  the `ACCESSORIES` overlay (gear is baked in); name/generic paths still draw
+  accessories. Walk motion spreads leg columns ±1px on the walk frame (same
+  cadence as before). Seasonal accents (`drawSeasonalAgentAccent`) and belief
+  tints (`BELIEF_TINTS[beliefIds[0]]`) position from the drawn grid's real
+  width/height so they land on head/neck at both scales. `genericAgentSprite`
+  and `tombstoneSprite` stay cached per agent name.
 - **Structure grid resolution order** — `getStructureGrid(structure)`
   (sprites/structures.js), in order: (1) canonical level-30 house
   (`type === "house" && level >= 30` → `LEVEL30_HOUSE_GRID` always); (2)
