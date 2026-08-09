@@ -1766,5 +1766,3 @@ class _CouncilGrowthMixin:
         # attempt so the cooldown advances normally.
         c["lastRuleAttemptFrame"] = self.frameTick
 
-        self._maybe_trigger_schism()
-

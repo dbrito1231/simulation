@@ -1717,7 +1717,7 @@ COUNCIL_DIGEST_PROMPT_ENTRIES = 2    # newest compact Daily Council records per 
 CHRONICLE_MILESTONE_KINDS = frozenset({
     "death", "burial", "election", "belief_founded", "belief_adoption",
     "meme_mutation", "knowledge_preserved", "disaster", "district_founded",
-    "emergency_measure",
+    "emergency_measure", "schism",
     # Sovereign God mode (Phase 2): a proclamation's chronicle entry. Viewer
     # rendering of this kind is out of scope until the later Divine Console
     # phase, but the milestone-set membership itself is data-shape only.

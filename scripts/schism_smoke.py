@@ -218,6 +218,13 @@ def test_flag_on_scripted_schism():
 
         assert_true(engine._execute_schism(cluster), "schism secession must succeed")
 
+        raw_chronicle = c.get("chronicle") or []
+        assert_true(any(e.get("kind") == "schism" for e in raw_chronicle),
+                    "schism must be recorded in civilization chronicle ring")
+        projected = engine._chronicle_snapshot()
+        assert_true(any(e.get("kind") == "schism" for e in projected),
+                    "schism must appear in /state chronicle projection")
+
         child_sid = next(s["id"] for s in c["settlements"] if s["id"] != home)
         for agent in rebels:
             assert_true(engine._settlement_id_for_agent(agent) == child_sid,

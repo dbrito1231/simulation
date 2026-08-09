@@ -644,7 +644,9 @@ First matching `(r, b)` in sorted rule-id / belief-id order wins.
 non-parent settlement). It deep-copies the parent's enacted rules into the child
 settlement bucket, forks `beliefRegistry` / `memeTexts` entries for beliefs the
 cluster holds, migrates agents' `currentDistrict` (and position) into the child
-settlement, and logs activity + chronicle kind **`schism`**. Inter-settlement
+settlement, and logs activity + chronicle kind **`schism`** (included in
+`CHRONICLE_MILESTONE_KINDS`, so `/state`'s `chronicle` projection surfaces it
+when `CHRONICLE_ENABLED` is on). Inter-settlement
 interaction remains treaty / caravan / tariff only (no war).
 
 **Elder:** `_start_succession_election(settlement_id=child)` opens global
@@ -696,11 +698,13 @@ ring. It never creates a second event store and never changes prompt history.
 The projection admits only the named milestone kinds `death`, `burial`,
 `election`, `belief_founded`, `belief_adoption`, `meme_mutation`,
 `knowledge_preserved`, `disaster`, `district_founded`, `emergency_measure`,
-and `divine`; routine gather, talk, craft, and build activity remains
-exclusively in `activity`. `disaster` entries are pushed unconditionally from
-`_maybe_disaster` (see [08](08-systems-economy.md)); `district_founded`
+`schism`, and `divine`; routine gather, talk, craft, and build activity
+remains exclusively in `activity`. `disaster` entries are pushed unconditionally
+from `_maybe_disaster` (see [08](08-systems-economy.md)); `district_founded`
 entries are pushed from `_found_district` only when `FOUNDING_EVENTS_ENABLED`
-is True (see [05](05-world.md)). `CHRONICLE_CAP` was raised from 20 to 100
+is True (see [05](05-world.md)); `schism` entries are pushed from
+`_execute_schism` when `SCHISM_ENABLED` and `CULTURE_ENABLED` are on (see
+[§schism_enabled](#schism_enabled)). `CHRONICLE_CAP` was raised from 20 to 100
 (living-ecosystem Phase 2, item 0) after live verification showed a
 storm-heavy stretch (`DISASTER_PROB` fires roughly every 100 simulated
 minutes) evicting real history (deaths/elections/beliefs) within about a day
