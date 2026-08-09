@@ -326,6 +326,14 @@ class _PersistenceMixin:
                         civ["resourceRegistry"].setdefault("coin", dict(BASE_RESOURCES["coin"]))
                     for s in (civ.get("structures") or []):
                         s.setdefault("homeOf", None)
+                if CONTRACTS_ENABLED:
+                    # Contracts & escrow: additive setdefault for old saves.
+                    civ.setdefault("contracts", [])
+                    civ.setdefault("contractEscrow", 0)
+                    civ.setdefault("nextContractId", 1)
+                    civ.setdefault("contractsOpened", 0)
+                    civ.setdefault("contractsFulfilled", 0)
+                    civ.setdefault("contractDefaults", 0)
                 if STRUCTURE_UPGRADES_ENABLED:
                     for s in (civ.get("structures") or []):
                         s.setdefault("level", 1)

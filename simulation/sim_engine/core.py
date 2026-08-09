@@ -560,6 +560,14 @@ class SimEngine(
             # deliberately NOT part of this dict -- it lives only in
             # self._god_requests, in-memory, never persisted.
             "godState": None,
+            # Contracts & escrow (CONTRACTS_ENABLED): open offers + engine-held
+            # coin. Persisted wholesale; restore setdefaults empty containers.
+            "contracts": [],
+            "contractEscrow": 0,
+            "nextContractId": 1,
+            "contractsOpened": 0,
+            "contractsFulfilled": 0,
+            "contractDefaults": 0,
         }
         self._effect_period_fired = 0
         self._module_period_runs = 0

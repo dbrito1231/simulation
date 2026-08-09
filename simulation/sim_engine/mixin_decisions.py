@@ -358,6 +358,25 @@ class _DecisionsMixin:
                 {"intervened": bool(god.get("intervened")),
                  "active_effects": len(god.get("activeEvents") or []),
                  "rejected_commands": self._god_rejected_count})
+        if CONTRACTS_ENABLED:
+            c = self.civilization
+            opened = c.get("contractsOpened", 0)
+            fulfilled = c.get("contractsFulfilled", 0)
+            defaults = c.get("contractDefaults", 0)
+            settled = fulfilled + defaults
+            default_rate = (defaults / settled) if settled else 0.0
+            self.lastBenchmarks["contractsOpened"] = opened
+            self.lastBenchmarks["contractsFulfilled"] = fulfilled
+            self.lastBenchmarks["contractDefaultRate"] = round(default_rate, 3)
+            self._log_benchmark(
+                "contracts_opened", opened,
+                {"open": len(c.get("contracts") or []),
+                 "escrow": c.get("contractEscrow", 0)})
+            self._log_benchmark(
+                "contracts_fulfilled", fulfilled, {"defaults": defaults})
+            self._log_benchmark(
+                "contract_default_rate", round(default_rate, 3),
+                {"opened": opened, "fulfilled": fulfilled, "defaults": defaults})
         try:
             flush = self.d.get("flush_benchmarks")
             if flush:
@@ -1150,6 +1169,18 @@ class _DecisionsMixin:
         elif action == "deliver_caravan":
             summary = self._deliver_caravan_action(agent, decision)
 
+        elif action == "offer_contract":
+            if not CONTRACTS_ENABLED:
+                summary = f"{agent['name']} cannot offer a contract — contracts are disabled"
+            else:
+                summary = self._apply_offer_contract(agent, decision)
+
+        elif action == "accept_contract":
+            if not CONTRACTS_ENABLED:
+                summary = f"{agent['name']} cannot accept a contract — contracts are disabled"
+            else:
+                summary = self._apply_accept_contract(agent, decision)
+
         elif action == "council_speak":
             summary = self._council_speak(agent, decision)
 
@@ -1221,6 +1252,8 @@ class _DecisionsMixin:
                       "approve_blueprint", "reject_blueprint", "sage_review_blueprint"):
             self._mark_civ_dirty("stockpile", "districtProjects", "rules", "pendingRules",
                                  "pendingBlueprints", "level")
+        if CONTRACTS_ENABLED and action in ("offer_contract", "accept_contract"):
+            self._mark_civ_dirty("contracts", "contractEscrow", "stockpile")
         return summary
 
     def _resolve_talk_target(self, agent, decision):

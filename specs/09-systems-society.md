@@ -642,6 +642,23 @@ disagreement resolves conservatively to `rival`. The browser uses this
 authoritative projection only to render nearby relationship cues; it does not
 derive or mutate social state.
 
+## Contracts — default relationship consequence (`CONTRACTS_ENABLED`)
+
+When an **accepted** contract expires without delivery, `_default_contract`
+refunds escrow to the offerer and applies the same one-sided relationship
+shape `confront_agent` uses on contact:
+
+```text
+if offerer.relationships[acceptor] != "rival":
+    offerer.relationships[acceptor] = "rival"
+```
+
+No relationship hit fires on an **unaccepted** open contract that simply
+expires. Benchmarks (when `CONTRACTS_ENABLED` and `BENCHMARKS_ENABLED`):
+`contracts_opened`, `contracts_fulfilled`, `contract_default_rate`
+(`contractDefaults / (contractsFulfilled + contractDefaults)`, `0` when none
+settled). See [08-systems-economy.md](08-systems-economy.md#contracts--escrow-contracts_enabled).
+
 ## Bounded agent conflict (`confront_agent`)
 
 Deterministic, opt-in agent-vs-agent friction — not a combat minigame and not

@@ -355,6 +355,7 @@ __all__ = [
     "ERA_LADDER",
     "ECONOMY_ENABLED",
     "CONTRACTS_ENABLED",
+    "MAX_OPEN_CONTRACTS",
     "BASE_PRICE",
     "PRICE_SCARCITY_MULT",
     "PRICE_MIN",
@@ -1588,6 +1589,7 @@ HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
 # flag off, both actions are filtered from available_actions and apply is a
 # no-op (same pattern as repair_structure / GOODS_ENABLED).
 CONTRACTS_ENABLED = False
+MAX_OPEN_CONTRACTS = 20
 
 # --- Phase F: population lifecycle & governance depth (LIFECYCLE_ENABLED) ---
 # Aging, birth, natural death (elder included -- succession is the design, not

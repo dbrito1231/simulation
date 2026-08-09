@@ -689,6 +689,8 @@ class _ThinkJobMixin:
                  or (SURVIVAL_ENABLED and bool(self._confront_eligible_targets(agent))))
             and (action_name not in ("offer_contract", "accept_contract")
                  or CONTRACTS_ENABLED)
+            and (action_name != "accept_contract"
+                 or self._has_acceptable_contract(agent))
         ]
 
         # Sovereign God mode (Phase 3): computed once per think payload,
@@ -1547,6 +1549,8 @@ class _ThinkJobMixin:
                 if ECONOMY_ENABLED:
                     self._maybe_mint_coin()
                     self._maybe_fund_project_coin()
+                if CONTRACTS_ENABLED:
+                    self._tick_contract_settlement()
                 if path1_on():
                     self._maybe_found_settlement()
                     self._path1_industry_benchmark()
