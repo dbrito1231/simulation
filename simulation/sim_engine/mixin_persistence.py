@@ -382,6 +382,10 @@ class _PersistenceMixin:
                     civ.setdefault("beliefPitchCalls", 0)
                     civ.setdefault("skillPracticeCount", 0)
                     civ.setdefault("teachCount", 0)
+                if SCHISM_ENABLED:
+                    # F4.1: wrap legacy flat governance/belief fields under the
+                    # primary home settlement id without removing flat keys.
+                    self._migrate_schism_storage_on_restore(civ)
                 if TESTAMENT_ENABLED:
                     civ.setdefault("testament", [])
                     civ.setdefault("testamentAuthored", 0)
@@ -564,8 +568,12 @@ class _PersistenceMixin:
                     return False
                 self.civilization = civ
                 self._rebuild_role_maps()
-                self._ensure_constitution()
-                self._rebuild_custom_rule_modifiers()
+                if SCHISM_ENABLED:
+                    for sid in (self.civilization.get("rulesBySettlement") or {}):
+                        self._rebuild_settlement_governance(sid)
+                else:
+                    self._ensure_constitution()
+                    self._rebuild_custom_rule_modifiers()
                 self.agents = agents
                 self.agent_names = set(a["name"] for a in agents)
                 self._revert_inland_founded_beaches()

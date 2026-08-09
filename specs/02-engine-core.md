@@ -307,6 +307,13 @@ orphan `ocean_N` districts that lack an edge-adjacent coastal pair (starter
 wildlife/road gates, then validates districts — see
 [05-world.md](05-world.md#restore-migration-inland-founded-beaches).
 
+**Schism storage migration (`SCHISM_ENABLED`):** when the flag is on at load,
+`restore_state()` wraps legacy flat `rules` / `pendingRules` / `constitution` /
+compiled governance maps and `beliefRegistry` / `memeTexts` under the primary
+`"home"` settlement id before `_rebuild_settlement_governance` runs per
+bucket. Flag-off restore skips this entirely — see
+[09-systems-society.md](09-systems-society.md#schism_enabled).
+
 Daily Council transcript persistence mirrors `memory`: authoritative in-RAM
 `council_transcript_rows`; append on live event; serialization exports full
 list; DB save deletes/re-inserts atomically. Restore rehydrates. At adjourn,

@@ -20,6 +20,167 @@ class _GovernanceCultureMixin:
     memes, and Phase G skills/library/chronicle/personality-drift. See
     module docstring for exact scope."""
 
+    # --- Schism storage (SCHISM_ENABLED): settlement-scoped governance maps ---
+    _SCHISM_FLAT_KEYED_PAIRS = (
+        ("rules", "rulesBySettlement", []),
+        ("pendingRules", "pendingRulesBySettlement", []),
+        ("constitution", "constitutionBySettlement", []),
+        ("customRuleModifiers", "customRuleModifiersBySettlement", {}),
+        ("harvestQuotas", "harvestQuotasBySettlement", {}),
+        ("rationingActive", "rationingActiveBySettlement", {}),
+        ("beliefRegistry", "beliefRegistryBySettlement", {}),
+        ("memeTexts", "memeTextsBySettlement", {}),
+    )
+
+    def _primary_settlement_id(self):
+        """Primary home settlement id (Path 1 `_init_settlements` convention)."""
+        if path1_on():
+            self._init_settlements()
+        return "home"
+
+    @staticmethod
+    def _primary_settlement_id_for_civ(civ):
+        """Home settlement id while restoring (before self.civilization is set)."""
+        for entry in civ.get("settlements") or []:
+            if isinstance(entry, dict) and entry.get("id") == "home":
+                return "home"
+        return "home"
+
+    def _settlement_id_for_agent(self, agent):
+        return self._settlement_for_agent(agent)
+
+    def _rules_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("rules") or []
+        bucket = c.get("rulesBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("rules") or []
+
+    def _pending_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("pendingRules") or []
+        bucket = c.get("pendingRulesBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("pendingRules") or []
+
+    def _constitution_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("constitution") or []
+        bucket = c.get("constitutionBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("constitution") or []
+
+    def _registry_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("beliefRegistry") or {}
+        bucket = c.get("beliefRegistryBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("beliefRegistry") or {}
+
+    def _meme_texts_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("memeTexts") or {}
+        bucket = c.get("memeTextsBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("memeTexts") or {}
+
+    def _custom_modifiers_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("customRuleModifiers") or {}
+        bucket = c.get("customRuleModifiersBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("customRuleModifiers") or {}
+
+    def _harvest_quotas_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("harvestQuotas") or {}
+        bucket = c.get("harvestQuotasBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("harvestQuotas") or {}
+
+    def _rationing_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("rationingActive") or {}
+        bucket = c.get("rationingActiveBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("rationingActive") or {}
+
+    def _wrap_schism_storage(self, civ, home):
+        """Install settlement-keyed maps sharing refs with flat home fields."""
+        for flat_key, keyed_key, default in self._SCHISM_FLAT_KEYED_PAIRS:
+            obj = civ.get(flat_key)
+            if obj is None:
+                obj = dict(default) if isinstance(default, dict) else list(default)
+                civ[flat_key] = obj
+            keyed = civ.get(keyed_key)
+            if not isinstance(keyed, dict):
+                civ[keyed_key] = {home: obj}
+            else:
+                keyed.setdefault(home, obj)
+
+    def _init_schism_storage(self):
+        if not SCHISM_ENABLED:
+            return
+        self._wrap_schism_storage(self.civilization, self._primary_settlement_id())
+
+    def _migrate_schism_storage_on_restore(self, civ):
+        if not SCHISM_ENABLED:
+            return
+        self._wrap_schism_storage(civ, self._primary_settlement_id_for_civ(civ))
+
+    def _rebuild_settlement_governance(self, sid):
+        """Rebuild constitution + compiled custom effects for one settlement."""
+        if not SCHISM_ENABLED:
+            self._ensure_constitution()
+            self._rebuild_custom_rule_modifiers()
+            return
+        home = self._primary_settlement_id()
+        if sid != home:
+            # F4.2+ will rebuild non-home buckets without flat aliases.
+            return
+        self._ensure_constitution()
+        self._rebuild_custom_rule_modifiers()
+
     # --- governance gates (#5): harvest_quota / rationing enforcement ---
     def _active_harvest_quota(self):
         if not LIFECYCLE_ENABLED:

@@ -330,14 +330,12 @@ making them per-settlement is invasive and is where the risk lives, especially o
 `restore_state()` for saves written before scoping existed. This feature is
 "reconfiguration of parts that already exist," but the reconfiguration is structural.
 
-### Mandatory audit phase (D10)
+### Mandatory audit phase (D10) — **done**
 
-Before any F4 code is planned, a **standalone read-only phase** enumerates every
-read and write of `civilization["rules"]` and belief state across `sim_engine/`,
-`_server/`, and `server.py`, and identifies every persistence/restore path that touches
-them. That audit gets **its own reviewer pass** and is reported to the user. F4
-implementation phases are only written after the audit lands — the scope table below is
-provisional until then.
+Read-only inventory: [schism-rules-beliefs-audit.md](schism-rules-beliefs-audit.md)
+(Option A: settlement-keyed maps). F4.1 (schema + restore migration,
+`SCHISM_ENABLED` default off) implemented; F4.2+ threads read paths / voting /
+trigger.
 
 ### Scope
 

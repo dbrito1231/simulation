@@ -357,6 +357,7 @@ __all__ = [
     "ERA_LADDER",
     "ECONOMY_ENABLED",
     "CONTRACTS_ENABLED",
+    "SCHISM_ENABLED",
     "MAX_OPEN_CONTRACTS",
     "BASE_PRICE",
     "PRICE_SCARCITY_MULT",
@@ -1600,6 +1601,14 @@ HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
 # no-op (same pattern as repair_structure / GOODS_ENABLED).
 CONTRACTS_ENABLED = False
 MAX_OPEN_CONTRACTS = 20
+
+# --- Schism / per-settlement governance scoping (SCHISM_ENABLED) ---
+# Settlement-keyed rules/belief registry storage for Feature 4 (Schism).
+# Default off: flat civilization["rules"] / beliefRegistry remain the only
+# live shape (byte-identical to pre-F4). When on, keyed maps share object
+# refs with the primary "home" settlement flat fields so single-settlement
+# worlds behave the same until F4.2 read-path threading and F4.3 trigger.
+SCHISM_ENABLED = False
 
 # --- Phase F: population lifecycle & governance depth (LIFECYCLE_ENABLED) ---
 # Aging, birth, natural death (elder included -- succession is the design, not

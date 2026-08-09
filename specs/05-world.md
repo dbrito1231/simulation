@@ -190,6 +190,10 @@ district's settlement differs from the actor's. Shipment visuals use
 ([08-systems-economy.md](08-systems-economy.md#caravan_visuals_enabled)).
 No persistent vehicle entities are spawned — movement remains agent-centric.
 
+**Schism (`SCHISM_ENABLED`):** domestic governance law may diverge per
+settlement when enabled; inter-settlement trade/treaty/tariff surfaces above
+stay global. See [09-systems-society.md](09-systems-society.md#schism_enabled).
+
 ## Zone kinds
 
 `ZONE_NAMES = ["farm", "forest", "village", "market", "beach", "cave", "ocean",

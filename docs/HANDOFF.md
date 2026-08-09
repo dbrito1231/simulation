@@ -102,6 +102,8 @@ Plan: [`.claude/plans/emergence-breakthroughs.md`](../.claude/plans/emergence-br
 | A2 | Fork compare harness (`scripts/fork_compare.py`) | Done (branch `emergence-breakthroughs`) |
 | B1 F2 | Theory of Mind (`THEORY_OF_MIND_ENABLED`, `scripts/peer_model_smoke.py`) | Implemented (default **off**; default-on needs soak gate) |
 | B0 F1 | Testament (`TESTAMENT_ENABLED`, `scripts/testament_smoke.py`) | Implemented (default **off**; requires `WIKI_MEMORY` for meaningful carryover) |
+| D10 | F4 rules/beliefs scoping audit | Done (`schism-rules-beliefs-audit.md`) |
+| F4.1 | Schism storage schema + restore migration (`SCHISM_ENABLED`, `scripts/schism_smoke.py`) | Implemented (default **off**; trigger/voting partition in F4.2+) |
 
 **F1 default-on gate:** D2 `WIKI_MEMORY` soak accepted on session `2026-08-09T19-47-41`. Before flipping `TESTAMENT_ENABLED` to default `True`, run a matched soak confirming deathbed merges populate the ring and `cultural_carryover` behaves as expected.
 
@@ -117,6 +119,7 @@ uv run python scripts/sid_parity_smoke.py
 uv run python scripts/path1_smoke.py
 uv run python scripts/peer_model_smoke.py   # if Theory of Mind touched
 uv run python scripts/testament_smoke.py    # if Testament touched
+uv run python scripts/schism_smoke.py       # if Schism storage touched
 uv run python scripts/god_mode_smoke.py    # if God mode surface touched
 ```
 

@@ -536,6 +536,53 @@ mutation is logged as activity and recorded in the chronicle under the
 `meme_mutation` kind, and increments `civilization["memeMutations"]`, which
 also feeds the `meme_mutations` benchmark.
 
+## SCHISM_ENABLED (default False) {#schism_enabled}
+
+Settlement-scoped domestic governance storage for Feature 4 (Schism).
+**Default off:** `civilization["rules"]`, `pendingRules`, `constitution`,
+`customRuleModifiers`, `harvestQuotas`, `rationingActive`, `beliefRegistry`,
+and `memeTexts` remain the only live shape — byte-identical to pre-F4 worlds.
+No schism trigger, voting partition, or read-path rewrite ships in F4.1.
+
+When **`SCHISM_ENABLED`** is on:
+
+**Settlement-keyed maps (Option A):** parallel buckets keyed by settlement id:
+
+- `rulesBySettlement`, `pendingRulesBySettlement`, `constitutionBySettlement`
+- `customRuleModifiersBySettlement`, `harvestQuotasBySettlement`,
+  `rationingActiveBySettlement`
+- `beliefRegistryBySettlement`, `memeTextsBySettlement`
+
+For the primary **`"home"`** settlement (Path 1 `_init_settlements` convention),
+each keyed bucket **shares the same list/dict object** as the legacy flat field
+so single-settlement worlds keep identical behavior while F4.2 threads read
+paths. Thin accessors (`_rules_for_settlement`, `_pending_for_settlement`,
+`_registry_for_settlement`, `_settlement_id_for_agent`, etc.) live in
+`mixin_governance_culture.py`.
+
+**Global (not forked per settlement):** `treaties`, treaty tariffs
+(`_enacted_treaty_tariff`), `beliefPitchCalls`, `memeMutations`,
+`ruleKindsEverEnacted`, `taxDue`/`taxPaid`, succession office
+(`pendingSuccession`), and session governance cadence counters.
+
+**Beliefs:** per-agent `beliefs` sets stay as-is; canonical definitions move
+under `beliefRegistryBySettlement` when the flag is on (with flat
+`beliefRegistry` aliasing home).
+
+**Rule ids:** remain **globally unique** across settlements for F4.1
+(constitution non-reuse; safer until schism fork mints prefixed ids in a
+later phase).
+
+**Restore migration:** when the flag is on at load and keyed maps are absent,
+`restore_state()` wraps existing flat governance/belief fields under
+`"home"` via `_migrate_schism_storage_on_restore`, then
+`_rebuild_settlement_governance` per bucket. Flag-off restore never introduces
+keyed maps.
+
+**Out of scope (later F4 phases):** schism trigger/secession, voting quorum
+partition, full enforcement read-path rewrite, viewer panel, war,
+per-settlement currency.
+
 ## CULTURE_ENABLED
 
 **Skills:** `SKILL_KINDS = ("gather", "craft", "build", "heal", "reflection")`, one float
