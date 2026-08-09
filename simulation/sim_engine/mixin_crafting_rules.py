@@ -815,6 +815,11 @@ class _CraftingRulesMixin:
         rule = self._find_pending_ballot(decision.get("target"), voter=agent)
         if not rule:
             return f"{agent['name']} found no such pending rule"
+        if SCHISM_ENABLED and not self._is_global_governance_ballot(rule):
+            voter_sid = self._settlement_id_for_agent(agent)
+            ballot_sid = self._ballot_settlement_id(rule)
+            if voter_sid != ballot_sid:
+                return f"{agent['name']} cannot vote on another settlement's ballot"
         vote = "no" if decision.get("vote") == "no" else "yes"
         rule["votes"][agent["name"]] = vote
         if LIFECYCLE_ENABLED and rule["kind"] == "succession" and vote == "yes":

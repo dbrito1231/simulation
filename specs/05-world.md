@@ -191,8 +191,10 @@ district's settlement differs from the actor's. Shipment visuals use
 No persistent vehicle entities are spawned — movement remains agent-centric.
 
 **Schism (`SCHISM_ENABLED`):** domestic governance law may diverge per
-settlement when enabled; inter-settlement trade/treaty/tariff surfaces above
-stay global. See [09-systems-society.md](09-systems-society.md#schism_enabled).
+settlement when enabled; secession reuses `_claim_frontier_plot` /
+`_found_district` (or an existing frontier settlement). Inter-settlement
+trade/treaty/tariff surfaces stay global. See
+[09-systems-society.md](09-systems-society.md#schism_enabled).
 
 ## Zone kinds
 

@@ -632,7 +632,7 @@ class _ThinkJobMixin:
         # MAX_ACTIVE_RULES (8) <= MAX_ACTIVE_RULES_PROMPT (12) today.
         agent_sid = self._settlement_id_for_agent(agent) if SCHISM_ENABLED else None
         rules_full = list(self._rules_for_settlement(agent_sid) if agent_sid else c["rules"]) if RULES_ENABLED else []
-        scoped_pending = self._pending_for_settlement(agent_sid) if agent_sid else c["pendingRules"]
+        scoped_pending = self._pending_rules_for_voter(agent) if SCHISM_ENABLED else c["pendingRules"]
         if len(rules_full) > MAX_ACTIVE_RULES_PROMPT:
             active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
                                   "effect": r.get("effect"), "supersedes": r.get("supersedes")}

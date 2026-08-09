@@ -1577,6 +1577,8 @@ class _CouncilGrowthMixin:
     def _maybe_advance_rules(self):
         if not RULES_ENABLED:
             return
+        if SCHISM_ENABLED:
+            self._maybe_trigger_schism()
         c = self.civilization
         if LIFECYCLE_ENABLED and c.get("pendingSuccession"):
             if DAILY_COUNCIL_ENABLED:
@@ -1763,4 +1765,6 @@ class _CouncilGrowthMixin:
         # don't knowingly emit an invalid action; still mark this as an
         # attempt so the cooldown advances normally.
         c["lastRuleAttemptFrame"] = self.frameTick
+
+        self._maybe_trigger_schism()
 

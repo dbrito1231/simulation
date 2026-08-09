@@ -358,6 +358,8 @@ __all__ = [
     "ECONOMY_ENABLED",
     "CONTRACTS_ENABLED",
     "SCHISM_ENABLED",
+    "SCHISM_MIN_CLUSTER",
+    "SCHISM_COOLDOWN_FRAMES",
     "MAX_OPEN_CONTRACTS",
     "BASE_PRICE",
     "PRICE_SCARCITY_MULT",
@@ -1609,6 +1611,11 @@ MAX_OPEN_CONTRACTS = 20
 # refs with the primary "home" settlement flat fields so single-settlement
 # worlds behave the same until F4.2 read-path threading and F4.3 trigger.
 SCHISM_ENABLED = False
+# Minimum mutually-allied agents (all rivals of their settlement elder, sharing
+# one belief that contradicts an enacted domestic rule) before schism fires.
+SCHISM_MIN_CLUSTER = 3
+# Cooldown between schism events (governance ticks share RULES_TICK_FRAMES).
+SCHISM_COOLDOWN_FRAMES = RULE_PROPOSE_COOLDOWN * 6
 
 # --- Phase F: population lifecycle & governance depth (LIFECYCLE_ENABLED) ---
 # Aging, birth, natural death (elder included -- succession is the design, not

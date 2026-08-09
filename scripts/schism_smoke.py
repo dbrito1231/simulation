@@ -167,6 +167,117 @@ def test_flag_on_two_settlement_rules_independent():
     print("  OK flag-on two-settlement independence")
 
 
+def test_flag_on_scripted_schism():
+    old = se.SCHISM_ENABLED
+    se.SCHISM_ENABLED = True
+    try:
+        engine = make_engine(8)
+        c = engine.civilization
+        home = engine._primary_settlement_id()
+        elder = engine._elder_for_settlement(home)
+        assert_true(elder is not None, "home settlement must have an elder")
+
+        fish_rule = {
+            "id": "priority_fish_schism",
+            "name": "Fish Priority",
+            "kind": "priority",
+            "value": "fish",
+            "enacted": True,
+            "enactedFrame": 1,
+        }
+        c["rules"].append(fish_rule)
+        engine._rebuild_settlement_governance(home)
+
+        rebels = [a for a in engine.agents if a.get("role") != "elder"][:3]
+        assert_true(len(rebels) >= se.SCHISM_MIN_CLUSTER, "need schism cluster size")
+        for agent in rebels:
+            agent["beliefs"] = {se.MEME_SEED_ID}
+            for other in rebels:
+                if other is not agent:
+                    agent.setdefault("relationships", {})[other["name"]] = "ally"
+                    other.setdefault("relationships", {})[agent["name"]] = "ally"
+            agent.setdefault("relationships", {})[elder["name"]] = "rival"
+
+        cluster = engine._find_schism_cluster(home)
+        assert_true(cluster is not None, "schism cluster must be detected")
+
+        outpost = "outpost_schism_smoke"
+        rebel_dids = {a.get("currentDistrict") for a in rebels}
+        outpost_did = next(
+            (did for did in c["districts"] if did not in rebel_dids),
+            list(c["districts"].keys())[-1],
+        )
+        c["districts"][outpost_did]["settlementId"] = outpost
+        c["settlements"].append({
+            "id": outpost,
+            "name": "Schism Outpost",
+            "districts": [outpost_did],
+        })
+        engine._init_schism_settlement_buckets(outpost)
+        engine._ensure_settlement_stores()
+
+        assert_true(engine._execute_schism(cluster), "schism secession must succeed")
+
+        child_sid = next(s["id"] for s in c["settlements"] if s["id"] != home)
+        for agent in rebels:
+            assert_true(engine._settlement_id_for_agent(agent) == child_sid,
+                        f"{agent['name']} must migrate to child settlement")
+
+        child_only = {
+            "id": "priority_child_schism",
+            "name": "Child Only",
+            "kind": "priority",
+            "value": "wood",
+            "enacted": True,
+            "enactedFrame": 2,
+        }
+        engine._rules_for_settlement(child_sid).append(child_only)
+        engine._rebuild_settlement_governance(child_sid)
+        home_ids = [r["id"] for r in engine._rules_for_settlement(home)]
+        child_ids = [r["id"] for r in engine._rules_for_settlement(child_sid)]
+        assert_true("priority_child_schism" not in home_ids,
+                    "home must not see child-only rule")
+        assert_true("priority_child_schism" in child_ids,
+                    "child must retain its own enacted rule")
+
+        pending = c.get("pendingSuccession")
+        assert_true(isinstance(pending, dict) and pending.get("settlementId") == child_sid,
+                    "child settlement succession must be pending")
+        ballot = next(r for r in c["pendingRules"] if r.get("kind") == "succession")
+        for voter in engine.agents:
+            if voter.get("deathFrame") or voter.get("role") == "elder":
+                continue
+            if voter["name"] not in ballot["votes"]:
+                engine._vote_on_rule(voter, {"target": ballot["id"], "vote": "yes"})
+        child_elder = engine._elder_for_settlement(child_sid)
+        assert_true(child_elder is not None, "child settlement must elect an elder")
+        assert_true(engine._elder_for_settlement(home) is not None,
+                    "home elder must remain after schism")
+
+        proposer = child_elder or rebels[0]
+        engine._propose_treaty(proposer, {
+            "rule": {
+                "id": "treaty_schism_smoke",
+                "name": "Schism Trade Pact",
+                "tariff": 0.1,
+            },
+        })
+        treaty_ballot = next(
+            (r for r in c["pendingRules"] if r.get("kind") == "treaty"), None)
+        assert_true(treaty_ballot is not None, "treaty ballot must be proposed")
+        for voter in engine.agents:
+            if voter.get("deathFrame") or voter["name"] in treaty_ballot["votes"]:
+                continue
+            engine._vote_treaty(voter, {"target": treaty_ballot["id"], "vote": "yes"})
+        assert_true(any(t.get("id") == "treaty_schism_smoke" for t in c.get("treaties") or []),
+                    "treaty must enact across settlements after schism")
+        assert_true(engine._enacted_treaty_tariff() >= 0.1,
+                    "treaty tariff must apply after schism")
+    finally:
+        se.SCHISM_ENABLED = old
+    print("  OK flag-on scripted schism")
+
+
 def main():
     print("schism_smoke.py")
     test_flag_off_no_keyed_maps()
@@ -174,6 +285,7 @@ def main():
     test_flag_on_restore_wraps_legacy_flat()
     test_flag_on_propose_enact_home()
     test_flag_on_two_settlement_rules_independent()
+    test_flag_on_scripted_schism()
     print("ALL OK")
 
 

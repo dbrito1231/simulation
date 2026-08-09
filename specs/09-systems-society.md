@@ -542,7 +542,8 @@ Settlement-scoped domestic governance storage for Feature 4 (Schism).
 **Default off:** `civilization["rules"]`, `pendingRules`, `constitution`,
 `customRuleModifiers`, `harvestQuotas`, `rationingActive`, `beliefRegistry`,
 and `memeTexts` remain the only live shape — byte-identical to pre-F4 worlds.
-No schism trigger, voting partition, or read-path rewrite ships in F4.1.
+No schism trigger ships while the flag is off. F4.2 threads read paths and
+voting scope; F4.3 adds trigger/secession/elder when the flag is on.
 
 When **`SCHISM_ENABLED`** is on:
 
@@ -579,7 +580,7 @@ later phase).
 `_rebuild_settlement_governance` per bucket. Flag-off restore never introduces
 keyed maps.
 
-**Out of scope (later F4 phases):** schism trigger/secession, viewer panel, war,
+**Out of scope (later F4 phases):** viewer panel, war,
 per-settlement currency.
 
 ### F4.2 — helper threading + voting scope (flag on)
@@ -612,6 +613,56 @@ canonical definitions; per-agent `beliefs` sets unchanged. Pitch adoption and
 global quorum; domestic settlement rules do not partition treaty ballots.
 
 **Still out of scope:** schism trigger, secession migration, per-settlement elder,
+viewer settlement panel.
+
+### F4.3 — schism trigger, secession, elder (flag on)
+
+When **`SCHISM_ENABLED`** is on, `_maybe_advance_rules` (same `RULES_TICK_FRAMES`
+governance cadence as domestic backstop voting) calls `_maybe_trigger_schism`
+before other work. At most one schism per cooldown (`SCHISM_COOLDOWN_FRAMES`,
+default `RULE_PROPOSE_COOLDOWN * 6`).
+
+**Trigger predicate (deterministic, no LLM):** per settlement `sid`, let `E` be
+the settlement elder (`_elder_for_settlement`). A cluster qualifies when there
+exists an **enacted** domestic rule `r` in `sid` and belief id `b` held by every
+member such that:
+
+1. **`_belief_contradicts_enacted_rule(agent, b, r)`** — `b` is not in `r`'s
+   favored affinity set, and either the explicit `_belief_biased_vote` oppositions
+   apply (`river_spirit` vs `rationing`/`harvest_quota`; `harvest_spirit` vs
+   `priority` with `value == fish`), **or** `b` has a non-empty affinity list and
+   `r.kind` is a governance kind (`resource_tax`, `custom`, `priority`, and when
+   `LIFECYCLE_ENABLED` also `harvest_quota`, `rationing`) outside that affinity.
+2. Every cluster member holds `b`, has `relationships[E.name] == "rival"`, and
+   pairwise mutual `ally` ties with every other member.
+3. `len(cluster) >= SCHISM_MIN_CLUSTER` (default **3**).
+
+First matching `(r, b)` in sorted rule-id / belief-id order wins.
+
+**Secession:** `_execute_schism` reuses Path 1 founding helpers
+(`_init_settlements`, `_claim_frontier_plot` + `_found_district`, or an existing
+non-parent settlement). It deep-copies the parent's enacted rules into the child
+settlement bucket, forks `beliefRegistry` / `memeTexts` entries for beliefs the
+cluster holds, migrates agents' `currentDistrict` (and position) into the child
+settlement, and logs activity + chronicle kind **`schism`**. Inter-settlement
+interaction remains treaty / caravan / tariff only (no war).
+
+**Elder:** `_start_succession_election(settlement_id=child)` opens global
+`succession` ballots scoped with `settlementId` on each record and
+`pendingSuccession.settlementId`. `_enact_succession_winner` allows **multiple
+simultaneous elders** when `SCHISM_ENABLED` — it only blocks a second elder in
+the **same** settlement. `_ensure_succession_election` delegates to
+`_ensure_settlement_succession_elections` so a home elder does not cancel a
+child settlement's pending election.
+
+**Voting hardening:** `_vote_on_rule` rejects domestic ballots when the voter's
+settlement differs from the ballot's `settlementId` (global treaty/succession
+unchanged).
+
+**Think payload:** `_build_think_payload` uses `_pending_rules_for_voter(agent)`
+so agents away from home still see global treaty/succession ballots.
+
+**Still out of scope:** war, per-settlement currency, forced reunification,
 viewer settlement panel.
 
 ## CULTURE_ENABLED
