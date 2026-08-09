@@ -355,6 +355,29 @@ def validate_function_block(function, available_resource_ids):
     return True, None
 
 
+def validate_contract(contract, known_resource_ids=None):
+    """Validate a contract offer object. Returns (ok: bool, reason: str|None)."""
+    known_resource_ids = known_resource_ids or []
+    if not isinstance(contract, dict):
+        return False, "contract must be an object"
+    want = contract.get("want")
+    if not isinstance(want, str) or not want.strip():
+        return False, "contract want must be a resource id"
+    if want not in known_resource_ids:
+        return False, f"unknown resource: {want}"
+    qty = contract.get("qty")
+    if isinstance(qty, bool) or not isinstance(qty, int) or qty < 1:
+        return False, "contract qty must be a positive integer"
+    pay_coin = contract.get("pay_coin")
+    if isinstance(pay_coin, bool) or not isinstance(pay_coin, int) or pay_coin < 1:
+        return False, "contract pay_coin must be a positive integer"
+    deadline_frames = contract.get("deadline_frames")
+    if (isinstance(deadline_frames, bool) or not isinstance(deadline_frames, int)
+            or deadline_frames < 1):
+        return False, "contract deadline_frames must be a positive integer"
+    return True, None
+
+
 def validate_blueprint(blueprint, known_resource_ids, pending_ids, approved_ids,
                        custom_resource_count, rejected_ids=None, known_effect_vectors=None,
                        village_tier=None):
@@ -1179,6 +1202,45 @@ def normalize_decision(decision, agent_data):
         if malformed:
             fallback = role_fallback_action(agent_data.get("role"), agent_data)
             fallback["reasoning"] = (fallback.get("reasoning", "") + " (invalid rule shape)").strip()
+            return fallback
+        decision.pop("blueprint", None)
+        return decision
+
+    if action == "offer_contract":
+        target = decision.get("target")
+        if not isinstance(target, str) or not target.strip():
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (
+                fallback.get("reasoning", "") + " (invalid contract offer)"
+            ).strip()
+            fallback["contract_rejection_note"] = (
+                "offer_contract requires target (agent name or open)"
+            )
+            return fallback
+        ok, reason = validate_contract(
+            decision.get("contract"),
+            agent_data.get("known_resource_ids") or [],
+        )
+        if not ok:
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (
+                fallback.get("reasoning", "") + f" (invalid contract: {reason})"
+            ).strip()
+            fallback["contract_rejection_note"] = reason
+            return fallback
+        decision.pop("blueprint", None)
+        return decision
+
+    if action == "accept_contract":
+        target = decision.get("target")
+        if not isinstance(target, str) or not target.strip():
+            fallback = role_fallback_action(agent_data.get("role"), agent_data)
+            fallback["reasoning"] = (
+                fallback.get("reasoning", "") + " (invalid contract accept)"
+            ).strip()
+            fallback["contract_rejection_note"] = (
+                "accept_contract requires target (contract id)"
+            )
             return fallback
         decision.pop("blueprint", None)
         return decision

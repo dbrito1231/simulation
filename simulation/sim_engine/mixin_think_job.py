@@ -687,6 +687,8 @@ class _ThinkJobMixin:
                  or (WILDLIFE_ENABLED and self._nearest_huntable_wildlife(agent) is not None))
             and (action_name != "confront_agent"
                  or (SURVIVAL_ENABLED and bool(self._confront_eligible_targets(agent))))
+            and (action_name not in ("offer_contract", "accept_contract")
+                 or CONTRACTS_ENABLED)
         ]
 
         # Sovereign God mode (Phase 3): computed once per think payload,

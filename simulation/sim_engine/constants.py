@@ -354,6 +354,7 @@ __all__ = [
     "COUNCIL_TTL_FRAMES",
     "ERA_LADDER",
     "ECONOMY_ENABLED",
+    "CONTRACTS_ENABLED",
     "BASE_PRICE",
     "PRICE_SCARCITY_MULT",
     "PRICE_MIN",
@@ -1580,6 +1581,13 @@ MINT_RATE = 1
 # proximity), so a homeless villager is the one actually competing for the
 # nearest-N shelter slots.
 HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
+
+# --- Contracts & escrow (CONTRACTS_ENABLED) ---
+# offer_contract / accept_contract: schema + validation in F3.1; escrow
+# settlement, persistence, and apply_decision branches ship in F3.2. With the
+# flag off, both actions are filtered from available_actions and apply is a
+# no-op (same pattern as repair_structure / GOODS_ENABLED).
+CONTRACTS_ENABLED = False
 
 # --- Phase F: population lifecycle & governance depth (LIFECYCLE_ENABLED) ---
 # Aging, birth, natural death (elder included -- succession is the design, not

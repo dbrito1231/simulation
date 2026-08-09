@@ -176,6 +176,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `DAILY_COUNCIL_ENABLED` | True | no | [09](09-systems-society.md) |
 | `SAGE_REVIEW_ENABLED` | True | no | [09](09-systems-society.md) |
 | `ECONOMY_ENABLED` | True | yes | [08](08-systems-economy.md) |
+| `CONTRACTS_ENABLED` | False | yes | [07](07-actions.md), [08](08-systems-economy.md) |
 | `LIFECYCLE_ENABLED` | True | yes | [06](06-agents.md) |
 | `CULTURE_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `CEMETERY_ENABLED` | True | yes | [05](05-world.md) |

@@ -380,6 +380,10 @@ DECISION_ACTIONS = [
     "confront_agent",
     # Daily Council Assembly. Offered only to a seated attendee in-session.
     "council_speak", "council_propose", "council_vote",
+    # Contracts & escrow (CONTRACTS_ENABLED): engine filters from
+    # available_actions when the flag is off; normalize validates shape;
+    # apply_decision settlement ships in F3.2.
+    "offer_contract", "accept_contract",
 ]
 
 # Loose shape only; validate_blueprint() stays the authority on blueprint detail.
@@ -425,6 +429,17 @@ DECISION_SCHEMA = {
                 "name": {"type": "string"},
                 "inputs": {"type": "object"},
                 "station": {"type": ["string", "null"]},
+            },
+        },
+        "contract": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "required": ["want", "qty", "pay_coin", "deadline_frames"],
+            "properties": {
+                "want": {"type": "string"},
+                "qty": {"type": "integer", "minimum": 1},
+                "pay_coin": {"type": "integer", "minimum": 1},
+                "deadline_frames": {"type": "integer", "minimum": 1},
             },
         },
         "role": {
@@ -1984,6 +1999,7 @@ _REJECTION_NOTE_KEYS = (
     "council_rejection_note",
     "terraform_rejection_note",
     "upgrade_rejection_note",
+    "contract_rejection_note",
     "rejection_note",
 )
 

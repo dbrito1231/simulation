@@ -145,7 +145,7 @@ action-sync invariant requires `DECISION_SCHEMA` stay in server.py — see
 
 `DECISION_SCHEMA` (server.py:357-527): `additionalProperties: False`;
 `required: ["action", "reasoning"]`. Key properties: `action` (enum =
-`DECISION_ACTIONS`, 43 entries — see specs/07-actions.md, not repeated here),
+`DECISION_ACTIONS`, 47 entries — see specs/07-actions.md, not repeated here),
 `divine_response` (nullable object, **required on every decision turn while
 active Voice guidance is unacknowledged** — see "Voice binding guidance"
 below; omitted on turns with no active unacked guidance), `target`/
@@ -153,7 +153,9 @@ below; omitted on turns with no active unacked guidance), `target`/
 `relationship_update` (nullable object, values constrained to
 ally/neutral/rival), `blueprint` (nullable object: id/name/needs/new_resources/
 visual_style/sprite/function), `recipe` (nullable object: id/name/inputs/
-station), `rule` (nullable object: id/name/kind/value/description), `vote`
+station), `contract` (nullable object: `want` resource id, `qty`, `pay_coin`,
+`deadline_frames` — all positive integers; `want` must be a known resource id),
+`rule` (nullable object: id/name/kind/value/description), `vote`
 (nullable string), `sage_decision` (nullable enum approve/deny), `sprite`
 (nullable object: palette/grid — **bounded**, see below). **TECH_TREE_ENABLED import-time addition**
 (server.py:2584-2591, applied only if the engine flag is on so flag-off
@@ -804,6 +806,8 @@ surfaces to the agent's next prompt):
 | `approve_blueprint`/`reject_blueprint` | role must be elder; target must be a pending id |
 | `assign_task` | role must be elder; target must be an idle agent name; message required |
 | `switch_role` | `new_role` (or `target`) must be a key in `ROLES` |
+| `offer_contract` | `target` required (agent name or `"open"`); `contract` must pass `validate_contract()` — failures stamp `contract_rejection_note` |
+| `accept_contract` | `target` required (contract id) — failures stamp `contract_rejection_note` |
 | `move_to_district` | promotes `target_district` into `target` if target is empty (the engine only reads `target`) |
 | `talk_to_nearby` | target/message both required, target must be in the nearby-agents list, nearby list non-empty |
 | `divine_response` (when active Voice guidance is unacknowledged) | must be an object with `stance` in `follow`/`continue` and a non-empty `reason` string; the JSON schema now *requires* the field's presence (as a non-null object) for this request via `build_response_format(require_divine_response=True)`, but missing/invalid *values* are still **not** rejected as a hard fallback to `rest` — instead of an immediate ack, non-response is now capped: it increments a per-guidance skip counter and only force-acks after `GOD_VOICE_ACK_SKIP_CAP` consecutive synthetic turns — see Voice binding guidance above |
