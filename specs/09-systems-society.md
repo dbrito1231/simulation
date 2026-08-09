@@ -747,6 +747,8 @@ rate + per-meme breakdown, active rule count, structure count, memory-store
 size, effect throughput (`STRUCTURE_EFFECTS_ENABLED`), ecology scarcity
 index (`ECOLOGY_ENABLED`), role-rebalance latency (`EMERGENT_ROLES`), rule
 kind diversity (`RULES_ENABLED`); plus era name/tech tier
-(`TECH_TREE_ENABLED`), module-total (`PIANO_MODULES`/`META_SYSTEM`). Each
-metric is written to `SessionLogger`'s `benchmarks` stream via
+(`TECH_TREE_ENABLED`), module-total (`PIANO_MODULES`/`META_SYSTEM`). When
+`THEORY_OF_MIND_ENABLED`, also samples `peer_prediction_accuracy` (hits/total
+against pending `expect=` predictions from `theory_of_mind` module reports).
+Each metric is written to `SessionLogger`'s `benchmarks` stream via
 `_log_benchmark` — see [12-ops.md](12-ops.md) for the JSONL sink.

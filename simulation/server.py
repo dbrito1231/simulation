@@ -1030,6 +1030,13 @@ MODULE_PROMPTS = {
                   "Reference only agents, resources, and numbers that appear in "
                   "the context; never invent a name, quantity, or statistic. "
                   "Output only the sentence.",
+    "theory_of_mind": "You are the Theory-of-Mind module of a village agent. "
+                      "Given nearby peers in context, model ONE peer you can "
+                      "see. Output EXACTLY one line in this format (no extra "
+                      "text): PEER=<name> | wants=<short> | good_at=<short> | "
+                      "owes=<short> | trust=<0.00-1.00> | expect=<action>. "
+                      "Use only peer names and actions from context; never "
+                      "invent. expect must be one action the peer might take next.",
 }
 
 

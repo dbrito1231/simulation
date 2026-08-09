@@ -212,6 +212,10 @@ class SimEngine(
         self._module_refresh_failures = 0
         self._module_note_ages = []
         self._meta_agent_index = 0
+        # Theory of Mind (F2): session-lifetime peer-action prediction scoring.
+        self._peer_prediction_pending = {}
+        self._peer_prediction_hits = 0
+        self._peer_prediction_total = 0
         self.ROAD_PATH_CACHE = {}   # (nodeA, nodeB) -> [node ids]; see _recompute_road_paths
         # Living-ecosystem Phase 3: cosmetic shipment ring. Deliberately kept
         # off the civilization dict (see CARAVAN_VISUALS_ENABLED) so it is
@@ -329,7 +333,8 @@ class SimEngine(
                 "moduleReports": {},
                 **({"contextDirty": True, "contextDirtySince": time.time()}
                    if ALWAYS_ON_MODULES else {}),
-                "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
+                "modules": self._piano_default_modules(),
+                **({"peerModel": {}} if THEORY_OF_MIND_ENABLED else {}),
                 # Phase E: home structure id (None = homeless) + refusal nudges.
                 "homeStructureId": None, "lastTradeRejection": None,
                 "lastHomelessNudgeFrame": None,

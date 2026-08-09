@@ -1,6 +1,6 @@
 # Emergence Breakthroughs — Plan
 
-**Status: Approved — Phase A2 done** (`scripts/fork_compare.py` fork harness on branch
+**Status: Approved — Phase A2 done; B1 F2 implemented (default off)** (`scripts/fork_compare.py` fork harness on branch
 `emergence-breakthroughs`; A0/A1 determinism proof + pinning shipped). Per [AGENTS.md](../../AGENTS.md), implementation follows
 the orchestrator → implementer → reviewer loop. The orchestrator owns splitting the
 features below into phase prompts.
@@ -446,7 +446,7 @@ F2/F3/F4 do **not** proceed unmeasured. F1 is unaffected.
 | Order | Feature | Gated on | Risk |
 |---|---|---|---|
 | B0 | **F1 — Testament** (+ its live `WIKI_MEMORY` soak) | **Nothing — runs in parallel with Track A (D6)** | Low |
-| B1 | **F2 — Theory of Mind** | Track A complete | Medium (contention) |
+| B1 | **F2 — Theory of Mind** | Track A complete | Medium (contention) — **implemented** (`THEORY_OF_MIND_ENABLED` default off; default-on needs soak gate) |
 | B2 | **F3 — Contracts** | Track A complete | Medium-high (six sync surfaces, coin conservation) |
 | B3 | **F4 — Schism** | Track A complete **+ the D10 audit phase reviewed and reported** | Medium-high (rule scoping, restore migration) |
 

@@ -115,6 +115,9 @@ def format_nearby_agents(nearby):
                     stigma_suffix = f", signs: {', '.join(str(t) for t in stigmata)}"
                 parts.append(
                     f"{name} ({role}, food:{food} wood:{wood} gold:{gold}{stigma_suffix})")
+                peer_hint = item.get("peer_model")
+                if peer_hint:
+                    parts[-1] += f" [think: {peer_hint}]"
             else:
                 parts.append(str(item))
         return "; ".join(parts)

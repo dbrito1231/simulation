@@ -1031,7 +1031,11 @@ up to ~6,163 invention-only) must stay under `sim-smart`'s per-slot share at
 
 `PIANO_MODULES` (`constants.py:483`, default `True` since Sid-parity Phase 1) —
 Perception/Social/Desire/Reflection module fan-out is the default cognition
-path. Module calls run on `self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`),
+path. When `THEORY_OF_MIND_ENABLED` (default `False`, Emergence Breakthroughs
+F2) is on, a fifth module `theory_of_mind` joins the same staggered fan-out
+by **swapping into the social slot every 4th module-tick** (`tick % 4 == 0`
+and `tick % 2 == 0`) — no extra call per turn, same
+`PIANO_CONCURRENT_LLM` budget. Module calls run on `self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`),
 bounded independently of `MAX_CONCURRENT_LLM` — `_run_piano_modules` submits
 to `piano_workers`, never `self._executor`. Decision-path fan-out and the
 gated always-on pulse share `_piano_refresh_inflight` (keyed by
@@ -1058,6 +1062,28 @@ suggest coordinating with, messaging, or requesting from that same agent.
 Advisory input to the Cognitive Controller only. `PIANO_MODULE_MAX_TOKENS = 90`
 (raised from 60 after module-quality screen: guarded 90-token variant reduced
 grounded-wrong modal count 1→0 with no category regression).
+
+### Theory of Mind (`THEORY_OF_MIND_ENABLED`, default False)
+
+Emergence Breakthroughs F2. When on, agents maintain a bounded
+`agent["peerModel"][peerIdStr] = {wants, good_at, owes_me, trust, frame}`
+(updated by the `theory_of_mind` PIANO module on successful parse only).
+Caps: `PEER_MODEL_MAX_PEERS = 8` (LRU eviction by `frame`),
+`PEER_MODEL_FIELD_CHAR_CAP = 48` per string field. Module output uses a
+pipe-delimited line (`PEER=… | wants=… | good_at=… | owes=… | trust=… |
+expect=…`); timeouts/drops leave prior `peerModel` intact.
+
+**Prompt surface:** one `[think: …]` suffix per *nearby* peer only, folded
+into `format_nearby_agents()` — never the full table.
+
+**Benchmark:** `peer_prediction_accuracy` — when a parsed module report
+includes `expect=<action>`, the engine records a pending prediction for that
+peer; the next `apply_decision()` on the peer scores hit/miss against
+`lastAction`. Sampled in `_sample_benchmarks()` when the flag is on.
+
+**Default-on gate:** flipping default to `True` requires a soak comparison
+(`scripts/soak_monitor.py`) showing `piano_module_drops` / `module_refresh_failures`
+not materially worse than a flag-off soak of the same length (see plan).
 
 ### Gated always-on PIANO (`ALWAYS_ON_MODULES`, default False)
 

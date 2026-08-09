@@ -495,10 +495,15 @@ class _PersistenceMixin:
                     a.setdefault("moduleTick", 0)
                     a.setdefault("moduleReports", {})
                     a.setdefault("memoryWiki", {})
-                    a.setdefault("modules", {
+                    default_modules = {
                         "perception": True, "social": True,
                         "desire": True, "reflection": True,
-                    })
+                    }
+                    if THEORY_OF_MIND_ENABLED:
+                        default_modules["theory_of_mind"] = True
+                    a.setdefault("modules", default_modules)
+                    if THEORY_OF_MIND_ENABLED:
+                        a.setdefault("peerModel", {})
                     if LIFECYCLE_ENABLED:
                         # Phase F: every restored agent gets an age (staggered
                         # by roster position, same deterministic spread

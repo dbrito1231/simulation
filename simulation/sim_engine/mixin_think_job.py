@@ -27,6 +27,13 @@ class _ThinkJobMixin:
         """Mirror index.html thinkAgent payload, computed under lock."""
         c = self.civilization
         nearby_detailed = self._get_nearby_detailed(agent)
+        if THEORY_OF_MIND_ENABLED:
+            for item in nearby_detailed:
+                peer = self._find_agent(item.get("name"))
+                if peer:
+                    suffix = self._peer_model_prompt_suffix(agent, peer)
+                    if suffix:
+                        item["peer_model"] = suffix
         idle_agents = []
         if agent["role"] == "elder":
             # C3: cap at MAX_IDLE_AGENTS_PROMPT -- _idle_agents_for_elder is
@@ -904,7 +911,7 @@ class _ThinkJobMixin:
         cache = self._piano_module_cache.get(agent_name, {})
         reports = []
         ages = []
-        for module in ("perception", "social", "desire", "reflection"):
+        for module in self._piano_module_names():
             if not enabled.get(module, True):
                 continue
             note = cache.get(module) or {}
@@ -963,8 +970,10 @@ class _ThinkJobMixin:
             cache[module] = {"tick": int(agent.get("moduleTick") or 0),
                              "text": text, "wall_ts": now}
             agent["moduleReports"] = {m: dict(v) for m, v in cache.items()}
+            if module == "theory_of_mind" and THEORY_OF_MIND_ENABLED:
+                self._apply_theory_of_mind_report(agent, text)
             enabled = agent.get("modules") or {}
-            due = [m for m in ("perception", "social", "desire", "reflection")
+            due = [m for m in self._piano_module_names()
                    if enabled.get(m, True)]
             # Do not clear a newer dirty event that arrived while this work ran.
             if agent.get("contextDirty") and agent.get("contextDirtySince", 0) <= dirty_since:
@@ -997,7 +1006,9 @@ class _ThinkJobMixin:
                 continue
             dirty = bool(agent.get("contextDirty"))
             dirty_since = agent.get("contextDirtySince") or now
-            for priority, module in enumerate(("perception", "desire", "social", "reflection")):
+            for priority, module in enumerate(
+                    ("perception", "desire", "social", "reflection")
+                    + (("theory_of_mind",) if THEORY_OF_MIND_ENABLED else ())):
                 if not (agent.get("modules") or {}).get(module, True):
                     continue
                 note = (self._piano_module_cache.get(agent["name"], {}) or {}).get(module) or {}
@@ -1051,23 +1062,11 @@ class _ThinkJobMixin:
         if ALWAYS_ON_MODULES:
             return self._always_on_reports(agent_name, modules), module_tick, 0
         tick = (module_tick or 0) + 1
-        modules = modules or {
-            "perception": True, "social": True, "desire": True, "reflection": True,
-        }
-        to_run = []
-        if modules.get("perception", True):
-            to_run.append("perception")
-        if modules.get("desire", True):
-            to_run.append("desire")
-        if modules.get("social", True) and tick % 2 == 0:
-            to_run.append("social")
-        if modules.get("reflection", True) and tick % 3 == 0:
-            to_run.append("reflection")
+        to_run, modules = self._piano_to_run(modules, tick)
         # Off-tick modules: enabled but not due this turn. Filled from cache
         # (if fresh) so the decision payload keeps seeing their last real
         # report instead of a gap on the ticks they don't fire.
-        off_tick = [m for m in ("social", "reflection")
-                    if modules.get(m, True) and m not in to_run]
+        off_tick = self._piano_off_tick_modules(modules, to_run)
         cache = self._piano_module_cache.setdefault(agent_name, {})
         ordered = list(to_run)
         for module in off_tick:
@@ -1161,6 +1160,11 @@ class _ThinkJobMixin:
                         cache[module] = {"tick": tick, "text": text}
                         report_by_module[module] = f"{module}: {text}"
                         runs += 1
+                        if module == "theory_of_mind" and THEORY_OF_MIND_ENABLED:
+                            with self.lock:
+                                agent = self._find_agent(agent_name)
+                                if agent:
+                                    self._apply_theory_of_mind_report(agent, text)
                     else:
                         self._piano_module_drops += 1
                     del active[module]

@@ -23,6 +23,9 @@ __all__ = [
     "SEASONAL_AGENTS_ENABLED",
     "MEMORY_ENABLED",
     "WIKI_MEMORY",
+    "THEORY_OF_MIND_ENABLED",
+    "PEER_MODEL_MAX_PEERS",
+    "PEER_MODEL_FIELD_CHAR_CAP",
     "AGENT_MESSAGING",
     "PIANO_MODULES",
     "ALWAYS_ON_MODULES",
@@ -483,6 +486,14 @@ MEMORY_ENABLED = True
 # instead of a plain summarize-and-append. No new LLM call cadence -- same
 # call site, same MEMORY_TICK_FRAMES cadence. Default off; one-flag revert.
 WIKI_MEMORY = True
+# Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
+# module inside the existing fan-out (not an extra call per turn). Advisory
+# prompt context only — no deterministic behavior acts on peerModel. Default
+# off; default-on requires a soak comparison (see specs/03-cognition.md).
+THEORY_OF_MIND_ENABLED = False
+# Hard caps on agent["peerModel"][peerIdStr] entries (LRU by frame).
+PEER_MODEL_MAX_PEERS = 8
+PEER_MODEL_FIELD_CHAR_CAP = 48
 AGENT_MESSAGING = True
 PIANO_MODULES = True
 # Gated scheduler for the PIANO whiteboard.  Kept dark until Phase B's
