@@ -91,6 +91,14 @@ Plan: [`.claude/plans/ai-deslop-campaign.md`](../.claude/plans/ai-deslop-campaig
 
 Campaign runs with simserver **stopped**; restart once after all approved phases complete.
 
+## In-flight: Emergence Breakthroughs
+
+Plan: [`.claude/plans/emergence-breakthroughs.md`](../.claude/plans/emergence-breakthroughs.md) (branch `emergence-breakthroughs`).
+
+| Phase | Target | Status |
+|-------|--------|--------|
+| A0 | Determinism proof (`scripts/determinism_proof.py`) | Done (branch `emergence-breakthroughs`) |
+
 ---
 
 ## Verify
