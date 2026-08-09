@@ -416,7 +416,7 @@ function drawSpeechBubble(ctx, agent) {
   ctx.font = "10px monospace";
   const w = Math.min(220, Math.max(48, ctx.measureText(text).width + 14));
   const bx = Math.max(4, Math.min(WORLD_W - w - 4, Math.round(x - w / 2)));
-  const by = Math.max(4, y - 78);
+  const by = Math.max(4, y - 94);
   ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
   ctx.fillRect(bx, by, w, 22);
   ctx.strokeStyle = "#111";
@@ -433,7 +433,7 @@ function drawHealthBar(ctx, agent) {
   if ((agent.health >= 100 || agent.health == null) && !agent.incapacitated) return;
   const w = 24, h = 3;
   const bx = Math.round(agent.x - w / 2);
-  const by = Math.round(agent.y - 30);
+  const by = Math.round(agent.y - 46);
   ctx.fillStyle = "rgba(0,0,0,0.55)";
   ctx.fillRect(bx - 1, by - 1, w + 2, h + 2);
   const frac = Math.max(0, Math.min(1, (agent.health || 0) / 100));
@@ -478,11 +478,11 @@ function drawAgent(ctx, agent, frameTick) {
   if (agent.incapacitated) {
     // Grey out collapsed agents and tag them.
     ctx.fillStyle = "rgba(60, 60, 70, 0.55)";
-    ctx.fillRect(agent.x - 12, agent.y - 26, 24, 30);
+    ctx.fillRect(agent.x - 18, agent.y - 42, 36, 42);
     ctx.fillStyle = "#fff";
     ctx.font = "12px monospace";
     ctx.textAlign = "center";
-    ctx.fillText("☠", agent.x, agent.y - 14);
+    ctx.fillText("☠", agent.x, agent.y - 28);
   }
   drawHealthBar(ctx, agent);
   drawAgentLabel(ctx, agent, agent.role.charAt(0).toUpperCase());
@@ -491,10 +491,10 @@ function drawAgent(ctx, agent, frameTick) {
   }
   if (agent.isThinking) {
     ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-    ctx.fillRect(agent.x + 12, agent.y - 46, 18, 12);
+    ctx.fillRect(agent.x + 12, agent.y - 62, 18, 12);
     ctx.fillStyle = "#fff";
     ctx.font = "bold 10px monospace";
-    ctx.fillText("...", agent.x + 21, agent.y - 37);
+    ctx.fillText("...", agent.x + 21, agent.y - 53);
   }
   drawSpeechBubble(ctx, agent);
 }

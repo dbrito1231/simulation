@@ -511,9 +511,10 @@ function genericAgentSprite(agent) {
 
 // Role-keyed sprites ported from the Claude Design generator
 // (.cursor/plans/Council Sprites.dc.html). Each role maps to a procedural
-// 24×32 grid; drawn at scale=1 so on-screen height stays 32px (same anchor
-// math as the legacy 16-row grids at scale 2). makeSprite is expensive (two
-// full-buffer neighbor passes) — never call per draw; cache per role+frame.
+// 24×32 grid; drawn at scale=1.5 so on-screen height is 48px (36px wide).
+// Legacy 16-row name/generic grids stay at scale 2 → 32px. makeSprite is
+// expensive (two full-buffer neighbor passes) — never call per draw; cache
+// per role+frame.
 const _ROLE_SPRITE_W = 24;
 const _ROLE_SPRITE_H = 32;
 
@@ -802,7 +803,7 @@ const ACCESSORIES = {
 // Small post-body pixels keep seasonal dress readable without replacing the
 // baked-in role art (hats/hoods/props) or the legacy named accessory strips.
 // Offsets are derived from the drawn grid's real w/h so they land on the same
-// anatomy at both scale=1 (24×32 role sprites) and scale=2 (16×16 legacy).
+// anatomy at scale=1.5 (24×32 role sprites) and scale=2 (16×16 legacy).
 function drawSeasonalAgentAccent(ctx, agent, grid, scale, flipX) {
   if (!seasonalAgentAccentsEnabled || agent.deceased) return;
   const w = grid[0].length * scale;
@@ -849,7 +850,7 @@ function drawAgentSprite(ctx, agent, frameTick) {
   let drewRoleSprite = false;
   if (ROLE_SPRITE_DEFS[agent.role]) {
     grid = roleAgentSprite(agent.role, walkFrame);
-    scale = 1; // 32 rows × 1 = 32px tall (matches legacy 16-row @ scale 2)
+    scale = 1.5; // 32 rows × 1.5 = 48px tall (requested size bump)
     drewRoleSprite = true;
   } else {
     const data = AGENT_SPRITES[agent.name] || genericAgentSprite(agent);
@@ -881,7 +882,7 @@ function drawAgentSprite(ctx, agent, frameTick) {
       ctx.globalAlpha = 0.28;
       ctx.fillStyle = tint;
       ctx.beginPath();
-      // Head center ~row 9 on role sprites; oy+4 still lands on the head at 32px.
+      // Head center ~row 9 on role sprites; h*9/32 still lands on the head at 48px.
       ctx.arc(agent.x, oy + Math.max(4, Math.round(h * 9 / 32)), 5, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();

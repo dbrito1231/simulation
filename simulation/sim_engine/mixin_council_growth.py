@@ -1414,46 +1414,108 @@ class _CouncilGrowthMixin:
                 return plot
         return None
 
-    def _found_district(self, kind, tmpl, plot):
+    def _claim_adjacent_frontier_pair(self):
+        """Return (ocean_plot, beach_plot) for two unclaimed plots sharing an edge.
+
+        Prefers horizontal pairs with lower x = ocean (west water), higher x = beach
+        (east sand), matching starter coast geometry. Vertical fallback: lower y =
+        ocean (north water), higher y = beach (south sand).
+        """
+        unclaimed = [p for p in self.civilization["frontierPlots"] if not p["claimed"]]
+        for left in unclaimed:
+            for right in unclaimed:
+                if left is right:
+                    continue
+                if (left["y1"] == right["y1"] and left["y2"] == right["y2"]
+                        and left["x2"] == right["x1"]):
+                    return left, right
+                if (left["y1"] == right["y1"] and left["y2"] == right["y2"]
+                        and right["x2"] == left["x1"]):
+                    return right, left
+        for north in unclaimed:
+            for south in unclaimed:
+                if north is south:
+                    continue
+                if (north["x1"] == south["x1"] and north["x2"] == south["x2"]
+                        and north["y2"] == south["y1"]):
+                    return north, south
+                if (north["x1"] == south["x1"] and north["x2"] == south["x2"]
+                        and south["y2"] == north["y1"]):
+                    return south, north
+        return None, None
+
+    def _found_district(self, kind, tmpl, plot, *, shore_gate=None):
         c = self.civilization
         n = sum(1 for d in c["districts"].values() if d["kind"] == kind) + 1
         did = f"{kind}_{n}"
         while did in c["districts"]:
             n += 1
             did = f"{kind}_{n}"
-        grid_t = tmpl["grid"]
+        grid_t = tmpl.get("grid")
         bounds = {"x1": plot["x1"], "y1": plot["y1"], "x2": plot["x2"], "y2": plot["y2"]}
-        entry_node = f"{did}_gate"
+        entry_node = shore_gate or f"{did}_gate"
         cx, cy = (bounds["x1"] + bounds["x2"]) / 2, (bounds["y1"] + bounds["y2"]) / 2
-        nearest = self._nearest_road_node(cx, cy)
+        nearest = None if shore_gate else self._nearest_road_node(cx, cy)
+        if "label" in tmpl:
+            label = tmpl["label"]
+        else:
+            label = f"{kind.upper()} {n}"
+        build_grid = None
+        if grid_t:
+            build_grid = {
+                "x0": bounds["x1"] + 20, "y0": bounds["y1"] + 40,
+                "cols": grid_t["cols"], "dx": grid_t["dx"], "dy": grid_t["dy"], "cap": grid_t["cap"],
+            }
         c["districts"][did] = {
-            "kind": kind, "tile": tmpl["tile"], "label": f"{kind.upper()} {n}",
-            "bounds": bounds,
-            "build_grid": {"x0": bounds["x1"] + 20, "y0": bounds["y1"] + 40,
-                           "cols": grid_t["cols"], "dx": grid_t["dx"], "dy": grid_t["dy"], "cap": grid_t["cap"]},
-            "entryNode": entry_node,
+            "kind": kind, "tile": tmpl["tile"], "label": label,
+            "bounds": bounds, "build_grid": build_grid, "entryNode": entry_node,
         }
         c["districtProjects"][did] = None
         c["districtLastContribution"][did] = self.frameTick
         plot["claimed"] = True
         plot["claimedBy"] = did
-        c["roadNodes"][entry_node] = {"x": cx, "y": cy}
-        if nearest:
-            c["roadEdges"].append([entry_node, nearest])
+        if not shore_gate:
+            c["roadNodes"][entry_node] = {"x": cx, "y": cy}
+            if nearest:
+                c["roadEdges"].append([entry_node, nearest])
         c["lastDistrictFoundFrame"] = self.frameTick
         self._recompute_road_paths()
         _validate_districts(c["districts"])
         _validate_road_graph(c["roadNodes"], c["roadEdges"])
         self._push_activity(f"The village claims new land in the frontier for a {kind} district ({did}).")
         self._log_benchmark("district_founded", len(c["districts"]), {"id": did, "kind": kind})
-        if FOUNDING_EVENTS_ENABLED:
-            label = c["districts"][did]["label"]
+        if FOUNDING_EVENTS_ENABLED and label:
             self._push_chronicle(f"{label} was founded on the frontier.", kind="district_founded")
         if ECOLOGY_ENABLED:
             self._ensure_district_stocks()
             new_stocks = self._init_district_stocks({did: c["districts"][did]}, c["resourceRegistry"])
             c["districtStocks"].update(new_stocks)
         self._bump_districts_epoch()
+        return did
+
+    def _found_coastal_pair(self, ocean_plot, beach_plot):
+        c = self.civilization
+        if len(c["districts"]) + 2 > MAX_TOTAL_DISTRICTS:
+            return False
+        beach_did = self._found_district(
+            "beach", COASTAL_PAIR_BEACH_TEMPLATE, beach_plot)
+        shore_gate = c["districts"][beach_did]["entryNode"]
+        self._found_district(
+            "ocean", OCEAN_DISTRICT_TEMPLATE, ocean_plot, shore_gate=shore_gate)
+        self._push_activity(
+            "The village extends the coast — new ocean and beach districts "
+            f"({ocean_plot['id']} + {beach_plot['id']}).")
+        return True
+
+    def _try_found_coastal_pair(self):
+        ocean_plot, beach_plot = self._claim_adjacent_frontier_pair()
+        if not ocean_plot:
+            if not self.civilization.get("coastalPairExhaustedLogged"):
+                self._push_activity(
+                    "The frontier has no adjacent unclaimed plots for a coastal expansion.")
+                self.civilization["coastalPairExhaustedLogged"] = True
+            return False
+        return self._found_coastal_pair(ocean_plot, beach_plot)
 
     def _maybe_found_district(self):
         """Deterministic, tick-gated backstop (same shape as
@@ -1485,6 +1547,14 @@ class _CouncilGrowthMixin:
                 continue
             self._found_district(kind, tmpl, plot)
             return  # one founding per gate check keeps this easy to reason about
+        if not self._kind_at_capacity("beach"):
+            return
+        if self.frameTick - c["kindLastActivityFrame"].get("beach", 0) < DISTRICT_FOUND_STALL_THRESHOLD:
+            return
+        if len(c["districts"]) + 2 > MAX_TOTAL_DISTRICTS:
+            return
+        if self._try_found_coastal_pair():
+            return
 
     def _next_rule_seq_token(self, counter_key):
         """Compact monotonic lowercase base36 token for auto-proposed

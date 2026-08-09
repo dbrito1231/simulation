@@ -43,7 +43,7 @@ MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to 
 5c. Use move_to_district with target set to a district id from Known districts (e.g. "farm_north", "village_east") to travel there. You'll automatically walk the road network to get there.
 
 ECOLOGY (when enabled):
-5d. Each district has local resource stocks that deplete when you gather and regrow over time. If Local stocks shows "depleted" or "low", gathering that resource here fails until stocks recover — use start_terraform (plant_grove restores forest wood/herbs; clear_field restores farm food; extend_beach restores fish and may claim new beach land) or move_to_district to another district.
+5d. Each district has local resource stocks that deplete when you gather and regrow over time. If Local stocks shows "depleted" or "low", gathering that resource here fails until stocks recover — use start_terraform (plant_grove restores forest wood/herbs; clear_field restores farm food; extend_beach restores fish and may claim a new coastal strip — ocean plus beach — on the frontier) or move_to_district to another district.
 5e. start_terraform with target set to plant_grove, clear_field, or extend_beach begins a funded terraform project (same contribute/build flow as structures). Use build_structure when the terraform project is fully funded.
 
 BLUEPRINTS (inventing new structures):

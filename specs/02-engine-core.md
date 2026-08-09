@@ -281,6 +281,13 @@ shutdown.
 `structure_sprites` as v3). v1→v2 migration removed. `setdefault`/flag-gated
 backfill for post-v2 fields still runs on every restore (forward-compat).
 
+**Inland-founded beach migration (coastal pairs):** after agents/civilization
+rehydrate, `_revert_inland_founded_beaches()` removes founded `beach_N` /
+orphan `ocean_N` districts that lack an edge-adjacent coastal pair (starter
+`beach`/`ocean` exempt), unclaims the frontier plot, cleans structures/agents/
+wildlife/road gates, then validates districts — see
+[05-world.md](05-world.md#restore-migration-inland-founded-beaches).
+
 Daily Council transcript persistence mirrors `memory`: authoritative in-RAM
 `council_transcript_rows`; append on live event; serialization exports full
 list; DB save deletes/re-inserts atomically. Restore rehydrates. At adjourn,
@@ -958,7 +965,9 @@ Server-authoritative fauna, distinct from Path-1 `_tick_wildlife` pressure
 `maxHp` from `WILDLIFE_MAX_HP[kind]` (low ≈1–2 hits; mid ≈3–4; high
 `boar`/`seal` ≈5–6; `bee` not combat target). Kind pools/yields:
 [08-systems-economy.md](08-systems-economy.md); caps `WILDLIFE_STAGE_COUNT` /
-`WILDLIFE_CAP_PER_DISTRICT = 4` from `districtEcology` ([05-world.md](05-world.md)).
+`WILDLIFE_CAP_PER_DISTRICT = 4` from per-district wildlife stage — farm/forest
+via `districtEcologyStage` (same averaged stock ratio as `districtEcology`);
+beach via fish-only ratio in `districtWildlifeStage` ([05-world.md](05-world.md)).
 
 **Habitat clamp.** Forest/farm: district bounds (inset). Beach water kinds
 (`fish`, `crab`, `turtle`, `seal`): eastern shore strip (~70px) of the adjacent
@@ -971,6 +980,19 @@ move). In-district idle wander via simple steering at `WILDLIFE_SPEED[kind]`
 (no road required). When an agent is within `WILDLIFE_FLEE_RADIUS`, or after
 a combat hit, retarget away (flee). Creatures with migration / long-range
 waypoints follow those waypoints at the same step logic.
+
+**Wildlife stage target (`_wildlife_stage_for_district` /
+`_wildlife_stage_target`).** Maps district stock health to spawn cap via
+`WILDLIFE_STAGE_COUNT` (`barren` 0 → `lush` 4). Farm and forest districts
+use `_district_ecology_ratio` (average across gatherable stocks). **Beach
+districts use fish stock only:**
+`min(1.0, fish / STOCK_DEFAULT_MAX)` (0 when fish is missing), not the
+clay/sand-averaged ecology ratio — so depleted fish drives beach fauna
+toward `barren`/`sparse` even when sand/clay remain high. Stage hysteresis
+reuses `_district_ecology_stage_with_hysteresis`; beach persists in
+`civilization["districtWildlifeStage"]` (separate from
+`districtEcologyStage`, which still averages all beach stocks for viewer
+terrain tint).
 
 **`_tick_huntable_wildlife()`** — slower cadence
 (`WILDLIFE_POP_TICK_FRAMES`, migrate check frames). Spawn into under-cap

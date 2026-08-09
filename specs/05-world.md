@@ -62,10 +62,15 @@ The starter coast is deliberately oversized for visible vessels: `ocean` spans
 migration updates the former narrow coastal bounds in existing saves. The
 coast remains non-buildable and the beach road gate remains on shore.
 
-`DISTRICT_KIND_TEMPLATES` (sim_engine/constants.py:964-969) covers only the kinds that
-`_maybe_found_district()` can instantiate anew: `farm`, `village`, `workshop`, `beach`.
-Forest/cave/ocean/market are single-instance by design; a founded cave would need
+`DISTRICT_KIND_TEMPLATES` (sim_engine/constants.py) covers the single-plot kinds that
+`_maybe_found_district()` can instantiate anew: `farm`, `village`, `workshop`.
+Beach expansion uses **coastal pairs** instead (see below) — standalone beach is not
+in `DISTRICT_KIND_TEMPLATES`. `COASTAL_PAIR_BEACH_TEMPLATE` and
+`OCEAN_DISTRICT_TEMPLATE` supply the west-water / east-sand pair geometry.
+Forest/cave/market starter districts are not frontier-founded; a founded cave would need
 per-district mining logic it doesn't have (covered by `cave_deep` already existing).
+Founded `ocean` districts are allowed when paired with an adjacent founded `beach` on
+the frontier (starter `ocean` + `beach` remain the canonical west-coast pair).
 `PROJECT_KIND` (sim_engine/constants.py:976-977) maps a project type to the district `kind` it
 must be built in (falls back to `village` for unlisted/custom-blueprint types).
 
@@ -88,11 +93,65 @@ must be built in (falls back to `village` for unlisted/custom-blueprint types).
   `district_founded`-kind chronicle milestone ("`{label}` was founded on the
   frontier.") alongside the existing unconditional `_push_activity` line. Gates only
   this chronicle call — district creation itself, the road-graph extension, and
-  `districtStocks` init are unaffected by the flag. No new district field was
+  `districtStocks` init are unaffected by the flag. Ocean districts (`label: null`)
+  skip the chronicle line. No new district field was
   added: the viewer derives its founding banner (see
   [11-viewer.md](11-viewer.md)) by diffing newly-appeared `district_founded`
   chronicle entries against ones already seen, rather than from a per-district
   `foundedFrame` timestamp.
+
+### Coastal pair founding (beach expansion)
+
+When beach districts are at capacity and stall, or when `extend_beach` terraform
+completes with `found_coastal_pair: true`, the engine claims **two adjacent
+unclaimed frontier plots** and founds `ocean_N` (west/north water) plus `beach_N`
+(east/south sand) in one operation:
+
+- `_claim_adjacent_frontier_pair()` (sim_engine/mixin_council_growth.py) scans
+  `frontierPlots` for edge-sharing unclaimed pairs. **Horizontal pairs are
+  preferred** (lower `x1` = ocean, higher `x1` = beach — same west-water /
+  east-sand read as the starter coast). **Vertical fallback:** lower `y1` =
+  ocean (north water), higher `y1` = beach (south sand). If no pair exists, founding
+  is skipped and a one-time activity line is logged.
+- `_found_coastal_pair()` (sim_engine/mixin_council_growth.py) calls
+  `_found_district()` for the beach plot (`COASTAL_PAIR_BEACH_TEMPLATE`: cols 3,
+  cap 18) then the ocean plot (`OCEAN_DISTRICT_TEMPLATE`: `tile: ocean`,
+  `label: null`, no `build_grid`). The ocean district reuses the beach plot's
+  `{beach_N}_gate` as `entryNode` (no duplicate road node) — matching starter
+  geometry where shore access is on the sand plot only.
+- `_maybe_found_district()` runs the coastal-pair path when every beach district
+  with a `build_grid` is full and beach-kind activity has stalled (same
+  `DISTRICT_FOUND_STALL_THRESHOLD` / `lastDistrictFoundFrame` gates as other kinds).
+  Pair founding requires room for **two** new districts (`len(districts) + 2 <=
+  MAX_TOTAL_DISTRICTS`).
+- Inland sand-only founding (single plot → lone `beach_N` without adjacent
+  `ocean_N`) is **removed** — terraform `extend_beach` and the beach backstop both
+  use coastal pairs only.
+
+### Restore migration (inland-founded beaches)
+
+On `restore_state()` (`sim_engine/mixin_persistence.py`), after civilization
+and agents are rehydrated and before road-path recompute / district validation,
+`_revert_inland_founded_beaches()` (`sim_engine/mixin_world_state.py`) removes
+legacy inland coast districts from older saves:
+
+- **Revert** any founded `beach_N` (`did != "beach"`) with **no edge-adjacent**
+  `ocean` district (same edge-sharing geometry as `_claim_adjacent_frontier_pair` /
+  `_district_bounds_share_edge`).
+- **Revert** orphan founded `ocean_N` (`did != "ocean"`) with no edge-adjacent
+  `beach` district (incomplete coastal pair).
+- **Starter `beach` + `ocean` are never touched.** Valid adjacent founded pairs
+  survive.
+
+Per reverted district: unclaim the matching `frontierPlots[].claimedBy` plot
+(back to grass), remove district records (`districts`, `districtProjects`,
+`districtStocks`, `districtEcologyStage`, `districtWildlifeStage`,
+`districtLastContribution`), drop
+`{did}_gate` from the road graph when present, relocate structures to another
+district of the same `PROJECT_KIND` kind or drop them (one activity line),
+reassign agents off the removed district via nearest road node / village-or-beach
+fallback, remove wildlife tied to the district, then `_recompute_road_paths()`,
+`_validate_districts()`, and `_bump_districts_epoch()`.
 
 ## Road network
 
@@ -178,7 +237,8 @@ Gated by `ECOLOGY_ENABLED` (default True). Each district carries a
   each funded like a build project (`needs`) and restricted to a district `kind`:
   `plant_grove` (forest; boosts wood/herbs stock ratio to 0.85), `clear_field`
   (farm; food stock ratio to 1.0), `extend_beach` (beach; fish stock ratio to 0.9,
-  and can additionally found a new beach district via `found_district`). Started
+  and can additionally found a new **coastal pair** — adjacent `ocean` + `beach`
+  frontier plots — via `found_coastal_pair`). Started
   via `start_terraform`, funded via `contribute_resources`, applied by
   `_complete_terraform` (sim_engine/mixin_world_state.py:1514), which calls
   `_apply_terraform_modifiers` to mutate district stocks per the template's
@@ -216,9 +276,10 @@ resource and are omitted. Omitted entirely when both flags are off.
 - The projection is computed inside `snapshot()` itself (no new engine tick);
   it is cheap (one pass over already-in-memory `districtStocks`) and safe to
   recompute on every poll since hysteresis state is idempotent between calls.
-- Consumers: viewer crop/tree growth-stage terrain and huntable-wildlife
-  spawn density both key off this same `stage`, per district — see
-  [11-viewer.md](11-viewer.md).
+- Consumers: viewer crop/tree growth-stage terrain keys off this `stage` per
+  district. Huntable-wildlife spawn caps use the same stage for farm/forest;
+  beach fauna uses fish-only ratio with hysteresis in
+  `districtWildlifeStage` — see [11-viewer.md](11-viewer.md).
 
 ## Huntable wildlife (`WILDLIFE_ENABLED`)
 
@@ -241,10 +302,11 @@ Yield table and `meat` edible:
 Viewer contract: [11-viewer.md](11-viewer.md#ambient-wildlife-wildlife_enabled).
 Action: [07-actions.md](07-actions.md). Role: [06-agents.md](06-agents.md).
 
-`districtEcology` stage still drives per-district spawn caps
-(`WILDLIFE_STAGE_COUNT` / `WILDLIFE_CAP_PER_DISTRICT = 4`); fauna population
-itself is separate from `districtStocks` (killing a creature does not
-decrement ecology gather stocks).
+Per-district wildlife spawn caps (`WILDLIFE_STAGE_COUNT` /
+`WILDLIFE_CAP_PER_DISTRICT = 4`) follow `districtEcologyStage` on farm/forest
+(same ratio as `districtEcology`); beach uses fish-only ratio in
+`districtWildlifeStage`. Fauna population is separate from `districtStocks`
+(killing a creature does not decrement ecology gather stocks).
 
 ## Structures
 

@@ -473,6 +473,163 @@ class _WorldStateMixin:
         """Content revision for GET /districts.js ?since= polls."""
         self.districtsEpoch = getattr(self, "districtsEpoch", 0) + 1
 
+    @staticmethod
+    def _district_bounds_share_edge(a, b):
+        """Edge-sharing adjacency — same geometry as _claim_adjacent_frontier_pair."""
+        if a["y1"] == b["y1"] and a["y2"] == b["y2"]:
+            if a["x2"] == b["x1"] or b["x2"] == a["x1"]:
+                return True
+        if a["x1"] == b["x1"] and a["x2"] == b["x2"]:
+            if a["y2"] == b["y1"] or b["y2"] == a["y1"]:
+                return True
+        return False
+
+    def _district_has_adjacent_kind(self, did, kind):
+        districts = self.civilization["districts"]
+        bounds = districts[did]["bounds"]
+        for other_id, other in districts.items():
+            if other_id == did or other.get("kind") != kind:
+                continue
+            if self._district_bounds_share_edge(bounds, other["bounds"]):
+                return True
+        return False
+
+    def _inland_founded_districts_to_revert(self):
+        """Founded beach/ocean districts missing their coastal pair (starter ids exempt)."""
+        districts = self.civilization["districts"]
+        to_revert = []
+        for did, d in districts.items():
+            kind = d.get("kind")
+            if kind == "beach" and did != "beach":
+                if not self._district_has_adjacent_kind(did, "ocean"):
+                    to_revert.append(did)
+            elif kind == "ocean" and did != "ocean":
+                if not self._district_has_adjacent_kind(did, "beach"):
+                    to_revert.append(did)
+        return to_revert
+
+    def _migration_fallback_district(self, removed_did):
+        c = self.civilization
+        removed_kind = c["districts"].get(removed_did, {}).get("kind")
+        prefer = "beach" if removed_kind in ("beach", "ocean") else "village"
+        for kind in (prefer, "village", "beach", "farm"):
+            for did, d in c["districts"].items():
+                if did != removed_did and d.get("kind") == kind:
+                    return did
+        return next((did for did in c["districts"] if did != removed_did), None)
+
+    def _remove_road_gate(self, gate_id):
+        c = self.civilization
+        c["roadNodes"].pop(gate_id, None)
+        c["roadEdges"] = [
+            e for e in c["roadEdges"] if e[0] != gate_id and e[1] != gate_id]
+
+    def _relocate_or_drop_structures_from_district(self, removed_did):
+        c = self.civilization
+        dropped = []
+        for s in list(c.get("structures") or []):
+            if s.get("districtId") != removed_did:
+                continue
+            kind = PROJECT_KIND.get(s.get("type"), "village")
+            dest = None
+            for did in self._buildable_district_ids():
+                if did == removed_did:
+                    continue
+                if c["districts"][did].get("kind") != kind:
+                    continue
+                spot = self._find_structure_spot(
+                    did, footprint=self._structure_footprint(s), ignore_id=s.get("id"))
+                if spot:
+                    dest = (did, spot)
+                    break
+            if dest:
+                did, spot = dest
+                s["districtId"] = did
+                s["x"] = spot["x"]
+                s["y"] = spot["y"]
+            else:
+                dropped.append(s)
+        if dropped:
+            dropped_ids = {s.get("id") for s in dropped}
+            c["structures"] = [s for s in c["structures"] if s.get("id") not in dropped_ids]
+            c["reorgTasks"] = [
+                t for t in c.get("reorgTasks", [])
+                if t.get("structureId") not in dropped_ids]
+            for a in self.agents:
+                if a.get("reorgTask") in dropped_ids:
+                    a["reorgTask"] = None
+        return dropped
+
+    def _reassign_agents_from_district(self, removed_did):
+        fallback = self._migration_fallback_district(removed_did)
+        if not fallback:
+            return
+        for agent in self.agents:
+            if agent.get("currentDistrict") != removed_did:
+                continue
+            near_node = self._nearest_road_node(agent["x"], agent["y"])
+            node_district = None
+            if near_node:
+                for did, d in self.civilization["districts"].items():
+                    if did != removed_did and d.get("entryNode") == near_node:
+                        node_district = did
+                        break
+            dest = node_district or fallback
+            if dest not in self.civilization["districts"]:
+                dest = fallback
+            db = self.civilization["districts"][dest]["bounds"]
+            agent["currentDistrict"] = dest
+            agent["x"] = (db["x1"] + db["x2"]) / 2 + (random.random() - 0.5) * 40
+            agent["y"] = (db["y1"] + db["y2"]) / 2 + (random.random() - 0.5) * 40
+            agent["waypoints"] = []
+            agent["targetX"] = agent["x"]
+            agent["targetY"] = agent["y"]
+
+    def _revert_founded_district(self, did):
+        c = self.civilization
+        for plot in c.get("frontierPlots") or []:
+            if plot.get("claimedBy") == did:
+                plot["claimed"] = False
+                plot["claimedBy"] = None
+        dropped = self._relocate_or_drop_structures_from_district(did)
+        self._reassign_agents_from_district(did)
+        c["wildlife"] = [w for w in c.get("wildlife", []) if w.get("districtId") != did]
+        lit = c.get("litDistricts")
+        if isinstance(lit, list) and did in lit:
+            c["litDistricts"] = [x for x in lit if x != did]
+        gate_id = f"{did}_gate"
+        if gate_id in c.get("roadNodes", {}):
+            self._remove_road_gate(gate_id)
+        c["districts"].pop(did, None)
+        c.get("districtProjects", {}).pop(did, None)
+        c.get("districtStocks", {}).pop(did, None)
+        c.get("districtEcologyStage", {}).pop(did, None)
+        c.get("districtWildlifeStage", {}).pop(did, None)
+        c.get("districtLastContribution", {}).pop(did, None)
+        return dropped
+
+    def _revert_inland_founded_beaches(self):
+        """On restore: drop inland-founded beach_N / orphan ocean_N back to frontier."""
+        to_revert = self._inland_founded_districts_to_revert()
+        if not to_revert:
+            return
+        reverted = []
+        total_dropped = 0
+        for did in to_revert:
+            dropped = self._revert_founded_district(did)
+            total_dropped += len(dropped)
+            reverted.append(did)
+        self._district_adjacency = None
+        self._recompute_road_paths()
+        _validate_districts(self.civilization["districts"])
+        self._bump_districts_epoch()
+        msg = (
+            f"Migrated save: reverted inland-founded coast districts to frontier "
+            f"({', '.join(reverted)}).")
+        if total_dropped:
+            msg += f" Dropped {total_dropped} structure(s) with no relocation room."
+        self._push_activity(msg)
+
     def _districts_of_kind(self, kind):
         return [did for did, d in self.civilization["districts"].items() if d["kind"] == kind]
 
@@ -1496,11 +1653,8 @@ class _WorldStateMixin:
                     self._set_district_stock(scope_did, rid, int(max_s * mod["set_ratio"]))
                 elif mod.get("add"):
                     self._add_district_stock(scope_did, rid, mod["add"])
-        if function.get("found_district") in DISTRICT_KIND_TEMPLATES:
-            plot = self._claim_frontier_plot()
-            if plot:
-                self._found_district(function["found_district"],
-                                     DISTRICT_KIND_TEMPLATES[function["found_district"]], plot)
+        if function.get("found_coastal_pair"):
+            self._try_found_coastal_pair()
 
     def _complete_terraform(self, agent, district_id):
         c = self.civilization

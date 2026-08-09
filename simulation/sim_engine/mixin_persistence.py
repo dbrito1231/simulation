@@ -552,6 +552,7 @@ class _PersistenceMixin:
                 self._rebuild_custom_rule_modifiers()
                 self.agents = agents
                 self.agent_names = set(a["name"] for a in agents)
+                self._revert_inland_founded_beaches()
                 self.council_transcript_rows = [
                     dict(row) for row in (data.get("council_transcript") or [])
                     if isinstance(row, dict)

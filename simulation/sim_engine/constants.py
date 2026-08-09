@@ -148,6 +148,8 @@ __all__ = [
     "WORLD_H",
     "STARTER_DISTRICTS",
     "DISTRICT_KIND_TEMPLATES",
+    "COASTAL_PAIR_BEACH_TEMPLATE",
+    "OCEAN_DISTRICT_TEMPLATE",
     "PROJECT_KIND",
     "STARTER_ROAD_NODES",
     "STARTER_ROAD_EDGES",
@@ -956,17 +958,22 @@ STARTER_DISTRICTS = {
 }
 
 # kind -> template used by _maybe_found_district() to instantiate a brand new
-# district of that kind into a claimed frontier plot. Only kinds that are
-# actually buildable get a template -- there's no reason to found more empty
-# forest/beach/ocean/market (single-instance by design), and a founded "cave"
-# would need real per-district mining logic it doesn't have, so cave growth is
-# covered by cave_deep already existing as a second starter site instead.
+# district of that kind into a claimed frontier plot. Beach expansion uses
+# COASTAL_PAIR_BEACH_TEMPLATE + OCEAN_DISTRICT_TEMPLATE instead (see
+# _found_coastal_pair). Forest/cave/market are not frontier-founded; a founded
+# "cave" would need real per-district mining logic it doesn't have, so cave
+# growth is covered by cave_deep already existing as a second starter site.
 DISTRICT_KIND_TEMPLATES = {
     "farm": {"tile": "farm", "grid": {"cols": 4, "dx": 105, "dy": 85, "cap": 30}},
     "village": {"tile": "village", "grid": {"cols": 4, "dx": 100, "dy": 95, "cap": 30}},
     "workshop": {"tile": "workshop", "grid": {"cols": 4, "dx": 100, "dy": 90, "cap": 24}},
-    "beach": {"tile": "beach", "grid": {"cols": 3, "dx": 100, "dy": 80, "cap": 18}},
 }
+# Beach/ocean frontier founding always claims an adjacent plot pair (west water,
+# east sand). Standalone beach is not in DISTRICT_KIND_TEMPLATES.
+COASTAL_PAIR_BEACH_TEMPLATE = {
+    "tile": "beach", "grid": {"cols": 3, "dx": 100, "dy": 80, "cap": 18},
+}
+OCEAN_DISTRICT_TEMPLATE = {"tile": "ocean", "grid": None, "label": None}
 
 # project type -> the district kind it must be built in (farmers build farm
 # plots in a farm district, general village builds go up in a village
@@ -1825,7 +1832,7 @@ TERRAFORM_TEMPLATES = {
                 "target": "stock", "resources": ["fish"],
                 "set_ratio": 0.9, "scope": "district",
             }],
-            "found_district": "beach",
+            "found_coastal_pair": True,
         },
     },
 }

@@ -184,14 +184,29 @@ class _WildlifeMixin:
             h = (h * 16777619) & 0xFFFFFFFF
         return h
 
+    def _wildlife_ecology_ratio(self, district_id):
+        """Stock ratio for wildlife spawn caps. Beach districts use fish only;
+        other habitat kinds use the averaged district ecology ratio."""
+        d = self.civilization["districts"].get(district_id)
+        if d and d.get("kind") == "beach":
+            self._ensure_district_stocks()
+            fish = (self.civilization.get("districtStocks", {}).get(district_id) or {}).get("fish", 0)
+            max_s = STOCK_DEFAULT_MAX
+            return min(1.0, fish / max_s) if max_s else 0.0
+        return self._district_ecology_ratio(district_id)
+
     def _wildlife_stage_for_district(self, district_id):
         """Ecology stage name for a district (barren/sparse/healthy/lush)."""
         if not ECOLOGY_ENABLED:
             return "healthy"
-        ratio = self._district_ecology_ratio(district_id)
+        ratio = self._wildlife_ecology_ratio(district_id)
         if ratio is None:
             return None
-        stage_state = self.civilization.setdefault("districtEcologyStage", {})
+        d = self.civilization["districts"].get(district_id)
+        # Beach wildlife keys off fish-only ratio; keep hysteresis separate from
+        # districtEcologyStage so terrain tint stays on averaged stocks.
+        stage_key = "districtWildlifeStage" if d and d.get("kind") == "beach" else "districtEcologyStage"
+        stage_state = self.civilization.setdefault(stage_key, {})
         idx = self._district_ecology_stage_with_hysteresis(ratio, stage_state.get(district_id))
         stage_state[district_id] = idx
         return DISTRICT_ECOLOGY_STAGES[idx]

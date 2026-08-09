@@ -589,11 +589,14 @@ own and does **not** pathfind, spawn, or reposition creatures.
   omitted. Engine ownership, spawn/respawn, wander/flee, migration, and
   combat live in [02-engine-core.md](02-engine-core.md); hunt yield in
   [07-actions.md](07-actions.md) / [08-systems-economy.md](08-systems-economy.md).
-- **Density (engine):** spawn caps still key off `world.districtEcology`
-  stage per district ([05-world.md](05-world.md)):
-  `WILDLIFE_STAGE_COUNT = {barren: 0, sparse: 1, healthy: 2, lush: 4}`,
-  capped at `WILDLIFE_CAP_PER_DISTRICT = 4`. Only forest/farm/beach district
-  kinds host fauna pools.
+- **Density (engine):** spawn caps key off per-district wildlife stage
+  (`WILDLIFE_STAGE_COUNT = {barren: 0, sparse: 1, healthy: 2, lush: 4}`,
+  capped at `WILDLIFE_CAP_PER_DISTRICT = 4`). Forest and farm use the same
+  averaged stock ratio as `world.districtEcology`; **beach fauna density
+  follows fish stock only** (see [02-engine-core.md](02-engine-core.md)) —
+  depleted fish reduces fish/crab/gull/turtle/seal counts even when
+  `districtEcology` still looks healthy from clay/sand. Only
+  forest/farm/beach district kinds host fauna pools.
 - **Kind pools (16 kinds):**
 
   | District | Kinds | Kill yield |
