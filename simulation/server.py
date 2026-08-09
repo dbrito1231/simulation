@@ -740,7 +740,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-{season_line}{prices_line}{weather_line}{chronicle_line}{council_digest_line}{library_lessons_line}{path1_lines}{level_line}Structures built: {structures_built}
+{season_line}{prices_line}{weather_line}{chronicle_line}{testament_line}{council_digest_line}{library_lessons_line}{path1_lines}{contracts_line}{level_line}Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
@@ -1666,6 +1666,8 @@ def build_user_prompt(data, slim=False, retry_feedback=None):
     # entry) so flag-off / empty-chronicle prompts stay byte-identical.
     chronicle_line_raw = data.get("chronicle_line")
     chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
+    testament_line_raw = data.get("testament_line")
+    testament_line = f"Village testament: {testament_line_raw}\n" if testament_line_raw else ""
     # Sovereign God mode (Phase 3 — Voice binding): public providence and
     # private omens use binding prompt lines requiring divine_response; Matrix
     # anoint/bush/story lines keep soft "interpret or ignore" wording.
@@ -1707,6 +1709,8 @@ def build_user_prompt(data, slim=False, retry_feedback=None):
     if data.get("settlement_stores_line"):
         path1_parts.append(f"Settlement stores: {data['settlement_stores_line']}")
     path1_lines = ("\n".join(path1_parts) + "\n") if path1_parts else ""
+    contracts_raw = data.get("contracts_line")
+    contracts_line = f"Open contracts: {contracts_raw}\n" if contracts_raw else ""
 
     return USER_PROMPT_TEMPLATE.format(
         agent_name=data.get("agent_name"),
@@ -1763,9 +1767,11 @@ def build_user_prompt(data, slim=False, retry_feedback=None):
         prices_line=prices_line,
         weather_line=weather_line,
         chronicle_line=chronicle_line,
+        testament_line=testament_line,
         council_digest_line=council_digest_line,
         library_lessons_line=library_lessons_line,
         path1_lines=path1_lines,
+        contracts_line=contracts_line,
         recent_conversations="none" if slim else data.get("recent_conversations", "none"),
         inbox=data.get("inbox", "none"),
         module_reports=data.get("module_reports", "none"),
@@ -1857,6 +1863,7 @@ def build_decision_payload(data, self_prompt, response_format, slim=False, retry
         system_content = COUNCIL_SYSTEM_PROMPT
     else:
         system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
+        system_content = _prompts.append_contracts_addendum(system_content)
         if not slim:
             if SYSTEM_PROMPT_AT_LOAD_TIME:
                 # The baked Modelfile SYSTEM directive applies instead (see

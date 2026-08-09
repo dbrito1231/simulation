@@ -23,6 +23,7 @@ __all__ = [
     "SEASONAL_AGENTS_ENABLED",
     "MEMORY_ENABLED",
     "WIKI_MEMORY",
+    "TESTAMENT_ENABLED",
     "THEORY_OF_MIND_ENABLED",
     "PEER_MODEL_MAX_PEERS",
     "PEER_MODEL_FIELD_CHAR_CAP",
@@ -240,6 +241,7 @@ __all__ = [
     "MAX_ACTIVE_RULES_PROMPT",
     "MAX_NEARBY_AGENTS_PROMPT",
     "MAX_IDLE_AGENTS_PROMPT",
+    "MAX_CONTRACTS_PROMPT",
     "MAX_BLUEPRINT_BRIEFS",
     "GOAL_STEP_FRAMES",
     "SAGE_CRITICAL_HEALTH",
@@ -394,6 +396,8 @@ __all__ = [
     "LIBRARY_STUDY_WEIGHT_CAP",
     "CHRONICLE_CAP",
     "CHRONICLE_PROMPT_ENTRIES",
+    "TESTAMENT_CAP",
+    "TESTAMENT_PROMPT_ENTRIES",
     "COUNCIL_DIGEST_PROMPT_ENTRIES",
     "CHRONICLE_MILESTONE_KINDS",
     "MEME_MUTATION_PROB",
@@ -488,6 +492,11 @@ MEMORY_ENABLED = True
 # instead of a plain summarize-and-append. No new LLM call cadence -- same
 # call site, same MEMORY_TICK_FRAMES cadence. Default off; one-flag revert.
 WIKI_MEMORY = True
+# Emergence Breakthroughs F1: generational knowledge inheritance — a capped
+# civilization["testament"] ring fed deterministically from dying agents'
+# memoryWiki (no new LLM call site). Meaningful only with WIKI_MEMORY on.
+# Default off; flag-off is byte-identical to baseline.
+TESTAMENT_ENABLED = False
 # Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
 # module inside the existing fan-out (not an extra call per turn). Advisory
 # prompt context only — no deterministic behavior acts on peerModel. Default
@@ -1183,6 +1192,7 @@ MAX_KNOWN_RECIPES_PROMPT = 30  # not read by validate_blueprint; prompt-only
 MAX_ACTIVE_RULES_PROMPT = 12  # already <= MAX_ACTIVE_RULES (8) in practice; safeguard only
 MAX_NEARBY_AGENTS_PROMPT = 10  # village is 8-12 agents; safeguard only
 MAX_IDLE_AGENTS_PROMPT = 8  # elder-only list; safeguard only
+MAX_CONTRACTS_PROMPT = 6  # open/accepted contracts shown in think payload
 MAX_BLUEPRINT_BRIEFS = 4  # per-bucket cap on elder blueprint-council nudge briefs
 GOAL_STEP_FRAMES = 45
 SAGE_CRITICAL_HEALTH = 30
@@ -1681,6 +1691,10 @@ LIBRARY_STUDY_WEIGHT_CAP = 5         # study-gain upgrade-weight cap (knowledge-
 # legible past without growing the prompt unboundedly.
 CHRONICLE_CAP = 100
 CHRONICLE_PROMPT_ENTRIES = 3         # how many recent entries to fold into the prompt line
+# Testament (TESTAMENT_ENABLED): capped ring of attributed lesson lines folded
+# into one prompt line ("Village testament: ...") the way the chronicle works.
+TESTAMENT_CAP = 100
+TESTAMENT_PROMPT_ENTRIES = 3         # prompt slice — independent of TESTAMENT_CAP
 COUNCIL_DIGEST_PROMPT_ENTRIES = 2    # newest compact Daily Council records per think payload
 # The viewer chronicle is deliberately narrower than the prompt-facing ring:
 # only named historical milestones belong beside the raw Activity feed.

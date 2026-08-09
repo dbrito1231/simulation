@@ -91,7 +91,8 @@ vehicle/minimum cargo;
 `SURVIVAL_ENABLED` and further filters per-agent by social/pressure gates
 (see action table); `offer_contract`/`accept_contract` require
 `CONTRACTS_ENABLED` (`accept_contract` further requires an open contract the
-actor may accept); the three role
+actor may accept); viewer `ACTION_LABELS` map them to "offering a contract" /
+"accepting a contract" (`viewer/sidebar.js`). The three role
 proposal actions require `EMERGENT_ROLES`. All other
 actions in the table are always offered (subject to `DECISION_SCHEMA`'s fixed
 enum superset — [03-cognition.md](03-cognition.md)). Invalid or disallowed choices

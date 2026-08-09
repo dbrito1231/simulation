@@ -739,6 +739,101 @@ class _GovernanceCultureMixin:
         recent = chronicle[-CHRONICLE_PROMPT_ENTRIES:]
         return "; ".join(e["text"] for e in recent)
 
+    # --- Testament (TESTAMENT_ENABLED + WIKI_MEMORY prerequisite) ---
+    def _push_testament_entry(self, text, author, generation):
+        """Append one attributed lesson line to civilization["testament"],
+        deduplicated by text and capped at TESTAMENT_CAP (oldest drops first)."""
+        if not TESTAMENT_ENABLED:
+            return
+        text = (text or "").strip()[:WIKI_SECTION_CHAR_CAP]
+        if not text:
+            return
+        c = self.civilization
+        testament = c.setdefault("testament", [])
+        norm = text.lower()
+        for entry in testament:
+            if (entry.get("text") or "").strip().lower() == norm:
+                return
+        testament.append({
+            "text": text,
+            "author": author,
+            "frame": self.frameTick,
+            "generation": generation,
+        })
+        c["testamentAuthored"] = c.get("testamentAuthored", 0) + 1
+        if len(testament) > TESTAMENT_CAP:
+            del testament[:-TESTAMENT_CAP]
+
+    def _merge_testament_on_death(self, agent):
+        """Deterministic deathbed fold of memoryWiki into the testament ring.
+        No LLM call — skips when wiki sections are empty."""
+        if not TESTAMENT_ENABLED or not WIKI_MEMORY:
+            return
+        wiki = agent.get("memoryWiki") or {}
+        lessons = (wiki.get("lessons") or "").strip()
+        relationships = (wiki.get("relationships") or "").strip()
+        if not lessons and not relationships:
+            return
+        generation = self.civilization.get("births", 0)
+        if lessons:
+            self._push_testament_entry(lessons, agent["name"], generation)
+        if relationships:
+            self._push_testament_entry(relationships, agent["name"], generation)
+
+    def _testament_prompt_line(self):
+        """Compact 'Village testament: ...' slice for think payloads."""
+        if not TESTAMENT_ENABLED:
+            return None
+        testament = self.civilization.get("testament") or []
+        if not testament:
+            return None
+        recent = testament[-TESTAMENT_PROMPT_ENTRIES:]
+        parts = []
+        for entry in recent:
+            text = (entry.get("text") or "").strip()
+            if not text:
+                continue
+            author = entry.get("author") or "?"
+            parts.append(f"{author}: {text}")
+        return "; ".join(parts) if parts else None
+
+    def _seed_newborn_wiki_from_testament(self, newborn, parent_a, parent_b):
+        """Inherit parent wiki sections plus the newest testament entries,
+        each capped at WIKI_SECTION_CHAR_CAP."""
+        if not TESTAMENT_ENABLED or not WIKI_MEMORY:
+            return
+        wiki = newborn.setdefault("memoryWiki", {
+            "relationships": "", "goals": "", "lessons": "",
+        })
+        pa_wiki = parent_a.get("memoryWiki") or {}
+        pb_wiki = parent_b.get("memoryWiki") or {}
+        testament = self.civilization.get("testament") or []
+
+        def _join_unique(*parts):
+            seen = set()
+            kept = []
+            for part in parts:
+                val = (part or "").strip()
+                if not val:
+                    continue
+                key = val.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                kept.append(val)
+            return " | ".join(kept)[:WIKI_SECTION_CHAR_CAP]
+
+        testament_texts = [
+            (e.get("text") or "").strip()
+            for e in testament[-TESTAMENT_PROMPT_ENTRIES:]
+            if (e.get("text") or "").strip()
+        ]
+        wiki["lessons"] = _join_unique(
+            pa_wiki.get("lessons"), pb_wiki.get("lessons"), *testament_texts)
+        wiki["relationships"] = _join_unique(
+            pa_wiki.get("relationships"), pb_wiki.get("relationships"))
+        wiki["goals"] = _join_unique(pa_wiki.get("goals"), pb_wiki.get("goals"))
+
     def _council_digest_prompt_line(self):
         """Bounded newest-first Daily Council continuity for every agent."""
         digests = self.civilization.get("councilDigests") or []

@@ -127,6 +127,8 @@ class _LifecycleMixin:
                              and o.get("relationships", {}).get(agent["name"]) == "ally"), None)
             if bereaved:
                 self._drift_personality(bereaved, f"grieving the loss of {agent['name']}")
+        if TESTAMENT_ENABLED and WIKI_MEMORY:
+            self._merge_testament_on_death(agent)
         self._inherit_from(agent)
         if was_elder:
             # Every "find the elder" lookup across the codebase (assign_task,
@@ -1142,6 +1144,8 @@ class _LifecycleMixin:
         home_id = parent_a.get("homeStructureId") or parent_b.get("homeStructureId")
         if home_id:
             newborn["homeStructureId"] = None  # child doesn't claim outright while parents live; breadcrumb only
+        if TESTAMENT_ENABLED and WIKI_MEMORY:
+            self._seed_newborn_wiki_from_testament(newborn, parent_a, parent_b)
         self.agents.append(newborn)
         self.agent_names.add(newborn["name"])
         c["lastBirthFrame"] = self.frameTick

@@ -233,6 +233,20 @@ slices (never replacing them); `server.py`'s `MEMORY_PROMPT_CHAR_BUDGET` was
 raised 600 -> 900 so those lines have headroom instead of being the first
 thing evicted by the char-budget's oldest-first trim.
 
+### Testament inheritance (`TESTAMENT_ENABLED`, default False)
+
+See [09-systems-society.md](09-systems-society.md#testament_enabled) for the
+civilization ring and prompt line. Summary for the agent data-shape lens:
+when `TESTAMENT_ENABLED` and `WIKI_MEMORY` are both True, `_spawn_newborn`
+(`mixin_lifecycle.py`) seeds the newborn's `memoryWiki` from both parents'
+sections plus the newest `TESTAMENT_PROMPT_ENTRIES` testament lines (each
+section capped at `WIKI_SECTION_CHAR_CAP`). On death,
+`_merge_testament_on_death` (`mixin_governance_culture.py`) folds the
+deceased's `lessons` and optional `relationships` wiki text into
+`civilization["testament"]` deterministically — no new LLM call. With the
+flag off, birth and death paths are byte-identical to the pre-Testament
+baseline.
+
 ## Sovereign God mode: per-agent omen state and sight (Phase 3)
 
 Agents carry no new persisted field for this — a private omen lives entirely

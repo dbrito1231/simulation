@@ -1890,6 +1890,38 @@ class _StructuresEconomyMixin:
                 return True
         return False
 
+    def _format_contracts_for_prompt(self, agent):
+        """Compact open/accepted contract line for think payload (flag-on only)."""
+        if not CONTRACTS_ENABLED:
+            return None
+        name = agent["name"]
+        frame = self.frameTick
+        parts = []
+        for ct in self.civilization.get("contracts") or []:
+            status = ct.get("status")
+            if status not in ("open", "accepted"):
+                continue
+            offerer = ct.get("offerer")
+            acceptor = ct.get("acceptor")
+            target = ct.get("target")
+            if status == "open":
+                if offerer != name and target not in ("open", name):
+                    continue
+            elif offerer != name and acceptor != name:
+                continue
+            deadline = self._contract_deadline_frame(ct)
+            left = max(0, deadline - frame)
+            role = "you offer" if offerer == name else (
+                "you accept" if acceptor == name else "open")
+            parts.append(
+                f"{ct.get('id')} {status} {role} "
+                f"{ct.get('qty')} {ct.get('want')} for {ct.get('pay_coin')} coin "
+                f"(offerer {offerer}, target {target}, {left}f left)"
+            )
+            if len(parts) >= MAX_CONTRACTS_PROMPT:
+                break
+        return "; ".join(parts) if parts else None
+
     def _apply_offer_contract(self, agent, decision):
         c = self.civilization
         body = decision.get("contract") or {}

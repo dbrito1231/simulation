@@ -309,6 +309,23 @@ def format_constitution(constitution):
     return "; ".join(parts) if parts else "none"
 
 
+def format_testament_prompt_line(testament, prompt_entries):
+    """Render the bounded testament slice for think prompts."""
+    if not testament or not isinstance(testament, list):
+        return None
+    recent = testament[-prompt_entries:]
+    parts = []
+    for entry in recent:
+        if not isinstance(entry, dict):
+            continue
+        text = (entry.get("text") or "").strip()
+        if not text:
+            continue
+        author = entry.get("author") or "?"
+        parts.append(f"{author}: {text}")
+    return "; ".join(parts) if parts else None
+
+
 def format_commitment(commitment):
     """Format a pending commitment (#5.4) for the prompt, or 'none'."""
     if not isinstance(commitment, dict) or not commitment.get("to"):

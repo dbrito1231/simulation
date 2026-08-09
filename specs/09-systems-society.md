@@ -579,6 +579,38 @@ at the old cap; 100 entries absorbs many more disasters before crowding out
 anything else, at a negligible cost (~80 extra short strings in `/state` and
 `state.db`).
 
+### Testament (`TESTAMENT_ENABLED`, default False) {#testament_enabled}
+
+Generational knowledge inheritance (Emergence Breakthroughs F1). Requires
+`WIKI_MEMORY` on to be meaningful; `TESTAMENT_ENABLED` is its own flag
+(default **off**, one-flag revert).
+
+**Ring:** `civilization["testament"]` — capped at `TESTAMENT_CAP = 100`
+entries of `{text, author, frame, generation}` (oldest drops first).
+`testamentAuthored` counts cumulative pushes for benchmark survival ratio.
+
+**Deathbed merge:** on agent death (`_agent_dies` → `_merge_testament_on_death`),
+the deceased's `memoryWiki["lessons"]` and optional `relationships` line fold
+into the ring deterministically (dedupe by text, each line truncated at
+`WIKI_SECTION_CHAR_CAP`). Skipped when wiki sections are empty or either flag
+is off. Zero new LLM call sites.
+
+**Inheritance:** `_spawn_newborn` seeds the newborn's `memoryWiki` from both
+parents' wiki sections plus the newest `TESTAMENT_PROMPT_ENTRIES` testament
+lines, subject to `WIKI_SECTION_CHAR_CAP` per section.
+
+**Prompt:** one bounded `"Village testament: ..."` line alongside `"Village
+history: ..."`, sliced by `TESTAMENT_PROMPT_ENTRIES = 3` independently of
+`TESTAMENT_CAP` — raising the ring size never changes prompt length.
+
+**Benchmark:** `cultural_carryover` in `_sample_benchmarks()` — oldest
+surviving entry's generation gap (`births` − entry `generation`) plus
+`survival_ratio` (`len(testament) / testamentAuthored`) in `detail`.
+
+**Back-compat:** `restore_state()` `setdefault`s `testament` → `[]` and
+`testamentAuthored` → `0` only when `TESTAMENT_ENABLED` is on at load time;
+flag-off restore never introduces the fields.
+
 **Divine communication (Sovereign God mode, `GOD_MODE_ENABLED`):** an applied
 `proclamation` (which auto-applies as timed providence) or standalone
 `providence` command pushes to all three of `activity`,
@@ -767,5 +799,7 @@ kind diversity (`RULES_ENABLED`); plus era name/tech tier
 (`TECH_TREE_ENABLED`), module-total (`PIANO_MODULES`/`META_SYSTEM`). When
 `THEORY_OF_MIND_ENABLED`, also samples `peer_prediction_accuracy` (hits/total
 against pending `expect=` predictions from `theory_of_mind` module reports).
+When `TESTAMENT_ENABLED`, also samples `cultural_carryover` (oldest surviving
+testament entry's generation gap and `survival_ratio` in `detail`).
 Each metric is written to `SessionLogger`'s `benchmarks` stream via
 `_log_benchmark` — see [12-ops.md](12-ops.md) for the JSONL sink.

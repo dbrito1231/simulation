@@ -337,6 +337,23 @@ class _DecisionsMixin:
                 "chronicle_size", len(c.get("chronicle") or []),
                 {"meme_mutations": c.get("memeMutations", 0),
                  "belief_pitch_calls": c.get("beliefPitchCalls", 0)})
+        if TESTAMENT_ENABLED:
+            c = self.civilization
+            testament = c.get("testament") or []
+            authored = c.get("testamentAuthored", 0) or len(testament)
+            current_gen = c.get("births", 0)
+            if testament:
+                gen_gaps = [current_gen - e.get("generation", 0) for e in testament]
+                oldest_carryover = max(gen_gaps) if gen_gaps else 0
+                survival_ratio = round(len(testament) / max(authored, 1), 3)
+            else:
+                oldest_carryover = 0
+                survival_ratio = 0.0
+            self.lastBenchmarks["culturalCarryover"] = oldest_carryover
+            self._log_benchmark(
+                "cultural_carryover", oldest_carryover,
+                {"entries": len(testament), "authored": authored,
+                 "survival_ratio": survival_ratio, "births": current_gen})
         if THEORY_OF_MIND_ENABLED:
             accuracy = self._peer_prediction_accuracy()
             if accuracy is not None:

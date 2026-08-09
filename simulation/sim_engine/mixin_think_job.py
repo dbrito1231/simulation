@@ -863,6 +863,7 @@ class _ThinkJobMixin:
             # so flag-off prompts stay byte-identical to Phase F).
             "skills": {k: round(v, 1) for k, v in agent["skills"].items()} if CULTURE_ENABLED else None,
             "chronicle_line": self._chronicle_prompt_line() if CULTURE_ENABLED else None,
+            "testament_line": self._testament_prompt_line() if TESTAMENT_ENABLED else None,
             "council_digest_line": self._council_digest_prompt_line(),
             "weather_line": self._weather_prompt_line(),
             "library_lessons": (self._library_lessons(agent.get("currentDistrict"))
@@ -871,6 +872,7 @@ class _ThinkJobMixin:
             "path1_industry_line": industry_line,
             "path1_neighbor_line": neighbor_line,
             "settlement_stores_line": self._format_settlement_stores_for_prompt(agent),
+            "contracts_line": self._format_contracts_for_prompt(agent) if CONTRACTS_ENABLED else None,
             "high_stakes_reason": high_stakes_reason,
             "available_actions": available_actions,
             "divine_public_event_line": self._divine_public_event_line(agent),

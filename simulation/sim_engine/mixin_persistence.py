@@ -382,6 +382,9 @@ class _PersistenceMixin:
                     civ.setdefault("beliefPitchCalls", 0)
                     civ.setdefault("skillPracticeCount", 0)
                     civ.setdefault("teachCount", 0)
+                if TESTAMENT_ENABLED:
+                    civ.setdefault("testament", [])
+                    civ.setdefault("testamentAuthored", 0)
                 if CEMETERY_ENABLED:
                     # Cemetery/burial state: purely additive, same discipline
                     # as every other phase's setdefault-only back-compat --

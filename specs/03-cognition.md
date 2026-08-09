@@ -214,10 +214,14 @@ review then approve/reject), survival (hunger/health/heal), crafting/recipes,
 Sage-priority-absolute emergency response, Path 1 (tools/blocks/treaties),
 emergent roles (switch_role), collective rules/voting, Cognitive Controller
 (PIANO module weighing), upkeep/seasons (repair/spoilage), market/trade/
-property (homes), population/governance (succession, quotas/rationing),
-knowledge/culture (skill teaching), followed by the JSON output contract and
-worked examples per action family (rest, contribute, talk, propose_blueprint,
-sage_review_blueprint, approve_blueprint).
+property (homes), population/governance (succession,
+quotas/rationing), knowledge/culture (skill teaching), followed by the JSON
+output contract and worked examples per action family (rest, contribute, talk,
+propose_blueprint, sage_review_blueprint, approve_blueprint). Contracts
+(`CONTRACTS_ENABLED`): rules C1/C2 + `contract` JSON field/schema are **not**
+in the static rulebook — `prompts.CONTRACTS_SYSTEM_ADDENDUM` is appended by
+`append_contracts_addendum()` in `build_decision_payload()` only when the flag
+is on (D9 trim; flag-off routine system cost ≈0).
 
 `SYSTEM_PROMPT_SLIM` is defined in `simulation/prompts.py` and re-exported at
 server.py:33 (`SYSTEM_PROMPT_SLIM = _prompts.SYSTEM_PROMPT_SLIM`): `SYSTEM_PROMPT`
@@ -235,9 +239,10 @@ sprite-design-only turn that follows a blueprint's mechanical approval.
 (name/role/skill/personality/memory), vitals (resources/hunger/health/
 relationships/beliefs), spatial (nearby agents/zone/district/known districts/
 local stocks/terraform targets), flag-gated single lines (`season_line`,
-`prices_line`, `weather_line`, `chronicle_line`, `path1_lines`, `level_line` —
-each renders empty when its owning flag is off so prompts stay byte-identical
-across flag states, per `build_user_prompt` server.py:1542-1732), build state
+`prices_line`, `weather_line`, `chronicle_line`, `path1_lines`,
+`contracts_line`, `level_line` — each renders empty when its owning flag is
+off or has nothing to show so prompts stay byte-identical across flag states,
+per `build_user_prompt` server.py:1542-1732), build state
 (structures/active project/progress), civilization state (directive,
 `divine_lines` — see Sovereign God mode below, invention status, commitment,
 idle agents, known resources/recipes, pending/rejected blueprints/recipes/
@@ -253,6 +258,15 @@ including whenever the flag or `WEATHER_ENABLED` is off. Follows the exact
 server folds it in only when set) and rides the existing think cycle — no new
 LLM call, no new context section, just this one line so agents can reference
 storm conditions in council.
+
+`contracts_line` (`CONTRACTS_ENABLED`, F3.3): `_format_contracts_for_prompt()`
+(`mixin_structures_economy.py`) returns a compact `"; "`-joined summary of up
+to `MAX_CONTRACTS_PROMPT` (6) open/accepted contracts relevant to the actor
+(own offers, bindings, or open/directed offers they may accept). The engine
+sets `contracts_line` on the think payload only when the flag is on;
+`build_user_prompt()` renders `Open contracts: ...` only when non-empty, so
+flag-off prompts stay byte-identical and flag-on prompts with no contracts
+add no line.
 
 ### Sovereign God mode (Phase 3): Voice binding guidance
 
@@ -678,6 +692,23 @@ Measured prompt size: ~3,100-3,400 prompt tokens per routine decision call
 (docs/REFERENCE.md:40); invention-only prompts run larger due to the
 function-block schema and sprite few-shot example (worst case ~6,163 tokens
 measured, per the `HIGH_STAKES_MAX_TOKENS` comment, server.py:223-232).
+
+**Contracts prompt growth (D9, F3.3, measured 2026-08-09, D9 trim):** pre-trim
+F3.3 left rules C1/C2, the `contract` JSON field/schema, and one
+`offer_contract` worked example in static `SYSTEM_PROMPT` (**+286 tokens**
+flag-off vs pre-F3.3 baseline, `chars/4`). D9 trim removes that block from
+`SYSTEM_PROMPT` and injects `CONTRACTS_SYSTEM_ADDENDUM` via
+`append_contracts_addendum()` only when `CONTRACTS_ENABLED` is on
+(`build_decision_payload`, `server.py`). **Flag-off system addendum: ~0**
+(measured delta vs trimmed static prompt: **0 tokens**). **Flag-on system
+addendum: ~136 tokens** (546 chars, terse C1/C2 + schema, no worked example).
+With `CONTRACTS_ENABLED` on, a filled `contracts_line` at the
+`MAX_CONTRACTS_PROMPT` cap (6 entries) still adds **~127 tokens** to the user
+message vs flag-off on the same snapshot (~125 tokens for the line body alone).
+Representative full routine payload (`build_decision_payload`, sample engine
+snapshot): flag-off **~7,010** vs flag-on **~7,137** estimated when six open
+contracts are shown — dominated by the user `contracts_line`, not static
+rulebook cost. Re-measure after any further prompt edits.
 
 `MEMORY_PROMPT_CHAR_BUDGET = 900` (`simulation/_server/prompt_format.py`,
 raised from 600 — see [Wiki-style compounding memory](#wiki-memory) below)
