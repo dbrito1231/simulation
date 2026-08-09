@@ -579,9 +579,40 @@ later phase).
 `_rebuild_settlement_governance` per bucket. Flag-off restore never introduces
 keyed maps.
 
-**Out of scope (later F4 phases):** schism trigger/secession, voting quorum
-partition, full enforcement read-path rewrite, viewer panel, war,
+**Out of scope (later F4 phases):** schism trigger/secession, viewer panel, war,
 per-settlement currency.
+
+### F4.2 — helper threading + voting scope (flag on)
+
+When **`SCHISM_ENABLED`** is on, settlement accessors thread through domestic
+read/write paths in `mixin_crafting_rules.py`, `mixin_governance_culture.py`,
+`mixin_think_job.py`, `mixin_council_growth.py`, and belief registry writers.
+
+**Domestic ballots** (`propose_rule`, `repeal_rule`, council rule proposals)
+carry **`settlementId`** (proposer's settlement). **`_vote_quorum(rule)`** counts
+only living, non-incapacitated agents in that settlement — not the whole civ.
+Backstop voters in `_maybe_advance_rules` are likewise settlement-filtered.
+
+**Global ballots** (`kind: treaty`, `kind: succession`) stay on flat
+`pendingRules` (home alias), use civ-wide quorum, and ignore `settlementId`.
+
+**Rule ids** remain globally unique across all settlement buckets
+(`_all_enacted_rule_ids`, `_all_pending_rule_ids`, `_all_constitution_rule_ids`).
+
+**Flat home aliases:** mutating `civilization["rules"]` / `pendingRules` /
+compiled side-effect maps still updates the `"home"` bucket when ids match;
+non-home buckets are separate lists/dicts. **`_rebuild_settlement_governance(sid)`**
+rebuilds constitution + `customRuleModifiers` for any settlement id.
+
+**Beliefs:** `_belief_registry(agent)` / `_registry_for_settlement` scope
+canonical definitions; per-agent `beliefs` sets unchanged. Pitch adoption and
+`found_belief` write the proposer's settlement registry.
+
+**Treaties:** `_propose_treaty` / `_vote_treaty` unchanged — global pending +
+global quorum; domestic settlement rules do not partition treaty ballots.
+
+**Still out of scope:** schism trigger, secession migration, per-settlement elder,
+viewer settlement panel.
 
 ## CULTURE_ENABLED
 

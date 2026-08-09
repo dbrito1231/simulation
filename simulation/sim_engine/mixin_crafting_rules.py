@@ -233,8 +233,13 @@ class _CraftingRulesMixin:
     def _active_agent_count(self):
         return len([a for a in self.agents if not a["incapacitated"]])
 
-    def _vote_quorum(self):
-        return (self._active_agent_count() // 2) + 1
+    def _vote_quorum(self, rule=None):
+        if not SCHISM_ENABLED:
+            return (self._active_agent_count() // 2) + 1
+        if rule and self._is_global_governance_ballot(rule):
+            return (self._active_agent_count() // 2) + 1
+        sid = self._ballot_settlement_id(rule) if rule else self._primary_settlement_id()
+        return (self._settlement_living_agent_count(sid) // 2) + 1
 
     def _normalize_custom_rule_effect(self, effect):
         """Return a canonical, safe custom-rule effect or None.
@@ -297,7 +302,11 @@ class _CraftingRulesMixin:
             return 0
         total = 0
         district = district or agent.get("currentDistrict")
-        for effect in (self.civilization.get("customRuleModifiers") or {}).values():
+        if SCHISM_ENABLED and agent:
+            modifiers = self._custom_modifiers_for_settlement(self._settlement_id_for_agent(agent))
+        else:
+            modifiers = self.civilization.get("customRuleModifiers") or {}
+        for effect in modifiers.values():
             if not isinstance(effect, dict):
                 continue
             subject = effect.get("subject") or {}
@@ -337,10 +346,17 @@ class _CraftingRulesMixin:
             provision["supersedes"] = rule["supersedes"]
         return provision
 
-    def _ensure_constitution(self):
+    def _ensure_constitution(self, settlement_id=None):
         """Backfill missing active provisions without duplicating history."""
         c = self.civilization
-        constitution = c.get("constitution")
+        if SCHISM_ENABLED:
+            sid = settlement_id or self._primary_settlement_id()
+            active_rules = self._rules_for_settlement(sid)
+            constitution = self._constitution_for_settlement(sid)
+        else:
+            sid = None
+            active_rules = c.get("rules") or []
+            constitution = c.get("constitution")
         if not isinstance(constitution, list):
             constitution = []
         # Rule ids are globally non-reusable. Keep the last duplicate so a
@@ -357,7 +373,7 @@ class _CraftingRulesMixin:
             cleaned_reversed.append(provision)
         cleaned = list(reversed(cleaned_reversed))
         by_id = {p["id"]: p for p in cleaned}
-        for rule in c.get("rules") or []:
+        for rule in active_rules:
             if not isinstance(rule, dict) or not rule.get("id"):
                 continue
             provision = by_id.get(rule["id"])
@@ -384,18 +400,40 @@ class _CraftingRulesMixin:
                     continue
                 trimmed.append(provision)
             cleaned = trimmed
-        c["constitution"] = cleaned
+        if SCHISM_ENABLED and sid:
+            self._set_constitution_for_settlement(sid, cleaned)
+        else:
+            c["constitution"] = cleaned
         return cleaned
 
-    def _set_constitution_status(self, rule_id, status, **extra):
-        for provision in reversed(self._ensure_constitution()):
+    def _set_constitution_status(self, rule_id, status, settlement_id=None, **extra):
+        sid = settlement_id
+        if SCHISM_ENABLED:
+            sid = settlement_id or self._primary_settlement_id()
+            constitution = self._ensure_constitution(sid)
+        else:
+            constitution = self._ensure_constitution()
+        for provision in reversed(constitution):
             if provision.get("id") == rule_id:
                 provision["status"] = status
                 provision.update(extra)
                 return
 
-    def _rebuild_custom_rule_modifiers(self):
+    def _rebuild_custom_rule_modifiers(self, settlement_id=None):
         """Restore-safe compilation of only currently enacted custom laws."""
+        if SCHISM_ENABLED:
+            sid = settlement_id or self._primary_settlement_id()
+            rules = self._rules_for_settlement(sid)
+            compiled = {}
+            for rule in rules:
+                if rule.get("kind") != "custom":
+                    continue
+                effect = self._normalize_custom_rule_effect(rule.get("effect"))
+                if effect is not None:
+                    rule["effect"] = effect
+                    compiled[rule["id"]] = effect
+            self._set_custom_modifiers_for_settlement(sid, compiled)
+            return
         compiled = {}
         for rule in self.civilization.get("rules") or []:
             if rule.get("kind") != "custom":
@@ -406,20 +444,27 @@ class _CraftingRulesMixin:
                 compiled[rule["id"]] = effect
         self.civilization["customRuleModifiers"] = compiled
 
-    def _validate_rule(self, rule):
+    def _validate_rule(self, rule, agent=None):
         c = self.civilization
         if not RULES_ENABLED or not isinstance(rule, dict):
             return False
-        if len(c["pendingRules"]) >= MAX_PENDING_RULES:
+        if SCHISM_ENABLED:
+            sid = self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id()
+            pending_rules = self._pending_for_settlement(sid)
+            active_rules = self._rules_for_settlement(sid)
+        else:
+            pending_rules = c["pendingRules"]
+            active_rules = c["rules"]
+        if len(pending_rules) >= MAX_PENDING_RULES:
             return False
         rid = rule.get("id")
         if not isinstance(rid, str) or not self.SLUG_RE.match(rid):
             return False
-        if any(r["id"] == rid for r in c["rules"]):
+        if rid in self._all_enacted_rule_ids():
             return False
-        if any(r["id"] == rid for r in c["pendingRules"]):
+        if rid in self._all_pending_rule_ids():
             return False
-        if any(p.get("id") == rid for p in (c.get("constitution") or []) if isinstance(p, dict)):
+        if rid in self._all_constitution_rule_ids():
             return False
         name = rule.get("name")
         if not isinstance(name, str) or not (1 <= len(name) <= 32):
@@ -432,10 +477,10 @@ class _CraftingRulesMixin:
         if supersedes is not None:
             if not isinstance(supersedes, str) or supersedes == rid:
                 return False
-            target = next((r for r in c["rules"] if r.get("id") == supersedes), None)
+            target = next((r for r in active_rules if r.get("id") == supersedes), None)
             if target is None:
                 return False
-        if len(c["rules"]) >= MAX_ACTIVE_RULES and target is None:
+        if len(active_rules) >= MAX_ACTIVE_RULES and target is None:
             return False
         if kind == "succession":
             # Succession ballots are created deterministically by
@@ -487,19 +532,20 @@ class _CraftingRulesMixin:
 
     def _tally_and_maybe_enact(self, rule):
         c = self.civilization
+        rules_list, pending_list, scope_sid = self._governance_scope_lists(rule)
         votes = list(rule["votes"].values())
         yes = votes.count("yes")
         no = votes.count("no")
-        quorum = self._vote_quorum()
+        quorum = self._vote_quorum(rule)
         if yes >= quorum:
             if rule.get("kind") == "repeal":
                 rule["enacted"] = True
-                c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                pending_list[:] = [r for r in pending_list if r["id"] != rule["id"]]
                 c["lastRuleActivityFrame"] = self.frameTick
-                return self._enact_repeal(rule, yes)
+                return self._enact_repeal(rule, yes, scope_sid)
             if LIFECYCLE_ENABLED and rule["kind"] == "succession":
                 rule["enacted"] = True
-                c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                pending_list[:] = [r for r in pending_list if r["id"] != rule["id"]]
                 c["lastRuleActivityFrame"] = self.frameTick
                 # Succession ballots are a leadership record, not an ongoing
                 # governance constraint -- they deliberately do NOT join
@@ -513,10 +559,10 @@ class _CraftingRulesMixin:
             else:
                 superseded = None
                 if rule.get("supersedes"):
-                    superseded = next((r for r in c["rules"]
+                    superseded = next((r for r in rules_list
                                        if r.get("id") == rule["supersedes"]), None)
                     if superseded is None:
-                        c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                        pending_list[:] = [r for r in pending_list if r["id"] != rule["id"]]
                         c["lastRuleActivityFrame"] = self.frameTick
                         self._push_activity(
                             f'Rule "{rule["name"]}" rejected: its amendment target is no longer active')
@@ -524,34 +570,35 @@ class _CraftingRulesMixin:
                 # A normal enact adds one rule; an amendment first removes one.
                 # Re-check under the engine lock because other ballots may have
                 # changed the active set after this proposal was validated.
-                projected_rules = len(c["rules"]) - (1 if superseded is not None else 0)
+                projected_rules = len(rules_list) - (1 if superseded is not None else 0)
                 if projected_rules >= MAX_ACTIVE_RULES:
-                    c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                    pending_list[:] = [r for r in pending_list if r["id"] != rule["id"]]
                     c["lastRuleActivityFrame"] = self.frameTick
                     self._push_activity(
                         f'Rule "{rule["name"]}" rejected: the active-rule budget is full')
                     return "rejected"
                 rule["enacted"] = True
                 rule["enactedFrame"] = self.frameTick
-                c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+                pending_list[:] = [r for r in pending_list if r["id"] != rule["id"]]
                 c["lastRuleActivityFrame"] = self.frameTick
                 if superseded is not None:
                     # An amendment replaces an active provision atomically:
                     # reverse its effect exactly once before applying the new
                     # one, then retain only the historical constitution row.
-                    c["rules"] = [r for r in c["rules"] if r.get("id") != superseded["id"]]
-                    self._clear_governance_rule(superseded)
+                    rules_list[:] = [r for r in rules_list if r.get("id") != superseded["id"]]
+                    self._clear_governance_rule(superseded, scope_sid)
                     self._set_constitution_status(
-                        superseded["id"], "superseded", supersededBy=rule["id"])
-                c["rules"].append(rule)
+                        superseded["id"], "superseded", settlement_id=scope_sid,
+                        supersededBy=rule["id"])
+                rules_list.append(rule)
                 # _ensure_constitution backfills the newly active rule once;
                 # do not append a second provision after that migration pass.
-                self._ensure_constitution()
+                self._ensure_constitution(scope_sid if SCHISM_ENABLED else None)
                 self._record_rule_kind_enacted(rule.get("kind"))
                 self._push_activity(f'Rule "{rule["name"]}" enacted by vote ({yes} yes)')
-                self._log_benchmark("rule_enacted", len(c["rules"]), {
+                self._log_benchmark("rule_enacted", len(rules_list), {
                     "id": rule["id"], "yes": yes, "no": no, "kind": rule.get("kind")})
-                self._apply_governance_rule(rule)
+                self._apply_governance_rule(rule, scope_sid)
                 # Living-ecosystem Phase 5: the emergency storm-rationing
                 # auto-proposal (see _maybe_advance_rules) mints ids prefixed
                 # "emerg_" -- id-prefix detection because _propose_rule's
@@ -567,21 +614,31 @@ class _CraftingRulesMixin:
                         kind="emergency_measure")
             return "enacted"
         if no >= quorum:
-            c["pendingRules"] = [r for r in c["pendingRules"] if r["id"] != rule["id"]]
+            pending_list[:] = [r for r in pending_list if r["id"] != rule["id"]]
             c["lastRuleActivityFrame"] = self.frameTick
             self._push_activity(f'Rule "{rule["name"]}" rejected by vote ({no} no)')
             return "rejected"
         return "pending"
 
-    def _apply_governance_rule(self, rule):
+    def _apply_governance_rule(self, rule, settlement_id=None):
         """Compile/apply an enacted law; repeal and amendment reverse it."""
         c = self.civilization
+        sid = settlement_id
+        if SCHISM_ENABLED and not self._is_global_governance_ballot(rule):
+            sid = settlement_id or self._ballot_settlement_id(rule)
+            harvest_quotas = self._harvest_quotas_for_settlement(sid)
+            rationing_active = self._rationing_for_settlement(sid)
+            custom_modifiers = self._custom_modifiers_for_settlement(sid)
+        else:
+            harvest_quotas = c.setdefault("harvestQuotas", {})
+            rationing_active = c.setdefault("rationingActive", {})
+            custom_modifiers = c.setdefault("customRuleModifiers", {})
         if rule["kind"] == "harvest_quota":
             try:
                 value = int(float(rule.get("value")))
             except (TypeError, ValueError):
                 value = HARVEST_QUOTA_PERIOD_FRAMES and 5
-            c["harvestQuotas"][rule["id"]] = {"value": max(1, value)}
+            harvest_quotas[rule["id"]] = {"value": max(1, value)}
             self._push_activity(f'Harvest quota "{rule["name"]}" now limits gathers to '
                                 f'{max(1, value)} per resource per {HARVEST_QUOTA_PERIOD_FRAMES // 30}s per district')
         elif rule["kind"] == "rationing":
@@ -589,7 +646,7 @@ class _CraftingRulesMixin:
                 value = int(float(rule.get("value")))
             except (TypeError, ValueError):
                 value = RATIONING_WITHDRAW_CAP
-            c["rationingActive"][rule["id"]] = {"value": max(1, value)}
+            rationing_active[rule["id"]] = {"value": max(1, value)}
             self._push_activity(f'Rationing "{rule["name"]}" now caps stockpile withdrawals to '
                                 f'{max(1, value)} while storage is low')
         elif rule["kind"] == "priority":
@@ -600,38 +657,50 @@ class _CraftingRulesMixin:
             effect = self._normalize_custom_rule_effect(rule.get("effect"))
             if effect is not None:
                 rule["effect"] = effect
-                c.setdefault("customRuleModifiers", {})[rule["id"]] = effect
+                custom_modifiers[rule["id"]] = effect
                 self._push_activity(
                     f'Custom rule "{rule["name"]}" now adds {effect["modifier"]["value"]} '
                     f'to matching {effect["condition"].get("action", next(iter(effect["subject"].values())))} actions')
 
-    def _clear_governance_rule(self, rule):
+    def _clear_governance_rule(self, rule, settlement_id=None):
         """Reverse _apply_governance_rule side effects on repeal."""
-        c = self.civilization
         rid = rule.get("id")
         if not rid:
             return
-        c.get("harvestQuotas", {}).pop(rid, None)
-        c.get("rationingActive", {}).pop(rid, None)
-        c.get("customRuleModifiers", {}).pop(rid, None)
+        if SCHISM_ENABLED and not self._is_global_governance_ballot(rule):
+            sid = settlement_id or self._ballot_settlement_id(rule)
+            self._harvest_quotas_for_settlement(sid).pop(rid, None)
+            self._rationing_for_settlement(sid).pop(rid, None)
+            self._custom_modifiers_for_settlement(sid).pop(rid, None)
+        else:
+            c = self.civilization
+            c.get("harvestQuotas", {}).pop(rid, None)
+            c.get("rationingActive", {}).pop(rid, None)
+            c.get("customRuleModifiers", {}).pop(rid, None)
 
-    def _enact_repeal(self, repeal_ballot, yes_count):
+    def _enact_repeal(self, repeal_ballot, yes_count, settlement_id=None):
         """Remove the targeted enacted rule after a successful repeal vote."""
         c = self.civilization
         target_id = repeal_ballot.get("targetRuleId") or repeal_ballot.get("value")
-        target = next((r for r in c["rules"] if r["id"] == target_id), None)
+        sid = settlement_id
+        if SCHISM_ENABLED and not self._is_global_governance_ballot(repeal_ballot):
+            sid = settlement_id or self._ballot_settlement_id(repeal_ballot)
+            rules_list = self._rules_for_settlement(sid)
+        else:
+            rules_list = c["rules"]
+        target = next((r for r in rules_list if r["id"] == target_id), None)
         if not target:
             self._push_activity(
                 f'Repeal of "{target_id}" passed ({yes_count} yes) but the rule was already gone')
-            self._log_benchmark("rule_repealed", len(c["rules"]),
+            self._log_benchmark("rule_repealed", len(rules_list),
                                 {"id": target_id, "yes": yes_count, "missing": True})
             return "enacted"
-        c["rules"] = [r for r in c["rules"] if r["id"] != target_id]
-        self._clear_governance_rule(target)
-        self._set_constitution_status(target_id, "repealed")
+        rules_list[:] = [r for r in rules_list if r["id"] != target_id]
+        self._clear_governance_rule(target, sid)
+        self._set_constitution_status(target_id, "repealed", settlement_id=sid)
         self._push_activity(
             f'Rule "{target["name"]}" repealed by vote ({yes_count} yes)')
-        self._log_benchmark("rule_repealed", len(c["rules"]),
+        self._log_benchmark("rule_repealed", len(rules_list),
                             {"id": target_id, "yes": yes_count, "kind": target.get("kind")})
         return "enacted"
 
@@ -640,7 +709,7 @@ class _CraftingRulesMixin:
         if not RULES_ENABLED:
             return f"{agent['name']} cannot propose rules"
         rule = decision.get("rule")
-        if not self._validate_rule(rule):
+        if not self._validate_rule(rule, agent=agent):
             # Advance the attempt cooldown even on failure so a rejected
             # proposal (colliding id, malformed rule, etc.) waits a full
             # RULE_PROPOSE_COOLDOWN before the auto-proposer retries, instead
@@ -667,7 +736,12 @@ class _CraftingRulesMixin:
             entry["effect"] = effect
         if rule.get("supersedes"):
             entry["supersedes"] = rule["supersedes"]
-        c["pendingRules"].append(entry)
+        if SCHISM_ENABLED and not self._is_global_governance_ballot(entry):
+            entry["settlementId"] = self._settlement_id_for_agent(agent)
+            pending_list = self._pending_for_settlement(entry["settlementId"])
+        else:
+            pending_list = c["pendingRules"]
+        pending_list.append(entry)
         c["lastRuleActivityFrame"] = self.frameTick
         self._push_communication("rule_proposal", agent["name"], "everyone",
                                  f"{entry['name']}: {entry['description']}")
@@ -683,16 +757,19 @@ class _CraftingRulesMixin:
         target_id = decision.get("target")
         if not isinstance(target_id, str) or not target_id:
             return f"{agent['name']} named no rule to repeal"
-        target = next((r for r in c["rules"] if r["id"] == target_id), None)
+        sid = self._settlement_id_for_agent(agent) if SCHISM_ENABLED else None
+        rules_list = self._rules_for_settlement(sid) if sid else c["rules"]
+        pending_list = self._pending_for_settlement(sid) if sid else c["pendingRules"]
+        target = next((r for r in rules_list if r["id"] == target_id), None)
         if not target:
             return f"{agent['name']} found no enacted rule {target_id}"
-        if len(c["pendingRules"]) >= MAX_PENDING_RULES:
+        if len(pending_list) >= MAX_PENDING_RULES:
             return f"{agent['name']} cannot propose a repeal — too many pending votes"
         ballot_id = f"repeal_{target_id}"
-        if any(r["id"] == ballot_id for r in c["pendingRules"]):
+        if any(r["id"] == ballot_id for r in pending_list):
             return f"{agent['name']} found a repeal of {target_id} already pending"
         if any(r.get("kind") == "repeal" and r.get("targetRuleId") == target_id
-               for r in c["pendingRules"]):
+               for r in pending_list):
             return f"{agent['name']} found a repeal of {target_id} already pending"
         entry = {
             "id": ballot_id,
@@ -705,18 +782,26 @@ class _CraftingRulesMixin:
             "enacted": False,
             "votes": {agent["name"]: "yes"},
         }
-        c["pendingRules"].append(entry)
+        if SCHISM_ENABLED:
+            entry["settlementId"] = sid
+        pending_list.append(entry)
         c["lastRuleActivityFrame"] = self.frameTick
         self._push_communication("rule_proposal", agent["name"], "everyone",
                                  f'{entry["name"]}: {entry["description"]}')
         self._tally_and_maybe_enact(entry)
         return f'{agent["name"]} proposed repealing "{target["name"]}"'
 
-    def _active_priority_resource(self):
+    def _active_priority_resource(self, agent=None, settlement_id=None):
         """Return the resource id from the newest enacted priority rule, if any."""
         if not RULES_ENABLED:
             return None
-        for rule in reversed(self.civilization["rules"]):
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            rules = self._rules_for_settlement(sid)
+        else:
+            rules = self.civilization["rules"]
+        for rule in reversed(rules):
             if rule.get("kind") == "priority" and rule.get("enacted"):
                 rid = rule.get("value")
                 if isinstance(rid, str) and rid in self.civilization["resourceRegistry"]:
@@ -727,7 +812,7 @@ class _CraftingRulesMixin:
         c = self.civilization
         if not RULES_ENABLED:
             return f"{agent['name']} cannot vote"
-        rule = next((r for r in c["pendingRules"] if r["id"] == decision.get("target")), None)
+        rule = self._find_pending_ballot(decision.get("target"), voter=agent)
         if not rule:
             return f"{agent['name']} found no such pending rule"
         vote = "no" if decision.get("vote") == "no" else "yes"
@@ -750,14 +835,20 @@ class _CraftingRulesMixin:
         suffix = f" ({outcome})" if outcome != "pending" else ""
         return f'{agent["name"]} voted {vote} on "{rule["name"]}"{suffix}'
 
-    def _active_resource_tax(self):
+    def _active_resource_tax(self, agent=None, settlement_id=None):
         if not RULES_ENABLED:
             return 0
-        rule = next((r for r in self.civilization["rules"]
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            rules = self._rules_for_settlement(sid)
+        else:
+            rules = self.civilization["rules"]
+        rule = next((r for r in rules
                      if r["kind"] == "resource_tax" and r.get("enacted")), None)
         return (rule.get("value") or 0) if rule else 0
 
-    def _active_or_pending_rationing(self):
+    def _active_or_pending_rationing(self, agent=None, settlement_id=None):
         """Living-ecosystem Phase 5: True if a "rationing" rule is already
         active or already awaiting a vote, LLM-driven or auto-proposed alike.
         Governance-churn guard for the emergency branch in
@@ -765,15 +856,23 @@ class _CraftingRulesMixin:
         full WEATHER_DWELL_TICKS window would re-propose a fresh emergency
         rationing rule every RULE_PROPOSE_COOLDOWN, crowding out ordinary
         priority/tax governance and pressuring MAX_PENDING_RULES."""
-        c = self.civilization
-        if any(r.get("kind") == "rationing" for r in c["rules"]):
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            rules = self._rules_for_settlement(sid)
+            pending = self._pending_for_settlement(sid)
+        else:
+            c = self.civilization
+            rules = c["rules"]
+            pending = c["pendingRules"]
+        if any(r.get("kind") == "rationing" for r in rules):
             return True
-        if any(r.get("kind") == "rationing" for r in c["pendingRules"]):
+        if any(r.get("kind") == "rationing" for r in pending):
             return True
         return False
 
     def _enforce_resource_tax(self, agent, res):
-        tax = self._active_resource_tax()
+        tax = self._active_resource_tax(agent)
         # Edibles are exempt: nothing ever consumes the stockpile, so taxing
         # food/fish just deletes it from the survival economy.
         if tax <= 0 or res in EDIBLE_RESOURCES:

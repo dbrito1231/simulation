@@ -1,6 +1,7 @@
-"""Deterministic smoke for Emergence Breakthroughs F4.1 (Schism storage).
+"""Deterministic smoke for Emergence Breakthroughs F4.1–F4.2 (Schism storage + scope).
 
-Covers flag-off shape, flag-on cold-start keyed maps, and legacy restore wrap.
+Covers flag-off shape, flag-on cold-start keyed maps, legacy restore wrap,
+home-settlement propose/enact, and manual two-settlement rule independence.
 Ollama-free.
 
 Run: uv run python scripts/schism_smoke.py
@@ -93,11 +94,86 @@ def test_flag_on_restore_wraps_legacy_flat():
     print("  OK flag-on legacy restore wrap")
 
 
+def test_flag_on_propose_enact_home():
+    old = se.SCHISM_ENABLED
+    se.SCHISM_ENABLED = True
+    try:
+        engine = make_engine(4)
+        home = engine._primary_settlement_id()
+        agent = engine.agents[0]
+        rule = {
+            "id": "tax_smoke_home",
+            "name": "Smoke Tax",
+            "kind": "resource_tax",
+            "value": 1,
+            "description": "smoke test tax",
+        }
+        engine._propose_rule(agent, {"rule": rule})
+        pending = engine._pending_for_settlement(home)
+        ballot = next((r for r in pending if r["id"] == "tax_smoke_home"), None)
+        assert_true(ballot is not None, "pending ballot must exist after propose")
+        assert_true(ballot.get("settlementId") == home,
+                    "domestic ballot must carry proposer settlementId")
+        for voter in engine.agents:
+            if voter["name"] not in ballot["votes"]:
+                engine._vote_on_rule(voter, {"target": ballot["id"], "vote": "yes"})
+        rules = engine._rules_for_settlement(home)
+        assert_true(any(r.get("id") == "tax_smoke_home" for r in rules),
+                    "rule must enact in home settlement bucket")
+    finally:
+        se.SCHISM_ENABLED = old
+    print("  OK flag-on propose/enact home")
+
+
+def test_flag_on_two_settlement_rules_independent():
+    old = se.SCHISM_ENABLED
+    se.SCHISM_ENABLED = True
+    try:
+        engine = make_engine(4)
+        c = engine.civilization
+        home = engine._primary_settlement_id()
+        outpost = "outpost_smoke"
+        c.setdefault("rulesBySettlement", {})[outpost] = []
+        c.setdefault("pendingRulesBySettlement", {})[outpost] = []
+        c.setdefault("constitutionBySettlement", {})[outpost] = []
+        c.setdefault("customRuleModifiersBySettlement", {})[outpost] = {}
+        c.setdefault("harvestQuotasBySettlement", {})[outpost] = {}
+        c.setdefault("rationingActiveBySettlement", {})[outpost] = {}
+        outpost_rule = {
+            "id": "priority_out_only",
+            "name": "Outpost Only",
+            "kind": "priority",
+            "value": "wood",
+            "enacted": True,
+            "enactedFrame": 1,
+        }
+        c["rulesBySettlement"][outpost].append(outpost_rule)
+        engine._rebuild_settlement_governance(outpost)
+        home_ids = [r["id"] for r in engine._rules_for_settlement(home)]
+        out_ids = [r["id"] for r in engine._rules_for_settlement(outpost)]
+        assert_true("priority_out_only" not in home_ids,
+                    "home settlement must not see outpost-only enacted rule")
+        assert_true("priority_out_only" in out_ids,
+                    "outpost settlement must retain its enacted rule")
+        payload = engine._build_think_payload(engine.agents[0])
+        active_ids = [
+            r["id"] for r in payload.get("active_rules") or []
+            if isinstance(r, dict) and r.get("id")
+        ]
+        assert_true("priority_out_only" not in active_ids,
+                    "home agent think payload must not list outpost-only rule")
+    finally:
+        se.SCHISM_ENABLED = old
+    print("  OK flag-on two-settlement independence")
+
+
 def main():
     print("schism_smoke.py")
     test_flag_off_no_keyed_maps()
     test_flag_on_cold_start_aliases_home()
     test_flag_on_restore_wraps_legacy_flat()
+    test_flag_on_propose_enact_home()
+    test_flag_on_two_settlement_rules_independent()
     print("ALL OK")
 
 

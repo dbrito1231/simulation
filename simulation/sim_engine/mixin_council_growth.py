@@ -29,6 +29,9 @@ class _CouncilGrowthMixin:
 
     def _daily_council_agenda(self):
         c = self.civilization
+        elder = next((a for a in self.agents if a.get("role") == "elder"), None)
+        agenda_sid = (self._settlement_id_for_agent(elder) if elder and SCHISM_ENABLED
+                      else self._primary_settlement_id() if SCHISM_ENABLED else None)
         active_projects = [
             f"{did}: {p.get('name') or p.get('type')}"
             for did, p in sorted((c.get("districtProjects") or {}).items())
@@ -66,7 +69,8 @@ class _CouncilGrowthMixin:
             {
                 "topic": "rules",
                 "detail": (", ".join(r.get("name") or r.get("id", "rule")
-                                    for r in (c.get("rules") or [])[:8])
+                                    for r in (self._rules_for_settlement(agenda_sid) if SCHISM_ENABLED
+                                              else (c.get("rules") or []))[:8])
                            or "No active village rules"),
             },
             {
@@ -468,7 +472,7 @@ class _CouncilGrowthMixin:
         kind = decision.get("kind")
         if kind == "rule":
             rule = decision.get("rule")
-            if not self._validate_rule(rule):
+            if not self._validate_rule(rule, agent=agent):
                 return self._daily_council_reject(agent, "council_propose", "invalid rule proposal")
             self._propose_rule(agent, {"rule": rule})
             stable_id = rule["id"]
@@ -543,10 +547,7 @@ class _CouncilGrowthMixin:
                 )
         ballot.setdefault("votes", {})[agent["name"]] = vote
         if ballot.get("kind") == "rule":
-            pending = next(
-                (r for r in self.civilization["pendingRules"] if r.get("id") == ballot.get("id")),
-                None,
-            )
+            pending = self._find_pending_ballot(ballot.get("id"), voter=agent)
             if pending:
                 pending.setdefault("votes", {})[agent["name"]] = vote
                 self._tally_and_maybe_enact(pending)
@@ -665,13 +666,12 @@ class _CouncilGrowthMixin:
                 else "succession restart required: winner unavailable"
             )
         if kind == "rule":
-            pending = next(
-                (r for r in self.civilization["pendingRules"] if r.get("id") == ballot.get("id")),
-                None,
-            )
+            c = self.civilization
+            elder_sid = self._settlement_id_for_agent(elder) if elder and SCHISM_ENABLED else None
+            pending = self._find_pending_ballot(ballot.get("id"), voter=elder)
             if pending is None:
-                enacted = any(r.get("id") == ballot.get("id")
-                              for r in self.civilization.get("rules") or [])
+                rules_scan = self._rules_for_settlement(elder_sid) if elder_sid else c.get("rules") or []
+                enacted = any(r.get("id") == ballot.get("id") for r in rules_scan)
                 return "rule enacted through tally" if enacted else "rule ballot already resolved"
             pending["votes"] = dict(ballot.get("votes") or {})
             if tie_break and elder_name:
@@ -685,10 +685,8 @@ class _CouncilGrowthMixin:
                 # closed without becoming a lingering ordinary-rule ballot.
                 # Active rules remain untouched; only the unratified pending
                 # proposal is discarded.
-                self.civilization["pendingRules"] = [
-                    r for r in self.civilization["pendingRules"]
-                    if r.get("id") != ballot.get("id")
-                ]
+                _, pending_list, scope_sid = self._governance_scope_lists(pending)
+                pending_list[:] = [r for r in pending_list if r.get("id") != ballot.get("id")]
                 return "rule rejected without whole-village majority"
             return f"rule {result} through existing tally path"
         if kind == "blueprint":
@@ -1605,11 +1603,24 @@ class _CouncilGrowthMixin:
                         "reasoning": f'Casting my vote for {pending["candidateName"]} as the new elder.'})
                     return
             return
-        pending = c["pendingRules"][0] if c["pendingRules"] else None
+        elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
+        elder_sid = self._settlement_id_for_agent(elder) if elder and SCHISM_ENABLED else None
+        pending_list = self._pending_for_settlement(elder_sid) if elder_sid else c["pendingRules"]
+        domestic_pending = [
+            r for r in pending_list if not self._is_global_governance_ballot(r)
+        ]
+        pending = domestic_pending[0] if domestic_pending else None
         if pending:
-            eligible = [a for a in self.agents
-                        if not a["incapacitated"] and a["role"] != "elder"
-                        and a["name"] not in pending["votes"]]
+            ballot_sid = self._ballot_settlement_id(pending)
+            if SCHISM_ENABLED and not self._is_global_governance_ballot(pending):
+                eligible = [a for a in self.agents
+                            if not a["incapacitated"] and a["role"] != "elder"
+                            and a["name"] not in pending["votes"]
+                            and self._settlement_id_for_agent(a) == ballot_sid]
+            else:
+                eligible = [a for a in self.agents
+                            if not a["incapacitated"] and a["role"] != "elder"
+                            and a["name"] not in pending["votes"]]
             voter = next((a for a in eligible if self._is_idle(a)), None) or (eligible[0] if eligible else None)
             if voter:
                 biased = self._belief_biased_vote(voter, pending)
@@ -1630,6 +1641,7 @@ class _CouncilGrowthMixin:
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
         if not elder:
             return
+        elder_sid = self._settlement_id_for_agent(elder) if SCHISM_ENABLED else None
         # Living-ecosystem Phase 5 (WEATHER_GOVERNANCE_ENABLED): a storm
         # driving an affected district's ecology below STOCK_LOW_RATIO gets a
         # deterministic emergency response -- an auto-proposed "rationing"
@@ -1645,7 +1657,7 @@ class _CouncilGrowthMixin:
         # guard -- see plan-living-ecosystem-5's "governance churn" risk).
         if WEATHER_GOVERNANCE_ENABLED and WEATHER_ENABLED and LIFECYCLE_ENABLED:
             w = c.get("weather") or {}
-            if w.get("state") in ("storm", "clearing") and not self._active_or_pending_rationing():
+            if w.get("state") in ("storm", "clearing") and not self._active_or_pending_rationing(elder):
                 storm_districts = w.get("districts") or []
                 scarce = any(
                     (ratio := self._district_ecology_ratio(did)) is not None and ratio < STOCK_LOW_RATIO
@@ -1666,7 +1678,7 @@ class _CouncilGrowthMixin:
                         "value": max(1, RATIONING_WITHDRAW_CAP - 1),
                         "description": "Storm-driven scarcity: cap stockpile withdrawals until supplies recover.",
                     }
-                    if self._validate_rule(rule):
+                    if self._validate_rule(rule, agent=elder):
                         self.apply_decision(elder, {
                             "action": "propose_rule",
                             "rule": rule,
@@ -1682,7 +1694,7 @@ class _CouncilGrowthMixin:
                     return
         # Sid-parity Phase 2: once a tax exists, propose a priority rule for
         # the scarcest unmet build resource (or wood) so governance diversifies.
-        if self._active_resource_tax() > 0 and not self._active_priority_resource():
+        if self._active_resource_tax(elder) > 0 and not self._active_priority_resource(elder):
             unmet = self._first_unmet_resource_anywhere() or "wood"
             if unmet in c["resourceRegistry"]:
                 # Rule ids are globally non-reusable (see _ensure_constitution),
@@ -1697,7 +1709,7 @@ class _CouncilGrowthMixin:
                     "value": unmet,
                     "description": f"Contributors prioritize delivering {unmet} to active builds.",
                 }
-                if self._validate_rule(rule):
+                if self._validate_rule(rule, agent=elder):
                     self.apply_decision(elder, {
                         "action": "propose_rule",
                         "rule": rule,
@@ -1715,10 +1727,11 @@ class _CouncilGrowthMixin:
         # the normal 2-rule steady state -- meant this branch fired the very
         # next cooldown window after the propose branch ever enacted a
         # priority rule, undoing it immediately and oscillating forever.
-        non_tax = [r for r in c["rules"] if r.get("kind") != "resource_tax"]
+        rules_for_elder = self._rules_for_settlement(elder_sid) if elder_sid else c["rules"]
+        non_tax = [r for r in rules_for_elder if r.get("kind") != "resource_tax"]
         repeal_eligible = [r for r in non_tax
                           if self.frameTick - r.get("enactedFrame", 0) >= RULE_REPEAL_MIN_AGE_FRAMES]
-        if len(c["rules"]) >= 2 and repeal_eligible:
+        if len(rules_for_elder) >= 2 and repeal_eligible:
             target = repeal_eligible[0]
             self.apply_decision(elder, {
                 "action": "repeal_rule",
@@ -1726,7 +1739,7 @@ class _CouncilGrowthMixin:
                 "reasoning": f'Repealing outdated rule "{target["name"]}" to keep village law lean.',
             })
             return
-        if self._active_resource_tax() > 0:
+        if self._active_resource_tax(elder) > 0:
             return
         # Rule ids are globally non-reusable (see _ensure_constitution), so a
         # repealed "resource_tax" id (an LLM-driven repeal_rule can target it
@@ -1740,7 +1753,7 @@ class _CouncilGrowthMixin:
             "name": "Resource Tax", "kind": "resource_tax",
             "value": 1, "description": "Contributors add 1 of the same resource to a shared stockpile.",
         }
-        if self._validate_rule(tax_rule):
+        if self._validate_rule(tax_rule, agent=elder):
             self.apply_decision(elder, {
                 "action": "propose_rule",
                 "rule": tax_rule,

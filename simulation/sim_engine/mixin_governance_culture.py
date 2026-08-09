@@ -174,18 +174,141 @@ class _GovernanceCultureMixin:
             self._ensure_constitution()
             self._rebuild_custom_rule_modifiers()
             return
-        home = self._primary_settlement_id()
-        if sid != home:
-            # F4.2+ will rebuild non-home buckets without flat aliases.
-            return
-        self._ensure_constitution()
-        self._rebuild_custom_rule_modifiers()
+        self._ensure_constitution(sid)
+        self._rebuild_custom_rule_modifiers(sid)
+
+    def _is_global_governance_ballot(self, rule):
+        """Treaty and succession ballots stay civ-wide (quorum + flat pending)."""
+        if not rule:
+            return False
+        return rule.get("kind") in ("treaty", "succession")
+
+    def _settlement_living_agent_count(self, sid):
+        count = 0
+        for agent in self.agents:
+            if agent.get("incapacitated"):
+                continue
+            if self._settlement_id_for_agent(agent) == sid:
+                count += 1
+        return count
+
+    def _ballot_settlement_id(self, rule):
+        if not SCHISM_ENABLED or self._is_global_governance_ballot(rule):
+            return self._primary_settlement_id()
+        sid = rule.get("settlementId")
+        if isinstance(sid, str) and sid:
+            return sid
+        proposer = self._find_agent(rule.get("proposedBy"))
+        if proposer:
+            return self._settlement_id_for_agent(proposer)
+        return self._primary_settlement_id()
+
+    def _all_enacted_rule_ids(self):
+        ids = set()
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            for rule in c.get("rules") or []:
+                if isinstance(rule, dict) and rule.get("id"):
+                    ids.add(rule["id"])
+            return ids
+        for rules in (c.get("rulesBySettlement") or {}).values():
+            for rule in rules or []:
+                if isinstance(rule, dict) and rule.get("id"):
+                    ids.add(rule["id"])
+        return ids
+
+    def _all_pending_rule_ids(self):
+        ids = set()
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            for rule in c.get("pendingRules") or []:
+                if isinstance(rule, dict) and rule.get("id"):
+                    ids.add(rule["id"])
+            return ids
+        for pending in (c.get("pendingRulesBySettlement") or {}).values():
+            for rule in pending or []:
+                if isinstance(rule, dict) and rule.get("id"):
+                    ids.add(rule["id"])
+        return ids
+
+    def _all_constitution_rule_ids(self):
+        ids = set()
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            for provision in c.get("constitution") or []:
+                if isinstance(provision, dict) and provision.get("id"):
+                    ids.add(provision["id"])
+            return ids
+        for constitution in (c.get("constitutionBySettlement") or {}).values():
+            for provision in constitution or []:
+                if isinstance(provision, dict) and provision.get("id"):
+                    ids.add(provision["id"])
+        return ids
+
+    def _governance_scope_lists(self, rule):
+        """Return (rules, pending, settlement_id) for a ballot's domestic scope."""
+        c = self.civilization
+        if not SCHISM_ENABLED or self._is_global_governance_ballot(rule):
+            return c["rules"], c["pendingRules"], self._primary_settlement_id()
+        sid = self._ballot_settlement_id(rule)
+        return self._rules_for_settlement(sid), self._pending_for_settlement(sid), sid
+
+    def _find_pending_ballot(self, ballot_id, voter=None):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return next((r for r in c.get("pendingRules") or [] if r.get("id") == ballot_id), None)
+        for rule in c.get("pendingRules") or []:
+            if rule.get("id") == ballot_id and self._is_global_governance_ballot(rule):
+                return rule
+        if voter is not None:
+            sid = self._settlement_id_for_agent(voter)
+            for rule in self._pending_for_settlement(sid):
+                if rule.get("id") == ballot_id:
+                    return rule
+        for pending in (c.get("pendingRulesBySettlement") or {}).values():
+            for rule in pending or []:
+                if rule.get("id") == ballot_id:
+                    return rule
+        return None
+
+    def _pending_rules_for_voter(self, agent):
+        if not SCHISM_ENABLED:
+            return list(self.civilization.get("pendingRules") or [])
+        sid = self._settlement_id_for_agent(agent)
+        domestic = [
+            rule for rule in self._pending_for_settlement(sid)
+            if not self._is_global_governance_ballot(rule)
+        ]
+        global_pending = [
+            rule for rule in self.civilization.get("pendingRules") or []
+            if self._is_global_governance_ballot(rule)
+        ]
+        return domestic + global_pending
+
+    def _set_constitution_for_settlement(self, sid, constitution):
+        c = self.civilization
+        if not SCHISM_ENABLED or sid == self._primary_settlement_id():
+            c["constitution"] = constitution
+        else:
+            c.setdefault("constitutionBySettlement", {})[sid] = constitution
+
+    def _set_custom_modifiers_for_settlement(self, sid, compiled):
+        c = self.civilization
+        if not SCHISM_ENABLED or sid == self._primary_settlement_id():
+            c["customRuleModifiers"] = compiled
+        else:
+            c.setdefault("customRuleModifiersBySettlement", {})[sid] = compiled
 
     # --- governance gates (#5): harvest_quota / rationing enforcement ---
-    def _active_harvest_quota(self):
+    def _active_harvest_quota(self, agent=None, settlement_id=None):
         if not LIFECYCLE_ENABLED:
             return None
-        quotas = self.civilization.get("harvestQuotas") or {}
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            quotas = self._harvest_quotas_for_settlement(sid)
+        else:
+            quotas = self.civilization.get("harvestQuotas") or {}
         if not quotas:
             return None
         # If the village has enacted more than one harvest_quota rule, they
@@ -200,7 +323,7 @@ class _GovernanceCultureMixin:
         Deterministic escape: the counter resets every period, so a refusal
         is never permanent -- wait out the period, gather a different
         resource, or move to another district."""
-        quota = self._active_harvest_quota()
+        quota = self._active_harvest_quota(agent)
         if quota is None:
             return True, None
         if self.frameTick - agent.get("lastQuotaResetFrame", 0) >= HARVEST_QUOTA_PERIOD_FRAMES:
@@ -223,10 +346,15 @@ class _GovernanceCultureMixin:
         key = f"{district}:{resource}"
         counts[key] = counts.get(key, 0) + amount
 
-    def _rationing_active_cap(self):
+    def _rationing_active_cap(self, agent=None, settlement_id=None):
         if not LIFECYCLE_ENABLED:
             return None
-        active = self.civilization.get("rationingActive") or {}
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            active = self._rationing_for_settlement(sid)
+        else:
+            active = self.civilization.get("rationingActive") or {}
         if not active:
             return None
         # Deterministic escape: rationing only actually restricts while
@@ -252,7 +380,7 @@ class _GovernanceCultureMixin:
         (contribute_resources reversed, trade, etc. all funnel through here
         when they pull FROM the shared stockpile). Caps rather than outright
         refuses so a partial withdrawal still gets through when possible."""
-        cap = self._rationing_active_cap()
+        cap = self._rationing_active_cap(agent)
         if cap is None or resource not in EDIBLE_RESOURCES:
             return amount, None
         if amount <= cap:
@@ -395,7 +523,7 @@ class _GovernanceCultureMixin:
                 return target
         # Sid-parity Phase 2: an enacted priority rule biases contributions
         # toward its named resource (mirrors harvest_spirit edible bias).
-        priority_res = self._active_priority_resource()
+        priority_res = self._active_priority_resource(agent)
         if priority_res:
             need = p["needs"].get(priority_res, 0)
             have = p["contributed"].get(priority_res, 0)
@@ -420,12 +548,24 @@ class _GovernanceCultureMixin:
         return None
 
     # --- memes ---
-    def _belief_registry(self):
+    def _belief_registry(self, agent=None, settlement_id=None):
         """Live seed + authored beliefs; old saves gain seed records lazily."""
-        registry = self.civilization.get("beliefRegistry")
-        if not isinstance(registry, dict):
-            registry = {}
-            self.civilization["beliefRegistry"] = registry
+        c = self.civilization
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            registry = self._registry_for_settlement(sid)
+            if not isinstance(registry, dict):
+                registry = {}
+                if sid == self._primary_settlement_id():
+                    c["beliefRegistry"] = registry
+                else:
+                    c.setdefault("beliefRegistryBySettlement", {})[sid] = registry
+        else:
+            registry = c.get("beliefRegistry")
+            if not isinstance(registry, dict):
+                registry = {}
+                c["beliefRegistry"] = registry
         for bid, tenet in MEMES.items():
             registry.setdefault(bid, {
                 "id": bid, "name": bid.replace("_", " ").title(),
@@ -434,19 +574,22 @@ class _GovernanceCultureMixin:
             })
         return registry
 
-    def _belief_entry(self, belief_id):
-        return self._belief_registry().get(belief_id) or {}
+    def _belief_entry(self, belief_id, agent=None):
+        return self._belief_registry(agent).get(belief_id) or {}
 
-    def _belief_name(self, belief_id):
-        return self._belief_entry(belief_id).get("name") or belief_id.replace("_", " ").title()
+    def _belief_name(self, belief_id, agent=None):
+        return self._belief_entry(belief_id, agent).get("name") or belief_id.replace("_", " ").title()
 
-    def _belief_text(self, bid):
-        entry = self._belief_entry(bid)
+    def _belief_text(self, bid, agent=None):
+        entry = self._belief_entry(bid, agent)
         if entry.get("tenet"):
             return entry["tenet"]
         # Keep legacy mutation overrides readable when restoring an old state.
         if CULTURE_ENABLED:
-            override = self.civilization.get("memeTexts", {}).get(bid)
+            if SCHISM_ENABLED and agent:
+                override = self._meme_texts_for_settlement(self._settlement_id_for_agent(agent)).get(bid)
+            else:
+                override = self.civilization.get("memeTexts", {}).get(bid)
             if override:
                 return override
         return MEMES.get(bid, bid)
@@ -470,7 +613,7 @@ class _GovernanceCultureMixin:
     def _belief_favored_kinds(self, agent):
         favored = set()
         for bid in agent.get("beliefs") or ():
-            affinity = self._belief_entry(bid).get("affinity")
+            affinity = self._belief_entry(bid, agent).get("affinity")
             favored |= set(affinity if isinstance(affinity, list) else MEME_RULE_AFFINITY.get(bid, set()))
         return favored
 
@@ -498,7 +641,7 @@ class _GovernanceCultureMixin:
             return f"{agent['name']} did not provide a belief"
         belief_id, name, tenet, affinity = (belief.get("id"), belief.get("name"),
                                              belief.get("tenet"), belief.get("affinity"))
-        registry = self._belief_registry()
+        registry = self._belief_registry(agent)
         if not isinstance(belief_id, str) or not self.SLUG_RE.match(belief_id):
             return f"{agent['name']} proposed an invalid belief id"
         if belief_id in registry:
@@ -641,7 +784,7 @@ class _GovernanceCultureMixin:
             return
         if c.get("memeMutations", 0) >= MEME_MUTATION_SESSION_CAP:
             return
-        current_text = self._belief_text(belief_id)
+        current_text = self._belief_text(belief_id, speaker)
         try:
             # Few-shot form: a thinking-class model (qwen) measured live to be
             # unreliable at following an abstract "reword this, don't explain"
@@ -690,12 +833,15 @@ class _GovernanceCultureMixin:
         if not mutated or mutated == current_text or looks_meta or not has_words \
                 or self.d["is_scaffold_text"](mutated):
             return
-        entry = self._belief_entry(belief_id)
+        entry = self._belief_entry(belief_id, speaker)
         if entry.get("tenet"):
             entry.setdefault("originalTenet", entry["tenet"])
             entry["tenet"] = mutated
         else:
-            c.setdefault("memeTexts", {})[belief_id] = mutated
+            if SCHISM_ENABLED:
+                self._meme_texts_for_settlement(self._settlement_id_for_agent(speaker))[belief_id] = mutated
+            else:
+                c.setdefault("memeTexts", {})[belief_id] = mutated
         c["memeMutations"] = c.get("memeMutations", 0) + 1
         self._push_activity(f'The belief "{current_text}" drifted into "{mutated}" as it spread through the village.')
         self._push_chronicle(f'A belief mutated: "{mutated}"', kind="meme_mutation")

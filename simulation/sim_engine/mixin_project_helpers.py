@@ -48,11 +48,11 @@ class _ProjectHelpersMixin:
                               + list((tmpl.get("needs") or {}).keys())).lower()
         score = 0
         for belief_id in agent["beliefs"]:
-            entry = self._belief_entry(belief_id)
+            entry = self._belief_entry(belief_id, agent)
             words = {w for w in re.findall(r"[a-z]{3,}", str(entry.get("tenet") or "").lower())}
             score += sum(1 for word in words if word in haystack)
             affinity = set(entry.get("affinity") or ())
-            if "priority" in affinity and self._active_priority_resource() in (tmpl.get("needs") or {}):
+            if "priority" in affinity and self._active_priority_resource(agent) in (tmpl.get("needs") or {}):
                 score += 2
             if "resource_tax" in affinity and project_id in ("granary", "market", "house"):
                 score += 1

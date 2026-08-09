@@ -330,11 +330,15 @@ class _ThinkJobMixin:
                         f"NOTE: The village needs a {need_role} (survival or scarce "
                         f"resources). Consider switch_role to {need_role} to fill the gap.")
         if RULES_ENABLED:
-            unvoted = next((r for r in c["pendingRules"] if agent["name"] not in r["votes"]), None)
+            voter_pending = self._pending_rules_for_voter(agent)
+            unvoted = next((r for r in voter_pending if agent["name"] not in r["votes"]), None)
+            agent_sid_nudge = self._settlement_id_for_agent(agent) if SCHISM_ENABLED else None
+            scoped_rules = self._rules_for_settlement(agent_sid_nudge) if agent_sid_nudge else c["rules"]
+            scoped_pending_nudge = self._pending_for_settlement(agent_sid_nudge) if agent_sid_nudge else c["pendingRules"]
             if unvoted:
                 note(1, f'NOTE: Pending rule "{unvoted["name"]}" (id {unvoted["id"]}) needs your vote. '
                         f"Use vote_rule with target {unvoted['id']} and vote yes or no.")
-            elif (not c["rules"] and not c["pendingRules"]
+            elif (not scoped_rules and not scoped_pending_nudge
                   and self.frameTick - c["lastRuleActivityFrame"] > BLUEPRINT_STALL_THRESHOLD):
                 note(3, "NOTE: The village has no shared rules yet. Consider propose_rule (a small resource_tax builds a shared stockpile).")
         if agent["role"] == "elder" and c["pendingBlueprints"]:
@@ -580,7 +584,7 @@ class _ThinkJobMixin:
         known_resource_ids_full = [r["id"] for r in resource_items]
         belief_records = [{"id": bid, "name": entry.get("name"), "tenet": entry.get("tenet"),
                            "affinity": list(entry.get("affinity") or [])}
-                          for bid, entry in self._belief_registry().items()]
+                          for bid, entry in self._belief_registry(agent).items()]
         belief_examples = [dict(example) for example in BELIEF_ARCHETYPES.values()]
         nearby_beliefs = {
             n["name"]: sorted((self._find_agent(n["name"]) or {}).get("beliefs") or [])
@@ -626,7 +630,9 @@ class _ThinkJobMixin:
         # active_rules: not read by validate_blueprint at all, so a plain cap
         # on the existing field is safe. Already loosely bounded by
         # MAX_ACTIVE_RULES (8) <= MAX_ACTIVE_RULES_PROMPT (12) today.
-        rules_full = list(c["rules"]) if RULES_ENABLED else []
+        agent_sid = self._settlement_id_for_agent(agent) if SCHISM_ENABLED else None
+        rules_full = list(self._rules_for_settlement(agent_sid) if agent_sid else c["rules"]) if RULES_ENABLED else []
+        scoped_pending = self._pending_for_settlement(agent_sid) if agent_sid else c["pendingRules"]
         if len(rules_full) > MAX_ACTIVE_RULES_PROMPT:
             active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
                                   "effect": r.get("effect"), "supersedes": r.get("supersedes")}
@@ -826,9 +832,9 @@ class _ThinkJobMixin:
                                "yes": list(r["votes"].values()).count("yes"),
                                "no": list(r["votes"].values()).count("no"),
                                "proposed_by": r["proposedBy"]}
-                              for r in c["pendingRules"]] if RULES_ENABLED else [],
+                              for r in scoped_pending] if RULES_ENABLED else [],
             "active_rules": active_rules_list if RULES_ENABLED else [],
-            "constitution": [dict(p) for p in self._ensure_constitution()] if RULES_ENABLED else [],
+            "constitution": [dict(p) for p in self._ensure_constitution(agent_sid if SCHISM_ENABLED else None)] if RULES_ENABLED else [],
             "recent_conversations": self._recent_conversations_text(),
             "inbox": self._drain_inbox(agent),
             "self_prompt": "",
