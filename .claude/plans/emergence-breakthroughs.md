@@ -1,7 +1,7 @@
 # Emergence Breakthroughs — Plan
 
-**Status: Approved — Phase A1 done** (determinism pinning + hard-case proof modes on branch
-`emergence-breakthroughs`). Per [AGENTS.md](../../AGENTS.md), implementation follows
+**Status: Approved — Phase A2 done** (`scripts/fork_compare.py` fork harness on branch
+`emergence-breakthroughs`; A0/A1 determinism proof + pinning shipped). Per [AGENTS.md](../../AGENTS.md), implementation follows
 the orchestrator → implementer → reviewer loop. The orchestrator owns splitting the
 features below into phase prompts.
 

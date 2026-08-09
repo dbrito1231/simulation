@@ -99,6 +99,7 @@ Plan: [`.claude/plans/emergence-breakthroughs.md`](../.claude/plans/emergence-br
 |-------|--------|--------|
 | A0 | Determinism proof (`scripts/determinism_proof.py`) | Done (branch `emergence-breakthroughs`) |
 | A1 | Pin RNG / executor / tick scheduling (`DETERMINISM_PINNING`) | Done (branch `emergence-breakthroughs`) |
+| A2 | Fork compare harness (`scripts/fork_compare.py`) | Done (branch `emergence-breakthroughs`) |
 
 ---
 
