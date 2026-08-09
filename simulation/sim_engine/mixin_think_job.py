@@ -1211,7 +1211,14 @@ class _ThinkJobMixin:
         with self.lock:
             self._llm_orphan_timeouts += 1
             if self._llm_orphan_timeouts >= LLM_ORPHAN_TIMEOUT_THRESHOLD:
-                self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
+                if DETERMINISM_PINNING:
+                    cooldown_frames = max(
+                        1,
+                        int(round(LLM_ORPHAN_COOLDOWN_S * TICKS_PER_SEC)),
+                    )
+                    self._pin_cooldown_until_frame = self.frameTick + cooldown_frames
+                else:
+                    self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
                 self._llm_orphan_timeouts = 0
 
     def _think_job(self, agent_name):
@@ -1417,24 +1424,48 @@ class _ThinkJobMixin:
             return False
         if len(self._inflight) >= MAX_CONCURRENT_LLM:
             return False
-        now_ms = time.time() * 1000.0
-        if time.time() < self.llm_cooldown_until:
-            return False
-        if now_ms - self.last_llm_dispatch_ms < LLM_MIN_GAP_MS:
-            return False
+        if DETERMINISM_PINNING:
+            if self.frameTick < self._pin_cooldown_until_frame:
+                return False
+            gap_frames = max(1, int(round(LLM_MIN_GAP_MS * TICKS_PER_SEC / 1000.0)))
+            if self.frameTick - self._pin_last_dispatch_frame < gap_frames:
+                return False
+        else:
+            now_ms = time.time() * 1000.0
+            if time.time() < self.llm_cooldown_until:
+                return False
+            if now_ms - self.last_llm_dispatch_ms < LLM_MIN_GAP_MS:
+                return False
         if agent["role"] == "elder":
             c = self.civilization
             c["inventionRequiredStreak"] = (c.get("inventionRequiredStreak", 0) + 1) \
                 if self._invention_required() else 0
-        self.last_llm_dispatch_ms = now_ms
+        if DETERMINISM_PINNING:
+            self._pin_last_dispatch_frame = self.frameTick
+        else:
+            self.last_llm_dispatch_ms = time.time() * 1000.0
         self._inflight.add(agent["name"])
         agent["isThinking"] = True
         self._mark_agent_dirty(agent)
-        self._executor.submit(self._think_job, agent["name"])
+        if DETERMINISM_PINNING:
+            self._pin_think_queue.append(agent["name"])
+        else:
+            self._executor.submit(self._think_job, agent["name"])
         return True
 
     # --- the per-frame tick (ported tick(), minus rendering) ---
+    def _run_pin_think_queue(self):
+        """Drain deferred think jobs synchronously in stable agent-name order."""
+        if not DETERMINISM_PINNING:
+            return
+        queue = sorted(self._pin_think_queue)
+        self._pin_think_queue = []
+        for agent_name in queue:
+            self._think_job(agent_name)
+
     def _tick_once(self):
+        if DETERMINISM_PINNING:
+            self._pin_think_queue = []
         with self.lock:
             # When paused, the sim clock freezes entirely (no movement, survival,
             # thinking, or frameTick advance) so the viewer sees a frozen world
@@ -1612,6 +1643,8 @@ class _ThinkJobMixin:
                 if dispatched:
                     a["lastThinkFrame"] = ft
                 a["thinkTimer"] = a["thinkInterval"] if dispatched else THINK_RETRY_FRAMES
+
+        self._run_pin_think_queue()
 
     def _run_loop(self):
         while not self._stop.is_set():

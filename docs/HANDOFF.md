@@ -98,6 +98,7 @@ Plan: [`.claude/plans/emergence-breakthroughs.md`](../.claude/plans/emergence-br
 | Phase | Target | Status |
 |-------|--------|--------|
 | A0 | Determinism proof (`scripts/determinism_proof.py`) | Done (branch `emergence-breakthroughs`) |
+| A1 | Pin RNG / executor / tick scheduling (`DETERMINISM_PINNING`) | Done (branch `emergence-breakthroughs`) |
 
 ---
 

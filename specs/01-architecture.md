@@ -139,7 +139,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 52 module-level flags, sim_engine.py)
+## Flag index (complete — 53 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -160,6 +160,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `RULES_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `MEMES_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `BENCHMARKS_ENABLED` | True | no | [12](12-ops.md) |
+| `DETERMINISM_PINNING` | False (env-backed, `SIM_DETERMINISM_PINNING`) | no | [02](02-engine-core.md), [12](12-ops.md) |
 | `ECOLOGY_ENABLED` | True | yes | [05](05-world.md) |
 | `ROADS_ENABLED` | True | yes | [05](05-world.md) |
 | `STRUCTURE_UPGRADES_ENABLED` | True | yes | [05](05-world.md) |

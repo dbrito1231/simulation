@@ -179,6 +179,11 @@ class SimEngine(
         self.lastMemorySize = 0
         self._memory_maint_index = 0
         self._stop = threading.Event()
+        self._pin_think_queue = []
+        self._pin_last_dispatch_frame = 0
+        self._pin_cooldown_until_frame = 0
+        if DETERMINISM_PINNING:
+            random.seed(DETERMINISM_SEED)
         self._executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_LLM)
         # Sid-parity Phase 1: separate pool for PIANO module calls so they
         # never compete with decision calls for MAX_CONCURRENT_LLM slots.

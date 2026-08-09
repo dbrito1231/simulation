@@ -1,6 +1,6 @@
 # Emergence Breakthroughs — Plan
 
-**Status: Approved — Phase A0 in progress** (determinism proof script on branch
+**Status: Approved — Phase A1 done** (determinism pinning + hard-case proof modes on branch
 `emergence-breakthroughs`). Per [AGENTS.md](../../AGENTS.md), implementation follows
 the orchestrator → implementer → reviewer loop. The orchestrator owns splitting the
 features below into phase prompts.

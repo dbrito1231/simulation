@@ -31,6 +31,8 @@ __all__ = [
     "RULES_ENABLED",
     "MEMES_ENABLED",
     "BENCHMARKS_ENABLED",
+    "DETERMINISM_PINNING",
+    "DETERMINISM_SEED",
     "ECOLOGY_ENABLED",
     "ROADS_ENABLED",
     "CROP_GROWTH_ENABLED",
@@ -492,6 +494,16 @@ EMERGENT_ROLES = True
 RULES_ENABLED = True
 MEMES_ENABLED = True
 BENCHMARKS_ENABLED = True
+# Emergence Breakthroughs F5 / Phase A1: headless harness pinning only.
+# When True, SimEngine re-seeds the process RNG at init, defers think jobs to
+# the end of each tick (synchronous, sorted agent-name order), and uses
+# frameTick-based scheduling instead of wall clock for LLM gap/cooldown checks.
+# Default off — live 24/7 path unchanged. Opt in via SIM_DETERMINISM_PINNING=1
+# or scripts/determinism_proof.py --pin.
+DETERMINISM_PINNING = str(os.environ.get("SIM_DETERMINISM_PINNING", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+DETERMINISM_SEED = int(os.environ.get("SIM_DETERMINISM_SEED", "42"))
 ECOLOGY_ENABLED = True
 # World-expansion plan: waypoint-based road routing for general travel
 # (move_to_district / idle wander / craft-station redirects). Sage-emergency
