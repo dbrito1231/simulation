@@ -227,6 +227,8 @@ const ACTION_LABELS = {
   council_vote: "voting at council",
   hunt_wildlife: "hunting",
   confront_agent: "confronting",
+  offer_contract: "offering a contract",
+  accept_contract: "accepting a contract",
   rest: "resting"
 };
 function humanizeAction(agent) {

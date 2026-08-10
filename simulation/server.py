@@ -380,6 +380,10 @@ DECISION_ACTIONS = [
     "confront_agent",
     # Daily Council Assembly. Offered only to a seated attendee in-session.
     "council_speak", "council_propose", "council_vote",
+    # Contracts & escrow (CONTRACTS_ENABLED): engine filters from
+    # available_actions when the flag is off; normalize validates shape;
+    # apply_decision settlement ships in F3.2.
+    "offer_contract", "accept_contract",
 ]
 
 # Loose shape only; validate_blueprint() stays the authority on blueprint detail.
@@ -425,6 +429,17 @@ DECISION_SCHEMA = {
                 "name": {"type": "string"},
                 "inputs": {"type": "object"},
                 "station": {"type": ["string", "null"]},
+            },
+        },
+        "contract": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "required": ["want", "qty", "pay_coin", "deadline_frames"],
+            "properties": {
+                "want": {"type": "string"},
+                "qty": {"type": "integer", "minimum": 1},
+                "pay_coin": {"type": "integer", "minimum": 1},
+                "deadline_frames": {"type": "integer", "minimum": 1},
             },
         },
         "role": {
@@ -725,7 +740,7 @@ Current district: {current_district}
 Known districts (use as target_district): {known_districts}
 Local resource stocks (your current district): {district_stocks}
 Terraform projects (start_terraform targets): {known_terraform}
-{season_line}{prices_line}{weather_line}{chronicle_line}{council_digest_line}{library_lessons_line}{path1_lines}{level_line}Structures built: {structures_built}
+{season_line}{prices_line}{weather_line}{chronicle_line}{testament_line}{council_digest_line}{library_lessons_line}{path1_lines}{contracts_line}{level_line}Structures built: {structures_built}
 Active builds (by district): {active_project}
 Build progress (by district): {project_progress}
 Civilization directive: {directive}
@@ -1030,6 +1045,13 @@ MODULE_PROMPTS = {
                   "Reference only agents, resources, and numbers that appear in "
                   "the context; never invent a name, quantity, or statistic. "
                   "Output only the sentence.",
+    "theory_of_mind": "You are the Theory-of-Mind module of a village agent. "
+                      "Given nearby peers in context, model ONE peer you can "
+                      "see. Output EXACTLY one line in this format (no extra "
+                      "text): PEER=<name> | wants=<short> | good_at=<short> | "
+                      "owes=<short> | trust=<0.00-1.00> | expect=<action>. "
+                      "Use only peer names and actions from context; never "
+                      "invent. expect must be one action the peer might take next.",
 }
 
 
@@ -1644,6 +1666,8 @@ def build_user_prompt(data, slim=False, retry_feedback=None):
     # entry) so flag-off / empty-chronicle prompts stay byte-identical.
     chronicle_line_raw = data.get("chronicle_line")
     chronicle_line = f"Village history: {chronicle_line_raw}\n" if chronicle_line_raw else ""
+    testament_line_raw = data.get("testament_line")
+    testament_line = f"Village testament: {testament_line_raw}\n" if testament_line_raw else ""
     # Sovereign God mode (Phase 3 — Voice binding): public providence and
     # private omens use binding prompt lines requiring divine_response; Matrix
     # anoint/bush/story lines keep soft "interpret or ignore" wording.
@@ -1685,6 +1709,8 @@ def build_user_prompt(data, slim=False, retry_feedback=None):
     if data.get("settlement_stores_line"):
         path1_parts.append(f"Settlement stores: {data['settlement_stores_line']}")
     path1_lines = ("\n".join(path1_parts) + "\n") if path1_parts else ""
+    contracts_raw = data.get("contracts_line")
+    contracts_line = f"Open contracts: {contracts_raw}\n" if contracts_raw else ""
 
     return USER_PROMPT_TEMPLATE.format(
         agent_name=data.get("agent_name"),
@@ -1741,9 +1767,11 @@ def build_user_prompt(data, slim=False, retry_feedback=None):
         prices_line=prices_line,
         weather_line=weather_line,
         chronicle_line=chronicle_line,
+        testament_line=testament_line,
         council_digest_line=council_digest_line,
         library_lessons_line=library_lessons_line,
         path1_lines=path1_lines,
+        contracts_line=contracts_line,
         recent_conversations="none" if slim else data.get("recent_conversations", "none"),
         inbox=data.get("inbox", "none"),
         module_reports=data.get("module_reports", "none"),
@@ -1835,6 +1863,7 @@ def build_decision_payload(data, self_prompt, response_format, slim=False, retry
         system_content = COUNCIL_SYSTEM_PROMPT
     else:
         system_content = SYSTEM_PROMPT_SLIM if slim else SYSTEM_PROMPT
+        system_content = _prompts.append_contracts_addendum(system_content)
         if not slim:
             if SYSTEM_PROMPT_AT_LOAD_TIME:
                 # The baked Modelfile SYSTEM directive applies instead (see
@@ -1977,6 +2006,7 @@ _REJECTION_NOTE_KEYS = (
     "council_rejection_note",
     "terraform_rejection_note",
     "upgrade_rejection_note",
+    "contract_rejection_note",
     "rejection_note",
 )
 

@@ -3,7 +3,7 @@
 **The action catalog** — the sole source for every decision action an agent can be
 offered. No other spec lists actions.
 
-**Canonical for:** all 45 `DECISION_ACTIONS`: params, flag gate/preconditions,
+**Canonical for:** all 47 `DECISION_ACTIONS`: params, flag gate/preconditions,
 effect, validation. The build pipeline and blueprint two-stage flow as the core
 game loop.
 **See also:** [01-architecture.md](01-architecture.md#action-sync-invariant) for the
@@ -16,12 +16,12 @@ for districts/terrain/structures referenced by params; [08](08-systems-economy.m
 [09](09-systems-society.md)/[10](10-path1.md) for the flag semantics gating many
 of these actions.
 
-Fact source: `DECISION_ACTIONS` (server.py, 45 entries after the Daily Council
+Fact source: `DECISION_ACTIONS` (server.py, 47 entries after the Daily Council
 actions below, listed
 here in declaration order). Params legend: `target` (agent name / district id /
 structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 `target_district`, `message`, `new_role`, `blueprint` (object), `recipe`
-(object), `rule` (object), `belief` (object), `belief_pitch` (object), `vote`
+(object), `contract` (object), `rule` (object), `belief` (object), `belief_pitch` (object), `vote`
 (`yes`/`no`), `sage_decision` (`approve`/`deny`), `sprite` (grid block).
 
 ## Action table
@@ -36,6 +36,8 @@ structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 | `talk_to_nearby` | `target` (recipient or "everyone"), `message`, optional `belief_pitch` (`belief_id`/`pitch`) | `AGENT_MESSAGING` for delivery ([06](06-agents.md)); a pitch requires an existing adjacent (≤80px) recipient + speaker-held belief | Sets `agent["message"]`, logs conversation, delivers to inbox, may teach; ordinary distant talk retains move/delivery behavior, but an explicit belief pitch cannot score or persuade until adjacent ([09](09-systems-society.md)) |
 | `found_belief` | `belief` (`id`/`name`/`tenet`/`affinity`) | `MEMES_ENABLED`; any agent may author; live registry below `MAX_BELIEFS` | Validates and persists an authored belief, adds it to the founder, and logs/memorializes the founding ([09](09-systems-society.md)) |
 | `trade_resource` | `target` (agent name) | `ECONOMY_ENABLED` for priced trade | Moves toward target if not adjacent; within 80px, trades the agent's most-abundant resource — priced via market if `ECONOMY_ENABLED` and a market is active, else 1-for-nothing barter |
+| `offer_contract` | `target` (agent name or `"open"`), `contract` (`want` resource id, `qty`, `pay_coin`, `deadline_frames`) | `CONTRACTS_ENABLED` | Debits `pay_coin` from the offerer's held coin into engine escrow (`civilization["contractEscrow"]`) and posts an open or directed contract (`status: "open"`). Rejects without partial debit when held coin is insufficient or `MAX_OPEN_CONTRACTS` is reached. |
+| `accept_contract` | `target` (contract id) | `CONTRACTS_ENABLED`; contract must exist, be `open`, not be the actor's own offer, match a directed target or `"open"`, and not be past deadline (`frameTick < createdFrame + deadline_frames`) | Binds the acceptor (`status: "accepted"`). Rejects when `frameTick >= createdFrame + deadline_frames` (contract stays `open` for settlement expiry/refund). Settlement tick (`_tick_contract_settlement`, same `RULES_TICK_FRAMES` batch as mint/backstops) fulfills when the acceptor holds `qty` of `want` while `frameTick < createdFrame + deadline_frames`, paying escrow to the acceptor and transferring goods to the offerer (carry-cap overflow to stockpile). At or after the deadline (`frameTick >= createdFrame + deadline_frames`), open contracts expire with refund only; accepted-but-undelivered contracts default with refund and, when both parties are living, a neutral→rival relationship hit from offerer to acceptor (same shape as `confront_agent`; skipped when either party is dead). |
 | `start_project` | `target` (project type), `target_district` | project type must exist in `PROJECT_TEMPLATES`/`projectRegistry` | Starts a district build project (see build pipeline below) |
 | `contribute_resources` | `target` (resource id, optional), `target_district` | active project in the district | Deposits a resource toward the active project; auto-builds if complete; falls back to gathering the unmet resource |
 | `build_structure` | `target_district` | project fully funded | Completes construction if the district's project is fully funded, else reports waiting |
@@ -87,7 +89,10 @@ per-agent when fewer than two settlements exist or the actor lacks a
 vehicle/minimum cargo;
 `hunt_wildlife` requires `WILDLIFE_ENABLED`; `confront_agent` requires
 `SURVIVAL_ENABLED` and further filters per-agent by social/pressure gates
-(see action table); the three role
+(see action table); `offer_contract`/`accept_contract` require
+`CONTRACTS_ENABLED` (`accept_contract` further requires an open contract the
+actor may accept); viewer `ACTION_LABELS` map them to "offering a contract" /
+"accepting a contract" (`viewer/sidebar.js`). The three role
 proposal actions require `EMERGENT_ROLES`. All other
 actions in the table are always offered (subject to `DECISION_SCHEMA`'s fixed
 enum superset — [03-cognition.md](03-cognition.md)). Invalid or disallowed choices

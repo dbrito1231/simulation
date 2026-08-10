@@ -326,6 +326,14 @@ class _PersistenceMixin:
                         civ["resourceRegistry"].setdefault("coin", dict(BASE_RESOURCES["coin"]))
                     for s in (civ.get("structures") or []):
                         s.setdefault("homeOf", None)
+                if CONTRACTS_ENABLED:
+                    # Contracts & escrow: additive setdefault for old saves.
+                    civ.setdefault("contracts", [])
+                    civ.setdefault("contractEscrow", 0)
+                    civ.setdefault("nextContractId", 1)
+                    civ.setdefault("contractsOpened", 0)
+                    civ.setdefault("contractsFulfilled", 0)
+                    civ.setdefault("contractDefaults", 0)
                 if STRUCTURE_UPGRADES_ENABLED:
                     for s in (civ.get("structures") or []):
                         s.setdefault("level", 1)
@@ -374,6 +382,13 @@ class _PersistenceMixin:
                     civ.setdefault("beliefPitchCalls", 0)
                     civ.setdefault("skillPracticeCount", 0)
                     civ.setdefault("teachCount", 0)
+                if SCHISM_ENABLED:
+                    # F4.1: wrap legacy flat governance/belief fields under the
+                    # primary home settlement id without removing flat keys.
+                    self._migrate_schism_storage_on_restore(civ)
+                if TESTAMENT_ENABLED:
+                    civ.setdefault("testament", [])
+                    civ.setdefault("testamentAuthored", 0)
                 if CEMETERY_ENABLED:
                     # Cemetery/burial state: purely additive, same discipline
                     # as every other phase's setdefault-only back-compat --
@@ -495,10 +510,15 @@ class _PersistenceMixin:
                     a.setdefault("moduleTick", 0)
                     a.setdefault("moduleReports", {})
                     a.setdefault("memoryWiki", {})
-                    a.setdefault("modules", {
+                    default_modules = {
                         "perception": True, "social": True,
                         "desire": True, "reflection": True,
-                    })
+                    }
+                    if THEORY_OF_MIND_ENABLED:
+                        default_modules["theory_of_mind"] = True
+                    a.setdefault("modules", default_modules)
+                    if THEORY_OF_MIND_ENABLED:
+                        a.setdefault("peerModel", {})
                     if LIFECYCLE_ENABLED:
                         # Phase F: every restored agent gets an age (staggered
                         # by roster position, same deterministic spread
@@ -548,8 +568,12 @@ class _PersistenceMixin:
                     return False
                 self.civilization = civ
                 self._rebuild_role_maps()
-                self._ensure_constitution()
-                self._rebuild_custom_rule_modifiers()
+                if SCHISM_ENABLED:
+                    for sid in (self.civilization.get("rulesBySettlement") or {}):
+                        self._rebuild_settlement_governance(sid)
+                else:
+                    self._ensure_constitution()
+                    self._rebuild_custom_rule_modifiers()
                 self.agents = agents
                 self.agent_names = set(a["name"] for a in agents)
                 self._revert_inland_founded_beaches()

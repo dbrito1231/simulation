@@ -127,6 +127,8 @@ class _LifecycleMixin:
                              and o.get("relationships", {}).get(agent["name"]) == "ally"), None)
             if bereaved:
                 self._drift_personality(bereaved, f"grieving the loss of {agent['name']}")
+        if TESTAMENT_ENABLED and WIKI_MEMORY:
+            self._merge_testament_on_death(agent)
         self._inherit_from(agent)
         if was_elder:
             # Every "find the elder" lookup across the codebase (assign_task,
@@ -727,14 +729,25 @@ class _LifecycleMixin:
             self._tick_structure_health_benchmark()
 
     # --- succession (#4): reuses the propose_rule/vote_rule scaffold ---
-    def _succession_candidates(self):
+    def _succession_candidates(self, settlement_id=None):
         """Deterministic pool of agents who can safely take office now."""
         candidates = self._eligible_adults()
+        if SCHISM_ENABLED and settlement_id:
+            candidates = [
+                a for a in candidates
+                if self._settlement_id_for_agent(a) == settlement_id
+            ]
         if candidates:
             return candidates
         # A village made entirely of young survivors still needs leadership,
         # but an incapacitated survivor cannot safely win or exercise it.
-        return [a for a in self._living_agents() if not a["incapacitated"]]
+        living = [a for a in self._living_agents() if not a["incapacitated"]]
+        if SCHISM_ENABLED and settlement_id:
+            living = [
+                a for a in living
+                if self._settlement_id_for_agent(a) == settlement_id
+            ]
+        return living
 
     def _ensure_succession_daily_council(self):
         """Convene or refresh the visible emergency assembly for this election."""
@@ -774,6 +787,35 @@ class _LifecycleMixin:
         })
         self._sync_daily_council_turns(council)
 
+    def _ensure_settlement_succession_elections(self):
+        """Per-settlement elder repair when SCHISM_ENABLED (multiple elders allowed)."""
+        c = self.civilization
+        self._init_settlements()
+        pending = c.get("pendingSuccession")
+        pending_sid = (pending or {}).get("settlementId") if isinstance(pending, dict) else None
+        for entry in c.get("settlements") or []:
+            sid = entry.get("id")
+            if not sid:
+                continue
+            if self._elder_for_settlement(sid):
+                if isinstance(pending, dict) and pending_sid == sid:
+                    c["pendingRules"] = [
+                        r for r in c.get("pendingRules") or []
+                        if not (isinstance(r, dict) and r.get("kind") == "succession"
+                                and (r.get("settlementId") or self._primary_settlement_id()) == sid)
+                    ]
+                    c["pendingSuccession"] = None
+                continue
+            if isinstance(pending, dict) and pending_sid == sid:
+                eligible = {a["name"] for a in self._succession_candidates(sid)}
+                candidates = pending.get("candidates") or []
+                if candidates and set(candidates).issubset(eligible):
+                    continue
+            if isinstance(pending, dict) and pending_sid and pending_sid != sid:
+                continue
+            if self._succession_candidates(sid):
+                self._start_succession_election(settlement_id=sid)
+
     def _ensure_succession_election(self):
         """Repair missing/corrupt succession state without resetting a valid vote.
 
@@ -784,6 +826,9 @@ class _LifecycleMixin:
         resolver can decide it immediately instead of granting a fresh term.
         """
         if not LIFECYCLE_ENABLED:
+            return
+        if SCHISM_ENABLED:
+            self._ensure_settlement_succession_elections()
             return
         c = self.civilization
         succession_rules = [
@@ -880,7 +925,7 @@ class _LifecycleMixin:
             self._start_succession_election()
             self._ensure_succession_daily_council()
 
-    def _start_succession_election(self):
+    def _start_succession_election(self, settlement_id=None):
         """One pending 'succession' rule per eligible candidate (adults,
         excluding the just-deceased elder, capped to keep MAX_PENDING_RULES
         headroom for ordinary governance). Candidates are the eligible-adult
@@ -888,12 +933,22 @@ class _LifecycleMixin:
         projects these records into its candidate ballot; with that feature
         off, legacy vote_rule exclusivity still applies."""
         c = self.civilization
-        candidates = self._succession_candidates()
+        sid = settlement_id or self._primary_settlement_id()
+        candidates = self._succession_candidates(sid if SCHISM_ENABLED else None)
         if not candidates:
             return  # extinction/all-incapacitated edge: no safe winner yet
         candidates = candidates[:max(2, MAX_PENDING_RULES)]
-        election_id = f"succession_{self.frameTick}"
-        c["pendingRules"] = [r for r in c["pendingRules"] if r["kind"] != "succession"]
+        election_id = (
+            f"succession_{sid}_{self.frameTick}" if SCHISM_ENABLED
+            else f"succession_{self.frameTick}")
+        if SCHISM_ENABLED:
+            c["pendingRules"] = [
+                r for r in c["pendingRules"]
+                if not (r.get("kind") == "succession"
+                        and (r.get("settlementId") or self._primary_settlement_id()) == sid)
+            ]
+        else:
+            c["pendingRules"] = [r for r in c["pendingRules"] if r["kind"] != "succession"]
         entries = []
         for cand in candidates:
             entry = {
@@ -903,20 +958,28 @@ class _LifecycleMixin:
                 "proposedBy": "the village", "enacted": False, "votes": {},
                 "electionId": election_id, "candidateName": cand["name"],
             }
+            if SCHISM_ENABLED:
+                entry["settlementId"] = sid
             entries.append(entry)
             c["pendingRules"].append(entry)
-        c["pendingSuccession"] = {
+        pending_payload = {
             "electionId": election_id,
             "candidates": [cand["name"] for cand in candidates],
             "startFrame": self.frameTick,
             "deadline": self.frameTick + SUCCESSION_ELECTION_TTL_FRAMES,
         }
+        if SCHISM_ENABLED:
+            pending_payload["settlementId"] = sid
+        c["pendingSuccession"] = pending_payload
         c["lastSuccessionActivityFrame"] = self.frameTick
         c["lastRuleActivityFrame"] = self.frameTick
+        scope = f" ({sid})" if SCHISM_ENABLED and sid != self._primary_settlement_id() else ""
         self._push_activity(
-            f"The village must choose a new elder. Candidates: {', '.join(c['pendingSuccession']['candidates'])}.")
+            f"The village{scope} must choose a new elder. "
+            f"Candidates: {', '.join(c['pendingSuccession']['candidates'])}.")
         self._push_communication("election", "the village", "everyone",
-                                 f"Succession election opened: {', '.join(c['pendingSuccession']['candidates'])}")
+                                 f"Succession election opened{scope}: "
+                                 f"{', '.join(c['pendingSuccession']['candidates'])}")
 
     def _enact_succession_winner(self, rule):
         """Promotes the winning candidate to elder (direct role assignment --
@@ -928,6 +991,9 @@ class _LifecycleMixin:
         winner_name = rule.get("candidateName") or rule.get("value")
         winner = self._find_agent(winner_name)
         election_id = rule.get("electionId")
+        winner_sid = (
+            rule.get("settlementId") or self._primary_settlement_id()
+            if SCHISM_ENABLED else None)
         other_candidates = [r.get("candidateName") for r in c["pendingRules"]
                             if r["kind"] == "succession" and r.get("electionId") == election_id
                             and r.get("candidateName") != winner_name]
@@ -938,6 +1004,7 @@ class _LifecycleMixin:
         incumbent = next((
             a for a in self._living_agents()
             if a.get("role") == "elder" and a is not winner
+            and (not SCHISM_ENABLED or self._settlement_id_for_agent(a) == winner_sid)
         ), None)
         if incumbent:
             self._push_activity(
@@ -955,7 +1022,8 @@ class _LifecycleMixin:
             self._push_activity(
                 f"{winner_name or 'The chosen candidate'} could not take up the elder's mantle -- "
                 f"the village must choose again.")
-            self._start_succession_election()
+            self._start_succession_election(
+                settlement_id=winner_sid if SCHISM_ENABLED else None)
             return
         if winner:
             old_role = winner["role"]
@@ -1142,6 +1210,8 @@ class _LifecycleMixin:
         home_id = parent_a.get("homeStructureId") or parent_b.get("homeStructureId")
         if home_id:
             newborn["homeStructureId"] = None  # child doesn't claim outright while parents live; breadcrumb only
+        if TESTAMENT_ENABLED and WIKI_MEMORY:
+            self._seed_newborn_wiki_from_testament(newborn, parent_a, parent_b)
         self.agents.append(newborn)
         self.agent_names.add(newborn["name"])
         c["lastBirthFrame"] = self.frameTick

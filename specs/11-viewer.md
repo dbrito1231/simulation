@@ -333,7 +333,8 @@ village-declared succession verdict. The verdict section heading changes to
 ruling. It does not calculate seats, quorum, votes, or outcomes.
 The existing Council sidebar/history continues to render bounded `councilLog`
 records. `ACTION_LABELS` adds display gerunds for `council_speak`,
-`council_propose`, and `council_vote`.
+`council_propose`, and `council_vote`, and for `offer_contract` /
+`accept_contract` when contracts are enabled in the world.
 
 The history transcript modal (`openCouncilTranscript`, `viewer/council.js`) reads
 `record.transcript` from a past `councilLog` entry, which may have been

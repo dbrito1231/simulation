@@ -115,6 +115,9 @@ def format_nearby_agents(nearby):
                     stigma_suffix = f", signs: {', '.join(str(t) for t in stigmata)}"
                 parts.append(
                     f"{name} ({role}, food:{food} wood:{wood} gold:{gold}{stigma_suffix})")
+                peer_hint = item.get("peer_model")
+                if peer_hint:
+                    parts[-1] += f" [think: {peer_hint}]"
             else:
                 parts.append(str(item))
         return "; ".join(parts)
@@ -304,6 +307,23 @@ def format_constitution(constitution):
             text += f" supersedes {provision['supersedes']}"
         parts.append(text)
     return "; ".join(parts) if parts else "none"
+
+
+def format_testament_prompt_line(testament, prompt_entries):
+    """Render the bounded testament slice for think prompts."""
+    if not testament or not isinstance(testament, list):
+        return None
+    recent = testament[-prompt_entries:]
+    parts = []
+    for entry in recent:
+        if not isinstance(entry, dict):
+            continue
+        text = (entry.get("text") or "").strip()
+        if not text:
+            continue
+        author = entry.get("author") or "?"
+        parts.append(f"{author}: {text}")
+    return "; ".join(parts) if parts else None
 
 
 def format_commitment(commitment):

@@ -1841,3 +1841,262 @@ class _StructuresEconomyMixin:
             summary += f" ({overflow} overflow to settlement store)"
         return summary
 
+    # --- Contracts & escrow (CONTRACTS_ENABLED) ---
+    def _total_tracked_coin(self):
+        """Agent-held + stockpile + engine escrow coin (conservation audits)."""
+        c = self.civilization
+        total = int(c.get("contractEscrow") or 0)
+        total += int((c.get("stockpile") or {}).get("coin") or 0)
+        for agent in self.agents:
+            total += int((agent.get("resources") or {}).get("coin") or 0)
+        return total
+
+    def _contract_deadline_frame(self, contract):
+        return contract["createdFrame"] + contract["deadline_frames"]
+
+    def _find_contract(self, contract_id):
+        for ct in self.civilization.get("contracts") or []:
+            if ct.get("id") == contract_id:
+                return ct
+        return None
+
+    def _alloc_contract_id(self):
+        c = self.civilization
+        cid = f"contract_{c.get('nextContractId', 1)}"
+        c["nextContractId"] = c.get("nextContractId", 1) + 1
+        return cid
+
+    def _debit_agent_coin(self, agent, amount):
+        held = agent.get("resources", {}).get("coin", 0)
+        if held < amount:
+            return False
+        agent["resources"]["coin"] = held - amount
+        return True
+
+    def _credit_agent_coin(self, agent, amount):
+        agent["resources"]["coin"] = agent.get("resources", {}).get("coin", 0) + amount
+
+    def _has_acceptable_contract(self, agent):
+        if not CONTRACTS_ENABLED:
+            return False
+        name = agent["name"]
+        for ct in self.civilization.get("contracts") or []:
+            if ct.get("status") != "open":
+                continue
+            if ct.get("offerer") == name:
+                continue
+            target = ct.get("target")
+            if target == "open" or target == name:
+                return True
+        return False
+
+    def _format_contracts_for_prompt(self, agent):
+        """Compact open/accepted contract line for think payload (flag-on only)."""
+        if not CONTRACTS_ENABLED:
+            return None
+        name = agent["name"]
+        frame = self.frameTick
+        parts = []
+        for ct in self.civilization.get("contracts") or []:
+            status = ct.get("status")
+            if status not in ("open", "accepted"):
+                continue
+            offerer = ct.get("offerer")
+            acceptor = ct.get("acceptor")
+            target = ct.get("target")
+            if status == "open":
+                if offerer != name and target not in ("open", name):
+                    continue
+            elif offerer != name and acceptor != name:
+                continue
+            deadline = self._contract_deadline_frame(ct)
+            left = max(0, deadline - frame)
+            role = "you offer" if offerer == name else (
+                "you accept" if acceptor == name else "open")
+            parts.append(
+                f"{ct.get('id')} {status} {role} "
+                f"{ct.get('qty')} {ct.get('want')} for {ct.get('pay_coin')} coin "
+                f"(offerer {offerer}, target {target}, {left}f left)"
+            )
+            if len(parts) >= MAX_CONTRACTS_PROMPT:
+                break
+        return "; ".join(parts) if parts else None
+
+    def _apply_offer_contract(self, agent, decision):
+        c = self.civilization
+        body = decision.get("contract") or {}
+        pay_coin = body["pay_coin"]
+        if not self._debit_agent_coin(agent, pay_coin):
+            return f"{agent['name']} cannot offer a contract — insufficient coin"
+        contracts = c.setdefault("contracts", [])
+        if len(contracts) >= MAX_OPEN_CONTRACTS:
+            self._credit_agent_coin(agent, pay_coin)
+            return f"{agent['name']} cannot offer a contract — too many open contracts"
+        target = decision.get("target")
+        if target not in ("open",) and target not in self.agent_names:
+            self._credit_agent_coin(agent, pay_coin)
+            return f"{agent['name']} cannot offer a contract — invalid target"
+        if target == agent["name"]:
+            self._credit_agent_coin(agent, pay_coin)
+            return f"{agent['name']} cannot offer a contract to themselves"
+        if target != "open":
+            tagent = self._find_agent(target)
+            if not tagent or tagent.get("deathFrame") is not None:
+                self._credit_agent_coin(agent, pay_coin)
+                return f"{agent['name']} cannot offer a contract — target not found"
+        c["contractEscrow"] = c.get("contractEscrow", 0) + pay_coin
+        cid = self._alloc_contract_id()
+        record = {
+            "id": cid,
+            "want": body["want"],
+            "qty": body["qty"],
+            "pay_coin": pay_coin,
+            "deadline_frames": body["deadline_frames"],
+            "offerer": agent["name"],
+            "target": target,
+            "createdFrame": self.frameTick,
+            "status": "open",
+            "acceptor": None,
+            "acceptedFrame": None,
+        }
+        contracts.append(record)
+        c["contractsOpened"] = c.get("contractsOpened", 0) + 1
+        note = (f"{agent['name']} offered contract {cid} "
+                f"({body['qty']} {body['want']} for {pay_coin} coin)")
+        self._push_activity(note)
+        return note
+
+    def _apply_accept_contract(self, agent, decision):
+        cid = decision.get("target")
+        ct = self._find_contract(cid)
+        if not ct:
+            return f"{agent['name']} found no contract to accept"
+        if ct.get("status") != "open":
+            return f"{agent['name']} cannot accept contract {cid} — not open"
+        if ct.get("offerer") == agent["name"]:
+            return f"{agent['name']} cannot accept their own contract"
+        target = ct.get("target")
+        if target != "open" and target != agent["name"]:
+            return f"{agent['name']} cannot accept contract {cid} — not directed at them"
+        if self.frameTick >= self._contract_deadline_frame(ct):
+            return f"{agent['name']} cannot accept contract {cid} — past deadline"
+        ct["status"] = "accepted"
+        ct["acceptor"] = agent["name"]
+        ct["acceptedFrame"] = self.frameTick
+        note = f"{agent['name']} accepted contract {cid}"
+        self._push_activity(note)
+        return note
+
+    def _deliver_contract_goods(self, acceptor, offerer, resource, qty):
+        held = acceptor.get("resources", {}).get(resource, 0)
+        if held < qty:
+            return False
+        acceptor["resources"][resource] = held - qty
+        cap = self._carry_cap(offerer)
+        oheld = offerer.get("resources", {}).get(resource, 0)
+        room = max(0, cap - oheld)
+        deliver = min(qty, room)
+        overflow = qty - deliver
+        if deliver:
+            offerer["resources"][resource] = oheld + deliver
+        if overflow:
+            c = self.civilization
+            c.setdefault("stockpile", {})
+            c["stockpile"][resource] = c["stockpile"].get(resource, 0) + overflow
+        return True
+
+    def _route_escrow_refund_coin(self, offerer_name, pay):
+        """Return escrowed coin to a living offerer, else heirs, else stockpile."""
+        offerer = self._find_agent(offerer_name)
+        if offerer and offerer.get("deathFrame") is None:
+            self._credit_agent_coin(offerer, pay)
+            return
+        heirs = []
+        if offerer:
+            heirs = [h for h in self._heirs_of(offerer) if h.get("deathFrame") is None]
+        if heirs:
+            base_each, remainder = divmod(int(pay), len(heirs))
+            for i, heir in enumerate(heirs):
+                give = base_each + (remainder if i == 0 else 0)
+                if give:
+                    self._credit_agent_coin(heir, give)
+            return
+        c = self.civilization
+        c.setdefault("stockpile", {})
+        c["stockpile"]["coin"] = c["stockpile"].get("coin", 0) + pay
+
+    def _refund_contract_escrow(self, ct):
+        c = self.civilization
+        pay = ct["pay_coin"]
+        self._route_escrow_refund_coin(ct["offerer"], pay)
+        c["contractEscrow"] = max(0, c.get("contractEscrow", 0) - pay)
+
+    def _fulfill_contract(self, ct):
+        c = self.civilization
+        acceptor = self._find_agent(ct.get("acceptor"))
+        offerer = self._find_agent(ct.get("offerer"))
+        if (not acceptor or not offerer
+                or acceptor.get("deathFrame") is not None
+                or offerer.get("deathFrame") is not None):
+            self._refund_contract_escrow(ct)
+            return
+        if not self._deliver_contract_goods(acceptor, offerer, ct["want"], ct["qty"]):
+            return
+        pay = ct["pay_coin"]
+        self._credit_agent_coin(acceptor, pay)
+        c["contractEscrow"] = max(0, c.get("contractEscrow", 0) - pay)
+        c["contractsFulfilled"] = c.get("contractsFulfilled", 0) + 1
+        note = (f"Contract {ct['id']} fulfilled: {acceptor['name']} delivered "
+                f"{ct['qty']} {ct['want']} to {offerer['name']} for {pay} coin")
+        self._push_activity(note)
+
+    def _default_contract(self, ct):
+        c = self.civilization
+        offerer = self._find_agent(ct.get("offerer"))
+        acceptor = self._find_agent(ct.get("acceptor"))
+        self._refund_contract_escrow(ct)
+        c["contractDefaults"] = c.get("contractDefaults", 0) + 1
+        both_living = (
+            offerer and acceptor
+            and offerer.get("deathFrame") is None
+            and acceptor.get("deathFrame") is None
+        )
+        if both_living:
+            if offerer["relationships"].get(acceptor["name"]) != "rival":
+                offerer["relationships"][acceptor["name"]] = "rival"
+            self._mark_top_dirty("socialTies")
+        note = f"Contract {ct['id']} defaulted — escrow refunded to {ct['offerer']}"
+        if both_living:
+            note += f"; {acceptor['name']} marked rival by {ct['offerer']}"
+        self._push_activity(note)
+
+    def _tick_contract_settlement(self):
+        if not CONTRACTS_ENABLED:
+            return
+        contracts = self.civilization.get("contracts") or []
+        if not contracts:
+            return
+        surviving = []
+        for ct in contracts:
+            deadline = self._contract_deadline_frame(ct)
+            if self.frameTick >= deadline:
+                if ct.get("status") == "open":
+                    self._refund_contract_escrow(ct)
+                    self._push_activity(
+                        f"Contract {ct['id']} expired unaccepted — refunded {ct['offerer']}")
+                elif ct.get("status") == "accepted":
+                    self._default_contract(ct)
+                continue
+            if ct.get("status") == "accepted":
+                acceptor = self._find_agent(ct.get("acceptor"))
+                offerer = self._find_agent(ct.get("offerer"))
+                if (acceptor and offerer
+                        and acceptor.get("deathFrame") is None
+                        and offerer.get("deathFrame") is None):
+                    held = acceptor.get("resources", {}).get(ct["want"], 0)
+                    if held >= ct["qty"]:
+                        self._fulfill_contract(ct)
+                        continue
+            surviving.append(ct)
+        self.civilization["contracts"] = surviving
+

@@ -177,6 +177,25 @@ failed attempts keep front-of-line priority. Without this, rosters larger than
 `MAX_CONCURRENT_LLM` could starve late-indexed agents under sustained
 contention.
 
+### Determinism pinning (`DETERMINISM_PINNING`, Phase A1)
+
+Headless-harness only (Emergence Breakthroughs F5). Default **off**; opt in via
+env `SIM_DETERMINISM_PINNING=1` or `scripts/determinism_proof.py --pin`. When
+on:
+
+- `SimEngine.__init__` calls `random.seed(DETERMINISM_SEED)` (env
+  `SIM_DETERMINISM_SEED`, default `42`) so each cold start gets an isolated RNG
+  stream regardless of prior harness runs in the same process.
+- `_schedule_think` defers jobs to `_pin_think_queue` instead of
+  `ThreadPoolExecutor.submit`; `_tick_once` drains that queue synchronously in
+  sorted agent-name order via `_run_pin_think_queue`.
+- LLM dispatch gap / orphan cooldown use `frameTick`-based frames
+  (`_pin_last_dispatch_frame`, `_pin_cooldown_until_frame`) instead of
+  `time.time()` / `LLM_MIN_GAP_MS` wall clock.
+
+Flag off preserves the live 24/7 path exactly (async executor + wall-clock
+gaps). Not echoed to `/state` `config.flags`.
+
 ## Proximity scans (district-bucketed, Phase 6)
 
 `_get_nearby_agents`/`_get_nearby_detailed` (both `NEARBY_RADIUS = 80`) back
@@ -287,6 +306,13 @@ orphan `ocean_N` districts that lack an edge-adjacent coastal pair (starter
 `beach`/`ocean` exempt), unclaims the frontier plot, cleans structures/agents/
 wildlife/road gates, then validates districts — see
 [05-world.md](05-world.md#restore-migration-inland-founded-beaches).
+
+**Schism storage migration (`SCHISM_ENABLED`):** when the flag is on at load,
+`restore_state()` wraps legacy flat `rules` / `pendingRules` / `constitution` /
+compiled governance maps and `beliefRegistry` / `memeTexts` under the primary
+`"home"` settlement id before `_rebuild_settlement_governance` runs per
+bucket. Flag-off restore skips this entirely — see
+[09-systems-society.md](09-systems-society.md#schism_enabled).
 
 Daily Council transcript persistence mirrors `memory`: authoritative in-RAM
 `council_transcript_rows`; append on live event; serialization exports full

@@ -139,7 +139,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 52 module-level flags, sim_engine.py)
+## Flag index (complete — 54 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -160,6 +160,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `RULES_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `MEMES_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `BENCHMARKS_ENABLED` | True | no | [12](12-ops.md) |
+| `DETERMINISM_PINNING` | False (env-backed, `SIM_DETERMINISM_PINNING`) | no | [02](02-engine-core.md), [12](12-ops.md) |
 | `ECOLOGY_ENABLED` | True | yes | [05](05-world.md) |
 | `ROADS_ENABLED` | True | yes | [05](05-world.md) |
 | `STRUCTURE_UPGRADES_ENABLED` | True | yes | [05](05-world.md) |
@@ -175,6 +176,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `DAILY_COUNCIL_ENABLED` | True | no | [09](09-systems-society.md) |
 | `SAGE_REVIEW_ENABLED` | True | no | [09](09-systems-society.md) |
 | `ECONOMY_ENABLED` | True | yes | [08](08-systems-economy.md) |
+| `CONTRACTS_ENABLED` | False | yes | [07](07-actions.md), [08](08-systems-economy.md) |
 | `LIFECYCLE_ENABLED` | True | yes | [06](06-agents.md) |
 | `CULTURE_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `CEMETERY_ENABLED` | True | yes | [05](05-world.md) |
@@ -190,7 +192,10 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `LIBRARY_SCALING_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `TRANSIT_ENABLED` | True | yes | [10](10-path1.md) |
 | `ECONOMY_SINKS_ENABLED` | True | yes | [08](08-systems-economy.md) |
-| `WIKI_MEMORY` | False | yes | [03](03-cognition.md) |
+| `WIKI_MEMORY` | True (D2 soak on `main` — see [03](03-cognition.md)) | yes | [03](03-cognition.md) |
+| `TESTAMENT_ENABLED` | False | yes | [06](06-agents.md), [09](09-systems-society.md) |
+| `THEORY_OF_MIND_ENABLED` | False (env-backed, `SIM_THEORY_OF_MIND`) | yes | [03](03-cognition.md) |
+| `SCHISM_ENABLED` | False | yes | [09](09-systems-society.md#schism_enabled) |
 | `CROP_GROWTH_ENABLED` | True | yes | [05](05-world.md) |
 | `WILDLIFE_ENABLED` | True | yes | [05](05-world.md) (authoritative fauna + hunt + motion; also [02](02-engine-core.md), [07](07-actions.md), [08](08-systems-economy.md), [11](11-viewer.md)) |
 | `CARAVAN_VISUALS_ENABLED` | True | yes | [08](08-systems-economy.md) |

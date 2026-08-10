@@ -536,6 +536,137 @@ mutation is logged as activity and recorded in the chronicle under the
 `meme_mutation` kind, and increments `civilization["memeMutations"]`, which
 also feeds the `meme_mutations` benchmark.
 
+## SCHISM_ENABLED (default False) {#schism_enabled}
+
+Settlement-scoped domestic governance storage for Feature 4 (Schism).
+**Default off:** `civilization["rules"]`, `pendingRules`, `constitution`,
+`customRuleModifiers`, `harvestQuotas`, `rationingActive`, `beliefRegistry`,
+and `memeTexts` remain the only live shape — byte-identical to pre-F4 worlds.
+No schism trigger ships while the flag is off. F4.2 threads read paths and
+voting scope; F4.3 adds trigger/secession/elder when the flag is on.
+
+When **`SCHISM_ENABLED`** is on:
+
+**Settlement-keyed maps (Option A):** parallel buckets keyed by settlement id:
+
+- `rulesBySettlement`, `pendingRulesBySettlement`, `constitutionBySettlement`
+- `customRuleModifiersBySettlement`, `harvestQuotasBySettlement`,
+  `rationingActiveBySettlement`
+- `beliefRegistryBySettlement`, `memeTextsBySettlement`
+
+For the primary **`"home"`** settlement (Path 1 `_init_settlements` convention),
+each keyed bucket **shares the same list/dict object** as the legacy flat field
+so single-settlement worlds keep identical behavior while F4.2 threads read
+paths. Thin accessors (`_rules_for_settlement`, `_pending_for_settlement`,
+`_registry_for_settlement`, `_settlement_id_for_agent`, etc.) live in
+`mixin_governance_culture.py`.
+
+**Global (not forked per settlement):** `treaties`, treaty tariffs
+(`_enacted_treaty_tariff`), `beliefPitchCalls`, `memeMutations`,
+`ruleKindsEverEnacted`, `taxDue`/`taxPaid`, succession office
+(`pendingSuccession`), and session governance cadence counters.
+
+**Beliefs:** per-agent `beliefs` sets stay as-is; canonical definitions move
+under `beliefRegistryBySettlement` when the flag is on (with flat
+`beliefRegistry` aliasing home).
+
+**Rule ids:** remain **globally unique** across settlements for F4.1
+(constitution non-reuse; safer until schism fork mints prefixed ids in a
+later phase).
+
+**Restore migration:** when the flag is on at load and keyed maps are absent,
+`restore_state()` wraps existing flat governance/belief fields under
+`"home"` via `_migrate_schism_storage_on_restore`, then
+`_rebuild_settlement_governance` per bucket. Flag-off restore never introduces
+keyed maps.
+
+**Out of scope (later F4 phases):** viewer panel, war,
+per-settlement currency.
+
+### F4.2 — helper threading + voting scope (flag on)
+
+When **`SCHISM_ENABLED`** is on, settlement accessors thread through domestic
+read/write paths in `mixin_crafting_rules.py`, `mixin_governance_culture.py`,
+`mixin_think_job.py`, `mixin_council_growth.py`, and belief registry writers.
+
+**Domestic ballots** (`propose_rule`, `repeal_rule`, council rule proposals)
+carry **`settlementId`** (proposer's settlement). **`_vote_quorum(rule)`** counts
+only living, non-incapacitated agents in that settlement — not the whole civ.
+Backstop voters in `_maybe_advance_rules` are likewise settlement-filtered.
+
+**Global ballots** (`kind: treaty`, `kind: succession`) stay on flat
+`pendingRules` (home alias), use civ-wide quorum, and ignore `settlementId`.
+
+**Rule ids** remain globally unique across all settlement buckets
+(`_all_enacted_rule_ids`, `_all_pending_rule_ids`, `_all_constitution_rule_ids`).
+
+**Flat home aliases:** mutating `civilization["rules"]` / `pendingRules` /
+compiled side-effect maps still updates the `"home"` bucket when ids match;
+non-home buckets are separate lists/dicts. **`_rebuild_settlement_governance(sid)`**
+rebuilds constitution + `customRuleModifiers` for any settlement id.
+
+**Beliefs:** `_belief_registry(agent)` / `_registry_for_settlement` scope
+canonical definitions; per-agent `beliefs` sets unchanged. Pitch adoption and
+`found_belief` write the proposer's settlement registry.
+
+**Treaties:** `_propose_treaty` / `_vote_treaty` unchanged — global pending +
+global quorum; domestic settlement rules do not partition treaty ballots.
+
+**Still out of scope:** schism trigger, secession migration, per-settlement elder,
+viewer settlement panel.
+
+### F4.3 — schism trigger, secession, elder (flag on)
+
+When **`SCHISM_ENABLED`** is on, `_maybe_advance_rules` (same `RULES_TICK_FRAMES`
+governance cadence as domestic backstop voting) calls `_maybe_trigger_schism`
+before other work. At most one schism per cooldown (`SCHISM_COOLDOWN_FRAMES`,
+default `RULE_PROPOSE_COOLDOWN * 6`).
+
+**Trigger predicate (deterministic, no LLM):** per settlement `sid`, let `E` be
+the settlement elder (`_elder_for_settlement`). A cluster qualifies when there
+exists an **enacted** domestic rule `r` in `sid` and belief id `b` held by every
+member such that:
+
+1. **`_belief_contradicts_enacted_rule(agent, b, r)`** — `b` is not in `r`'s
+   favored affinity set, and either the explicit `_belief_biased_vote` oppositions
+   apply (`river_spirit` vs `rationing`/`harvest_quota`; `harvest_spirit` vs
+   `priority` with `value == fish`), **or** `b` has a non-empty affinity list and
+   `r.kind` is a governance kind (`resource_tax`, `custom`, `priority`, and when
+   `LIFECYCLE_ENABLED` also `harvest_quota`, `rationing`) outside that affinity.
+2. Every cluster member holds `b`, has `relationships[E.name] == "rival"`, and
+   pairwise mutual `ally` ties with every other member.
+3. `len(cluster) >= SCHISM_MIN_CLUSTER` (default **3**).
+
+First matching `(r, b)` in sorted rule-id / belief-id order wins.
+
+**Secession:** `_execute_schism` reuses Path 1 founding helpers
+(`_init_settlements`, `_claim_frontier_plot` + `_found_district`, or an existing
+non-parent settlement). It deep-copies the parent's enacted rules into the child
+settlement bucket, forks `beliefRegistry` / `memeTexts` entries for beliefs the
+cluster holds, migrates agents' `currentDistrict` (and position) into the child
+settlement, and logs activity + chronicle kind **`schism`** (included in
+`CHRONICLE_MILESTONE_KINDS`, so `/state`'s `chronicle` projection surfaces it
+when `CHRONICLE_ENABLED` is on). Inter-settlement
+interaction remains treaty / caravan / tariff only (no war).
+
+**Elder:** `_start_succession_election(settlement_id=child)` opens global
+`succession` ballots scoped with `settlementId` on each record and
+`pendingSuccession.settlementId`. `_enact_succession_winner` allows **multiple
+simultaneous elders** when `SCHISM_ENABLED` — it only blocks a second elder in
+the **same** settlement. `_ensure_succession_election` delegates to
+`_ensure_settlement_succession_elections` so a home elder does not cancel a
+child settlement's pending election.
+
+**Voting hardening:** `_vote_on_rule` rejects domestic ballots when the voter's
+settlement differs from the ballot's `settlementId` (global treaty/succession
+unchanged).
+
+**Think payload:** `_build_think_payload` uses `_pending_rules_for_voter(agent)`
+so agents away from home still see global treaty/succession ballots.
+
+**Still out of scope:** war, per-settlement currency, forced reunification,
+viewer settlement panel.
+
 ## CULTURE_ENABLED
 
 **Skills:** `SKILL_KINDS = ("gather", "craft", "build", "heal", "reflection")`, one float
@@ -567,17 +698,51 @@ ring. It never creates a second event store and never changes prompt history.
 The projection admits only the named milestone kinds `death`, `burial`,
 `election`, `belief_founded`, `belief_adoption`, `meme_mutation`,
 `knowledge_preserved`, `disaster`, `district_founded`, `emergency_measure`,
-and `divine`; routine gather, talk, craft, and build activity remains
-exclusively in `activity`. `disaster` entries are pushed unconditionally from
-`_maybe_disaster` (see [08](08-systems-economy.md)); `district_founded`
+`schism`, and `divine`; routine gather, talk, craft, and build activity
+remains exclusively in `activity`. `disaster` entries are pushed unconditionally
+from `_maybe_disaster` (see [08](08-systems-economy.md)); `district_founded`
 entries are pushed from `_found_district` only when `FOUNDING_EVENTS_ENABLED`
-is True (see [05](05-world.md)). `CHRONICLE_CAP` was raised from 20 to 100
+is True (see [05](05-world.md)); `schism` entries are pushed from
+`_execute_schism` when `SCHISM_ENABLED` and `CULTURE_ENABLED` are on (see
+[§schism_enabled](#schism_enabled)). `CHRONICLE_CAP` was raised from 20 to 100
 (living-ecosystem Phase 2, item 0) after live verification showed a
 storm-heavy stretch (`DISASTER_PROB` fires roughly every 100 simulated
 minutes) evicting real history (deaths/elections/beliefs) within about a day
 at the old cap; 100 entries absorbs many more disasters before crowding out
 anything else, at a negligible cost (~80 extra short strings in `/state` and
 `state.db`).
+
+### Testament (`TESTAMENT_ENABLED`, default False) {#testament_enabled}
+
+Generational knowledge inheritance (Emergence Breakthroughs F1). Requires
+`WIKI_MEMORY` on to be meaningful; `TESTAMENT_ENABLED` is its own flag
+(default **off**, one-flag revert).
+
+**Ring:** `civilization["testament"]` — capped at `TESTAMENT_CAP = 100`
+entries of `{text, author, frame, generation}` (oldest drops first).
+`testamentAuthored` counts cumulative pushes for benchmark survival ratio.
+
+**Deathbed merge:** on agent death (`_agent_dies` → `_merge_testament_on_death`),
+the deceased's `memoryWiki["lessons"]` and optional `relationships` line fold
+into the ring deterministically (dedupe by text, each line truncated at
+`WIKI_SECTION_CHAR_CAP`). Skipped when wiki sections are empty or either flag
+is off. Zero new LLM call sites.
+
+**Inheritance:** `_spawn_newborn` seeds the newborn's `memoryWiki` from both
+parents' wiki sections plus the newest `TESTAMENT_PROMPT_ENTRIES` testament
+lines, subject to `WIKI_SECTION_CHAR_CAP` per section.
+
+**Prompt:** one bounded `"Village testament: ..."` line alongside `"Village
+history: ..."`, sliced by `TESTAMENT_PROMPT_ENTRIES = 3` independently of
+`TESTAMENT_CAP` — raising the ring size never changes prompt length.
+
+**Benchmark:** `cultural_carryover` in `_sample_benchmarks()` — oldest
+surviving entry's generation gap (`births` − entry `generation`) plus
+`survival_ratio` (`len(testament) / testamentAuthored`) in `detail`.
+
+**Back-compat:** `restore_state()` `setdefault`s `testament` → `[]` and
+`testamentAuthored` → `0` only when `TESTAMENT_ENABLED` is on at load time;
+flag-off restore never introduces the fields.
 
 **Divine communication (Sovereign God mode, `GOD_MODE_ENABLED`):** an applied
 `proclamation` (which auto-applies as timed providence) or standalone
@@ -641,6 +806,23 @@ relationships between living agents, shaped as `{from, to, valence}` where
 disagreement resolves conservatively to `rival`. The browser uses this
 authoritative projection only to render nearby relationship cues; it does not
 derive or mutate social state.
+
+## Contracts — default relationship consequence (`CONTRACTS_ENABLED`)
+
+When an **accepted** contract expires without delivery, `_default_contract`
+refunds escrow to the offerer and applies the same one-sided relationship
+shape `confront_agent` uses on contact:
+
+```text
+if offerer.relationships[acceptor] != "rival":
+    offerer.relationships[acceptor] = "rival"
+```
+
+No relationship hit fires on an **unaccepted** open contract that simply
+expires. Benchmarks (when `CONTRACTS_ENABLED` and `BENCHMARKS_ENABLED`):
+`contracts_opened`, `contracts_fulfilled`, `contract_default_rate`
+(`contractDefaults / (contractsFulfilled + contractDefaults)`, `0` when none
+settled). See [08-systems-economy.md](08-systems-economy.md#contracts--escrow-contracts_enabled).
 
 ## Bounded agent conflict (`confront_agent`)
 
@@ -747,6 +929,10 @@ rate + per-meme breakdown, active rule count, structure count, memory-store
 size, effect throughput (`STRUCTURE_EFFECTS_ENABLED`), ecology scarcity
 index (`ECOLOGY_ENABLED`), role-rebalance latency (`EMERGENT_ROLES`), rule
 kind diversity (`RULES_ENABLED`); plus era name/tech tier
-(`TECH_TREE_ENABLED`), module-total (`PIANO_MODULES`/`META_SYSTEM`). Each
-metric is written to `SessionLogger`'s `benchmarks` stream via
+(`TECH_TREE_ENABLED`), module-total (`PIANO_MODULES`/`META_SYSTEM`). When
+`THEORY_OF_MIND_ENABLED`, also samples `peer_prediction_accuracy` (hits/total
+against pending `expect=` predictions from `theory_of_mind` module reports).
+When `TESTAMENT_ENABLED`, also samples `cultural_carryover` (oldest surviving
+testament entry's generation gap and `survival_ratio` in `detail`).
+Each metric is written to `SessionLogger`'s `benchmarks` stream via
 `_log_benchmark` — see [12-ops.md](12-ops.md) for the JSONL sink.

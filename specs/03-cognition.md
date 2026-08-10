@@ -145,7 +145,7 @@ action-sync invariant requires `DECISION_SCHEMA` stay in server.py — see
 
 `DECISION_SCHEMA` (server.py:357-527): `additionalProperties: False`;
 `required: ["action", "reasoning"]`. Key properties: `action` (enum =
-`DECISION_ACTIONS`, 43 entries — see specs/07-actions.md, not repeated here),
+`DECISION_ACTIONS`, 47 entries — see specs/07-actions.md, not repeated here),
 `divine_response` (nullable object, **required on every decision turn while
 active Voice guidance is unacknowledged** — see "Voice binding guidance"
 below; omitted on turns with no active unacked guidance), `target`/
@@ -153,7 +153,9 @@ below; omitted on turns with no active unacked guidance), `target`/
 `relationship_update` (nullable object, values constrained to
 ally/neutral/rival), `blueprint` (nullable object: id/name/needs/new_resources/
 visual_style/sprite/function), `recipe` (nullable object: id/name/inputs/
-station), `rule` (nullable object: id/name/kind/value/description), `vote`
+station), `contract` (nullable object: `want` resource id, `qty`, `pay_coin`,
+`deadline_frames` — all positive integers; `want` must be a known resource id),
+`rule` (nullable object: id/name/kind/value/description), `vote`
 (nullable string), `sage_decision` (nullable enum approve/deny), `sprite`
 (nullable object: palette/grid — **bounded**, see below). **TECH_TREE_ENABLED import-time addition**
 (server.py:2584-2591, applied only if the engine flag is on so flag-off
@@ -212,10 +214,14 @@ review then approve/reject), survival (hunger/health/heal), crafting/recipes,
 Sage-priority-absolute emergency response, Path 1 (tools/blocks/treaties),
 emergent roles (switch_role), collective rules/voting, Cognitive Controller
 (PIANO module weighing), upkeep/seasons (repair/spoilage), market/trade/
-property (homes), population/governance (succession, quotas/rationing),
-knowledge/culture (skill teaching), followed by the JSON output contract and
-worked examples per action family (rest, contribute, talk, propose_blueprint,
-sage_review_blueprint, approve_blueprint).
+property (homes), population/governance (succession,
+quotas/rationing), knowledge/culture (skill teaching), followed by the JSON
+output contract and worked examples per action family (rest, contribute, talk,
+propose_blueprint, sage_review_blueprint, approve_blueprint). Contracts
+(`CONTRACTS_ENABLED`): rules C1/C2 + `contract` JSON field/schema are **not**
+in the static rulebook — `prompts.CONTRACTS_SYSTEM_ADDENDUM` is appended by
+`append_contracts_addendum()` in `build_decision_payload()` only when the flag
+is on (D9 trim; flag-off routine system cost ≈0).
 
 `SYSTEM_PROMPT_SLIM` is defined in `simulation/prompts.py` and re-exported at
 server.py:33 (`SYSTEM_PROMPT_SLIM = _prompts.SYSTEM_PROMPT_SLIM`): `SYSTEM_PROMPT`
@@ -233,9 +239,10 @@ sprite-design-only turn that follows a blueprint's mechanical approval.
 (name/role/skill/personality/memory), vitals (resources/hunger/health/
 relationships/beliefs), spatial (nearby agents/zone/district/known districts/
 local stocks/terraform targets), flag-gated single lines (`season_line`,
-`prices_line`, `weather_line`, `chronicle_line`, `path1_lines`, `level_line` —
-each renders empty when its owning flag is off so prompts stay byte-identical
-across flag states, per `build_user_prompt` server.py:1542-1732), build state
+`prices_line`, `weather_line`, `chronicle_line`, `path1_lines`,
+`contracts_line`, `level_line` — each renders empty when its owning flag is
+off or has nothing to show so prompts stay byte-identical across flag states,
+per `build_user_prompt` server.py:1542-1732), build state
 (structures/active project/progress), civilization state (directive,
 `divine_lines` — see Sovereign God mode below, invention status, commitment,
 idle agents, known resources/recipes, pending/rejected blueprints/recipes/
@@ -251,6 +258,15 @@ including whenever the flag or `WEATHER_ENABLED` is off. Follows the exact
 server folds it in only when set) and rides the existing think cycle — no new
 LLM call, no new context section, just this one line so agents can reference
 storm conditions in council.
+
+`contracts_line` (`CONTRACTS_ENABLED`, F3.3): `_format_contracts_for_prompt()`
+(`mixin_structures_economy.py`) returns a compact `"; "`-joined summary of up
+to `MAX_CONTRACTS_PROMPT` (6) open/accepted contracts relevant to the actor
+(own offers, bindings, or open/directed offers they may accept). The engine
+sets `contracts_line` on the think payload only when the flag is on;
+`build_user_prompt()` renders `Open contracts: ...` only when non-empty, so
+flag-off prompts stay byte-identical and flag-on prompts with no contracts
+add no line.
 
 ### Sovereign God mode (Phase 3): Voice binding guidance
 
@@ -677,6 +693,23 @@ Measured prompt size: ~3,100-3,400 prompt tokens per routine decision call
 function-block schema and sprite few-shot example (worst case ~6,163 tokens
 measured, per the `HIGH_STAKES_MAX_TOKENS` comment, server.py:223-232).
 
+**Contracts prompt growth (D9, F3.3, measured 2026-08-09, D9 trim):** pre-trim
+F3.3 left rules C1/C2, the `contract` JSON field/schema, and one
+`offer_contract` worked example in static `SYSTEM_PROMPT` (**+286 tokens**
+flag-off vs pre-F3.3 baseline, `chars/4`). D9 trim removes that block from
+`SYSTEM_PROMPT` and injects `CONTRACTS_SYSTEM_ADDENDUM` via
+`append_contracts_addendum()` only when `CONTRACTS_ENABLED` is on
+(`build_decision_payload`, `server.py`). **Flag-off system addendum: ~0**
+(measured delta vs trimmed static prompt: **0 tokens**). **Flag-on system
+addendum: ~136 tokens** (546 chars, terse C1/C2 + schema, no worked example).
+With `CONTRACTS_ENABLED` on, a filled `contracts_line` at the
+`MAX_CONTRACTS_PROMPT` cap (6 entries) still adds **~127 tokens** to the user
+message vs flag-off on the same snapshot (~125 tokens for the line body alone).
+Representative full routine payload (`build_decision_payload`, sample engine
+snapshot): flag-off **~7,010** vs flag-on **~7,137** estimated when six open
+contracts are shown — dominated by the user `contracts_line`, not static
+rulebook cost. Re-measure after any further prompt edits.
+
 `MEMORY_PROMPT_CHAR_BUDGET = 900` (`simulation/_server/prompt_format.py`,
 raised from 600 — see [Wiki-style compounding memory](#wiki-memory) below)
 caps the composed "Recent memory:" line; `compose_memory()`
@@ -718,19 +751,21 @@ restart started the index empty despite surviving agent-visible memory.
   entries AND flushing empty store to `MEMORY_STORE_PATH` (matching
   `_piano_module_cache` wipe-on-reset precedent).
 
-### Wiki-style compounding memory (`WIKI_MEMORY`, default False) {#wiki-memory}
+### Wiki-style compounding memory (`WIKI_MEMORY`, default True) {#wiki-memory}
 
 TASKS_PENDING item 3 / plan Phase 4. Goal: long-term memory that merges and
 reconciles instead of FIFO-dropping (Karpathy LLM-Wiki pattern), without
 adding any new LLM call site or timer — it upgrades what
 `_run_memory_maintenance`'s existing round-robin call already does.
+Default flipped to `True` on `main` after D2 soak (session `2026-08-09T19-47-41`);
+flag-off remains a one-flag revert.
 
 - **Structure.** `agent["memoryWiki"]` is a dict of three named sections —
   `relationships`, `goals`, `lessons` — each hard-capped at
   `WIKI_SECTION_CHAR_CAP = 300` chars (`constants.py`, next to `LONG_MEM_CAP`).
   Always present (`{}` initial shape, populated only when the flag is on) so
   persistence via `state.db` is free — same pattern as `moduleReports`. See
-  [06-agents.md](06-agents.md#wiki-style-compounding-memory-wiki_memory-default-false)
+  [06-agents.md](06-agents.md#wiki-style-compounding-memory-wiki_memory-default-true)
   for the agent data-shape entry.
 - **One-call budget, preserved.** `_run_memory_maintenance` still fires only
   every `MEMORY_TICK_FRAMES = 1800` frames, one agent per pass, and still
@@ -804,6 +839,8 @@ surfaces to the agent's next prompt):
 | `approve_blueprint`/`reject_blueprint` | role must be elder; target must be a pending id |
 | `assign_task` | role must be elder; target must be an idle agent name; message required |
 | `switch_role` | `new_role` (or `target`) must be a key in `ROLES` |
+| `offer_contract` | `target` required (agent name or `"open"`); `contract` must pass `validate_contract()` — failures stamp `contract_rejection_note` |
+| `accept_contract` | `target` required (contract id) — failures stamp `contract_rejection_note` |
 | `move_to_district` | promotes `target_district` into `target` if target is empty (the engine only reads `target`) |
 | `talk_to_nearby` | target/message both required, target must be in the nearby-agents list, nearby list non-empty |
 | `divine_response` (when active Voice guidance is unacknowledged) | must be an object with `stance` in `follow`/`continue` and a non-empty `reason` string; the JSON schema now *requires* the field's presence (as a non-null object) for this request via `build_response_format(require_divine_response=True)`, but missing/invalid *values* are still **not** rejected as a hard fallback to `rest` — instead of an immediate ack, non-response is now capped: it increments a per-guidance skip counter and only force-acks after `GOD_VOICE_ACK_SKIP_CAP` consecutive synthetic turns — see Voice binding guidance above |
@@ -1031,10 +1068,17 @@ up to ~6,163 invention-only) must stay under `sim-smart`'s per-slot share at
 
 `PIANO_MODULES` (`constants.py:483`, default `True` since Sid-parity Phase 1) —
 Perception/Social/Desire/Reflection module fan-out is the default cognition
-path. Module calls run on `self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`),
-bounded independently of `MAX_CONCURRENT_LLM` — `_run_piano_modules` submits
-to `piano_workers`, never `self._executor`. Decision-path fan-out and the
-gated always-on pulse share `_piano_refresh_inflight` (keyed by
+path. When `THEORY_OF_MIND_ENABLED` (default `False`, Emergence Breakthroughs
+F2) is on, `theory_of_mind` joins the same staggered fan-out by **swapping
+into the social slot every 4th module-tick** (`tick % 4 == 0` and
+`tick % 2 == 0`) — no extra call per turn, same `PIANO_CONCURRENT_LLM`
+budget. Both decision-path `_piano_to_run` and gated always-on
+`_pulse_piano_modules` enumerate exactly four module slots via
+`_piano_social_slot_module` (never a fifth name). Module calls run on
+`self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`), bounded independently of
+`MAX_CONCURRENT_LLM` — `_run_piano_modules` submits to `piano_workers`, never
+`self._executor`. Decision-path fan-out and the gated always-on pulse share
+`_piano_refresh_inflight` (keyed by
 `(agent_name, module)`): before each submit wave `_run_piano_modules` checks
 `_piano_free_slots()` and never queues more than
 `PIANO_CONCURRENT_LLM - len(_piano_refresh_inflight)`. Within one turn it
@@ -1059,6 +1103,34 @@ Advisory input to the Cognitive Controller only. `PIANO_MODULE_MAX_TOKENS = 90`
 (raised from 60 after module-quality screen: guarded 90-token variant reduced
 grounded-wrong modal count 1→0 with no category regression).
 
+### Theory of Mind (`THEORY_OF_MIND_ENABLED`, default False)
+
+Env override: `SIM_THEORY_OF_MIND=1` (or `true`/`yes`/`on`) forces the flag on
+at import time without editing `constants.py` — same truthy pattern as
+`SIM_DETERMINISM_PINNING`. Unset or `0`/`false` leaves default off. Used by
+`scripts/tom_contention_soak.py` for matched flag-off vs flag-on contention
+soaks before flipping the code default.
+
+Emergence Breakthroughs F2. When on, agents maintain a bounded
+`agent["peerModel"][peerIdStr] = {wants, good_at, owes_me, trust, frame}`
+(updated by the `theory_of_mind` PIANO module on successful parse only).
+Caps: `PEER_MODEL_MAX_PEERS = 8` (LRU eviction by `frame`),
+`PEER_MODEL_FIELD_CHAR_CAP = 48` per string field. Module output uses a
+pipe-delimited line (`PEER=… | wants=… | good_at=… | owes=… | trust=… |
+expect=…`); timeouts/drops leave prior `peerModel` intact.
+
+**Prompt surface:** one `[think: …]` suffix per *nearby* peer only, folded
+into `format_nearby_agents()` — never the full table.
+
+**Benchmark:** `peer_prediction_accuracy` — when a parsed module report
+includes `expect=<action>`, the engine records a pending prediction for that
+peer; the next `apply_decision()` on the peer scores hit/miss against
+`lastAction`. Sampled in `_sample_benchmarks()` when the flag is on.
+
+**Default-on gate:** flipping default to `True` requires a soak comparison
+(`scripts/soak_monitor.py`) showing `piano_module_drops` / `module_refresh_failures`
+not materially worse than a flag-off soak of the same length (see plan).
+
 ### Gated always-on PIANO (`ALWAYS_ON_MODULES`, default False)
 
 `ALWAYS_ON_MODULES` is a dark, one-flag-revert scheduler change. When false,
@@ -1075,7 +1147,11 @@ interval restores the existing GPU-rest window when the gate is off. Phase C's
 optional night backstop has not been attempted.
 
 The pulse orders dirty work before old work and retains the legacy
-perception/desire, social x2, reflection x3 cadence as priority weights. It
+perception/desire, social x2, reflection x3 cadence as priority weights.
+When `THEORY_OF_MIND_ENABLED`, the social priority slot is
+`theory_of_mind` on the same swap ticks as `_piano_to_run` (using
+`agent["moduleTick"] + 1`) — never both social and theory_of_mind in one
+pulse due-list. It
 submits at most `MODULE_PULSE_MAX_BATCH = 2` and the currently free slots from
 `_piano_free_slots()` (same `_piano_refresh_inflight` budget as decision-path
 fan-out) to `piano_workers`; only these always-on refresh

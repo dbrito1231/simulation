@@ -41,6 +41,155 @@ class _DecisionsMixin:
             return None
         return self.civilization["taxPaid"] / self.civilization["taxDue"]
 
+    # --- Theory of Mind (Emergence Breakthroughs F2) ---
+    def _parse_theory_of_mind_line(self, text):
+        if not text or "peer=" not in str(text).lower():
+            return None
+        parts = {}
+        for chunk in str(text).split("|"):
+            if "=" not in chunk:
+                continue
+            key, _, val = chunk.strip().partition("=")
+            parts[key.strip().lower()] = val.strip()
+        peer = parts.get("peer")
+        expect = parts.get("expect")
+        if not peer or not expect:
+            return None
+        return {
+            "peer": peer,
+            "wants": parts.get("wants", ""),
+            "good_at": parts.get("good_at", ""),
+            "owes": parts.get("owes", ""),
+            "trust": parts.get("trust", "0.5"),
+            "expect": expect,
+        }
+
+    def _apply_theory_of_mind_report(self, observer, text):
+        if not THEORY_OF_MIND_ENABLED or not text:
+            return
+        parsed = self._parse_theory_of_mind_line(text)
+        if not parsed:
+            return
+        peer = self._find_agent(parsed["peer"])
+        if not peer or peer is observer:
+            return
+        self._upsert_peer_model(observer, peer["id"], {
+            "wants": parsed["wants"],
+            "good_at": parsed["good_at"],
+            "owes": parsed["owes"],
+            "trust": parsed["trust"],
+        })
+        expected = parsed["expect"].strip().lower()
+        if expected:
+            self._peer_prediction_pending[str(peer["id"])] = {
+                "observer": observer["name"],
+                "expected": expected,
+                "frame": self.frameTick,
+            }
+
+    def _piano_default_modules(self):
+        mods = {"perception": True, "social": True, "desire": True, "reflection": True}
+        if THEORY_OF_MIND_ENABLED:
+            mods["theory_of_mind"] = True
+        return mods
+
+    def _piano_module_names(self):
+        names = ["perception", "social", "desire", "reflection"]
+        if THEORY_OF_MIND_ENABLED:
+            names.append("theory_of_mind")
+        return names
+
+    def _piano_social_slot_module(self, modules, tick):
+        """Social-slot name for one module-tick; theory_of_mind swaps in every
+        4th even tick when enabled — same slot, no extra call."""
+        modules = modules or self._piano_default_modules()
+        if (THEORY_OF_MIND_ENABLED
+                and modules.get("theory_of_mind", True)
+                and tick % 4 == 0
+                and tick % 2 == 0):
+            return "theory_of_mind"
+        return "social"
+
+    def _piano_to_run(self, modules, tick):
+        """Staggered PIANO dispatch for one module-tick. theory_of_mind swaps
+        into the social slot every 4th tick when enabled — no extra call."""
+        modules = modules or self._piano_default_modules()
+        to_run = []
+        if modules.get("perception", True):
+            to_run.append("perception")
+        if modules.get("desire", True):
+            to_run.append("desire")
+        if tick % 2 == 0:
+            social_slot = self._piano_social_slot_module(modules, tick)
+            if modules.get(social_slot, True):
+                to_run.append(social_slot)
+        if modules.get("reflection", True) and tick % 3 == 0:
+            to_run.append("reflection")
+        return to_run, modules
+
+    def _piano_off_tick_modules(self, modules, to_run):
+        candidates = ["social", "reflection"]
+        if THEORY_OF_MIND_ENABLED:
+            candidates.append("theory_of_mind")
+        return [m for m in candidates if modules.get(m, True) and m not in to_run]
+
+    def _cap_peer_model_field(self, text):
+        if not text:
+            return ""
+        return str(text).strip()[:PEER_MODEL_FIELD_CHAR_CAP]
+
+    def _upsert_peer_model(self, agent, peer_id, fields):
+        peer_id = str(peer_id)
+        model = agent.setdefault("peerModel", {})
+        try:
+            trust = float(fields.get("trust", 0.5))
+        except (TypeError, ValueError):
+            trust = 0.5
+        model[peer_id] = {
+            "wants": self._cap_peer_model_field(fields.get("wants", "")),
+            "good_at": self._cap_peer_model_field(fields.get("good_at", "")),
+            "owes_me": self._cap_peer_model_field(
+                fields.get("owes_me", fields.get("owes", ""))),
+            "trust": max(0.0, min(1.0, trust)),
+            "frame": self.frameTick,
+        }
+        while len(model) > PEER_MODEL_MAX_PEERS:
+            oldest_id = min(model.items(), key=lambda kv: kv[1].get("frame", 0))[0]
+            del model[oldest_id]
+
+    def _peer_model_prompt_suffix(self, agent, peer_agent):
+        if not THEORY_OF_MIND_ENABLED:
+            return None
+        entry = (agent.get("peerModel") or {}).get(str(peer_agent["id"]))
+        if not entry:
+            return None
+        parts = []
+        if entry.get("wants"):
+            parts.append(f"wants {entry['wants']}")
+        if entry.get("good_at"):
+            parts.append(f"good at {entry['good_at']}")
+        if entry.get("owes_me"):
+            parts.append(f"owes me {entry['owes_me']}")
+        trust = entry.get("trust")
+        if trust is not None:
+            parts.append(f"trust {trust:.1f}")
+        return " — ".join(parts) if parts else None
+
+    def _score_peer_prediction(self, peer, action):
+        if not THEORY_OF_MIND_ENABLED:
+            return
+        pending = self._peer_prediction_pending.pop(str(peer["id"]), None)
+        if not pending:
+            return
+        self._peer_prediction_total += 1
+        if str(action).lower() == pending["expected"]:
+            self._peer_prediction_hits += 1
+
+    def _peer_prediction_accuracy(self):
+        if self._peer_prediction_total == 0:
+            return None
+        return self._peer_prediction_hits / self._peer_prediction_total
+
     def _sample_benchmarks(self):
         if not BENCHMARKS_ENABLED:
             return
@@ -193,6 +342,32 @@ class _DecisionsMixin:
                 "chronicle_size", len(c.get("chronicle") or []),
                 {"meme_mutations": c.get("memeMutations", 0),
                  "belief_pitch_calls": c.get("beliefPitchCalls", 0)})
+        if TESTAMENT_ENABLED:
+            c = self.civilization
+            testament = c.get("testament") or []
+            authored = c.get("testamentAuthored", 0) or len(testament)
+            current_gen = c.get("births", 0)
+            if testament:
+                gen_gaps = [current_gen - e.get("generation", 0) for e in testament]
+                oldest_carryover = max(gen_gaps) if gen_gaps else 0
+                survival_ratio = round(len(testament) / max(authored, 1), 3)
+            else:
+                oldest_carryover = 0
+                survival_ratio = 0.0
+            self.lastBenchmarks["culturalCarryover"] = oldest_carryover
+            self._log_benchmark(
+                "cultural_carryover", oldest_carryover,
+                {"entries": len(testament), "authored": authored,
+                 "survival_ratio": survival_ratio, "births": current_gen})
+        if THEORY_OF_MIND_ENABLED:
+            accuracy = self._peer_prediction_accuracy()
+            if accuracy is not None:
+                self.lastBenchmarks["peerPredictionAccuracy"] = round(accuracy, 3)
+                self._log_benchmark(
+                    "peer_prediction_accuracy", round(accuracy, 3),
+                    {"hits": self._peer_prediction_hits,
+                     "total": self._peer_prediction_total,
+                     "period_ticks": BENCHMARK_TICK_FRAMES})
         if GOD_MODE_ENABLED:
             # Sovereign God mode (Phase 2): intervention-aware evidence (rule
             # 6 of the plan) -- expose `intervened` in benchmark metadata so
@@ -205,6 +380,25 @@ class _DecisionsMixin:
                 {"intervened": bool(god.get("intervened")),
                  "active_effects": len(god.get("activeEvents") or []),
                  "rejected_commands": self._god_rejected_count})
+        if CONTRACTS_ENABLED:
+            c = self.civilization
+            opened = c.get("contractsOpened", 0)
+            fulfilled = c.get("contractsFulfilled", 0)
+            defaults = c.get("contractDefaults", 0)
+            settled = fulfilled + defaults
+            default_rate = (defaults / settled) if settled else 0.0
+            self.lastBenchmarks["contractsOpened"] = opened
+            self.lastBenchmarks["contractsFulfilled"] = fulfilled
+            self.lastBenchmarks["contractDefaultRate"] = round(default_rate, 3)
+            self._log_benchmark(
+                "contracts_opened", opened,
+                {"open": len(c.get("contracts") or []),
+                 "escrow": c.get("contractEscrow", 0)})
+            self._log_benchmark(
+                "contracts_fulfilled", fulfilled, {"defaults": defaults})
+            self._log_benchmark(
+                "contract_default_rate", round(default_rate, 3),
+                {"opened": opened, "fulfilled": fulfilled, "defaults": defaults})
         try:
             flush = self.d.get("flush_benchmarks")
             if flush:
@@ -997,6 +1191,18 @@ class _DecisionsMixin:
         elif action == "deliver_caravan":
             summary = self._deliver_caravan_action(agent, decision)
 
+        elif action == "offer_contract":
+            if not CONTRACTS_ENABLED:
+                summary = f"{agent['name']} cannot offer a contract — contracts are disabled"
+            else:
+                summary = self._apply_offer_contract(agent, decision)
+
+        elif action == "accept_contract":
+            if not CONTRACTS_ENABLED:
+                summary = f"{agent['name']} cannot accept a contract — contracts are disabled"
+            else:
+                summary = self._apply_accept_contract(agent, decision)
+
         elif action == "council_speak":
             summary = self._council_speak(agent, decision)
 
@@ -1027,6 +1233,8 @@ class _DecisionsMixin:
 
         agent["lastAction"] = action
         agent["lastReasoning"] = decision.get("reasoning")
+        if THEORY_OF_MIND_ENABLED:
+            self._score_peer_prediction(agent, action)
         agent["actionCounts"][action] = agent["actionCounts"].get(action, 0) + 1
         if action not in ("rest", "talk_to_nearby", "assign_task"):
             agent["assignedTask"] = None
@@ -1066,6 +1274,8 @@ class _DecisionsMixin:
                       "approve_blueprint", "reject_blueprint", "sage_review_blueprint"):
             self._mark_civ_dirty("stockpile", "districtProjects", "rules", "pendingRules",
                                  "pendingBlueprints", "level")
+        if CONTRACTS_ENABLED and action in ("offer_contract", "accept_contract"):
+            self._mark_civ_dirty("contracts", "contractEscrow", "stockpile")
         return summary
 
     def _resolve_talk_target(self, agent, decision):

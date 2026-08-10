@@ -52,6 +52,9 @@ class _SnapshotMixin:
             self._module_pulse_work = []
             self._module_refresh_failures = 0
             self._module_note_ages = []
+            self._peer_prediction_pending = {}
+            self._peer_prediction_hits = 0
+            self._peer_prediction_total = 0
             self.shipments = []
             self._shipment_seq = 0
             self._god_preview_cache = {}
@@ -254,6 +257,7 @@ class _SnapshotMixin:
                 "GOODS_ENABLED": GOODS_ENABLED,
                 "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
                 "ECONOMY_ENABLED": ECONOMY_ENABLED,
+                "CONTRACTS_ENABLED": CONTRACTS_ENABLED,
                 "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
                 "CULTURE_ENABLED": CULTURE_ENABLED,
                 "CEMETERY_ENABLED": CEMETERY_ENABLED,
@@ -278,6 +282,9 @@ class _SnapshotMixin:
                 "TRANSIT_ENABLED": TRANSIT_ENABLED,
                 "ECONOMY_SINKS_ENABLED": ECONOMY_SINKS_ENABLED,
                 "WIKI_MEMORY": WIKI_MEMORY,
+                "TESTAMENT_ENABLED": TESTAMENT_ENABLED,
+                "THEORY_OF_MIND_ENABLED": THEORY_OF_MIND_ENABLED,
+                "SCHISM_ENABLED": SCHISM_ENABLED,
                 "CROP_GROWTH_ENABLED": CROP_GROWTH_ENABLED,
                 "WILDLIFE_ENABLED": WILDLIFE_ENABLED,
                 "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,

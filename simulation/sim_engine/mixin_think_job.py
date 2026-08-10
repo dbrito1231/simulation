@@ -27,6 +27,13 @@ class _ThinkJobMixin:
         """Mirror index.html thinkAgent payload, computed under lock."""
         c = self.civilization
         nearby_detailed = self._get_nearby_detailed(agent)
+        if THEORY_OF_MIND_ENABLED:
+            for item in nearby_detailed:
+                peer = self._find_agent(item.get("name"))
+                if peer:
+                    suffix = self._peer_model_prompt_suffix(agent, peer)
+                    if suffix:
+                        item["peer_model"] = suffix
         idle_agents = []
         if agent["role"] == "elder":
             # C3: cap at MAX_IDLE_AGENTS_PROMPT -- _idle_agents_for_elder is
@@ -323,11 +330,15 @@ class _ThinkJobMixin:
                         f"NOTE: The village needs a {need_role} (survival or scarce "
                         f"resources). Consider switch_role to {need_role} to fill the gap.")
         if RULES_ENABLED:
-            unvoted = next((r for r in c["pendingRules"] if agent["name"] not in r["votes"]), None)
+            voter_pending = self._pending_rules_for_voter(agent)
+            unvoted = next((r for r in voter_pending if agent["name"] not in r["votes"]), None)
+            agent_sid_nudge = self._settlement_id_for_agent(agent) if SCHISM_ENABLED else None
+            scoped_rules = self._rules_for_settlement(agent_sid_nudge) if agent_sid_nudge else c["rules"]
+            scoped_pending_nudge = self._pending_for_settlement(agent_sid_nudge) if agent_sid_nudge else c["pendingRules"]
             if unvoted:
                 note(1, f'NOTE: Pending rule "{unvoted["name"]}" (id {unvoted["id"]}) needs your vote. '
                         f"Use vote_rule with target {unvoted['id']} and vote yes or no.")
-            elif (not c["rules"] and not c["pendingRules"]
+            elif (not scoped_rules and not scoped_pending_nudge
                   and self.frameTick - c["lastRuleActivityFrame"] > BLUEPRINT_STALL_THRESHOLD):
                 note(3, "NOTE: The village has no shared rules yet. Consider propose_rule (a small resource_tax builds a shared stockpile).")
         if agent["role"] == "elder" and c["pendingBlueprints"]:
@@ -573,7 +584,7 @@ class _ThinkJobMixin:
         known_resource_ids_full = [r["id"] for r in resource_items]
         belief_records = [{"id": bid, "name": entry.get("name"), "tenet": entry.get("tenet"),
                            "affinity": list(entry.get("affinity") or [])}
-                          for bid, entry in self._belief_registry().items()]
+                          for bid, entry in self._belief_registry(agent).items()]
         belief_examples = [dict(example) for example in BELIEF_ARCHETYPES.values()]
         nearby_beliefs = {
             n["name"]: sorted((self._find_agent(n["name"]) or {}).get("beliefs") or [])
@@ -619,7 +630,9 @@ class _ThinkJobMixin:
         # active_rules: not read by validate_blueprint at all, so a plain cap
         # on the existing field is safe. Already loosely bounded by
         # MAX_ACTIVE_RULES (8) <= MAX_ACTIVE_RULES_PROMPT (12) today.
-        rules_full = list(c["rules"]) if RULES_ENABLED else []
+        agent_sid = self._settlement_id_for_agent(agent) if SCHISM_ENABLED else None
+        rules_full = list(self._rules_for_settlement(agent_sid) if agent_sid else c["rules"]) if RULES_ENABLED else []
+        scoped_pending = self._pending_rules_for_voter(agent) if SCHISM_ENABLED else c["pendingRules"]
         if len(rules_full) > MAX_ACTIVE_RULES_PROMPT:
             active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
                                   "effect": r.get("effect"), "supersedes": r.get("supersedes")}
@@ -680,6 +693,10 @@ class _ThinkJobMixin:
                  or (WILDLIFE_ENABLED and self._nearest_huntable_wildlife(agent) is not None))
             and (action_name != "confront_agent"
                  or (SURVIVAL_ENABLED and bool(self._confront_eligible_targets(agent))))
+            and (action_name not in ("offer_contract", "accept_contract")
+                 or CONTRACTS_ENABLED)
+            and (action_name != "accept_contract"
+                 or self._has_acceptable_contract(agent))
         ]
 
         # Sovereign God mode (Phase 3): computed once per think payload,
@@ -815,9 +832,9 @@ class _ThinkJobMixin:
                                "yes": list(r["votes"].values()).count("yes"),
                                "no": list(r["votes"].values()).count("no"),
                                "proposed_by": r["proposedBy"]}
-                              for r in c["pendingRules"]] if RULES_ENABLED else [],
+                              for r in scoped_pending] if RULES_ENABLED else [],
             "active_rules": active_rules_list if RULES_ENABLED else [],
-            "constitution": [dict(p) for p in self._ensure_constitution()] if RULES_ENABLED else [],
+            "constitution": [dict(p) for p in self._ensure_constitution(agent_sid if SCHISM_ENABLED else None)] if RULES_ENABLED else [],
             "recent_conversations": self._recent_conversations_text(),
             "inbox": self._drain_inbox(agent),
             "self_prompt": "",
@@ -852,6 +869,7 @@ class _ThinkJobMixin:
             # so flag-off prompts stay byte-identical to Phase F).
             "skills": {k: round(v, 1) for k, v in agent["skills"].items()} if CULTURE_ENABLED else None,
             "chronicle_line": self._chronicle_prompt_line() if CULTURE_ENABLED else None,
+            "testament_line": self._testament_prompt_line() if TESTAMENT_ENABLED else None,
             "council_digest_line": self._council_digest_prompt_line(),
             "weather_line": self._weather_prompt_line(),
             "library_lessons": (self._library_lessons(agent.get("currentDistrict"))
@@ -860,6 +878,7 @@ class _ThinkJobMixin:
             "path1_industry_line": industry_line,
             "path1_neighbor_line": neighbor_line,
             "settlement_stores_line": self._format_settlement_stores_for_prompt(agent),
+            "contracts_line": self._format_contracts_for_prompt(agent) if CONTRACTS_ENABLED else None,
             "high_stakes_reason": high_stakes_reason,
             "available_actions": available_actions,
             "divine_public_event_line": self._divine_public_event_line(agent),
@@ -904,7 +923,7 @@ class _ThinkJobMixin:
         cache = self._piano_module_cache.get(agent_name, {})
         reports = []
         ages = []
-        for module in ("perception", "social", "desire", "reflection"):
+        for module in self._piano_module_names():
             if not enabled.get(module, True):
                 continue
             note = cache.get(module) or {}
@@ -963,8 +982,10 @@ class _ThinkJobMixin:
             cache[module] = {"tick": int(agent.get("moduleTick") or 0),
                              "text": text, "wall_ts": now}
             agent["moduleReports"] = {m: dict(v) for m, v in cache.items()}
+            if module == "theory_of_mind" and THEORY_OF_MIND_ENABLED:
+                self._apply_theory_of_mind_report(agent, text)
             enabled = agent.get("modules") or {}
-            due = [m for m in ("perception", "social", "desire", "reflection")
+            due = [m for m in self._piano_module_names()
                    if enabled.get(m, True)]
             # Do not clear a newer dirty event that arrived while this work ran.
             if agent.get("contextDirty") and agent.get("contextDirtySince", 0) <= dirty_since:
@@ -997,7 +1018,11 @@ class _ThinkJobMixin:
                 continue
             dirty = bool(agent.get("contextDirty"))
             dirty_since = agent.get("contextDirtySince") or now
-            for priority, module in enumerate(("perception", "desire", "social", "reflection")):
+            agent_modules = agent.get("modules") or {}
+            module_tick = int(agent.get("moduleTick") or 0) + 1
+            social_slot = self._piano_social_slot_module(agent_modules, module_tick)
+            pulse_modules = ("perception", "desire", social_slot, "reflection")
+            for priority, module in enumerate(pulse_modules):
                 if not (agent.get("modules") or {}).get(module, True):
                     continue
                 note = (self._piano_module_cache.get(agent["name"], {}) or {}).get(module) or {}
@@ -1051,23 +1076,11 @@ class _ThinkJobMixin:
         if ALWAYS_ON_MODULES:
             return self._always_on_reports(agent_name, modules), module_tick, 0
         tick = (module_tick or 0) + 1
-        modules = modules or {
-            "perception": True, "social": True, "desire": True, "reflection": True,
-        }
-        to_run = []
-        if modules.get("perception", True):
-            to_run.append("perception")
-        if modules.get("desire", True):
-            to_run.append("desire")
-        if modules.get("social", True) and tick % 2 == 0:
-            to_run.append("social")
-        if modules.get("reflection", True) and tick % 3 == 0:
-            to_run.append("reflection")
+        to_run, modules = self._piano_to_run(modules, tick)
         # Off-tick modules: enabled but not due this turn. Filled from cache
         # (if fresh) so the decision payload keeps seeing their last real
         # report instead of a gap on the ticks they don't fire.
-        off_tick = [m for m in ("social", "reflection")
-                    if modules.get(m, True) and m not in to_run]
+        off_tick = self._piano_off_tick_modules(modules, to_run)
         cache = self._piano_module_cache.setdefault(agent_name, {})
         ordered = list(to_run)
         for module in off_tick:
@@ -1161,6 +1174,11 @@ class _ThinkJobMixin:
                         cache[module] = {"tick": tick, "text": text}
                         report_by_module[module] = f"{module}: {text}"
                         runs += 1
+                        if module == "theory_of_mind" and THEORY_OF_MIND_ENABLED:
+                            with self.lock:
+                                agent = self._find_agent(agent_name)
+                                if agent:
+                                    self._apply_theory_of_mind_report(agent, text)
                     else:
                         self._piano_module_drops += 1
                     del active[module]
@@ -1211,7 +1229,14 @@ class _ThinkJobMixin:
         with self.lock:
             self._llm_orphan_timeouts += 1
             if self._llm_orphan_timeouts >= LLM_ORPHAN_TIMEOUT_THRESHOLD:
-                self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
+                if DETERMINISM_PINNING:
+                    cooldown_frames = max(
+                        1,
+                        int(round(LLM_ORPHAN_COOLDOWN_S * TICKS_PER_SEC)),
+                    )
+                    self._pin_cooldown_until_frame = self.frameTick + cooldown_frames
+                else:
+                    self.llm_cooldown_until = time.time() + LLM_ORPHAN_COOLDOWN_S
                 self._llm_orphan_timeouts = 0
 
     def _think_job(self, agent_name):
@@ -1417,24 +1442,48 @@ class _ThinkJobMixin:
             return False
         if len(self._inflight) >= MAX_CONCURRENT_LLM:
             return False
-        now_ms = time.time() * 1000.0
-        if time.time() < self.llm_cooldown_until:
-            return False
-        if now_ms - self.last_llm_dispatch_ms < LLM_MIN_GAP_MS:
-            return False
+        if DETERMINISM_PINNING:
+            if self.frameTick < self._pin_cooldown_until_frame:
+                return False
+            gap_frames = max(1, int(round(LLM_MIN_GAP_MS * TICKS_PER_SEC / 1000.0)))
+            if self.frameTick - self._pin_last_dispatch_frame < gap_frames:
+                return False
+        else:
+            now_ms = time.time() * 1000.0
+            if time.time() < self.llm_cooldown_until:
+                return False
+            if now_ms - self.last_llm_dispatch_ms < LLM_MIN_GAP_MS:
+                return False
         if agent["role"] == "elder":
             c = self.civilization
             c["inventionRequiredStreak"] = (c.get("inventionRequiredStreak", 0) + 1) \
                 if self._invention_required() else 0
-        self.last_llm_dispatch_ms = now_ms
+        if DETERMINISM_PINNING:
+            self._pin_last_dispatch_frame = self.frameTick
+        else:
+            self.last_llm_dispatch_ms = time.time() * 1000.0
         self._inflight.add(agent["name"])
         agent["isThinking"] = True
         self._mark_agent_dirty(agent)
-        self._executor.submit(self._think_job, agent["name"])
+        if DETERMINISM_PINNING:
+            self._pin_think_queue.append(agent["name"])
+        else:
+            self._executor.submit(self._think_job, agent["name"])
         return True
 
     # --- the per-frame tick (ported tick(), minus rendering) ---
+    def _run_pin_think_queue(self):
+        """Drain deferred think jobs synchronously in stable agent-name order."""
+        if not DETERMINISM_PINNING:
+            return
+        queue = sorted(self._pin_think_queue)
+        self._pin_think_queue = []
+        for agent_name in queue:
+            self._think_job(agent_name)
+
     def _tick_once(self):
+        if DETERMINISM_PINNING:
+            self._pin_think_queue = []
         with self.lock:
             # When paused, the sim clock freezes entirely (no movement, survival,
             # thinking, or frameTick advance) so the viewer sees a frozen world
@@ -1510,6 +1559,8 @@ class _ThinkJobMixin:
                 if ECONOMY_ENABLED:
                     self._maybe_mint_coin()
                     self._maybe_fund_project_coin()
+                if CONTRACTS_ENABLED:
+                    self._tick_contract_settlement()
                 if path1_on():
                     self._maybe_found_settlement()
                     self._path1_industry_benchmark()
@@ -1612,6 +1663,8 @@ class _ThinkJobMixin:
                 if dispatched:
                     a["lastThinkFrame"] = ft
                 a["thinkTimer"] = a["thinkInterval"] if dispatched else THINK_RETRY_FRAMES
+
+        self._run_pin_think_queue()
 
     def _run_loop(self):
         while not self._stop.is_set():

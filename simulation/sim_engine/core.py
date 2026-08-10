@@ -179,6 +179,11 @@ class SimEngine(
         self.lastMemorySize = 0
         self._memory_maint_index = 0
         self._stop = threading.Event()
+        self._pin_think_queue = []
+        self._pin_last_dispatch_frame = 0
+        self._pin_cooldown_until_frame = 0
+        if DETERMINISM_PINNING:
+            random.seed(DETERMINISM_SEED)
         self._executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_LLM)
         # Sid-parity Phase 1: separate pool for PIANO module calls so they
         # never compete with decision calls for MAX_CONCURRENT_LLM slots.
@@ -207,6 +212,10 @@ class SimEngine(
         self._module_refresh_failures = 0
         self._module_note_ages = []
         self._meta_agent_index = 0
+        # Theory of Mind (F2): session-lifetime peer-action prediction scoring.
+        self._peer_prediction_pending = {}
+        self._peer_prediction_hits = 0
+        self._peer_prediction_total = 0
         self.ROAD_PATH_CACHE = {}   # (nodeA, nodeB) -> [node ids]; see _recompute_road_paths
         # Living-ecosystem Phase 3: cosmetic shipment ring. Deliberately kept
         # off the civilization dict (see CARAVAN_VISUALS_ENABLED) so it is
@@ -324,7 +333,8 @@ class SimEngine(
                 "moduleReports": {},
                 **({"contextDirty": True, "contextDirtySince": time.time()}
                    if ALWAYS_ON_MODULES else {}),
-                "modules": {"perception": True, "social": True, "desire": True, "reflection": True},
+                "modules": self._piano_default_modules(),
+                **({"peerModel": {}} if THEORY_OF_MIND_ENABLED else {}),
                 # Phase E: home structure id (None = homeless) + refusal nudges.
                 "homeStructureId": None, "lastTradeRejection": None,
                 "lastHomelessNudgeFrame": None,
@@ -550,6 +560,14 @@ class SimEngine(
             # deliberately NOT part of this dict -- it lives only in
             # self._god_requests, in-memory, never persisted.
             "godState": None,
+            # Contracts & escrow (CONTRACTS_ENABLED): open offers + engine-held
+            # coin. Persisted wholesale; restore setdefaults empty containers.
+            "contracts": [],
+            "contractEscrow": 0,
+            "nextContractId": 1,
+            "contractsOpened": 0,
+            "contractsFulfilled": 0,
+            "contractDefaults": 0,
         }
         self._effect_period_fired = 0
         self._module_period_runs = 0
@@ -567,6 +585,7 @@ class SimEngine(
                 d.setdefault("tiles", {})
                 self._ensure_district_terrain(d)
             self._init_settlements()
+        self._init_schism_storage()
         self._recompute_road_paths()
         self._rebuild_role_maps()
         active_defs = self._select_active_defs(roster_size)

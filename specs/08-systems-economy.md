@@ -922,3 +922,42 @@ smoke suite proves this for every site (gather, survival, structure decay,
 spoilage) by running identical operations against two independently
 constructed engines — one with the flag off, one with the flag on and every
 key pinned to `1.0` — and asserting the observable results match exactly.
+
+## Contracts & escrow (`CONTRACTS_ENABLED`)
+
+Default **off**. Two decision actions (`offer_contract`, `accept_contract`)
+plus engine-held escrow — see [07-actions.md](07-actions.md) for params and
+apply semantics. `validate_contract()` in `normalize_decision` rejects
+malformed offers before apply.
+
+**State** (persisted on `civilization`, restore `setdefault`s empty
+containers on old saves):
+
+| Field | Meaning |
+|---|---|
+| `contracts` | Open/accepted contract records (`id`, `want`, `qty`, `pay_coin`, `deadline_frames`, `offerer`, `target` (`"open"` or agent name), `createdFrame`, `status`, `acceptor`, `acceptedFrame`) |
+| `contractEscrow` | Total coin held by the engine for open/accepted contracts |
+| `nextContractId` | Monotonic id allocator (`contract_<n>`) |
+| `contractsOpened` / `contractsFulfilled` / `contractDefaults` | Session counters for benchmarks |
+
+**Coin conservation.** `offer_contract` debits the offerer's held coin into
+`contractEscrow` (no partial debit). Fulfillment pays escrow to the acceptor;
+expiry/default refunds escrow via `_route_escrow_refund_coin`: living offerer
+(as before), else integer-split among living heirs (`_heirs_of`, same rule as
+`_inherit_from`), else village `stockpile["coin"]`. Dead offerers never
+receive refunds on their corpse record (`deathFrame` set, resources already
+cleared by inheritance). Accepted contracts do not fulfill when either party
+is dead — escrow refunds through the same route. No mint or burn across
+offer/fulfill/default/expiry — `scripts/contract_smoke.py` asserts
+`sum(agent coin) + stockpile coin + contractEscrow` is invariant.
+
+**Settlement.** `_tick_contract_settlement()` runs on the `RULES_TICK_FRAMES`
+batch in `_tick_once` (with mint/backstops). Contracts expire when
+`frameTick >= createdFrame + deadline_frames` (deadline frame is expired;
+fulfillment and `accept_contract` both require `frameTick < deadline`). Goods
+delivery transfers from acceptor to offerer with the same carry-cap
+overflow-to-stockpile pattern as gather grants. Default applies the
+offerer→acceptor rival hit only when both parties are living (`deathFrame is
+None`); dead-party defaults still refund escrow via `_route_escrow_refund_coin`
+but do not mutate corpse relationships. `MAX_OPEN_CONTRACTS = 20` caps
+simultaneous open+accepted records.

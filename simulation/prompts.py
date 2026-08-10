@@ -325,6 +325,24 @@ EXAMPLE (elder sage-reviewing a pending blueprint's geography/resources):
 EXAMPLE (elder approving a pending blueprint after sage review):
 {"action":"approve_blueprint","target":"library","target_district":"forest","message":"Approved. Gather paper from the forest.","new_role":null,"relationship_update":null,"reasoning":"A worthy addition to the village."}"""
 
+# Appended to routine system prompts only when CONTRACTS_ENABLED (F3.3 D9
+# trim): keeps flag-off SYSTEM_PROMPT byte-identical to pre-contracts baseline.
+CONTRACTS_SYSTEM_ADDENDUM = """CONTRACTS:
+C1. offer_contract: target = agent name or "open"; include "contract" with want (resource id), qty, pay_coin, deadline_frames. pay_coin debits your coin into escrow.
+C2. accept_contract: target = contract id from Open contracts; deliver want×qty before deadline for pay_coin. Missed deliveries hurt your relationship with the offerer.
+
+Add to the JSON output: "contract": <contract object or null> (required for offer_contract).
+
+CONTRACT object schema (offer_contract only):
+{"want":"wood","qty":2,"pay_coin":4,"deadline_frames":1200}"""
+
+
+def append_contracts_addendum(system_content: str) -> str:
+    """Append contracts rules/schema when CONTRACTS_ENABLED is on."""
+    if not _sim_engine.CONTRACTS_ENABLED:
+        return system_content
+    return system_content + "\n\n" + CONTRACTS_SYSTEM_ADDENDUM
+
 
 COUNCIL_SYSTEM_PROMPT = """You are a seated villager taking one turn in the Daily Council Assembly.
 Use only the council actions offered in available_actions. Respond with ONLY valid JSON.

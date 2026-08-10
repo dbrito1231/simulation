@@ -121,7 +121,7 @@ an emergent role, so the single elder role remains a seed-only invariant.
 | Movement | `x`, `y`, `targetX`, `targetY`, `speed`, `waypoints`, `currentZone`, `currentDistrict` |
 | Social | `relationships`, `inbox`, `beliefs`, `votes`, `message`, `messageTimer`, `consecutiveTalks`, `lastSpokeFrame` |
 | Survival | `resources`, `hunger`, `health`, `incapacitated` |
-| Cognition | `memory` (`{working, shortTerm, longTerm}`), `memoryWiki` (`{relationships, goals, lessons}`, each capped at `WIKI_SECTION_CHAR_CAP`=300 chars — see below), `thinkTimer`, `thinkInterval`, `isThinking`, `pendingThink`, `lastAction`, `lastReasoning`, `persona`, `idleFrames`, `moduleTick`, `modules` (`{perception, social, desire, reflection}`), `moduleReports` (`{module: {tick, text}}` — persistence-only mirror of the engine's `_piano_module_cache` entry for this agent, written alongside `moduleTick` after every think; never read on the hot path, only rehydrated by `restore_state()`), `goal` (kinds include `gather`, `deliver`, `build`, `craft_gather`, `plant_terrain`, `seek_shelter`, `dig_relocate`, `caravan`, `repair`, and **`hunt`** — forced starvation backstop; see [08-systems-economy.md](08-systems-economy.md#starvation-reflex-and-forced-hunt-precedence)), `commitment`, `actionCounts` |
+| Cognition | `memory` (`{working, shortTerm, longTerm}`), `memoryWiki` (`{relationships, goals, lessons}`, each capped at `WIKI_SECTION_CHAR_CAP`=300 chars — see below), `thinkTimer`, `thinkInterval`, `isThinking`, `pendingThink`, `lastAction`, `lastReasoning`, `persona`, `idleFrames`, `moduleTick`, `modules` (`{perception, social, desire, reflection}` plus `theory_of_mind` when `THEORY_OF_MIND_ENABLED`), `moduleReports` (`{module: {tick, text}}` — persistence-only mirror of the engine's `_piano_module_cache` entry for this agent, written alongside `moduleTick` after every think; never read on the hot path, only rehydrated by `restore_state()`), `peerModel` (`THEORY_OF_MIND_ENABLED` only — `{peerIdStr: {wants, good_at, owes_me, trust, frame}}`, capped by `PEER_MODEL_MAX_PEERS` / `PEER_MODEL_FIELD_CHAR_CAP`, LRU eviction by `frame`), `goal` (kinds include `gather`, `deliver`, `build`, `craft_gather`, `plant_terrain`, `seek_shelter`, `dig_relocate`, `caravan`, `repair`, and **`hunt`** — forced starvation backstop; see [08-systems-economy.md](08-systems-economy.md#starvation-reflex-and-forced-hunt-precedence)), `commitment`, `actionCounts` |
 | Task/build | `assignedTask`, `idleCycles`, `lastTaskedFrame`, `lastContributedFrame`, `consecutiveIdleMoves`, `homeStructureId`, `reorgTask` |
 | Invention/sprite | `inventionTurn`, `inventionRetryUsed`, `inventionBuildContext`, `spriteDesignTurn` |
 | Rejection-note fields | `lastBlueprintRejection`, `lastGatherRejection`, `lastUpgradeRejection`, `lastSpriteRejection`, `lastProjectRejection`, `lastTerraformRejection`, `lastCraftRejection`, `lastRepairRejection`, `lastRecipeRejection`, `lastBurialRejection`, `lastTradeRejection`, `lastShelterNote`, `lastHomelessNudgeFrame` — each surfaces *why* the agent's last attempt at that action was rejected, back into its next prompt |
@@ -216,7 +216,7 @@ memory — see server.py's scaffold-detection regexes).
 `_memory_for_prompt(agent)` (`mixin_world_state.py:346-363`) composes the prompt's memory
 section from the last 3 longTerm + 4 shortTerm + 4 working entries.
 
-### Wiki-style compounding memory (`WIKI_MEMORY`, default False)
+### Wiki-style compounding memory (`WIKI_MEMORY`, default True)
 
 See [03-cognition.md](03-cognition.md#wiki-memory) for full merge/lint semantics.
 Summary for the agent data-shape lens: `agent["memoryWiki"]` is always present
@@ -232,6 +232,20 @@ or cadence. When on, `_memory_for_prompt` prepends up to three
 slices (never replacing them); `server.py`'s `MEMORY_PROMPT_CHAR_BUDGET` was
 raised 600 -> 900 so those lines have headroom instead of being the first
 thing evicted by the char-budget's oldest-first trim.
+
+### Testament inheritance (`TESTAMENT_ENABLED`, default False)
+
+See [09-systems-society.md](09-systems-society.md#testament_enabled) for the
+civilization ring and prompt line. Summary for the agent data-shape lens:
+when `TESTAMENT_ENABLED` and `WIKI_MEMORY` are both True, `_spawn_newborn`
+(`mixin_lifecycle.py`) seeds the newborn's `memoryWiki` from both parents'
+sections plus the newest `TESTAMENT_PROMPT_ENTRIES` testament lines (each
+section capped at `WIKI_SECTION_CHAR_CAP`). On death,
+`_merge_testament_on_death` (`mixin_governance_culture.py`) folds the
+deceased's `lessons` and optional `relationships` wiki text into
+`civilization["testament"]` deterministically — no new LLM call. With the
+flag off, birth and death paths are byte-identical to the pre-Testament
+baseline.
 
 ## Sovereign God mode: per-agent omen state and sight (Phase 3)
 

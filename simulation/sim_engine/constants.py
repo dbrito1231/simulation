@@ -23,6 +23,10 @@ __all__ = [
     "SEASONAL_AGENTS_ENABLED",
     "MEMORY_ENABLED",
     "WIKI_MEMORY",
+    "TESTAMENT_ENABLED",
+    "THEORY_OF_MIND_ENABLED",
+    "PEER_MODEL_MAX_PEERS",
+    "PEER_MODEL_FIELD_CHAR_CAP",
     "AGENT_MESSAGING",
     "PIANO_MODULES",
     "ALWAYS_ON_MODULES",
@@ -31,6 +35,8 @@ __all__ = [
     "RULES_ENABLED",
     "MEMES_ENABLED",
     "BENCHMARKS_ENABLED",
+    "DETERMINISM_PINNING",
+    "DETERMINISM_SEED",
     "ECOLOGY_ENABLED",
     "ROADS_ENABLED",
     "CROP_GROWTH_ENABLED",
@@ -235,6 +241,7 @@ __all__ = [
     "MAX_ACTIVE_RULES_PROMPT",
     "MAX_NEARBY_AGENTS_PROMPT",
     "MAX_IDLE_AGENTS_PROMPT",
+    "MAX_CONTRACTS_PROMPT",
     "MAX_BLUEPRINT_BRIEFS",
     "GOAL_STEP_FRAMES",
     "SAGE_CRITICAL_HEALTH",
@@ -349,6 +356,11 @@ __all__ = [
     "COUNCIL_TTL_FRAMES",
     "ERA_LADDER",
     "ECONOMY_ENABLED",
+    "CONTRACTS_ENABLED",
+    "SCHISM_ENABLED",
+    "SCHISM_MIN_CLUSTER",
+    "SCHISM_COOLDOWN_FRAMES",
+    "MAX_OPEN_CONTRACTS",
     "BASE_PRICE",
     "PRICE_SCARCITY_MULT",
     "PRICE_MIN",
@@ -387,6 +399,8 @@ __all__ = [
     "LIBRARY_STUDY_WEIGHT_CAP",
     "CHRONICLE_CAP",
     "CHRONICLE_PROMPT_ENTRIES",
+    "TESTAMENT_CAP",
+    "TESTAMENT_PROMPT_ENTRIES",
     "COUNCIL_DIGEST_PROMPT_ENTRIES",
     "CHRONICLE_MILESTONE_KINDS",
     "MEME_MUTATION_PROB",
@@ -481,6 +495,22 @@ MEMORY_ENABLED = True
 # instead of a plain summarize-and-append. No new LLM call cadence -- same
 # call site, same MEMORY_TICK_FRAMES cadence. Default off; one-flag revert.
 WIKI_MEMORY = True
+# Emergence Breakthroughs F1: generational knowledge inheritance — a capped
+# civilization["testament"] ring fed deterministically from dying agents'
+# memoryWiki (no new LLM call site). Meaningful only with WIKI_MEMORY on.
+# Default off; flag-off is byte-identical to baseline.
+TESTAMENT_ENABLED = False
+# Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
+# module inside the existing fan-out (not an extra call per turn). Advisory
+# prompt context only — no deterministic behavior acts on peerModel. Default
+# off; default-on requires a soak comparison (see specs/03-cognition.md).
+# Opt in via SIM_THEORY_OF_MIND=1 or scripts/tom_contention_soak.py.
+THEORY_OF_MIND_ENABLED = str(os.environ.get("SIM_THEORY_OF_MIND", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+# Hard caps on agent["peerModel"][peerIdStr] entries (LRU by frame).
+PEER_MODEL_MAX_PEERS = 8
+PEER_MODEL_FIELD_CHAR_CAP = 48
 AGENT_MESSAGING = True
 PIANO_MODULES = True
 # Gated scheduler for the PIANO whiteboard.  Kept dark until Phase B's
@@ -492,6 +522,16 @@ EMERGENT_ROLES = True
 RULES_ENABLED = True
 MEMES_ENABLED = True
 BENCHMARKS_ENABLED = True
+# Emergence Breakthroughs F5 / Phase A1: headless harness pinning only.
+# When True, SimEngine re-seeds the process RNG at init, defers think jobs to
+# the end of each tick (synchronous, sorted agent-name order), and uses
+# frameTick-based scheduling instead of wall clock for LLM gap/cooldown checks.
+# Default off — live 24/7 path unchanged. Opt in via SIM_DETERMINISM_PINNING=1
+# or scripts/determinism_proof.py --pin.
+DETERMINISM_PINNING = str(os.environ.get("SIM_DETERMINISM_PINNING", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
+DETERMINISM_SEED = int(os.environ.get("SIM_DETERMINISM_SEED", "42"))
 ECOLOGY_ENABLED = True
 # World-expansion plan: waypoint-based road routing for general travel
 # (move_to_district / idle wander / craft-station redirects). Sage-emergency
@@ -1158,6 +1198,7 @@ MAX_KNOWN_RECIPES_PROMPT = 30  # not read by validate_blueprint; prompt-only
 MAX_ACTIVE_RULES_PROMPT = 12  # already <= MAX_ACTIVE_RULES (8) in practice; safeguard only
 MAX_NEARBY_AGENTS_PROMPT = 10  # village is 8-12 agents; safeguard only
 MAX_IDLE_AGENTS_PROMPT = 8  # elder-only list; safeguard only
+MAX_CONTRACTS_PROMPT = 6  # open/accepted contracts shown in think payload
 MAX_BLUEPRINT_BRIEFS = 4  # per-bucket cap on elder blueprint-council nudge briefs
 GOAL_STEP_FRAMES = 45
 SAGE_CRITICAL_HEALTH = 30
@@ -1558,6 +1599,27 @@ MINT_RATE = 1
 # nearest-N shelter slots.
 HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
 
+# --- Contracts & escrow (CONTRACTS_ENABLED) ---
+# offer_contract / accept_contract: schema + validation in F3.1; escrow
+# settlement, persistence, and apply_decision branches ship in F3.2. With the
+# flag off, both actions are filtered from available_actions and apply is a
+# no-op (same pattern as repair_structure / GOODS_ENABLED).
+CONTRACTS_ENABLED = False
+MAX_OPEN_CONTRACTS = 20
+
+# --- Schism / per-settlement governance scoping (SCHISM_ENABLED) ---
+# Settlement-keyed rules/belief registry storage for Feature 4 (Schism).
+# Default off: flat civilization["rules"] / beliefRegistry remain the only
+# live shape (byte-identical to pre-F4). When on, keyed maps share object
+# refs with the primary "home" settlement flat fields so single-settlement
+# worlds behave the same until F4.2 read-path threading and F4.3 trigger.
+SCHISM_ENABLED = False
+# Minimum mutually-allied agents (all rivals of their settlement elder, sharing
+# one belief that contradicts an enacted domestic rule) before schism fires.
+SCHISM_MIN_CLUSTER = 3
+# Cooldown between schism events (governance ticks share RULES_TICK_FRAMES).
+SCHISM_COOLDOWN_FRAMES = RULE_PROPOSE_COOLDOWN * 6
+
 # --- Phase F: population lifecycle & governance depth (LIFECYCLE_ENABLED) ---
 # Aging, birth, natural death (elder included -- succession is the design, not
 # an edge case), and two rule kinds with teeth (harvest_quota, rationing) that
@@ -1648,13 +1710,17 @@ LIBRARY_STUDY_WEIGHT_CAP = 5         # study-gain upgrade-weight cap (knowledge-
 # legible past without growing the prompt unboundedly.
 CHRONICLE_CAP = 100
 CHRONICLE_PROMPT_ENTRIES = 3         # how many recent entries to fold into the prompt line
+# Testament (TESTAMENT_ENABLED): capped ring of attributed lesson lines folded
+# into one prompt line ("Village testament: ...") the way the chronicle works.
+TESTAMENT_CAP = 100
+TESTAMENT_PROMPT_ENTRIES = 3         # prompt slice — independent of TESTAMENT_CAP
 COUNCIL_DIGEST_PROMPT_ENTRIES = 2    # newest compact Daily Council records per think payload
 # The viewer chronicle is deliberately narrower than the prompt-facing ring:
 # only named historical milestones belong beside the raw Activity feed.
 CHRONICLE_MILESTONE_KINDS = frozenset({
     "death", "burial", "election", "belief_founded", "belief_adoption",
     "meme_mutation", "knowledge_preserved", "disaster", "district_founded",
-    "emergency_measure",
+    "emergency_measure", "schism",
     # Sovereign God mode (Phase 2): a proclamation's chronicle entry. Viewer
     # rendering of this kind is out of scope until the later Divine Console
     # phase, but the milestone-set membership itself is data-shape only.

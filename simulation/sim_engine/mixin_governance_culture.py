@@ -20,11 +20,519 @@ class _GovernanceCultureMixin:
     memes, and Phase G skills/library/chronicle/personality-drift. See
     module docstring for exact scope."""
 
+    # --- Schism storage (SCHISM_ENABLED): settlement-scoped governance maps ---
+    _SCHISM_FLAT_KEYED_PAIRS = (
+        ("rules", "rulesBySettlement", []),
+        ("pendingRules", "pendingRulesBySettlement", []),
+        ("constitution", "constitutionBySettlement", []),
+        ("customRuleModifiers", "customRuleModifiersBySettlement", {}),
+        ("harvestQuotas", "harvestQuotasBySettlement", {}),
+        ("rationingActive", "rationingActiveBySettlement", {}),
+        ("beliefRegistry", "beliefRegistryBySettlement", {}),
+        ("memeTexts", "memeTextsBySettlement", {}),
+    )
+
+    def _primary_settlement_id(self):
+        """Primary home settlement id (Path 1 `_init_settlements` convention)."""
+        if path1_on():
+            self._init_settlements()
+        return "home"
+
+    @staticmethod
+    def _primary_settlement_id_for_civ(civ):
+        """Home settlement id while restoring (before self.civilization is set)."""
+        for entry in civ.get("settlements") or []:
+            if isinstance(entry, dict) and entry.get("id") == "home":
+                return "home"
+        return "home"
+
+    def _settlement_id_for_agent(self, agent):
+        return self._settlement_for_agent(agent)
+
+    def _rules_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("rules") or []
+        bucket = c.get("rulesBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("rules") or []
+
+    def _pending_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("pendingRules") or []
+        bucket = c.get("pendingRulesBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("pendingRules") or []
+
+    def _constitution_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("constitution") or []
+        bucket = c.get("constitutionBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("constitution") or []
+
+    def _registry_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("beliefRegistry") or {}
+        bucket = c.get("beliefRegistryBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("beliefRegistry") or {}
+
+    def _meme_texts_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("memeTexts") or {}
+        bucket = c.get("memeTextsBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("memeTexts") or {}
+
+    def _custom_modifiers_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("customRuleModifiers") or {}
+        bucket = c.get("customRuleModifiersBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("customRuleModifiers") or {}
+
+    def _harvest_quotas_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("harvestQuotas") or {}
+        bucket = c.get("harvestQuotasBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("harvestQuotas") or {}
+
+    def _rationing_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("rationingActive") or {}
+        bucket = c.get("rationingActiveBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("rationingActive") or {}
+
+    def _wrap_schism_storage(self, civ, home):
+        """Install settlement-keyed maps sharing refs with flat home fields."""
+        for flat_key, keyed_key, default in self._SCHISM_FLAT_KEYED_PAIRS:
+            obj = civ.get(flat_key)
+            if obj is None:
+                obj = dict(default) if isinstance(default, dict) else list(default)
+                civ[flat_key] = obj
+            keyed = civ.get(keyed_key)
+            if not isinstance(keyed, dict):
+                civ[keyed_key] = {home: obj}
+            else:
+                keyed.setdefault(home, obj)
+
+    def _init_schism_storage(self):
+        if not SCHISM_ENABLED:
+            return
+        self._wrap_schism_storage(self.civilization, self._primary_settlement_id())
+
+    def _migrate_schism_storage_on_restore(self, civ):
+        if not SCHISM_ENABLED:
+            return
+        self._wrap_schism_storage(civ, self._primary_settlement_id_for_civ(civ))
+
+    def _rebuild_settlement_governance(self, sid):
+        """Rebuild constitution + compiled custom effects for one settlement."""
+        if not SCHISM_ENABLED:
+            self._ensure_constitution()
+            self._rebuild_custom_rule_modifiers()
+            return
+        self._ensure_constitution(sid)
+        self._rebuild_custom_rule_modifiers(sid)
+
+    def _is_global_governance_ballot(self, rule):
+        """Treaty and succession ballots stay civ-wide (quorum + flat pending)."""
+        if not rule:
+            return False
+        return rule.get("kind") in ("treaty", "succession")
+
+    def _settlement_living_agent_count(self, sid):
+        count = 0
+        for agent in self.agents:
+            if agent.get("incapacitated"):
+                continue
+            if self._settlement_id_for_agent(agent) == sid:
+                count += 1
+        return count
+
+    def _ballot_settlement_id(self, rule):
+        if not SCHISM_ENABLED or self._is_global_governance_ballot(rule):
+            return self._primary_settlement_id()
+        sid = rule.get("settlementId")
+        if isinstance(sid, str) and sid:
+            return sid
+        proposer = self._find_agent(rule.get("proposedBy"))
+        if proposer:
+            return self._settlement_id_for_agent(proposer)
+        return self._primary_settlement_id()
+
+    def _all_enacted_rule_ids(self):
+        ids = set()
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            for rule in c.get("rules") or []:
+                if isinstance(rule, dict) and rule.get("id"):
+                    ids.add(rule["id"])
+            return ids
+        for rules in (c.get("rulesBySettlement") or {}).values():
+            for rule in rules or []:
+                if isinstance(rule, dict) and rule.get("id"):
+                    ids.add(rule["id"])
+        return ids
+
+    def _all_pending_rule_ids(self):
+        ids = set()
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            for rule in c.get("pendingRules") or []:
+                if isinstance(rule, dict) and rule.get("id"):
+                    ids.add(rule["id"])
+            return ids
+        for pending in (c.get("pendingRulesBySettlement") or {}).values():
+            for rule in pending or []:
+                if isinstance(rule, dict) and rule.get("id"):
+                    ids.add(rule["id"])
+        return ids
+
+    def _all_constitution_rule_ids(self):
+        ids = set()
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            for provision in c.get("constitution") or []:
+                if isinstance(provision, dict) and provision.get("id"):
+                    ids.add(provision["id"])
+            return ids
+        for constitution in (c.get("constitutionBySettlement") or {}).values():
+            for provision in constitution or []:
+                if isinstance(provision, dict) and provision.get("id"):
+                    ids.add(provision["id"])
+        return ids
+
+    def _governance_scope_lists(self, rule):
+        """Return (rules, pending, settlement_id) for a ballot's domestic scope."""
+        c = self.civilization
+        if not SCHISM_ENABLED or self._is_global_governance_ballot(rule):
+            return c["rules"], c["pendingRules"], self._primary_settlement_id()
+        sid = self._ballot_settlement_id(rule)
+        return self._rules_for_settlement(sid), self._pending_for_settlement(sid), sid
+
+    def _find_pending_ballot(self, ballot_id, voter=None):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return next((r for r in c.get("pendingRules") or [] if r.get("id") == ballot_id), None)
+        for rule in c.get("pendingRules") or []:
+            if rule.get("id") == ballot_id and self._is_global_governance_ballot(rule):
+                return rule
+        if voter is not None:
+            sid = self._settlement_id_for_agent(voter)
+            for rule in self._pending_for_settlement(sid):
+                if rule.get("id") == ballot_id:
+                    return rule
+        for pending in (c.get("pendingRulesBySettlement") or {}).values():
+            for rule in pending or []:
+                if rule.get("id") == ballot_id:
+                    return rule
+        return None
+
+    def _pending_rules_for_voter(self, agent):
+        if not SCHISM_ENABLED:
+            return list(self.civilization.get("pendingRules") or [])
+        sid = self._settlement_id_for_agent(agent)
+        domestic = [
+            rule for rule in self._pending_for_settlement(sid)
+            if not self._is_global_governance_ballot(rule)
+        ]
+        global_pending = [
+            rule for rule in self.civilization.get("pendingRules") or []
+            if self._is_global_governance_ballot(rule)
+        ]
+        return domestic + global_pending
+
+    # --- Schism trigger + secession (F4.3, SCHISM_ENABLED) ---
+    def _governance_rule_kinds_for_beliefs(self):
+        kinds = set(RULE_KINDS)
+        if LIFECYCLE_ENABLED:
+            kinds |= {"harvest_quota", "rationing"}
+        return kinds
+
+    def _belief_contradicts_enacted_rule(self, agent, belief_id, rule):
+        """Deterministic opposition: reuse _belief_biased_vote signals plus
+        affinity mismatch on enacted domestic rule kinds."""
+        if belief_id not in (agent.get("beliefs") or ()):
+            return False
+        if not rule or not rule.get("enacted"):
+            return False
+        entry = self._belief_entry(belief_id, agent)
+        affinity = set(entry.get("affinity") or MEME_RULE_AFFINITY.get(belief_id, set()))
+        kind = rule.get("kind")
+        if kind in affinity:
+            return False
+        if belief_id == MEME_RIVAL_ID and kind in ("rationing", "harvest_quota"):
+            return True
+        if belief_id == MEME_SEED_ID and kind == "priority" and rule.get("value") == "fish":
+            return True
+        if affinity and kind in self._governance_rule_kinds_for_beliefs():
+            return True
+        return False
+
+    def _cluster_mutual_allies(self, agents):
+        if len(agents) < 2:
+            return True
+        for i, left in enumerate(agents):
+            rels = left.get("relationships") or {}
+            for right in agents[i + 1:]:
+                if rels.get(right["name"]) != "ally":
+                    return False
+                if (right.get("relationships") or {}).get(left["name"]) != "ally":
+                    return False
+        return True
+
+    def _agent_rivals_elder(self, agent, elder):
+        if not elder:
+            return False
+        return (agent.get("relationships") or {}).get(elder["name"]) == "rival"
+
+    def _elder_for_settlement(self, settlement_id):
+        for agent in self.agents:
+            if agent.get("deathFrame") is not None or agent.get("incapacitated"):
+                continue
+            if agent.get("role") != "elder":
+                continue
+            if not SCHISM_ENABLED or self._settlement_id_for_agent(agent) == settlement_id:
+                return agent
+        return None
+
+    def _find_schism_cluster(self, settlement_id):
+        if not SCHISM_ENABLED or not MEMES_ENABLED or not RULES_ENABLED:
+            return None
+        elder = self._elder_for_settlement(settlement_id)
+        if not elder:
+            return None
+        enacted = [r for r in self._rules_for_settlement(settlement_id) if r.get("enacted")]
+        if not enacted:
+            return None
+        roster = [
+            a for a in self.agents
+            if a.get("deathFrame") is None and not a.get("incapacitated")
+            and self._settlement_id_for_agent(a) == settlement_id
+            and a.get("role") != "elder"
+        ]
+        belief_ids = set()
+        for agent in roster:
+            belief_ids |= set(agent.get("beliefs") or ())
+        enacted_sorted = sorted(enacted, key=lambda r: r.get("id") or "")
+        for rule in enacted_sorted:
+            for belief_id in sorted(belief_ids):
+                cluster = [
+                    a for a in roster
+                    if self._belief_contradicts_enacted_rule(a, belief_id, rule)
+                    and self._agent_rivals_elder(a, elder)
+                ]
+                if len(cluster) < SCHISM_MIN_CLUSTER:
+                    continue
+                if self._cluster_mutual_allies(cluster):
+                    return {
+                        "agents": cluster,
+                        "belief_id": belief_id,
+                        "rule": rule,
+                        "parent_sid": settlement_id,
+                        "elder": elder,
+                    }
+        return None
+
+    def _init_schism_settlement_buckets(self, settlement_id):
+        c = self.civilization
+        c.setdefault("rulesBySettlement", {}).setdefault(settlement_id, [])
+        c.setdefault("pendingRulesBySettlement", {}).setdefault(settlement_id, [])
+        c.setdefault("constitutionBySettlement", {}).setdefault(settlement_id, [])
+        c.setdefault("customRuleModifiersBySettlement", {}).setdefault(settlement_id, {})
+        c.setdefault("harvestQuotasBySettlement", {}).setdefault(settlement_id, {})
+        c.setdefault("rationingActiveBySettlement", {}).setdefault(settlement_id, {})
+        c.setdefault("beliefRegistryBySettlement", {}).setdefault(settlement_id, {})
+        c.setdefault("memeTextsBySettlement", {}).setdefault(settlement_id, {})
+
+    def _fork_settlement_governance(self, parent_sid, child_sid):
+        parent_rules = self._rules_for_settlement(parent_sid)
+        child_rules = [copy.deepcopy(r) for r in parent_rules if r.get("enacted")]
+        self._init_schism_settlement_buckets(child_sid)
+        self.civilization["rulesBySettlement"][child_sid] = child_rules
+        self._rebuild_settlement_governance(child_sid)
+
+    def _fork_settlement_beliefs(self, parent_sid, child_sid, belief_ids):
+        parent_reg = self._registry_for_settlement(parent_sid)
+        parent_texts = self._meme_texts_for_settlement(parent_sid)
+        child_reg = {}
+        child_texts = {}
+        for bid in belief_ids:
+            if bid in parent_reg:
+                child_reg[bid] = copy.deepcopy(parent_reg[bid])
+            if bid in parent_texts:
+                child_texts[bid] = parent_texts[bid]
+        self._init_schism_settlement_buckets(child_sid)
+        self.civilization["beliefRegistryBySettlement"][child_sid] = child_reg
+        self.civilization["memeTextsBySettlement"][child_sid] = child_texts
+
+    def _ensure_schism_settlement(self, parent_sid):
+        """Reuse an existing frontier settlement or found one via Path 1 helpers."""
+        self._init_settlements()
+        c = self.civilization
+        home = self._primary_settlement_id()
+        for entry in c.get("settlements") or []:
+            sid = entry.get("id")
+            if sid and sid != parent_sid and entry.get("districts"):
+                self._init_schism_settlement_buckets(sid)
+                self._ensure_settlement_stores()
+                self._settlement_store_bucket(sid)
+                return sid, entry["districts"][0]
+        if len(c.get("settlements") or []) >= 2:
+            return None, None
+        plot = self._claim_frontier_plot()
+        if not plot:
+            return None, None
+        self._found_district("village", DISTRICT_KIND_TEMPLATES["village"], plot)
+        new_did = plot.get("claimedBy")
+        if not new_did:
+            return None, None
+        sid = f"schism_{self.frameTick}"
+        c["settlements"].append({
+            "id": sid,
+            "name": "Seceding Settlement",
+            "districts": [new_did],
+        })
+        c["districts"][new_did]["settlementId"] = sid
+        self._init_schism_settlement_buckets(sid)
+        self._ensure_settlement_stores()
+        self._settlement_store_bucket(sid)
+        self._push_activity(f"A seceding faction claims the frontier as {sid}.")
+        return sid, new_did
+
+    def _migrate_agents_to_settlement(self, agents, settlement_id, district_id):
+        district = self.civilization["districts"].get(district_id) or {}
+        bounds = district.get("bounds") or {}
+        cx = (bounds.get("x1", 0) + bounds.get("x2", 0)) / 2
+        cy = (bounds.get("y1", 0) + bounds.get("y2", 0)) / 2
+        for agent in agents:
+            agent["currentDistrict"] = district_id
+            if bounds:
+                agent["x"] = cx
+                agent["y"] = cy
+            agent["goal"] = None
+
+    def _execute_schism(self, cluster_info):
+        parent_sid = cluster_info["parent_sid"]
+        agents = cluster_info["agents"]
+        belief_id = cluster_info["belief_id"]
+        rule = cluster_info["rule"]
+        child_sid, district_id = self._ensure_schism_settlement(parent_sid)
+        if not child_sid or not district_id:
+            return False
+        belief_ids = set()
+        for agent in agents:
+            belief_ids |= set(agent.get("beliefs") or ())
+        self._fork_settlement_governance(parent_sid, child_sid)
+        self._fork_settlement_beliefs(parent_sid, child_sid, belief_ids)
+        self._migrate_agents_to_settlement(agents, child_sid, district_id)
+        names = ", ".join(a["name"] for a in agents)
+        belief_name = self._belief_name(belief_id, agents[0])
+        rule_name = rule.get("name") or rule.get("id")
+        self.civilization["lastSchismFrame"] = self.frameTick
+        self._push_activity(
+            f"Schism: {names} secede to {child_sid} over belief {belief_name} "
+            f"and enacted rule \"{rule_name}\".")
+        self._push_communication(
+            "schism", agents[0]["name"], "everyone",
+            f"The faction secedes to {child_sid}, rejecting \"{rule_name}\".")
+        if CULTURE_ENABLED:
+            self._push_chronicle(
+                f"{names} seceded to {child_sid} over {belief_name} vs \"{rule_name}\".",
+                kind="schism")
+        self._log_benchmark("schism", len(agents), {
+            "parent": parent_sid,
+            "child": child_sid,
+            "belief": belief_id,
+            "rule": rule.get("id"),
+        })
+        if LIFECYCLE_ENABLED:
+            self._start_succession_election(settlement_id=child_sid)
+        return True
+
+    def _maybe_trigger_schism(self):
+        if not SCHISM_ENABLED or not MEMES_ENABLED or not RULES_ENABLED:
+            return
+        c = self.civilization
+        last = c.get("lastSchismFrame")
+        if isinstance(last, int) and self.frameTick - last < SCHISM_COOLDOWN_FRAMES:
+            return
+        self._init_settlements()
+        for entry in sorted(c.get("settlements") or [], key=lambda s: s.get("id") or ""):
+            sid = entry.get("id")
+            if not sid:
+                continue
+            cluster = self._find_schism_cluster(sid)
+            if cluster and self._execute_schism(cluster):
+                return
+
+    def _set_constitution_for_settlement(self, sid, constitution):
+        c = self.civilization
+        if not SCHISM_ENABLED or sid == self._primary_settlement_id():
+            c["constitution"] = constitution
+        else:
+            c.setdefault("constitutionBySettlement", {})[sid] = constitution
+
+    def _set_custom_modifiers_for_settlement(self, sid, compiled):
+        c = self.civilization
+        if not SCHISM_ENABLED or sid == self._primary_settlement_id():
+            c["customRuleModifiers"] = compiled
+        else:
+            c.setdefault("customRuleModifiersBySettlement", {})[sid] = compiled
+
     # --- governance gates (#5): harvest_quota / rationing enforcement ---
-    def _active_harvest_quota(self):
+    def _active_harvest_quota(self, agent=None, settlement_id=None):
         if not LIFECYCLE_ENABLED:
             return None
-        quotas = self.civilization.get("harvestQuotas") or {}
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            quotas = self._harvest_quotas_for_settlement(sid)
+        else:
+            quotas = self.civilization.get("harvestQuotas") or {}
         if not quotas:
             return None
         # If the village has enacted more than one harvest_quota rule, they
@@ -39,7 +547,7 @@ class _GovernanceCultureMixin:
         Deterministic escape: the counter resets every period, so a refusal
         is never permanent -- wait out the period, gather a different
         resource, or move to another district."""
-        quota = self._active_harvest_quota()
+        quota = self._active_harvest_quota(agent)
         if quota is None:
             return True, None
         if self.frameTick - agent.get("lastQuotaResetFrame", 0) >= HARVEST_QUOTA_PERIOD_FRAMES:
@@ -62,10 +570,15 @@ class _GovernanceCultureMixin:
         key = f"{district}:{resource}"
         counts[key] = counts.get(key, 0) + amount
 
-    def _rationing_active_cap(self):
+    def _rationing_active_cap(self, agent=None, settlement_id=None):
         if not LIFECYCLE_ENABLED:
             return None
-        active = self.civilization.get("rationingActive") or {}
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            active = self._rationing_for_settlement(sid)
+        else:
+            active = self.civilization.get("rationingActive") or {}
         if not active:
             return None
         # Deterministic escape: rationing only actually restricts while
@@ -91,7 +604,7 @@ class _GovernanceCultureMixin:
         (contribute_resources reversed, trade, etc. all funnel through here
         when they pull FROM the shared stockpile). Caps rather than outright
         refuses so a partial withdrawal still gets through when possible."""
-        cap = self._rationing_active_cap()
+        cap = self._rationing_active_cap(agent)
         if cap is None or resource not in EDIBLE_RESOURCES:
             return amount, None
         if amount <= cap:
@@ -234,7 +747,7 @@ class _GovernanceCultureMixin:
                 return target
         # Sid-parity Phase 2: an enacted priority rule biases contributions
         # toward its named resource (mirrors harvest_spirit edible bias).
-        priority_res = self._active_priority_resource()
+        priority_res = self._active_priority_resource(agent)
         if priority_res:
             need = p["needs"].get(priority_res, 0)
             have = p["contributed"].get(priority_res, 0)
@@ -259,12 +772,24 @@ class _GovernanceCultureMixin:
         return None
 
     # --- memes ---
-    def _belief_registry(self):
+    def _belief_registry(self, agent=None, settlement_id=None):
         """Live seed + authored beliefs; old saves gain seed records lazily."""
-        registry = self.civilization.get("beliefRegistry")
-        if not isinstance(registry, dict):
-            registry = {}
-            self.civilization["beliefRegistry"] = registry
+        c = self.civilization
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            registry = self._registry_for_settlement(sid)
+            if not isinstance(registry, dict):
+                registry = {}
+                if sid == self._primary_settlement_id():
+                    c["beliefRegistry"] = registry
+                else:
+                    c.setdefault("beliefRegistryBySettlement", {})[sid] = registry
+        else:
+            registry = c.get("beliefRegistry")
+            if not isinstance(registry, dict):
+                registry = {}
+                c["beliefRegistry"] = registry
         for bid, tenet in MEMES.items():
             registry.setdefault(bid, {
                 "id": bid, "name": bid.replace("_", " ").title(),
@@ -273,19 +798,22 @@ class _GovernanceCultureMixin:
             })
         return registry
 
-    def _belief_entry(self, belief_id):
-        return self._belief_registry().get(belief_id) or {}
+    def _belief_entry(self, belief_id, agent=None):
+        return self._belief_registry(agent).get(belief_id) or {}
 
-    def _belief_name(self, belief_id):
-        return self._belief_entry(belief_id).get("name") or belief_id.replace("_", " ").title()
+    def _belief_name(self, belief_id, agent=None):
+        return self._belief_entry(belief_id, agent).get("name") or belief_id.replace("_", " ").title()
 
-    def _belief_text(self, bid):
-        entry = self._belief_entry(bid)
+    def _belief_text(self, bid, agent=None):
+        entry = self._belief_entry(bid, agent)
         if entry.get("tenet"):
             return entry["tenet"]
         # Keep legacy mutation overrides readable when restoring an old state.
         if CULTURE_ENABLED:
-            override = self.civilization.get("memeTexts", {}).get(bid)
+            if SCHISM_ENABLED and agent:
+                override = self._meme_texts_for_settlement(self._settlement_id_for_agent(agent)).get(bid)
+            else:
+                override = self.civilization.get("memeTexts", {}).get(bid)
             if override:
                 return override
         return MEMES.get(bid, bid)
@@ -309,7 +837,7 @@ class _GovernanceCultureMixin:
     def _belief_favored_kinds(self, agent):
         favored = set()
         for bid in agent.get("beliefs") or ():
-            affinity = self._belief_entry(bid).get("affinity")
+            affinity = self._belief_entry(bid, agent).get("affinity")
             favored |= set(affinity if isinstance(affinity, list) else MEME_RULE_AFFINITY.get(bid, set()))
         return favored
 
@@ -337,7 +865,7 @@ class _GovernanceCultureMixin:
             return f"{agent['name']} did not provide a belief"
         belief_id, name, tenet, affinity = (belief.get("id"), belief.get("name"),
                                              belief.get("tenet"), belief.get("affinity"))
-        registry = self._belief_registry()
+        registry = self._belief_registry(agent)
         if not isinstance(belief_id, str) or not self.SLUG_RE.match(belief_id):
             return f"{agent['name']} proposed an invalid belief id"
         if belief_id in registry:
@@ -480,7 +1008,7 @@ class _GovernanceCultureMixin:
             return
         if c.get("memeMutations", 0) >= MEME_MUTATION_SESSION_CAP:
             return
-        current_text = self._belief_text(belief_id)
+        current_text = self._belief_text(belief_id, speaker)
         try:
             # Few-shot form: a thinking-class model (qwen) measured live to be
             # unreliable at following an abstract "reword this, don't explain"
@@ -529,12 +1057,15 @@ class _GovernanceCultureMixin:
         if not mutated or mutated == current_text or looks_meta or not has_words \
                 or self.d["is_scaffold_text"](mutated):
             return
-        entry = self._belief_entry(belief_id)
+        entry = self._belief_entry(belief_id, speaker)
         if entry.get("tenet"):
             entry.setdefault("originalTenet", entry["tenet"])
             entry["tenet"] = mutated
         else:
-            c.setdefault("memeTexts", {})[belief_id] = mutated
+            if SCHISM_ENABLED:
+                self._meme_texts_for_settlement(self._settlement_id_for_agent(speaker))[belief_id] = mutated
+            else:
+                c.setdefault("memeTexts", {})[belief_id] = mutated
         c["memeMutations"] = c.get("memeMutations", 0) + 1
         self._push_activity(f'The belief "{current_text}" drifted into "{mutated}" as it spread through the village.')
         self._push_chronicle(f'A belief mutated: "{mutated}"', kind="meme_mutation")
@@ -738,6 +1269,101 @@ class _GovernanceCultureMixin:
             return None
         recent = chronicle[-CHRONICLE_PROMPT_ENTRIES:]
         return "; ".join(e["text"] for e in recent)
+
+    # --- Testament (TESTAMENT_ENABLED + WIKI_MEMORY prerequisite) ---
+    def _push_testament_entry(self, text, author, generation):
+        """Append one attributed lesson line to civilization["testament"],
+        deduplicated by text and capped at TESTAMENT_CAP (oldest drops first)."""
+        if not TESTAMENT_ENABLED:
+            return
+        text = (text or "").strip()[:WIKI_SECTION_CHAR_CAP]
+        if not text:
+            return
+        c = self.civilization
+        testament = c.setdefault("testament", [])
+        norm = text.lower()
+        for entry in testament:
+            if (entry.get("text") or "").strip().lower() == norm:
+                return
+        testament.append({
+            "text": text,
+            "author": author,
+            "frame": self.frameTick,
+            "generation": generation,
+        })
+        c["testamentAuthored"] = c.get("testamentAuthored", 0) + 1
+        if len(testament) > TESTAMENT_CAP:
+            del testament[:-TESTAMENT_CAP]
+
+    def _merge_testament_on_death(self, agent):
+        """Deterministic deathbed fold of memoryWiki into the testament ring.
+        No LLM call — skips when wiki sections are empty."""
+        if not TESTAMENT_ENABLED or not WIKI_MEMORY:
+            return
+        wiki = agent.get("memoryWiki") or {}
+        lessons = (wiki.get("lessons") or "").strip()
+        relationships = (wiki.get("relationships") or "").strip()
+        if not lessons and not relationships:
+            return
+        generation = self.civilization.get("births", 0)
+        if lessons:
+            self._push_testament_entry(lessons, agent["name"], generation)
+        if relationships:
+            self._push_testament_entry(relationships, agent["name"], generation)
+
+    def _testament_prompt_line(self):
+        """Compact 'Village testament: ...' slice for think payloads."""
+        if not TESTAMENT_ENABLED:
+            return None
+        testament = self.civilization.get("testament") or []
+        if not testament:
+            return None
+        recent = testament[-TESTAMENT_PROMPT_ENTRIES:]
+        parts = []
+        for entry in recent:
+            text = (entry.get("text") or "").strip()
+            if not text:
+                continue
+            author = entry.get("author") or "?"
+            parts.append(f"{author}: {text}")
+        return "; ".join(parts) if parts else None
+
+    def _seed_newborn_wiki_from_testament(self, newborn, parent_a, parent_b):
+        """Inherit parent wiki sections plus the newest testament entries,
+        each capped at WIKI_SECTION_CHAR_CAP."""
+        if not TESTAMENT_ENABLED or not WIKI_MEMORY:
+            return
+        wiki = newborn.setdefault("memoryWiki", {
+            "relationships": "", "goals": "", "lessons": "",
+        })
+        pa_wiki = parent_a.get("memoryWiki") or {}
+        pb_wiki = parent_b.get("memoryWiki") or {}
+        testament = self.civilization.get("testament") or []
+
+        def _join_unique(*parts):
+            seen = set()
+            kept = []
+            for part in parts:
+                val = (part or "").strip()
+                if not val:
+                    continue
+                key = val.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                kept.append(val)
+            return " | ".join(kept)[:WIKI_SECTION_CHAR_CAP]
+
+        testament_texts = [
+            (e.get("text") or "").strip()
+            for e in testament[-TESTAMENT_PROMPT_ENTRIES:]
+            if (e.get("text") or "").strip()
+        ]
+        wiki["lessons"] = _join_unique(
+            pa_wiki.get("lessons"), pb_wiki.get("lessons"), *testament_texts)
+        wiki["relationships"] = _join_unique(
+            pa_wiki.get("relationships"), pb_wiki.get("relationships"))
+        wiki["goals"] = _join_unique(pa_wiki.get("goals"), pb_wiki.get("goals"))
 
     def _council_digest_prompt_line(self):
         """Bounded newest-first Daily Council continuity for every agent."""
