@@ -2,13 +2,21 @@
 
 Orchestrates two native ``simulation/server.py`` runs (ToM off, then
 ``SIM_THEORY_OF_MIND=1``), each observed by ``soak_monitor.py``. Refuses if
-Docker ``gitserv-sim`` is running or the target port is already served.
+Docker ``gitserv-sim`` is running, any native server/soak harness is active,
+or the target port is already served.
+
+Starts the server with ``sys.executable`` (not ``uv run``) so stop can kill the
+full process tree. On Windows, ``uv run`` orphans the child ``python.exe`` when
+only the wrapper is terminated — see ``specs/12-ops.md``. ``stop_server`` uses
+``taskkill /T /F`` (Windows) or process-group signals (Unix) and sweeps any
+remaining ``simulation/server.py`` PIDs before the next phase.
 
 Before each soak phase the script waits until ``/state`` is unreachable (port
 released after the prior server stops). After start it hard-asserts
 ``config.flags.THEORY_OF_MIND_ENABLED`` matches the phase expectation via
 ``/state`` (and ties readiness to a new log session) before ``soak_monitor``
-runs.
+runs. A final cleanup helper kills all native sim servers on the target port on
+exit or failure.
 
 Usage:
     uv run python scripts/tom_contention_soak.py [--minutes 45] [--port 5001]
@@ -28,8 +36,10 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -52,6 +62,7 @@ BASELINE_LABEL = "tom-baseline"
 FLAGON_LABEL = "tom-flagon"
 PORT_DOWN_TIMEOUT_S = 90.0
 READY_TIMEOUT_S = 120.0
+_CLEANUP_PORT: int | None = None
 
 
 def utc_now() -> str:
@@ -133,29 +144,36 @@ def docker_gitserv_running() -> bool:
     return any(name == DOCKER_NAME or name.endswith(DOCKER_NAME) for name in names)
 
 
+def _powershell_python_pids(pattern: str) -> list[int]:
+    ps_cmd = (
+        "Get-CimInstance Win32_Process -Filter \"name='python.exe'\" | "
+        f"Where-Object {{ $_.CommandLine -match '{pattern}' }} | "
+        "Select-Object -ExpandProperty ProcessId"
+    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    pids = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids
+
+
 def native_server_pids() -> list[int]:
     if sys.platform == "win32":
         ps_cmd = (
-            "Get-CimInstance Win32_Process -Filter \"name='python.exe'\" | "
-            "Where-Object { $_.CommandLine -match 'simulation[\\\\/]server\\.py|simulation\\.server' } | "
-            "Select-Object -ExpandProperty ProcessId"
+            "simulation[\\\\/]server\\.py|simulation\\.server"
         )
-        try:
-            proc = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            return []
-        pids = []
-        for line in (proc.stdout or "").splitlines():
-            line = line.strip()
-            if line.isdigit():
-                pids.append(int(line))
-        return pids
+        return _powershell_python_pids(ps_cmd)
     try:
         proc = subprocess.run(
             ["pgrep", "-f", "simulation/server.py|simulation.server"],
@@ -172,6 +190,138 @@ def native_server_pids() -> list[int]:
         if line.isdigit():
             pids.append(int(line))
     return pids
+
+
+def soak_harness_pids() -> list[int]:
+    """PIDs for tom_contention_soak / soak_monitor (excluding this process tree)."""
+    exclude = {os.getpid(), os.getppid()}
+    if sys.platform == "win32":
+        pattern = "tom_contention_soak|soak_monitor"
+        pids = _powershell_python_pids(pattern)
+    else:
+        try:
+            proc = subprocess.run(
+                ["pgrep", "-f", "tom_contention_soak|soak_monitor"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return []
+        pids = []
+        for line in (proc.stdout or "").splitlines():
+            line = line.strip()
+            if line.isdigit():
+                pids.append(int(line))
+    return sorted({pid for pid in pids if pid not in exclude})
+
+
+def port_listener_pids(port: int) -> list[int]:
+    if sys.platform == "win32":
+        try:
+            proc = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return []
+        pids: list[int] = []
+        needle = f":{port}"
+        for line in (proc.stdout or "").splitlines():
+            if needle in line and "LISTENING" in line.upper():
+                parts = line.split()
+                if parts and parts[-1].isdigit():
+                    pids.append(int(parts[-1]))
+        return sorted(set(pids))
+    try:
+        proc = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    pids = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return sorted(set(pids))
+
+
+def kill_process_tree(pid: int) -> None:
+    if pid <= 0:
+        return
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            return
+    deadline = time.time() + 10
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return
+        time.sleep(0.2)
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+def cleanup_all_native_sim_servers(port: int) -> None:
+    """Kill native simulation servers and port listeners (exit/failure helper)."""
+    targets = sorted(set(native_server_pids()) | set(port_listener_pids(port)))
+    if not targets:
+        return
+    log(f"cleanup: killing native sim server pids={targets} on port={port}")
+    for pid in targets:
+        kill_process_tree(pid)
+    deadline = time.time() + PORT_DOWN_TIMEOUT_S
+    while time.time() < deadline:
+        if not port_served(port) and not port_listener_pids(port):
+            log(f"cleanup: port {port} released")
+            return
+        time.sleep(0.5)
+    log(f"cleanup: warning — port {port} may still be served after kill sweep")
+
+
+def _register_cleanup(port: int) -> None:
+    global _CLEANUP_PORT
+    _CLEANUP_PORT = port
+
+
+def _atexit_cleanup() -> None:
+    if _CLEANUP_PORT is None:
+        return
+    try:
+        cleanup_all_native_sim_servers(_CLEANUP_PORT)
+    except Exception as exc:
+        # Avoid subprocess/thread errors during interpreter shutdown.
+        print(f"[atexit] cleanup skipped: {exc}", flush=True)
+
+
+atexit.register(_atexit_cleanup)
 
 
 def session_dirs() -> list[Path]:
@@ -222,28 +372,39 @@ def start_server(port: int, tom_env: str | None) -> subprocess.Popen:
         env.pop("SIM_THEORY_OF_MIND", None)
     else:
         env["SIM_THEORY_OF_MIND"] = tom_env
+    python_exe = sys.executable
     log(
-        f"starting server port={port} SIM_THEORY_OF_MIND={env.get('SIM_THEORY_OF_MIND', '(unset)')}",
+        f"starting server pid-target={python_exe} port={port} "
+        f"SIM_THEORY_OF_MIND={env.get('SIM_THEORY_OF_MIND', '(unset)')}",
     )
+    popen_kwargs: dict = {
+        "cwd": str(ROOT),
+        "env": env,
+    }
+    if sys.platform != "win32":
+        popen_kwargs["start_new_session"] = True
     proc = subprocess.Popen(
-        ["uv", "run", "python", str(SERVER_SCRIPT)],
-        cwd=str(ROOT),
-        env=env,
+        [python_exe, str(SERVER_SCRIPT)],
+        **popen_kwargs,
     )
     return proc
 
 
-def stop_server(proc: subprocess.Popen | None) -> None:
-    if proc is None or proc.poll() is not None:
-        return
-    log(f"stopping server pid={proc.pid}")
-    proc.terminate()
-    try:
-        proc.wait(timeout=45)
-    except subprocess.TimeoutExpired:
-        log(f"killing server pid={proc.pid}")
-        proc.kill()
-        proc.wait()
+def stop_server(proc: subprocess.Popen | None, port: int) -> None:
+    if proc is not None and proc.poll() is None:
+        log(f"stopping server tree pid={proc.pid}")
+        kill_process_tree(proc.pid)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            log(f"force-kill server pid={proc.pid}")
+            kill_process_tree(proc.pid)
+            proc.wait(timeout=10)
+    orphans = sorted(set(native_server_pids()) | set(port_listener_pids(port)))
+    if orphans:
+        log(f"sweeping orphan sim server pids={orphans}")
+        for pid in orphans:
+            kill_process_tree(pid)
 
 
 def run_soak_monitor(label: str, minutes: float) -> int:
@@ -295,10 +456,20 @@ def preflight(port: int) -> None:
         raise SystemExit(
             f"refusing: Docker container {DOCKER_NAME} is running (stop it before this soak)"
         )
-    pids = native_server_pids()
-    if pids:
+    server_pids = native_server_pids()
+    if server_pids:
         raise SystemExit(
-            f"refusing: native simulation/server.py already running (pids={pids})"
+            f"refusing: native simulation/server.py already running (pids={server_pids})"
+        )
+    harness_pids = soak_harness_pids()
+    if harness_pids:
+        raise SystemExit(
+            f"refusing: tom_contention_soak/soak_monitor already running (pids={harness_pids})"
+        )
+    listeners = port_listener_pids(port)
+    if listeners:
+        raise SystemExit(
+            f"refusing: port {port} has LISTENING pids={listeners}"
         )
     if port_served(port):
         raise SystemExit(f"refusing: port {port} already serves /state")
@@ -325,7 +496,7 @@ def run_phase(
             raise SystemExit(f"missing soak summary for label={label}")
         return summary, session.name
     finally:
-        stop_server(proc)
+        stop_server(proc, port)
         wait_for_port_down(port, PORT_DOWN_TIMEOUT_S)
 
 
@@ -398,14 +569,34 @@ def main() -> int:
         raise SystemExit("--minutes must be positive")
 
     LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    _register_cleanup(args.port)
     started_at = utc_now()
     mode = "flagon-only" if args.flagon_only else "full"
     log(f"tom contention soak starting mode={mode} minutes={args.minutes} port={args.port}")
 
     preflight(args.port)
 
-    if args.flagon_only:
-        baseline_summary, baseline_session = load_baseline_for_flagon_only()
+    try:
+        if args.flagon_only:
+            baseline_summary, baseline_session = load_baseline_for_flagon_only()
+            flagon_summary, flagon_session = run_phase(
+                FLAGON_LABEL, args.port, args.minutes, "1", True,
+            )
+            write_result(
+                started_at=started_at,
+                minutes=args.minutes,
+                port=args.port,
+                baseline_session=baseline_session,
+                flagon_session=flagon_session,
+                baseline_summary=baseline_summary,
+                flagon_summary=flagon_summary,
+                flagon_only=True,
+            )
+            return 0
+
+        baseline_summary, baseline_session = run_phase(
+            BASELINE_LABEL, args.port, args.minutes, None, False,
+        )
         flagon_summary, flagon_session = run_phase(
             FLAGON_LABEL, args.port, args.minutes, "1", True,
         )
@@ -417,27 +608,11 @@ def main() -> int:
             flagon_session=flagon_session,
             baseline_summary=baseline_summary,
             flagon_summary=flagon_summary,
-            flagon_only=True,
+            flagon_only=False,
         )
         return 0
-
-    baseline_summary, baseline_session = run_phase(
-        BASELINE_LABEL, args.port, args.minutes, None, False,
-    )
-    flagon_summary, flagon_session = run_phase(
-        FLAGON_LABEL, args.port, args.minutes, "1", True,
-    )
-    write_result(
-        started_at=started_at,
-        minutes=args.minutes,
-        port=args.port,
-        baseline_session=baseline_session,
-        flagon_session=flagon_session,
-        baseline_summary=baseline_summary,
-        flagon_summary=flagon_summary,
-        flagon_only=False,
-    )
-    return 0
+    finally:
+        cleanup_all_native_sim_servers(args.port)
 
 
 if __name__ == "__main__":
