@@ -504,7 +504,10 @@ TESTAMENT_ENABLED = False
 # module inside the existing fan-out (not an extra call per turn). Advisory
 # prompt context only — no deterministic behavior acts on peerModel. Default
 # off; default-on requires a soak comparison (see specs/03-cognition.md).
-THEORY_OF_MIND_ENABLED = False
+# Opt in via SIM_THEORY_OF_MIND=1 or scripts/tom_contention_soak.py.
+THEORY_OF_MIND_ENABLED = str(os.environ.get("SIM_THEORY_OF_MIND", "")).strip().lower() in (
+    "1", "true", "yes", "on",
+)
 # Hard caps on agent["peerModel"][peerIdStr] entries (LRU by frame).
 PEER_MODEL_MAX_PEERS = 8
 PEER_MODEL_FIELD_CHAR_CAP = 48

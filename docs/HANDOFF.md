@@ -107,7 +107,7 @@ Plan: [`.claude/plans/emergence-breakthroughs.md`](../.claude/plans/emergence-br
 
 **F1 default-on gate:** D2 `WIKI_MEMORY` soak accepted on session `2026-08-09T19-47-41`. Before flipping `TESTAMENT_ENABLED` to default `True`, run a matched soak confirming deathbed merges populate the ring and `cultural_carryover` behaves as expected.
 
-**F2 default-on gate:** before flipping `THEORY_OF_MIND_ENABLED` to default `True`, run matched-length `soak_monitor.py` sessions flag-off vs flag-on and confirm `piano_module_drops` / `module_refresh_failures` do not materially regress.
+**F2 default-on gate:** before flipping `THEORY_OF_MIND_ENABLED` to default `True`, run matched-length `soak_monitor.py` sessions flag-off vs flag-on and confirm `piano_module_drops` / `module_refresh_failures` do not materially regress. Orchestrated soak: `uv run python scripts/tom_contention_soak.py --minutes 45` (native server only; refuses Docker `gitserv-sim` on port 5001). **In progress (2026-08-09):** background run kicked off via `Start-Process`; watch `simulation/logs/tom-contention-soak.log`, per-phase summaries `simulation/logs/soak-tom-baseline.json` / `soak-tom-flagon.json`, combined gate JSON `simulation/logs/tom-contention-soak-result.json` when complete (~90 min). Flag-on uses env `SIM_THEORY_OF_MIND=1` only — code default stays `False`.
 
 ---
 

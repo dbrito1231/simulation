@@ -1100,6 +1100,12 @@ grounded-wrong modal count 1→0 with no category regression).
 
 ### Theory of Mind (`THEORY_OF_MIND_ENABLED`, default False)
 
+Env override: `SIM_THEORY_OF_MIND=1` (or `true`/`yes`/`on`) forces the flag on
+at import time without editing `constants.py` — same truthy pattern as
+`SIM_DETERMINISM_PINNING`. Unset or `0`/`false` leaves default off. Used by
+`scripts/tom_contention_soak.py` for matched flag-off vs flag-on contention
+soaks before flipping the code default.
+
 Emergence Breakthroughs F2. When on, agents maintain a bounded
 `agent["peerModel"][peerIdStr] = {wants, good_at, owes_me, trust, frame}`
 (updated by the `theory_of_mind` PIANO module on successful parse only).
