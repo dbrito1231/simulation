@@ -108,6 +108,109 @@ def test_fulfill_conserves_coin():
     print("  OK fulfill conservation")
 
 
+def test_accept_rejected_after_deadline():
+    old = se.CONTRACTS_ENABLED
+    se.CONTRACTS_ENABLED = True
+    try:
+        engine = make_engine(4)
+        offerer, acceptor = engine.agents[0], engine.agents[1]
+        before = _coin_setup(engine, offerer, acceptor)
+        _offer(engine, offerer, acceptor, deadline_frames=10)
+        ct = engine.civilization["contracts"][0]
+        engine.frameTick = ct["createdFrame"] + 11
+        summary = engine.apply_decision(acceptor, {
+            "action": "accept_contract",
+            "target": ct["id"],
+            "reasoning": "smoke",
+        })
+        assert_true("past deadline" in summary.lower(), summary)
+        assert_true(ct["status"] == "open", "expired contract must stay open")
+        assert_true(ct.get("acceptor") is None, "acceptor must not bind after deadline")
+        engine._tick_contract_settlement()
+        assert_true(not engine.civilization["contracts"], "expired open contract should clear")
+        assert_true(offerer["resources"]["coin"] == 10, "offerer refunded on expiry")
+        assert_true(offerer["relationships"].get(acceptor["name"]) != "rival",
+                    "late accept path must not default or mark rival")
+        assert_true(engine.civilization["contractDefaults"] == 0, "no default on open expiry")
+        assert_true(engine._total_tracked_coin() == before, "coin not conserved")
+    finally:
+        se.CONTRACTS_ENABLED = old
+    print("  OK accept rejected after deadline")
+
+
+def test_exact_deadline_frame_expired():
+    old = se.CONTRACTS_ENABLED
+    se.CONTRACTS_ENABLED = True
+    try:
+        engine = make_engine(4)
+        offerer, acceptor = engine.agents[0], engine.agents[1]
+        before = _coin_setup(engine, offerer, acceptor)
+        _offer(engine, offerer, acceptor, deadline_frames=10)
+        ct = engine.civilization["contracts"][0]
+        deadline = ct["createdFrame"] + ct["deadline_frames"]
+        engine.frameTick = deadline
+        summary = engine.apply_decision(acceptor, {
+            "action": "accept_contract",
+            "target": ct["id"],
+            "reasoning": "smoke",
+        })
+        assert_true("past deadline" in summary.lower(), summary)
+        assert_true(ct["status"] == "open", "accept on deadline frame must fail")
+        engine._tick_contract_settlement()
+        assert_true(not engine.civilization["contracts"], "open contract expires on deadline frame")
+        assert_true(offerer["resources"]["coin"] == 10, "offerer refunded on deadline frame")
+
+        engine = make_engine(4)
+        offerer, acceptor = engine.agents[0], engine.agents[1]
+        _coin_setup(engine, offerer, acceptor)
+        _offer(engine, offerer, acceptor, deadline_frames=10)
+        ct = engine.civilization["contracts"][0]
+        engine.apply_decision(acceptor, {
+            "action": "accept_contract",
+            "target": ct["id"],
+            "reasoning": "smoke",
+        })
+        acceptor["resources"]["wood"] = 2
+        engine.frameTick = ct["createdFrame"] + ct["deadline_frames"]
+        engine._tick_contract_settlement()
+        assert_true(not engine.civilization["contracts"], "accepted contract defaults on deadline frame")
+        assert_true(engine.civilization["contractsFulfilled"] == 0, "no fulfill on deadline frame")
+        assert_true(offerer["relationships"].get(acceptor["name"]) == "rival",
+                    "living default on deadline frame still marks rival")
+        assert_true(engine._total_tracked_coin() == before, "coin not conserved on deadline default")
+    finally:
+        se.CONTRACTS_ENABLED = old
+    print("  OK exact-deadline frame expired")
+
+
+def test_dead_offerer_default_no_rival():
+    old = se.CONTRACTS_ENABLED
+    se.CONTRACTS_ENABLED = True
+    try:
+        engine = make_engine(4)
+        offerer, acceptor = engine.agents[0], engine.agents[1]
+        before = _coin_setup(engine, offerer, acceptor)
+        _offer(engine, offerer, acceptor, deadline_frames=10)
+        ct = engine.civilization["contracts"][0]
+        engine.apply_decision(acceptor, {
+            "action": "accept_contract",
+            "target": ct["id"],
+            "reasoning": "smoke",
+        })
+        engine._agent_dies(offerer, cause="smoke")
+        assert_true(offerer.get("deathFrame") is not None, "offerer should be dead")
+        engine.frameTick = ct["createdFrame"] + 11
+        engine._tick_contract_settlement()
+        assert_true(not engine.civilization["contracts"], "defaulted contract should clear")
+        assert_true(offerer["relationships"].get(acceptor["name"]) != "rival",
+                    "dead offerer must not get rival relationship mutation")
+        assert_true(engine.civilization["contractDefaults"] == 1, "default counter")
+        assert_true(engine._total_tracked_coin() == before, "coin not conserved on dead-offerer default")
+    finally:
+        se.CONTRACTS_ENABLED = old
+    print("  OK dead-offerer default skips rival")
+
+
 def test_default_refunds_and_rival():
     old = se.CONTRACTS_ENABLED
     se.CONTRACTS_ENABLED = True
@@ -275,7 +378,10 @@ def main():
     test_flag_off_noop()
     test_offer_conserves_coin()
     test_fulfill_conserves_coin()
+    test_accept_rejected_after_deadline()
+    test_exact_deadline_frame_expired()
     test_default_refunds_and_rival()
+    test_dead_offerer_default_no_rival()
     test_open_expiry_refunds()
     test_dead_offerer_expiry_refunds_to_heirs()
     test_dead_offerer_default_refunds_to_heirs()

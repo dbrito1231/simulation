@@ -1978,6 +1978,8 @@ class _StructuresEconomyMixin:
         target = ct.get("target")
         if target != "open" and target != agent["name"]:
             return f"{agent['name']} cannot accept contract {cid} — not directed at them"
+        if self.frameTick >= self._contract_deadline_frame(ct):
+            return f"{agent['name']} cannot accept contract {cid} — past deadline"
         ct["status"] = "accepted"
         ct["acceptor"] = agent["name"]
         ct["acceptedFrame"] = self.frameTick
@@ -2054,12 +2056,17 @@ class _StructuresEconomyMixin:
         acceptor = self._find_agent(ct.get("acceptor"))
         self._refund_contract_escrow(ct)
         c["contractDefaults"] = c.get("contractDefaults", 0) + 1
-        if offerer and acceptor:
+        both_living = (
+            offerer and acceptor
+            and offerer.get("deathFrame") is None
+            and acceptor.get("deathFrame") is None
+        )
+        if both_living:
             if offerer["relationships"].get(acceptor["name"]) != "rival":
                 offerer["relationships"][acceptor["name"]] = "rival"
             self._mark_top_dirty("socialTies")
         note = f"Contract {ct['id']} defaulted — escrow refunded to {ct['offerer']}"
-        if acceptor:
+        if both_living:
             note += f"; {acceptor['name']} marked rival by {ct['offerer']}"
         self._push_activity(note)
 
@@ -2072,7 +2079,7 @@ class _StructuresEconomyMixin:
         surviving = []
         for ct in contracts:
             deadline = self._contract_deadline_frame(ct)
-            if self.frameTick > deadline:
+            if self.frameTick >= deadline:
                 if ct.get("status") == "open":
                     self._refund_contract_escrow(ct)
                     self._push_activity(

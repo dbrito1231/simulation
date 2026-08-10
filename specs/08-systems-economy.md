@@ -952,7 +952,12 @@ offer/fulfill/default/expiry — `scripts/contract_smoke.py` asserts
 `sum(agent coin) + stockpile coin + contractEscrow` is invariant.
 
 **Settlement.** `_tick_contract_settlement()` runs on the `RULES_TICK_FRAMES`
-batch in `_tick_once` (with mint/backstops). Goods delivery transfers from
-acceptor to offerer with the same carry-cap overflow-to-stockpile pattern as
-gather grants. `MAX_OPEN_CONTRACTS = 20` caps simultaneous open+accepted
-records.
+batch in `_tick_once` (with mint/backstops). Contracts expire when
+`frameTick >= createdFrame + deadline_frames` (deadline frame is expired;
+fulfillment and `accept_contract` both require `frameTick < deadline`). Goods
+delivery transfers from acceptor to offerer with the same carry-cap
+overflow-to-stockpile pattern as gather grants. Default applies the
+offerer→acceptor rival hit only when both parties are living (`deathFrame is
+None`); dead-party defaults still refund escrow via `_route_escrow_refund_coin`
+but do not mutate corpse relationships. `MAX_OPEN_CONTRACTS = 20` caps
+simultaneous open+accepted records.
