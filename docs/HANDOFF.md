@@ -1,7 +1,7 @@
 # HANDOFF — Simulation repo resume
 
-**Branch:** `main` @ `50202f9` (2026-08-06)  
-**Maintained:** manually (Phase C, AI Deslop Campaign)
+**Branch:** `emergence-breakthroughs` @ `c6c72eb` (2026-08-09), forked from `main` @ `50202f9` (2026-08-06)  
+**Maintained:** manually (In-flight: Emergence Breakthroughs — see below)
 
 Start here when resuming work. Behavior truth is [`specs/`](../specs/00-overview.md); ops/commands are [`CLAUDE.md`](../CLAUDE.md); AI workflow is [`AGENTS.md`](../AGENTS.md).
 
@@ -14,6 +14,29 @@ Server-authoritative AI village simulation: Python engine runs the world headles
 ---
 
 ## Recent landings (`git log -20` snapshot)
+
+On branch `emergence-breakthroughs` (not yet merged to `main`) — full detail in
+"In-flight: Emergence Breakthroughs" below:
+
+| Commit | Summary |
+|--------|---------|
+| `c6c72eb` | Harden ToM soak process-tree kill and record F2 contention gate FAIL |
+| `51e01be` | Harden ToM soak: assert flag-on and wait for port release |
+| `86b3968` | Add ToM contention soak script with `SIM_THEORY_OF_MIND` env override |
+| `80fdc93` | Include schism in chronicle milestone kinds for `/state` projection |
+| `ef2b5cd` | Implement schism trigger, secession, and settlement-scoped succession |
+| `2bc1f54` | Thread settlement-scoped rules and voting when `SCHISM_ENABLED` |
+| `bdf4698` | Add `SCHISM_ENABLED` settlement-keyed governance storage and restore wrap |
+| `c6aa85e` | Add D10 rules and beliefs scoping audit for Schism prep |
+| `c0935c5` | Add Testament and finish contracts prompt with flag-gated addendum |
+| `5969e1c` | Implement contract escrow offer, accept, and settlement |
+| `27d3abc` | Add contract action schema and validation behind a default-off flag |
+| `7b62574` | Add Theory of Mind peer models behind a default-off flag |
+| `577c2f7` | Add fork_compare harness for one-variable headless diffs |
+| `1b26c83` | Add `DETERMINISM_PINNING` for harness-identical twin runs |
+| `8ef3693` | Add A0 headless determinism proof for emergence harness |
+
+Landed on `main` before the branch point (`cbcd42a`):
 
 | Commit | Summary |
 |--------|---------|
@@ -100,10 +123,11 @@ Plan: [`.claude/plans/emergence-breakthroughs.md`](../.claude/plans/emergence-br
 | A0 | Determinism proof (`scripts/determinism_proof.py`) | Done (branch `emergence-breakthroughs`) |
 | A1 | Pin RNG / executor / tick scheduling (`DETERMINISM_PINNING`) | Done (branch `emergence-breakthroughs`) |
 | A2 | Fork compare harness (`scripts/fork_compare.py`) | Done (branch `emergence-breakthroughs`) |
-| B1 F2 | Theory of Mind (`THEORY_OF_MIND_ENABLED`, `scripts/peer_model_smoke.py`) | Implemented (default **off**; default-on soak gate **FAIL** — keep off) |
 | B0 F1 | Testament (`TESTAMENT_ENABLED`, `scripts/testament_smoke.py`) | Implemented (default **off**; requires `WIKI_MEMORY` for meaningful carryover) |
+| B1 F2 | Theory of Mind (`THEORY_OF_MIND_ENABLED`, `scripts/peer_model_smoke.py`) | Implemented (default **off**; default-on soak gate **FAIL** — keep off) |
+| B2 F3 | Contracts and escrow (`CONTRACTS_ENABLED`, `offer_contract`/`accept_contract`, `scripts/contract_smoke.py`) | Implemented (default **off**) |
 | D10 | F4 rules/beliefs scoping audit | Done (`schism-rules-beliefs-audit.md`) |
-| F4.1 | Schism storage schema + restore migration (`SCHISM_ENABLED`, `scripts/schism_smoke.py`) | Implemented (default **off**; trigger/voting partition in F4.2+) |
+| B3 F4 | Schism: settlement-keyed storage/restore, rule/vote threading, trigger + secession + settlement-scoped succession, Chronicle allowlist fix (`SCHISM_ENABLED`, `scripts/schism_smoke.py`) | Implemented (default **off**) |
 
 **F1 default-on gate:** D2 `WIKI_MEMORY` soak accepted on session `2026-08-09T19-47-41`. Before flipping `TESTAMENT_ENABLED` to default `True`, run a matched soak confirming deathbed merges populate the ring and `cultural_carryover` behaves as expected.
 
@@ -119,6 +143,7 @@ uv run python scripts/sid_parity_smoke.py
 uv run python scripts/path1_smoke.py
 uv run python scripts/peer_model_smoke.py   # if Theory of Mind touched
 uv run python scripts/testament_smoke.py    # if Testament touched
+uv run python scripts/contract_smoke.py     # if Contracts/escrow touched
 uv run python scripts/schism_smoke.py       # if Schism storage touched
 uv run python scripts/god_mode_smoke.py    # if God mode surface touched
 ```
