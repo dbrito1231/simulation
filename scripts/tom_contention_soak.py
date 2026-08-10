@@ -4,8 +4,20 @@ Orchestrates two native ``simulation/server.py`` runs (ToM off, then
 ``SIM_THEORY_OF_MIND=1``), each observed by ``soak_monitor.py``. Refuses if
 Docker ``gitserv-sim`` is running or the target port is already served.
 
+Before each soak phase the script waits until ``/state`` is unreachable (port
+released after the prior server stops). After start it hard-asserts
+``config.flags.THEORY_OF_MIND_ENABLED`` matches the phase expectation via
+``/state`` (and ties readiness to a new log session) before ``soak_monitor``
+runs.
+
 Usage:
     uv run python scripts/tom_contention_soak.py [--minutes 45] [--port 5001]
+    uv run python scripts/tom_contention_soak.py --flagon-only [--minutes 45]
+
+    ``--flagon-only`` skips the baseline phase, requires existing
+    ``simulation/logs/soak-tom-baseline.json``, reruns only the flag-on phase,
+    and rewrites ``tom-contention-soak-result.json`` merging preserved baseline
+    data with the new flagon summary and comparison.
 
 Outputs:
     simulation/logs/soak-tom-baseline.json
@@ -30,12 +42,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 LOG_ROOT = ROOT / "simulation" / "logs"
 RESULT_PATH = LOG_ROOT / "tom-contention-soak-result.json"
+BASELINE_JSON = LOG_ROOT / "soak-tom-baseline.json"
+FLAGON_JSON = LOG_ROOT / "soak-tom-flagon.json"
 PROGRESS_LOG = LOG_ROOT / "tom-contention-soak.log"
 SOAK_MONITOR = ROOT / "scripts" / "soak_monitor.py"
 SERVER_SCRIPT = ROOT / "simulation" / "server.py"
 DOCKER_NAME = "gitserv-sim"
 BASELINE_LABEL = "tom-baseline"
 FLAGON_LABEL = "tom-flagon"
+PORT_DOWN_TIMEOUT_S = 90.0
+READY_TIMEOUT_S = 120.0
 
 
 def utc_now() -> str:
@@ -65,6 +81,41 @@ def http_get_state(port: int, timeout: float = 3.0) -> dict | None:
 
 def port_served(port: int) -> bool:
     return http_get_state(port) is not None
+
+
+def tom_flag_from_state(state: dict) -> bool | None:
+    flags = (state.get("config") or {}).get("flags") or {}
+    value = flags.get("THEORY_OF_MIND_ENABLED")
+    if value is None:
+        return None
+    return bool(value)
+
+
+def wait_for_port_down(port: int, timeout_s: float) -> None:
+    """Block until /state is unreachable; hard-fail on timeout."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if not port_served(port):
+            log(f"port {port} released (/state unreachable)")
+            return
+        time.sleep(0.5)
+    raise SystemExit(
+        f"timeout: port {port} still serves /state after {timeout_s:.0f}s — "
+        "refusing to start next phase on a stale server",
+    )
+
+
+def assert_tom_flag(port: int, expected: bool) -> None:
+    state = http_get_state(port)
+    if state is None:
+        raise SystemExit(f"assert failed: /state unreachable on port {port}")
+    actual = tom_flag_from_state(state)
+    if actual != expected:
+        raise SystemExit(
+            f"assert failed: THEORY_OF_MIND_ENABLED={actual!r} on port {port}, "
+            f"expected {expected!r}",
+        )
+    log(f"ASSERT PASS: THEORY_OF_MIND_ENABLED={actual} on port {port}")
 
 
 def docker_gitserv_running() -> bool:
@@ -132,28 +183,36 @@ def session_dirs() -> list[Path]:
     ]
 
 
-def wait_for_new_session(before_names: set[str], timeout_s: float) -> Path:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        candidates = [p for p in session_dirs() if p.name not in before_names]
-        if candidates:
-            session = max(candidates, key=lambda p: p.stat().st_mtime)
-            log(f"new session ready: {session.name}")
-            return session
-        time.sleep(2)
-    raise SystemExit(f"timeout waiting for new session after {timeout_s:.0f}s")
-
-
-def wait_for_server(port: int, timeout_s: float) -> None:
+def wait_for_ready(
+    port: int,
+    before_names: set[str],
+    expected_tom: bool,
+    timeout_s: float,
+) -> Path:
+    """Wait for a new session and /state flag matching expected_tom."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         state = http_get_state(port)
-        if state is not None:
-            flags = (state.get("config") or {}).get("flags") or {}
-            log(f"server up on port {port} THEORY_OF_MIND_ENABLED={flags.get('THEORY_OF_MIND_ENABLED')}")
-            return
+        candidates = [p for p in session_dirs() if p.name not in before_names]
+        if state is not None and candidates:
+            actual = tom_flag_from_state(state)
+            if actual == expected_tom:
+                session = max(candidates, key=lambda p: p.stat().st_mtime)
+                log(
+                    f"ASSERT PASS: new session {session.name} with "
+                    f"THEORY_OF_MIND_ENABLED={actual}",
+                )
+                return session
+            if actual is not None:
+                log(
+                    f"/state reachable but THEORY_OF_MIND_ENABLED={actual} "
+                    f"(expected {expected_tom}), waiting for new server",
+                )
         time.sleep(1)
-    raise SystemExit(f"server failed to start within {timeout_s:.0f}s on port {port}")
+    raise SystemExit(
+        f"timeout waiting for new session with THEORY_OF_MIND_ENABLED={expected_tom} "
+        f"after {timeout_s:.0f}s on port {port}",
+    )
 
 
 def start_server(port: int, tom_env: str | None) -> subprocess.Popen:
@@ -250,12 +309,14 @@ def run_phase(
     port: int,
     minutes: float,
     tom_env: str | None,
+    expected_tom: bool,
 ) -> tuple[dict, str]:
+    wait_for_port_down(port, PORT_DOWN_TIMEOUT_S)
     before_names = {p.name for p in session_dirs()}
     proc = start_server(port, tom_env)
     try:
-        wait_for_server(port, 90.0)
-        session = wait_for_new_session(before_names, 120.0)
+        session = wait_for_ready(port, before_names, expected_tom, READY_TIMEOUT_S)
+        assert_tom_flag(port, expected_tom)
         rc = run_soak_monitor(label, minutes)
         if rc != 0:
             log(f"warning: soak_monitor returned {rc} for label={label}")
@@ -265,44 +326,46 @@ def run_phase(
         return summary, session.name
     finally:
         stop_server(proc)
-        # Brief pause so the port releases before the next phase.
-        for _ in range(15):
-            if not port_served(port):
-                break
-            time.sleep(1)
+        wait_for_port_down(port, PORT_DOWN_TIMEOUT_S)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--minutes", type=float, default=45, help="minutes per phase (default: 45)")
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=int(os.environ.get("SIM_PORT", "5001")),
-        help="server port (default: SIM_PORT or 5001)",
-    )
-    args = parser.parse_args()
-    if args.minutes <= 0:
-        raise SystemExit("--minutes must be positive")
+def load_baseline_for_flagon_only() -> tuple[dict, str]:
+    if not BASELINE_JSON.is_file():
+        raise SystemExit(
+            f"--flagon-only requires existing baseline summary at {BASELINE_JSON}",
+        )
+    baseline = json.loads(BASELINE_JSON.read_text(encoding="utf-8"))
+    baseline_session = baseline.get("session")
+    if not baseline_session:
+        if RESULT_PATH.is_file():
+            prior = json.loads(RESULT_PATH.read_text(encoding="utf-8"))
+            baseline_session = (prior.get("sessions") or {}).get("baseline")
+        if not baseline_session:
+            raise SystemExit(
+                f"--flagon-only: could not determine baseline session from "
+                f"{BASELINE_JSON} or {RESULT_PATH}",
+            )
+    log(f"--flagon-only: preserving baseline session={baseline_session}")
+    return baseline, baseline_session
 
-    LOG_ROOT.mkdir(parents=True, exist_ok=True)
-    started_at = utc_now()
-    log(f"tom contention soak starting minutes={args.minutes} port={args.port}")
 
-    preflight(args.port)
-
-    baseline_summary, baseline_session = run_phase(
-        BASELINE_LABEL, args.port, args.minutes, None,
-    )
-    flagon_summary, flagon_session = run_phase(
-        FLAGON_LABEL, args.port, args.minutes, "1",
-    )
-
+def write_result(
+    *,
+    started_at: str,
+    minutes: float,
+    port: int,
+    baseline_session: str,
+    flagon_session: str,
+    baseline_summary: dict,
+    flagon_summary: dict,
+    flagon_only: bool,
+) -> None:
     result = {
         "started_at": started_at,
         "ended_at": utc_now(),
-        "minutes_per_phase": args.minutes,
-        "port": args.port,
+        "minutes_per_phase": minutes,
+        "port": port,
+        "flagon_only_rerun": flagon_only,
         "sessions": {
             "baseline": baseline_session,
             "flagon": flagon_session,
@@ -314,6 +377,66 @@ def main() -> int:
     RESULT_PATH.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     log(f"DONE combined results -> {RESULT_PATH}")
     print(f"RESULTS {RESULT_PATH}", flush=True)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--minutes", type=float, default=45, help="minutes per phase (default: 45)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("SIM_PORT", "5001")),
+        help="server port (default: SIM_PORT or 5001)",
+    )
+    parser.add_argument(
+        "--flagon-only",
+        action="store_true",
+        help="skip baseline; require soak-tom-baseline.json; rerun flag-on phase only",
+    )
+    args = parser.parse_args()
+    if args.minutes <= 0:
+        raise SystemExit("--minutes must be positive")
+
+    LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    started_at = utc_now()
+    mode = "flagon-only" if args.flagon_only else "full"
+    log(f"tom contention soak starting mode={mode} minutes={args.minutes} port={args.port}")
+
+    preflight(args.port)
+
+    if args.flagon_only:
+        baseline_summary, baseline_session = load_baseline_for_flagon_only()
+        flagon_summary, flagon_session = run_phase(
+            FLAGON_LABEL, args.port, args.minutes, "1", True,
+        )
+        write_result(
+            started_at=started_at,
+            minutes=args.minutes,
+            port=args.port,
+            baseline_session=baseline_session,
+            flagon_session=flagon_session,
+            baseline_summary=baseline_summary,
+            flagon_summary=flagon_summary,
+            flagon_only=True,
+        )
+        return 0
+
+    baseline_summary, baseline_session = run_phase(
+        BASELINE_LABEL, args.port, args.minutes, None, False,
+    )
+    flagon_summary, flagon_session = run_phase(
+        FLAGON_LABEL, args.port, args.minutes, "1", True,
+    )
+    write_result(
+        started_at=started_at,
+        minutes=args.minutes,
+        port=args.port,
+        baseline_session=baseline_session,
+        flagon_session=flagon_session,
+        baseline_summary=baseline_summary,
+        flagon_summary=flagon_summary,
+        flagon_only=False,
+    )
     return 0
 
 
