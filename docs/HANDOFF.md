@@ -123,13 +123,13 @@ Plan: [`.claude/plans/emergence-breakthroughs.md`](../.claude/plans/emergence-br
 | A0 | Determinism proof (`scripts/determinism_proof.py`) | Done (branch `emergence-breakthroughs`) |
 | A1 | Pin RNG / executor / tick scheduling (`DETERMINISM_PINNING`) | Done (branch `emergence-breakthroughs`) |
 | A2 | Fork compare harness (`scripts/fork_compare.py`) | Done (branch `emergence-breakthroughs`) |
-| B0 F1 | Testament (`TESTAMENT_ENABLED`, `scripts/testament_smoke.py`) | Implemented (default **off**; requires `WIKI_MEMORY` for meaningful carryover) |
+| B0 F1 | Testament (`TESTAMENT_ENABLED`, `scripts/testament_smoke.py`) | Implemented (default **on** per user enable; requires `WIKI_MEMORY` for meaningful carryover) |
 | B1 F2 | Theory of Mind (`THEORY_OF_MIND_ENABLED`, `scripts/peer_model_smoke.py`) | Implemented (default **off**; default-on soak gate **FAIL** — keep off) |
-| B2 F3 | Contracts and escrow (`CONTRACTS_ENABLED`, `offer_contract`/`accept_contract`, `scripts/contract_smoke.py`) | Implemented (default **off**) |
+| B2 F3 | Contracts and escrow (`CONTRACTS_ENABLED`, `offer_contract`/`accept_contract`, `scripts/contract_smoke.py`) | Implemented (default **on** per user enable) |
 | D10 | F4 rules/beliefs scoping audit | Done (`schism-rules-beliefs-audit.md`) |
-| B3 F4 | Schism: settlement-keyed storage/restore, rule/vote threading, trigger + secession + settlement-scoped succession, Chronicle allowlist fix (`SCHISM_ENABLED`, `scripts/schism_smoke.py`) | Implemented (default **off**) |
+| B3 F4 | Schism: settlement-keyed storage/restore, rule/vote threading, trigger + secession + settlement-scoped succession, Chronicle allowlist fix (`SCHISM_ENABLED`, `scripts/schism_smoke.py`) | Implemented (default **on** per user enable) |
 
-**F1 default-on gate:** D2 `WIKI_MEMORY` soak accepted on session `2026-08-09T19-47-41`. Before flipping `TESTAMENT_ENABLED` to default `True`, run a matched soak confirming deathbed merges populate the ring and `cultural_carryover` behaves as expected.
+**F1 default-on gate:** D2 `WIKI_MEMORY` soak accepted on session `2026-08-09T19-47-41`. `TESTAMENT_ENABLED` is now default **on** per user enable (2026-08-10).
 
 **F2 default-on gate:** **FAIL** (2026-08-09). Matched 4+4 min native soak via `uv run python scripts/tom_contention_soak.py --minutes 4` (native server only; refuses Docker `gitserv-sim` on port 5001). Methodologically valid after `scripts/tom_contention_soak.py` hardening: process-tree kill + `sys.executable` start (see [`specs/12-ops.md`](../specs/12-ops.md)). Sessions: baseline `2026-08-09T22-40-54` (`THEORY_OF_MIND_ENABLED` assert **False**), flag-on `2026-08-09T22-45-00` (assert **True**, env `SIM_THEORY_OF_MIND=1`). `piano_module_drops` rate **0.169** (12/71) → **0.25** (26/104) — flag-on materially worse (~48% relative increase). Decision latency p50 **6686** → **7218** ms; p90 **15286** → **13201** ms. **Keep `THEORY_OF_MIND_ENABLED` default `False`.** Invalid prior runs discarded: 45 min flag-on without True assert; 15 min flag-on orphan race. Artifacts: `simulation/logs/tom-contention-soak-4m.log`, `simulation/logs/tom-contention-soak-result.json`.
 

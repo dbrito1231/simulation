@@ -233,7 +233,7 @@ slices (never replacing them); `server.py`'s `MEMORY_PROMPT_CHAR_BUDGET` was
 raised 600 -> 900 so those lines have headroom instead of being the first
 thing evicted by the char-budget's oldest-first trim.
 
-### Testament inheritance (`TESTAMENT_ENABLED`, default False)
+### Testament inheritance (`TESTAMENT_ENABLED`, default True)
 
 See [09-systems-society.md](09-systems-society.md#testament_enabled) for the
 civilization ring and prompt line. Summary for the agent data-shape lens:

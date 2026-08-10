@@ -127,7 +127,7 @@ the agent's settlement store first, then falls back to the village
 [08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
 Think payload and `/state` expose per-settlement stores when this flag is on.
 
-**Schism (`SCHISM_ENABLED`, default off):** when enabled, domestic
+**Schism (`SCHISM_ENABLED`, default on):** domestic
 rules/belief registries are keyed by settlement id (`"home"` primary); treaties,
 caravan tariffs, and `settlementStores` stay as documented here and in
 [09-systems-society.md](09-systems-society.md#schism_enabled). F4.3 adds the

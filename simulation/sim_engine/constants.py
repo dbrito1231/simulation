@@ -498,8 +498,8 @@ WIKI_MEMORY = True
 # Emergence Breakthroughs F1: generational knowledge inheritance — a capped
 # civilization["testament"] ring fed deterministically from dying agents'
 # memoryWiki (no new LLM call site). Meaningful only with WIKI_MEMORY on.
-# Default off; flag-off is byte-identical to baseline.
-TESTAMENT_ENABLED = False
+# Default on; set False for byte-identical baseline revert.
+TESTAMENT_ENABLED = True
 # Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
 # module inside the existing fan-out (not an extra call per turn). Advisory
 # prompt context only — no deterministic behavior acts on peerModel. Default
@@ -1603,17 +1603,17 @@ HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
 # offer_contract / accept_contract: schema + validation in F3.1; escrow
 # settlement, persistence, and apply_decision branches ship in F3.2. With the
 # flag off, both actions are filtered from available_actions and apply is a
-# no-op (same pattern as repair_structure / GOODS_ENABLED).
-CONTRACTS_ENABLED = False
+# no-op (same pattern as repair_structure / GOODS_ENABLED). Default on.
+CONTRACTS_ENABLED = True
 MAX_OPEN_CONTRACTS = 20
 
 # --- Schism / per-settlement governance scoping (SCHISM_ENABLED) ---
 # Settlement-keyed rules/belief registry storage for Feature 4 (Schism).
-# Default off: flat civilization["rules"] / beliefRegistry remain the only
-# live shape (byte-identical to pre-F4). When on, keyed maps share object
-# refs with the primary "home" settlement flat fields so single-settlement
-# worlds behave the same until F4.2 read-path threading and F4.3 trigger.
-SCHISM_ENABLED = False
+# When off: flat civilization["rules"] / beliefRegistry remain the only live
+# shape (byte-identical to pre-F4). Default on; keyed maps share object refs
+# with the primary "home" settlement flat fields so single-settlement worlds
+# behave the same until F4.2 read-path threading and F4.3 trigger.
+SCHISM_ENABLED = True
 # Minimum mutually-allied agents (all rivals of their settlement elder, sharing
 # one belief that contradicts an enacted domestic rule) before schism fires.
 SCHISM_MIN_CLUSTER = 3

@@ -536,10 +536,10 @@ mutation is logged as activity and recorded in the chronicle under the
 `meme_mutation` kind, and increments `civilization["memeMutations"]`, which
 also feeds the `meme_mutations` benchmark.
 
-## SCHISM_ENABLED (default False) {#schism_enabled}
+## SCHISM_ENABLED (default True) {#schism_enabled}
 
 Settlement-scoped domestic governance storage for Feature 4 (Schism).
-**Default off:** `civilization["rules"]`, `pendingRules`, `constitution`,
+**When off:** `civilization["rules"]`, `pendingRules`, `constitution`,
 `customRuleModifiers`, `harvestQuotas`, `rationingActive`, `beliefRegistry`,
 and `memeTexts` remain the only live shape — byte-identical to pre-F4 worlds.
 No schism trigger ships while the flag is off. F4.2 threads read paths and
@@ -712,11 +712,11 @@ at the old cap; 100 entries absorbs many more disasters before crowding out
 anything else, at a negligible cost (~80 extra short strings in `/state` and
 `state.db`).
 
-### Testament (`TESTAMENT_ENABLED`, default False) {#testament_enabled}
+### Testament (`TESTAMENT_ENABLED`, default True) {#testament_enabled}
 
 Generational knowledge inheritance (Emergence Breakthroughs F1). Requires
 `WIKI_MEMORY` on to be meaningful; `TESTAMENT_ENABLED` is its own flag
-(default **off**, one-flag revert).
+(default **on**, one-flag revert).
 
 **Ring:** `civilization["testament"]` — capped at `TESTAMENT_CAP = 100`
 entries of `{text, author, frame, generation}` (oldest drops first).

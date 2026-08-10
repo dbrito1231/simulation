@@ -925,7 +925,7 @@ key pinned to `1.0` — and asserting the observable results match exactly.
 
 ## Contracts & escrow (`CONTRACTS_ENABLED`)
 
-Default **off**. Two decision actions (`offer_contract`, `accept_contract`)
+Default **on**. Two decision actions (`offer_contract`, `accept_contract`)
 plus engine-held escrow — see [07-actions.md](07-actions.md) for params and
 apply semantics. `validate_contract()` in `normalize_decision` rejects
 malformed offers before apply.
