@@ -751,19 +751,21 @@ restart started the index empty despite surviving agent-visible memory.
   entries AND flushing empty store to `MEMORY_STORE_PATH` (matching
   `_piano_module_cache` wipe-on-reset precedent).
 
-### Wiki-style compounding memory (`WIKI_MEMORY`, default False) {#wiki-memory}
+### Wiki-style compounding memory (`WIKI_MEMORY`, default True) {#wiki-memory}
 
 TASKS_PENDING item 3 / plan Phase 4. Goal: long-term memory that merges and
 reconciles instead of FIFO-dropping (Karpathy LLM-Wiki pattern), without
 adding any new LLM call site or timer — it upgrades what
 `_run_memory_maintenance`'s existing round-robin call already does.
+Default flipped to `True` on `main` after D2 soak (session `2026-08-09T19-47-41`);
+flag-off remains a one-flag revert.
 
 - **Structure.** `agent["memoryWiki"]` is a dict of three named sections —
   `relationships`, `goals`, `lessons` — each hard-capped at
   `WIKI_SECTION_CHAR_CAP = 300` chars (`constants.py`, next to `LONG_MEM_CAP`).
   Always present (`{}` initial shape, populated only when the flag is on) so
   persistence via `state.db` is free — same pattern as `moduleReports`. See
-  [06-agents.md](06-agents.md#wiki-style-compounding-memory-wiki_memory-default-false)
+  [06-agents.md](06-agents.md#wiki-style-compounding-memory-wiki_memory-default-true)
   for the agent data-shape entry.
 - **One-call budget, preserved.** `_run_memory_maintenance` still fires only
   every `MEMORY_TICK_FRAMES = 1800` frames, one agent per pass, and still
@@ -1067,13 +1069,16 @@ up to ~6,163 invention-only) must stay under `sim-smart`'s per-slot share at
 `PIANO_MODULES` (`constants.py:483`, default `True` since Sid-parity Phase 1) —
 Perception/Social/Desire/Reflection module fan-out is the default cognition
 path. When `THEORY_OF_MIND_ENABLED` (default `False`, Emergence Breakthroughs
-F2) is on, a fifth module `theory_of_mind` joins the same staggered fan-out
-by **swapping into the social slot every 4th module-tick** (`tick % 4 == 0`
-and `tick % 2 == 0`) — no extra call per turn, same
-`PIANO_CONCURRENT_LLM` budget. Module calls run on `self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`),
-bounded independently of `MAX_CONCURRENT_LLM` — `_run_piano_modules` submits
-to `piano_workers`, never `self._executor`. Decision-path fan-out and the
-gated always-on pulse share `_piano_refresh_inflight` (keyed by
+F2) is on, `theory_of_mind` joins the same staggered fan-out by **swapping
+into the social slot every 4th module-tick** (`tick % 4 == 0` and
+`tick % 2 == 0`) — no extra call per turn, same `PIANO_CONCURRENT_LLM`
+budget. Both decision-path `_piano_to_run` and gated always-on
+`_pulse_piano_modules` enumerate exactly four module slots via
+`_piano_social_slot_module` (never a fifth name). Module calls run on
+`self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`), bounded independently of
+`MAX_CONCURRENT_LLM` — `_run_piano_modules` submits to `piano_workers`, never
+`self._executor`. Decision-path fan-out and the gated always-on pulse share
+`_piano_refresh_inflight` (keyed by
 `(agent_name, module)`): before each submit wave `_run_piano_modules` checks
 `_piano_free_slots()` and never queues more than
 `PIANO_CONCURRENT_LLM - len(_piano_refresh_inflight)`. Within one turn it
@@ -1142,7 +1147,11 @@ interval restores the existing GPU-rest window when the gate is off. Phase C's
 optional night backstop has not been attempted.
 
 The pulse orders dirty work before old work and retains the legacy
-perception/desire, social x2, reflection x3 cadence as priority weights. It
+perception/desire, social x2, reflection x3 cadence as priority weights.
+When `THEORY_OF_MIND_ENABLED`, the social priority slot is
+`theory_of_mind` on the same swap ticks as `_piano_to_run` (using
+`agent["moduleTick"] + 1`) — never both social and theory_of_mind in one
+pulse due-list. It
 submits at most `MODULE_PULSE_MAX_BATCH = 2` and the currently free slots from
 `_piano_free_slots()` (same `_piano_refresh_inflight` budget as decision-path
 fan-out) to `piano_workers`; only these always-on refresh

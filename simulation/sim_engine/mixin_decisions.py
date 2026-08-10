@@ -99,6 +99,17 @@ class _DecisionsMixin:
             names.append("theory_of_mind")
         return names
 
+    def _piano_social_slot_module(self, modules, tick):
+        """Social-slot name for one module-tick; theory_of_mind swaps in every
+        4th even tick when enabled — same slot, no extra call."""
+        modules = modules or self._piano_default_modules()
+        if (THEORY_OF_MIND_ENABLED
+                and modules.get("theory_of_mind", True)
+                and tick % 4 == 0
+                and tick % 2 == 0):
+            return "theory_of_mind"
+        return "social"
+
     def _piano_to_run(self, modules, tick):
         """Staggered PIANO dispatch for one module-tick. theory_of_mind swaps
         into the social slot every 4th tick when enabled — no extra call."""
@@ -108,16 +119,10 @@ class _DecisionsMixin:
             to_run.append("perception")
         if modules.get("desire", True):
             to_run.append("desire")
-        social_slot = None
-        if modules.get("social", True) and tick % 2 == 0:
-            social_slot = "social"
-        if (THEORY_OF_MIND_ENABLED
-                and modules.get("theory_of_mind", True)
-                and tick % 4 == 0
-                and tick % 2 == 0):
-            social_slot = "theory_of_mind"
-        if social_slot:
-            to_run.append(social_slot)
+        if tick % 2 == 0:
+            social_slot = self._piano_social_slot_module(modules, tick)
+            if modules.get(social_slot, True):
+                to_run.append(social_slot)
         if modules.get("reflection", True) and tick % 3 == 0:
             to_run.append("reflection")
         return to_run, modules

@@ -157,6 +157,93 @@ def test_open_expiry_refunds():
     print("  OK open expiry refund")
 
 
+def _heir_coin_total(engine, deceased):
+    return sum(
+        int((a.get("resources") or {}).get("coin") or 0)
+        for a in engine.agents
+        if a is not deceased
+    )
+
+
+def test_dead_offerer_expiry_refunds_to_heirs():
+    old = se.CONTRACTS_ENABLED
+    se.CONTRACTS_ENABLED = True
+    try:
+        engine = make_engine(4)
+        offerer, acceptor = engine.agents[0], engine.agents[1]
+        before = _coin_setup(engine, offerer, acceptor)
+        _offer(engine, offerer, acceptor, deadline_frames=10)
+        ct = engine.civilization["contracts"][0]
+        engine._agent_dies(offerer, cause="smoke")
+        assert_true(offerer["resources"].get("coin", 0) == 0,
+                    "inheritance should clear corpse coin")
+        heir_coin_after_death = _heir_coin_total(engine, offerer)
+        engine.frameTick = ct["createdFrame"] + 11
+        engine._tick_contract_settlement()
+        assert_true(not engine.civilization["contracts"], "expired contract should clear")
+        assert_true(engine.civilization["contractEscrow"] == 0, "escrow refunded")
+        assert_true(offerer["resources"].get("coin", 0) == 0,
+                    "refund must not credit corpse")
+        assert_true(_heir_coin_total(engine, offerer) == heir_coin_after_death + 5,
+                    "living heirs should receive escrow refund")
+        assert_true(engine._total_tracked_coin() == before, "coin not conserved on dead-offerer expiry")
+    finally:
+        se.CONTRACTS_ENABLED = old
+    print("  OK dead-offerer expiry refund to heirs")
+
+
+def test_dead_offerer_default_refunds_to_heirs():
+    old = se.CONTRACTS_ENABLED
+    se.CONTRACTS_ENABLED = True
+    try:
+        engine = make_engine(4)
+        offerer, acceptor = engine.agents[0], engine.agents[1]
+        before = _coin_setup(engine, offerer, acceptor)
+        _offer(engine, offerer, acceptor, deadline_frames=10)
+        ct = engine.civilization["contracts"][0]
+        engine.apply_decision(acceptor, {
+            "action": "accept_contract",
+            "target": ct["id"],
+            "reasoning": "smoke",
+        })
+        engine._agent_dies(offerer, cause="smoke")
+        heir_coin_after_death = _heir_coin_total(engine, offerer)
+        engine.frameTick = ct["createdFrame"] + 11
+        engine._tick_contract_settlement()
+        assert_true(not engine.civilization["contracts"], "defaulted contract should clear")
+        assert_true(engine.civilization["contractEscrow"] == 0, "escrow refunded on default")
+        assert_true(offerer["resources"].get("coin", 0) == 0,
+                    "refund must not credit corpse")
+        assert_true(_heir_coin_total(engine, offerer) == heir_coin_after_death + 5,
+                    "living heirs should receive escrow refund on default")
+        assert_true(engine._total_tracked_coin() == before, "coin not conserved on dead-offerer default")
+    finally:
+        se.CONTRACTS_ENABLED = old
+    print("  OK dead-offerer default refund to heirs")
+
+
+def test_missing_offerer_refund_to_stockpile():
+    old = se.CONTRACTS_ENABLED
+    se.CONTRACTS_ENABLED = True
+    try:
+        engine = make_engine(4)
+        offerer, acceptor = engine.agents[0], engine.agents[1]
+        before = _coin_setup(engine, offerer, acceptor)
+        _offer(engine, offerer, acceptor, deadline_frames=10)
+        ct = engine.civilization["contracts"][0]
+        ct["offerer"] = "MissingVillager"
+        stock_before = engine.civilization["stockpile"].get("coin", 0)
+        engine.frameTick = ct["createdFrame"] + 11
+        engine._tick_contract_settlement()
+        assert_true(engine.civilization["contractEscrow"] == 0, "escrow refunded")
+        assert_true(engine.civilization["stockpile"].get("coin", 0) == stock_before + 5,
+                    "missing offerer refund should credit stockpile")
+        assert_true(engine._total_tracked_coin() == before, "coin not conserved on missing offerer")
+    finally:
+        se.CONTRACTS_ENABLED = old
+    print("  OK missing-offerer refund to stockpile")
+
+
 def test_restore_round_trip():
     import sim_engine as se_mod
 
@@ -190,6 +277,9 @@ def main():
     test_fulfill_conserves_coin()
     test_default_refunds_and_rival()
     test_open_expiry_refunds()
+    test_dead_offerer_expiry_refunds_to_heirs()
+    test_dead_offerer_default_refunds_to_heirs()
+    test_missing_offerer_refund_to_stockpile()
     test_restore_round_trip()
     print("ALL OK")
 

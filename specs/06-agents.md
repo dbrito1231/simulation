@@ -216,7 +216,7 @@ memory — see server.py's scaffold-detection regexes).
 `_memory_for_prompt(agent)` (`mixin_world_state.py:346-363`) composes the prompt's memory
 section from the last 3 longTerm + 4 shortTerm + 4 working entries.
 
-### Wiki-style compounding memory (`WIKI_MEMORY`, default False)
+### Wiki-style compounding memory (`WIKI_MEMORY`, default True)
 
 See [03-cognition.md](03-cognition.md#wiki-memory) for full merge/lint semantics.
 Summary for the agent data-shape lens: `agent["memoryWiki"]` is always present

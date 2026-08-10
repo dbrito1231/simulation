@@ -2003,19 +2003,39 @@ class _StructuresEconomyMixin:
             c["stockpile"][resource] = c["stockpile"].get(resource, 0) + overflow
         return True
 
+    def _route_escrow_refund_coin(self, offerer_name, pay):
+        """Return escrowed coin to a living offerer, else heirs, else stockpile."""
+        offerer = self._find_agent(offerer_name)
+        if offerer and offerer.get("deathFrame") is None:
+            self._credit_agent_coin(offerer, pay)
+            return
+        heirs = []
+        if offerer:
+            heirs = [h for h in self._heirs_of(offerer) if h.get("deathFrame") is None]
+        if heirs:
+            base_each, remainder = divmod(int(pay), len(heirs))
+            for i, heir in enumerate(heirs):
+                give = base_each + (remainder if i == 0 else 0)
+                if give:
+                    self._credit_agent_coin(heir, give)
+            return
+        c = self.civilization
+        c.setdefault("stockpile", {})
+        c["stockpile"]["coin"] = c["stockpile"].get("coin", 0) + pay
+
     def _refund_contract_escrow(self, ct):
         c = self.civilization
         pay = ct["pay_coin"]
-        offerer = self._find_agent(ct["offerer"])
-        if offerer:
-            self._credit_agent_coin(offerer, pay)
+        self._route_escrow_refund_coin(ct["offerer"], pay)
         c["contractEscrow"] = max(0, c.get("contractEscrow", 0) - pay)
 
     def _fulfill_contract(self, ct):
         c = self.civilization
         acceptor = self._find_agent(ct.get("acceptor"))
         offerer = self._find_agent(ct.get("offerer"))
-        if not acceptor or not offerer:
+        if (not acceptor or not offerer
+                or acceptor.get("deathFrame") is not None
+                or offerer.get("deathFrame") is not None):
             self._refund_contract_escrow(ct)
             return
         if not self._deliver_contract_goods(acceptor, offerer, ct["want"], ct["qty"]):
@@ -2063,7 +2083,9 @@ class _StructuresEconomyMixin:
             if ct.get("status") == "accepted":
                 acceptor = self._find_agent(ct.get("acceptor"))
                 offerer = self._find_agent(ct.get("offerer"))
-                if acceptor and offerer:
+                if (acceptor and offerer
+                        and acceptor.get("deathFrame") is None
+                        and offerer.get("deathFrame") is None):
                     held = acceptor.get("resources", {}).get(ct["want"], 0)
                     if held >= ct["qty"]:
                         self._fulfill_contract(ct)

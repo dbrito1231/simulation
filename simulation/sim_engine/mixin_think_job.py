@@ -1018,9 +1018,11 @@ class _ThinkJobMixin:
                 continue
             dirty = bool(agent.get("contextDirty"))
             dirty_since = agent.get("contextDirtySince") or now
-            for priority, module in enumerate(
-                    ("perception", "desire", "social", "reflection")
-                    + (("theory_of_mind",) if THEORY_OF_MIND_ENABLED else ())):
+            agent_modules = agent.get("modules") or {}
+            module_tick = int(agent.get("moduleTick") or 0) + 1
+            social_slot = self._piano_social_slot_module(agent_modules, module_tick)
+            pulse_modules = ("perception", "desire", social_slot, "reflection")
+            for priority, module in enumerate(pulse_modules):
                 if not (agent.get("modules") or {}).get(module, True):
                     continue
                 note = (self._piano_module_cache.get(agent["name"], {}) or {}).get(module) or {}

@@ -182,6 +182,39 @@ def test_piano_stagger_swap():
     print("  OK piano stagger swap")
 
 
+def test_always_on_pulse_no_fifth_module():
+    """ALWAYS_ON + ToM: pulse due-list swaps ToM into social slot, never 5 names."""
+    old_piano, old_tom, old_always = se.PIANO_MODULES, se.THEORY_OF_MIND_ENABLED, se.ALWAYS_ON_MODULES
+    se.PIANO_MODULES, se.THEORY_OF_MIND_ENABLED, se.ALWAYS_ON_MODULES = True, True, True
+    try:
+        engine = make_engine(4)
+        agent = engine.agents[0]
+        modules = agent.get("modules") or {}
+        # Swap tick (moduleTick+1): social slot is theory_of_mind, never a 5th name.
+        agent["moduleTick"] = 3
+        tick = int(agent["moduleTick"] or 0) + 1
+        social = engine._piano_social_slot_module(modules, tick)
+        pulse_names = ("perception", "desire", social, "reflection")
+        assert_true(len(pulse_names) == 4, f"expected 4 pulse slots, got {pulse_names}")
+        assert_true(social == "theory_of_mind",
+                    f"tick {tick} should swap social slot to theory_of_mind, got {social}")
+        assert_true("social" not in pulse_names,
+                    f"swap tick must not list both social and theory_of_mind: {pulse_names}")
+        # Non-swap even tick keeps social in the slot.
+        assert_true(engine._piano_social_slot_module(modules, 2) == "social",
+                    "tick 2 should use social slot")
+        # ToM off: pulse list byte-identical to legacy four-tuple.
+        se.THEORY_OF_MIND_ENABLED = False
+        assert_true(engine._piano_social_slot_module(modules, tick) == "social",
+                    "ToM off should always use social slot")
+        legacy = ("perception", "desire", "social", "reflection")
+        off_social = engine._piano_social_slot_module(modules, tick)
+        assert_true(("perception", "desire", off_social, "reflection") == legacy, legacy)
+    finally:
+        se.PIANO_MODULES, se.THEORY_OF_MIND_ENABLED, se.ALWAYS_ON_MODULES = old_piano, old_tom, old_always
+    print("  OK always-on pulse no fifth module")
+
+
 def main():
     print("peer_model_smoke")
     test_flag_off_no_peer_model()
@@ -191,6 +224,7 @@ def main():
     test_restore_round_trip()
     test_nearby_prompt_fold_in()
     test_piano_stagger_swap()
+    test_always_on_pulse_no_fifth_module()
     print("ALL OK")
 
 

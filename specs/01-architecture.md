@@ -192,7 +192,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `LIBRARY_SCALING_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `TRANSIT_ENABLED` | True | yes | [10](10-path1.md) |
 | `ECONOMY_SINKS_ENABLED` | True | yes | [08](08-systems-economy.md) |
-| `WIKI_MEMORY` | False (code default **True** on `main` since D2 soak — see [03](03-cognition.md)) | yes | [03](03-cognition.md) |
+| `WIKI_MEMORY` | True (D2 soak on `main` — see [03](03-cognition.md)) | yes | [03](03-cognition.md) |
 | `TESTAMENT_ENABLED` | False | yes | [06](06-agents.md), [09](09-systems-society.md) |
 | `THEORY_OF_MIND_ENABLED` | False (env-backed, `SIM_THEORY_OF_MIND`) | yes | [03](03-cognition.md) |
 | `SCHISM_ENABLED` | False | yes | [09](09-systems-society.md#schism_enabled) |

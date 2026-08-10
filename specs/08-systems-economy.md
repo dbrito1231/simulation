@@ -942,7 +942,12 @@ containers on old saves):
 
 **Coin conservation.** `offer_contract` debits the offerer's held coin into
 `contractEscrow` (no partial debit). Fulfillment pays escrow to the acceptor;
-expiry/default refunds the offerer. No mint or burn across
+expiry/default refunds escrow via `_route_escrow_refund_coin`: living offerer
+(as before), else integer-split among living heirs (`_heirs_of`, same rule as
+`_inherit_from`), else village `stockpile["coin"]`. Dead offerers never
+receive refunds on their corpse record (`deathFrame` set, resources already
+cleared by inheritance). Accepted contracts do not fulfill when either party
+is dead — escrow refunds through the same route. No mint or burn across
 offer/fulfill/default/expiry — `scripts/contract_smoke.py` asserts
 `sum(agent coin) + stockpile coin + contractEscrow` is invariant.
 
