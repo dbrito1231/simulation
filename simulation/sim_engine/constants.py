@@ -25,6 +25,7 @@ __all__ = [
     "WIKI_MEMORY",
     "TESTAMENT_ENABLED",
     "ANOMALY_RADAR_ENABLED",
+    "DECISION_AUDIT_ENABLED",
     "THEORY_OF_MIND_ENABLED",
     "PEER_MODEL_MAX_PEERS",
     "PEER_MODEL_FIELD_CHAR_CAP",
@@ -508,6 +509,11 @@ TESTAMENT_ENABLED = True
 # plan). Default on; set False to disable the route (it still responds with
 # {ok: true, enabled: false, anomalies: []}, never a 404/disabled error).
 ANOMALY_RADAR_ENABLED = True
+# Idea-10 "Why did you do that?" audit: mint a per-decision correlation id in
+# run_agent_decision (llm.jsonl decision._decision_id) and thread it through
+# apply_decision's activity record (activity.jsonl decision_id). Default on;
+# when off, neither log stream carries the field.
+DECISION_AUDIT_ENABLED = True
 # Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
 # module inside the existing fan-out (not an extra call per turn). Advisory
 # prompt context only — no deterministic behavior acts on peerModel. Default

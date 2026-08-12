@@ -66,6 +66,7 @@ per-file detail.
 | `/control/god/cancel` | POST | Cancel an active omen/providence/timed event (requires God auth when `GOD_AUTH_REQUIRED`) | `{targetId}` | `engine.god_cancel(targetId)` |
 | `/control/god/compile` | POST | Optional Phase 8: compile free operator prose into a DRAFT `story_event` preview (requires God auth when `GOD_AUTH_REQUIRED`; also requires `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`, otherwise a clean rejection) | `{prose}` (string, up to `GOD_COMPILER_PROSE_MAX_CHARS = 800` chars) | `engine.god_compile_prose(prose)` — `{compileOk, previewId, commandDigest, previewOutcome, normalizedCommand, reversibilityClass, expiresAt}` or `{compileOk: false, reason}` |
 | `/anomalies` | GET | Anomaly radar (idea-07, expanded idea-07b): read-side, server-side reader over the current run's `benchmarks.jsonl`, gated by `ANOMALY_RADAR_ENABLED` (see [01-architecture.md](01-architecture.md)) | — | see "Anomaly radar" below |
+| `/decision-audit` | GET | Read-only decision-intent audit over the current session's `llm.jsonl` and `activity.jsonl`, gated by `DECISION_AUDIT_ENABLED` | — | see "Decision audit route" below |
 
 `/agent/think` is legacy: the server-authoritative engine never calls it over
 HTTP. Instead, `_ENGINE_DEPS["llm_decide"]` (server.py:2604-2633) is wired
@@ -586,6 +587,19 @@ reader, no new persisted detection state — idea-07 Answer 1).
 view (see
 [11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)), both
 polling this route on their own cadence separate from `/state`.
+
+## Decision audit route
+
+`GET /decision-audit` is a read-only current-session join of `llm.jsonl` and
+`activity.jsonl`. `DECISION_AUDIT_ENABLED` defaults to `True`; when disabled,
+the route returns HTTP 200 with `{enabled: false, agents: [], recent: []}`
+without reading either log. When enabled it returns `{enabled: true,
+session_id, agents, recent}`. `agents` contains per-agent scored/match/
+mismatch aggregates, and `recent` is a bounded newest-first list of scored
+comparisons. The reader caches parsed sources by path, byte size, and mtime so
+the viewer's three-second poll does not reparse unchanged logs. Correlation and
+scoring semantics are canonical in [03-cognition.md](03-cognition.md) and
+[12-ops.md](12-ops.md).
 
 ## Logging endpoints: fire-and-forget contract
 

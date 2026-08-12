@@ -10,7 +10,7 @@ drawing rules (structure sprite resolution order, seasonal variants).
 **Files:** `simulation/index.html` (markup shell), `simulation/css/*.css`
 (styles, split into 6 ordered files — see "css/*.css: split stylesheet"
 below), `simulation/viewer/*.js` (polling, render loop, sidebar, Divine
-Console; split into 16 ordered files — see "viewer/*.js: split viewer client
+Console; split into 17 ordered files — see "viewer/*.js: split viewer client
 script" below), `simulation/sprites/*.js` (stateless Canvas helpers, split
 into 8 ordered files — see "sprites/*.js: pure stateless drawing" below).
 **See also:** [01-architecture.md](01-architecture.md) for the
@@ -21,7 +21,7 @@ labels.
 
 ## Thin-viewer contract
 
-`simulation/viewer/setup.js` (first of the 16 split viewer files, see
+`simulation/viewer/setup.js` (first of the 17 split viewer files, see
 "viewer/*.js: split viewer client script" below) states the whole viewer's
 contract in a banner comment at the top of the file: it is a **PURE
 RENDERER** — it polls `GET /state`
@@ -264,7 +264,10 @@ mechanism the season tint already uses.
     key. A third scrollable **Chronicle** panel is a curated
     projection of top-level `world.chronicle`, distinct from the raw Activity
     feed. It preserves its scroll position across snapshot updates and is
-    hidden cleanly when `CHRONICLE_ENABLED` is off.
+    hidden cleanly when `CHRONICLE_ENABLED` is off. A fourth scrollable
+    **Decision audit** panel (see [Decision audit panel](#decision-audit-panel))
+    polls `GET /decision-audit` on its own cadence and is hidden when the
+    route returns `enabled: false`.
 - **`ACTION_LABELS`** (`viewer/sidebar.js`) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
   `humanizeAction(agent)` (`viewer/sidebar.js`) special-cases
@@ -274,6 +277,60 @@ mechanism the season tint already uses.
   [07-actions.md](07-actions.md)); per the action-sync invariant in
   [01-architecture.md](01-architecture.md), a new action should get an entry
   but nothing breaks if briefly missing.
+
+## Decision audit panel
+
+Dedicated observability panel for the idea-10 "Why did you do that?" audit —
+surfaces per-agent self-model mismatch aggregates from the server-side reader,
+**not** computed in the browser.
+
+**Data source.** Polls `GET /decision-audit` on its own cadence
+(`DECISION_AUDIT_POLL_MS`, viewer constant — slower than `/state`, similar to
+`/districts.js` / council-llm-log cadence). The panel is a **pure renderer** of
+the route payload: no client-side join, category classification, or scoring.
+
+**Visibility.** Driven by the route's `enabled` field — **not** `/state`
+`config.flags` (the flag is not echoed there). When `enabled: false`, the panel
+section is force-hidden and polling stops (or polls once to detect re-enable).
+When `enabled: true`, the panel renders.
+
+**Placement.** Right sidebar (`#sidebar`), inside `#sidebarBody`, as a
+`.panel-section` below Chronicle (`#chronicleLog`) — same flex/scroll pattern as
+Civilization, Activity, and Chronicle (`flex: 1 1 0; min-height: 0;
+overflow-y: auto`). Element ids: `#decisionAuditPanel` container,
+`#decisionAuditAgentList` for per-agent rows, `#decisionAuditRecent` for the
+bounded `recent[]` drill-down list (wrapped in `#decisionAuditRecentWrap`
+`<details>`).
+
+**Implementation.** `viewer/decision-audit.js` (loaded after `sidebar.js` for
+`escapeHtml`): `DECISION_AUDIT_POLL_MS = 3000`, `pollDecisionAudit()` fetches
+`GET /decision-audit`, `renderDecisionAuditPanel()` paints agent rows and the
+optional recent list with scroll preservation via a change-detect key (same
+pattern as Chronicle). Bootstrap kickoff in `divine-history.js` alongside
+`pollDistricts()`. Markup in `index.html`; styles in `css/council.css`
+(badges reuse divine semantic green/red).
+
+**Per-agent row.** One row per `agents[]` entry: agent name, `scored` count,
+`matches` / `mismatches`, and `mismatch_rate` as a percentage. Rows follow
+server rank order (worst mismatch rate first). Agents with `scored == 0` may be
+omitted or shown in a muted "no scored decisions yet" state — implementation
+choice; the spec requires at least the ranked `scored >= 1` agents.
+
+**Recent drill-down (optional sub-list).** When present, renders `recent[]`
+entries: `frame_tick`, `action`, `reasoning_category`, `score`
+(match/mismatch badge), truncated `activity_message`. Newest first; preserves
+scroll position across polls when the list content is unchanged (same
+change-detect key pattern as Chronicle).
+
+**Styling.** Lives in `css/council.css` alongside Activity/Chronicle list rules;
+reuses existing `.panel-section` header/body chrome. Match/mismatch badges use
+existing semantic colors (`.decision-audit-badge-match` /
+`.decision-audit-badge-mismatch`, same green/red family as divine badges).
+
+**Out of scope for the viewer.** Correlation-id minting, log joins, fallback
+filtering, and category keyword matching all stay server-side
+([12-ops.md](12-ops.md#decision-audit--log-reading-pattern-and-scoring-semantics),
+[04-http-api.md](04-http-api.md#decision-audit-route)).
 
 ## Founding banner (`FOUNDING_EVENTS_ENABLED`)
 
@@ -588,7 +645,7 @@ value was changed, and no rule was reordered relative to its neighbors.
 | 1 | `css/base.css` | Reset, `#wrap`/`#canvasWrap`/`#world`, map controls (`#pauseBtn`/`#resetBtn`/`#zoomInBtn`/`#zoomOutBtn`/`#zoomFitBtn`), `#worldClockHud`, `#minimap` |
 | 2 | `css/panels.css` | `#sidebar`/`#convPanel` shared chrome (headers, `#lmStatus`, `#sidebarBody`, `.panel-section`), `#civPanel` civilization stats (project sprite, resource/custom/recipe/rule chip lists, progress bar, bench groups) |
 | 3 | `css/agents.css` | `#agentList`, `#agentRollup`, `#agentDetail`, `#agentFollowBtn`, `.agents-panel-head`, the deceased-agents modal (`#deadAgentsBtn`/`#deadAgentsModal`/`#deadAgentsDialog`/`#deadAgentsList`) |
-| 4 | `css/council.css` | Council transcript modal, `#worldLoading`, conversation/activity/chronicle lists (`#convList`/`#actList`/`#chronicleList`), council banner/panel (`#councilBanner`, `.council-card`, `#councilHistory`), the Daily Council Assembly modal (`#councilAssemblyModal` and its canvas/tally/transcript rules) |
+| 4 | `css/council.css` | Council transcript modal, `#worldLoading`, conversation/activity/chronicle/decision-audit lists (`#convList`/`#actList`/`#chronicleList`/`#decisionAuditAgentList`/`#decisionAuditRecent`), council banner/panel (`#councilBanner`, `.council-card`, `#councilHistory`), the Daily Council Assembly modal (`#councilAssemblyModal` and its canvas/tally/transcript rules) |
 | 5 | `css/divine.css` | Divine Console bottom bar and modal (`.divine-bar`, `.gbtn`, `.modal`, every `.divine-*`/`.god-sight-*` rule), `#tooltip`, `#godPublicBanner`, `.chronicle-presentation-thunder` |
 | 6 | `css/responsive.css` | The two `@media (max-width: …)` blocks (900px and 620px breakpoints) |
 
@@ -665,7 +722,7 @@ earlier one, never the reverse.
 ## viewer/*.js: split viewer client script
 
 `simulation/viewer.js` was split (Phase 4 of the file-modularization plan)
-into 16 plain files, loaded via ordered `<script>` tags in `index.html`
+into 17 plain files, loaded via ordered `<script>` tags in `index.html`
 (after `sprites/*.js`, in the same relative position the single
 `viewer.js` tag occupied before) and served from fixed Flask routes under
 `/viewer/<name>.js` (see [12-ops.md](12-ops.md)). There is no bundler and no
@@ -683,18 +740,19 @@ move, no logic changed.
 | 2 | `viewer/state.js` | World snapshot: `MOCK_STATE`, module-level `world`, `mergeStateDelta()`, districts cache (`districtsData`/`districtsKey`/`districtsEpoch`), `getDistricts`/`findDistrictBounds`/`getDistrictBounds` |
 | 3 | `viewer/render.js` | Convenience accessors (`getAgents`/`getCiv`/etc.) plus drawing: terrain cache build (`buildTerrainCache`), season/night/golden-hour/weather overlays, `drawWorld`, per-agent/structure drawing (`drawAgent`, `drawStructureWithShadow`, hit-flash) |
 | 4 | `viewer/sidebar.js` | Sidebar render: `renderSidebar()`, `ACTION_LABELS`/`humanizeAction`, benchmarks, agent detail/rollup/panel, deceased-agents modal, founding/disaster banners, `renderWorldClockHud` |
-| 5 | `viewer/council.js` | Council panel (`renderCouncil`), council transcript modal (`openCouncilTranscript`), Daily Council Assembly modal, settlements |
-| 6 | `viewer/minimap.js` | Minimap render (`renderMinimap`) and click/drag-to-navigate |
-| 7 | `viewer/polling.js` | `/state` polling (`pollState`), `applyFlags`, social-tie/wildlife/shipment drawing (`drawSocialTies`, `drawWildlife`, `drawShipments`) |
-| 8 | `viewer/controls.js` | Pause/Resume/Reset controls (`postControl`, `syncPauseButton`, `doReset`), reset keyboard shortcut |
-| 9 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
-| 10 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
-| 11 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
-| 12 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers |
-| 13 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
-| 14 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
-| 15 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
-| 16 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`) |
+| 5 | `viewer/decision-audit.js` | Decision audit panel: `pollDecisionAudit()`/`renderDecisionAuditPanel()` — dedicated `GET /decision-audit` poll (`DECISION_AUDIT_POLL_MS`), per-agent mismatch aggregates + optional `recent[]` drill-down; pure renderer |
+| 6 | `viewer/council.js` | Council panel (`renderCouncil`), council transcript modal (`openCouncilTranscript`), Daily Council Assembly modal, settlements |
+| 7 | `viewer/minimap.js` | Minimap render (`renderMinimap`) and click/drag-to-navigate |
+| 8 | `viewer/polling.js` | `/state` polling (`pollState`), `applyFlags`, social-tie/wildlife/shipment drawing (`drawSocialTies`, `drawWildlife`, `drawShipments`) |
+| 9 | `viewer/controls.js` | Pause/Resume/Reset controls (`postControl`, `syncPauseButton`, `doReset`), reset keyboard shortcut |
+| 10 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
+| 11 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
+| 12 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
+| 13 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers |
+| 14 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
+| 15 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
+| 16 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
+| 17 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`, `pollDecisionAudit()`) |
 
 ## Civ-1 physical props
 

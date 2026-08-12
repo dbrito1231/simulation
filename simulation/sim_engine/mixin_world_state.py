@@ -147,12 +147,12 @@ class _WorldStateMixin:
             self._dirty_this_frame.add(f"t:{key}")
 
     # --- logging helpers (mirror pushActivity / pushCommunication) ---
-    def _push_activity(self, line):
+    def _push_activity(self, line, decision_id=None):
         self.activityLog.insert(0, line)
         del self.activityLog[30:]
         self._mark_top_dirty("activity")
         try:
-            self.d["log_activity"](line, self.frameTick)
+            self.d["log_activity"](line, self.frameTick, decision_id=decision_id)
         except Exception:
             pass
 

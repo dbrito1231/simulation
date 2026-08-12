@@ -141,10 +141,13 @@ class SessionLogger:
             # Logging must never break the simulation.
             pass
 
-    def log_activity(self, message, frame_tick=None):
-        self._append(self.activity_path, {
+    def log_activity(self, message, frame_tick=None, decision_id=None):
+        record = {
             "type": "activity", "message": message, "frame_tick": frame_tick,
-        })
+        }
+        if decision_id:
+            record["decision_id"] = decision_id
+        self._append(self.activity_path, record)
 
     def log_conversation(self, sender, recipient, message, frame_tick=None,
                          kind="speech", outcome=None):

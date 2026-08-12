@@ -471,29 +471,43 @@ rule adherence, meme adoption, memory-store size — see
 [09-systems-society.md](09-systems-society.md)). For full determinism
 without an Ollama dependency, use the smoke scripts below instead.
 
+## Decision audit — log reading and scoring
+
+`GET /decision-audit` reads only the active `SessionLogger`'s `llm.jsonl` and
+`activity.jsonl`. It joins `decision._decision_id` to `decision_id`, excludes
+`decision._fallback == true`, classifies the reasoning text into the first
+matching action category, and scores the recorded action as a match or
+mismatch against that category's allowed actions. Per-agent rows are ordered
+by mismatch rate then mismatch count; recent scored comparisons are newest
+first and bounded. The parsed pair is cached by each source's path, size, and
+mtime; a changed source invalidates the pair so subsequent polls read current
+records. This route and its cache never mutate world state or logs.
+
 ## Viewer static assets
 
-The thin viewer loads a few files from the Flask app beside `index.html`
+The thin viewer loads 18 fixed JavaScript files from the Flask app beside `index.html`
 (see [04-http-api.md](04-http-api.md)):
 
 | Path | File | Notes |
 |---|---|---|
-| `/viewer/setup.js` | `simulation/viewer/setup.js` | Required — viewer 1/16: boot/canvas setup, zoom, feature flags |
-| `/viewer/state.js` | `simulation/viewer/state.js` | Required — viewer 2/16: world snapshot (`MOCK_STATE`, `world`), delta merge, districts cache |
-| `/viewer/render.js` | `simulation/viewer/render.js` | Required — viewer 3/16: convenience accessors + drawing (terrain cache, weather/night overlays, agents, structures) |
-| `/viewer/sidebar.js` | `simulation/viewer/sidebar.js` | Required — viewer 4/16: sidebar render (Civilization/Agents panels, `ACTION_LABELS`, benchmarks, world clock HUD) |
-| `/viewer/council.js` | `simulation/viewer/council.js` | Required — viewer 5/16: Council panel, Council Assembly modal, settlements |
-| `/viewer/minimap.js` | `simulation/viewer/minimap.js` | Required — viewer 6/16: minimap render + navigation |
-| `/viewer/polling.js` | `simulation/viewer/polling.js` | Required — viewer 7/16: `/state` polling, flag sync, social ties/wildlife/shipment drawing |
-| `/viewer/controls.js` | `simulation/viewer/controls.js` | Required — viewer 8/16: Pause/Resume/Reset controls |
-| `/viewer/renderloop.js` | `simulation/viewer/renderloop.js` | Required — viewer 9/16: `tick`/`tickBody` render loop |
-| `/viewer/divine-bootstrap.js` | `simulation/viewer/divine-bootstrap.js` | Required — viewer 10/16: Divine Console state, DOM refs, feature registry/guide, agent/pin selects |
-| `/viewer/divine-auth-sight.js` | `simulation/viewer/divine-auth-sight.js` | Required — viewer 11/16: Divine Console auth/fetch plumbing, Sight overlays/diff, bar effects/pips, preview controller, favorites |
-| `/viewer/divine-modal.js` | `simulation/viewer/divine-modal.js` | Required — viewer 12/16: Divine Console bottom bar/modal/tabs, tooltip engine, preview→apply generic wiring |
-| `/viewer/divine-sight-voice.js` | `simulation/viewer/divine-sight-voice.js` | Required — viewer 13/16: Sight tab render + checkpoint restore, Voice presets |
-| `/viewer/divine-voice.js` | `simulation/viewer/divine-voice.js` | Required — viewer 14/16: Voice tab (proclamation/providence/private omen, whisper/crowd/dream, bargain/oracle/architect) |
-| `/viewer/divine-miracles-story.js` | `simulation/viewer/divine-miracles-story.js` | Required — viewer 15/16: Miracles tab, shared modifier editor, Story/Compile/Laws tabs |
-| `/viewer/divine-history.js` | `simulation/viewer/divine-history.js` | Required — viewer 16/16: History power tools, gate/passive refresh, public banner, `renderDivineConsole` entry point, poll/render loop kickoff |
+| `/viewer/setup.js` | `simulation/viewer/setup.js` | Required — boot/canvas setup, zoom, feature flags |
+| `/viewer/state.js` | `simulation/viewer/state.js` | Required — world snapshot (`MOCK_STATE`, `world`), delta merge, districts cache |
+| `/viewer/render.js` | `simulation/viewer/render.js` | Required — convenience accessors + drawing (terrain cache, weather/night overlays, agents, structures) |
+| `/viewer/sidebar.js` | `simulation/viewer/sidebar.js` | Required — sidebar render (Civilization/Agents panels, `ACTION_LABELS`, benchmarks, world clock HUD) |
+| `/viewer/decision-audit.js` | `simulation/viewer/decision-audit.js` | Required — Decision Audit panel poll and render; read-only `/decision-audit` consumer |
+| `/viewer/council.js` | `simulation/viewer/council.js` | Required — Council panel, Council Assembly modal, settlements |
+| `/viewer/minimap.js` | `simulation/viewer/minimap.js` | Required — minimap render + navigation |
+| `/viewer/polling.js` | `simulation/viewer/polling.js` | Required — `/state` polling, flag sync, social ties/wildlife/shipment drawing |
+| `/viewer/anomaly.js` | `simulation/viewer/anomaly.js` | Required — anomaly radar and console read-only `/anomalies` consumer |
+| `/viewer/controls.js` | `simulation/viewer/controls.js` | Required — Pause/Resume/Reset controls |
+| `/viewer/renderloop.js` | `simulation/viewer/renderloop.js` | Required — `tick`/`tickBody` render loop |
+| `/viewer/divine-bootstrap.js` | `simulation/viewer/divine-bootstrap.js` | Required — Divine Console state, DOM refs, feature registry/guide, agent/pin selects |
+| `/viewer/divine-auth-sight.js` | `simulation/viewer/divine-auth-sight.js` | Required — Divine Console auth/fetch plumbing, Sight overlays/diff, bar effects/pips, preview controller, favorites |
+| `/viewer/divine-modal.js` | `simulation/viewer/divine-modal.js` | Required — Divine Console bottom bar/modal/tabs, tooltip engine, preview→apply generic wiring |
+| `/viewer/divine-sight-voice.js` | `simulation/viewer/divine-sight-voice.js` | Required — Sight tab render + checkpoint restore, Voice presets |
+| `/viewer/divine-voice.js` | `simulation/viewer/divine-voice.js` | Required — Voice tab (proclamation/providence/private omen, whisper/crowd/dream, bargain/oracle/architect) |
+| `/viewer/divine-miracles-story.js` | `simulation/viewer/divine-miracles-story.js` | Required — Miracles tab, shared modifier editor, Story/Compile/Laws tabs |
+| `/viewer/divine-history.js` | `simulation/viewer/divine-history.js` | Required — History power tools, gate/passive refresh, public banner, `renderDivineConsole` entry point, poll/render loop kickoff |
 | `/css/base.css` | `simulation/css/base.css` | Required — stylesheet 1/6: reset, `#wrap`/`#canvasWrap`/`#world`, map controls, `#worldClockHud`, `#minimap` |
 | `/css/panels.css` | `simulation/css/panels.css` | Required — stylesheet 2/6: `#sidebar`/`#convPanel` shared chrome, `#civPanel` civilization stats |
 | `/css/agents.css` | `simulation/css/agents.css` | Required — stylesheet 3/6: `#agentList`/`#agentRollup`/`#agentDetail`, deceased-agents modal |
@@ -531,6 +545,7 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 | `contract_smoke.py` | No | Emergence Breakthroughs F3.2 — deterministic contracts/escrow smoke: flag-off apply no-op, coin conservation across offer/fulfill/default/expiry (`_total_tracked_coin`), open contracts + escrow save/restore round-trip. Run: `uv run python scripts/contract_smoke.py`. |
 | `soak_monitor.py` | No (tails a live session's existing logs) | Read-only Always-on-PIANO soak observer. At start selects the newest session directory, tails its `llm.jsonl` and `benchmarks.jsonl`, prints one progress line every 60 seconds (elapsed, decision count/p50, module failures), and writes `simulation/logs/soak-<label>.json`. The summary separates decision records from module records; reports decision p50/p90, error/fallback rates, literal `module_pulse_work`, note-age and pulse observations, plus three decision prompt module-report samples. It selects `module_refresh_failures` (always-on, rate against dispatched pulse work) or `piano_module_drops` (flag-off, rate against per-module latency counts when emitted, otherwise successful `module_total` plus drops), exposing metric name/count/attempts/rate. Usage: `uv run python scripts/soak_monitor.py --label attempt2 [--minutes 45]`. |
 | `idea07_anomaly_radar_smoke.py` | No | Deterministic smoke for the anomaly radar (`ANOMALY_RADAR_ENABLED`, docs/plans/idea-07-anomaly-radar/plan.md, expanded coverage per docs/plans/idea-07b-anomaly-console/plan.md): flag-off `GET /anomalies` no-op shape (`{ok: true, enabled: false, anomalies: []}`); flag-on detection of each resolved anomaly kind — `range_break` per-metric session max/min breaks across several of the 12 `RANGE_BREAK_METRICS` allowlist metrics (not `specialization_entropy` alone), confirming a non-allowlisted monotonic counter (e.g. `memory_store_size`) produces **no** `range_break`; `new_rule_kind` (a `rule_kind_diversity` record introducing a rule kind not seen earlier in the same run); and `schism` (a synthetic `metric: "schism"` benchmark record) — plus the `severity` field: magnitude-scaled tiers (`low`/`medium`/`high` by `break_amount / prior_range` thresholds, including the `prior_range == 0` degenerate case forced to `medium`) for `range_break`, and the fixed `high`/`low` values for `schism`/`new_rule_kind` respectively — via `server.app.test_client()` against a running `sim_engine`/`server` import, same pattern as `testament_smoke.py`/`contract_smoke.py`. No Ollama call. Run: `uv run python scripts/idea07_anomaly_radar_smoke.py`. |
+| `idea10_decision_audit_smoke.py` | No | Deterministic decision-audit join/scoring smoke, including matched and mismatched pairs, fallback exclusion, cache invalidation, and the disabled response shape. Run: `uv run python scripts/idea10_decision_audit_smoke.py`. |
 | `tom_contention_soak.py` | Yes (starts/stops native `simulation/server.py` twice; Ollama recommended) | F2 Theory of Mind contention gate orchestrator: refuses if Docker `gitserv-sim` is running, any native `simulation/server.py` or soak harness (`tom_contention_soak`/`soak_monitor`) is active, or port `SIM_PORT` (default 5001) is occupied/listening; runs matched native server soaks flag-off then `SIM_THEORY_OF_MIND=1`, each observed by `soak_monitor.py` (`--label tom-baseline` / `tom-flagon`). Starts the server with `sys.executable` (not `uv run`) and stops via process-tree kill (`taskkill /T /F` on Windows, process-group signals on Unix) plus a sweep of orphan `simulation/server.py` PIDs — terminating only the `uv` wrapper on Windows leaves a child `python.exe` serving stale `/state` (wrong `THEORY_OF_MIND_ENABLED` on the flag-on phase). Between phases waits until `/state` is unreachable (hard-fail on timeout); after each start hard-asserts `config.flags.THEORY_OF_MIND_ENABLED` via `/state` matches the phase (`False` baseline, `True` flag-on) and ties readiness to a new log session before `soak_monitor` runs. On exit/failure, `cleanup_all_native_sim_servers` kills native servers and port listeners. Writes per-phase `simulation/logs/soak-tom-baseline.json` and `soak-tom-flagon.json`, combined `simulation/logs/tom-contention-soak-result.json`, and progress to `simulation/logs/tom-contention-soak.log`. `--flagon-only` skips baseline (requires existing `soak-tom-baseline.json`), reruns flag-on only, and rewrites the combined result merging preserved baseline + new flagon. Does not flip `THEORY_OF_MIND_ENABLED` default in code. Usage: `uv run python scripts/tom_contention_soak.py [--minutes 45]` or `--flagon-only`. |
 
 `tom_contention_soak.py` process hygiene: always stop native soak servers with
