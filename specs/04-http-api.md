@@ -65,6 +65,7 @@ per-file detail.
 | `/control/god/apply` | POST | Apply an exact previewed command (requires God auth when `GOD_AUTH_REQUIRED`) | `{previewId, requestId}` | `engine.god_apply(previewId, requestId)` |
 | `/control/god/cancel` | POST | Cancel an active omen/providence/timed event (requires God auth when `GOD_AUTH_REQUIRED`) | `{targetId}` | `engine.god_cancel(targetId)` |
 | `/control/god/compile` | POST | Optional Phase 8: compile free operator prose into a DRAFT `story_event` preview (requires God auth when `GOD_AUTH_REQUIRED`; also requires `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`, otherwise a clean rejection) | `{prose}` (string, up to `GOD_COMPILER_PROSE_MAX_CHARS = 800` chars) | `engine.god_compile_prose(prose)` — `{compileOk, previewId, commandDigest, previewOutcome, normalizedCommand, reversibilityClass, expiresAt}` or `{compileOk: false, reason}` |
+| `/anomalies` | GET | Anomaly radar (idea-07): read-side, server-side reader over the current run's `benchmarks.jsonl`, gated by `ANOMALY_RADAR_ENABLED` (see [01-architecture.md](01-architecture.md)) | — | see "Anomaly radar" below |
 
 `/agent/think` is legacy: the server-authoritative engine never calls it over
 HTTP. Instead, `_ENGINE_DEPS["llm_decide"]` (server.py:2604-2633) is wired
@@ -364,6 +365,88 @@ for the model-routing and concurrency-pool contract.
 render or hide its Compile tab without probing `/control/god/compile`
 directly; `enabled` already folds both `GOD_MODE_ENABLED` and
 `GOD_COMPILER_ENABLED` together.
+
+## Anomaly radar (idea-07)
+
+`GET /anomalies` is a **read-only** route (docs/plans/idea-07-anomaly-radar/plan.md
+§2). It adds no engine state and no `/state` key — `simulation/sim_engine/mixin_decisions.py`
+and `mixin_snapshot.py` are untouched (Answers 1, 5). The engine is not
+modified; the route is purely a server-side reader.
+
+**Gate:** `ANOMALY_RADAR_ENABLED` (`sim_engine/constants.py`, default `True` —
+see [01-architecture.md](01-architecture.md)'s flag index). Because the flag
+gates only this route/reader and no engine mechanic, and `mixin_snapshot.py`
+is out of scope for this feature, the flag's on/off state is **not** present
+in `/state` `config.flags`. Instead the route's own response carries it (per
+plan §6):
+
+- **Flag off:** `{ok: true, enabled: false, anomalies: []}` — a clean no-op
+  shape, not a 404/disabled error.
+- **Flag on:** `{ok: true, enabled: true, anomalies: [...]}`.
+
+**Detection source (Answers 1-2).** The handler reads a single thing,
+scoped to the *current* server process's own run — no cross-run tailing of
+older `simulation/logs/<timestamp>/` directories:
+
+1. The current run's `benchmarks.jsonl`, located via the existing
+   module-level `session_logger` reference (`session_logger.benchmark_path`
+   / `session_logger.dir`, `simulation/_server/logging_session.py`) — the
+   same in-process reference `server.py` already holds, not a fresh
+   directory discovery/glob. Records already flushed to disk are visible;
+   `log_benchmark`'s in-memory buffer (`BENCHMARK_BUFFER_MAX`, see
+   [12-ops.md](12-ops.md)) flushes on its existing schedule — this route adds
+   no new forced flush.
+
+All three detected anomaly kinds, including schism, come from this single
+source: no live-`SimEngine`/`civilization["chronicle"]` access and no
+`self.lock` acquisition is needed. Schism already writes a `metric: "schism"`
+record to `benchmarks.jsonl` on every occurrence, independent of
+`_sample_benchmarks()`'s periodic sampling — `_execute_schism`
+(`simulation/sim_engine/mixin_governance_culture.py:486-491`) calls
+`self._log_benchmark("schism", len(agents), {"parent": ..., "child": ...,
+"belief": ..., "rule": ...})` directly, gated by `SCHISM_ENABLED`/
+`BENCHMARKS_ENABLED` (both default True), not by `CULTURE_ENABLED` (which
+gates only the separate chronicle push a few lines earlier). This makes the
+schism source consistent with the other two kinds — a pure
+`benchmarks.jsonl` read.
+
+**Detected anomaly kinds (Answers 2-4; no other kind is in scope — an
+"unusual death cluster" from the original idea text was never answered in
+plan §2 and is not implemented):**
+
+| `kind` | Source | Detection rule | Answer |
+|---|---|---|---|
+| `range_break` | `benchmarks.jsonl`, `metric: "specialization_entropy"` records | Fires when a sampled `specialization_entropy` value exceeds every prior value seen so far **this run** (a new session-lifetime max) or falls below every prior value seen so far this run (a new session-lifetime min). No computed theoretical entropy ceiling; no bound recomputed as `EMERGENT_ROLES` adds roles. | §2 Answer 3 |
+| `new_rule_kind` | `benchmarks.jsonl`, `metric: "rule_kind_diversity"` records, `detail.kinds` | Fires on the first time a rule kind appears in `detail.kinds` that has not appeared in any earlier `rule_kind_diversity` record this run (mirrors `civilization["ruleKindsEverEnacted"]`). No per-rule-id tracking; no proposer-origin (LLM vs. deterministic auto-proposed) distinction. | §2 Answer 4 |
+| `schism` | `benchmarks.jsonl`, `metric: "schism"` records | Every `metric: "schism"` record is reported — written directly by `_execute_schism` on every schism, independent of `_sample_benchmarks()`. | §2 Answer 2 |
+
+**Response shape.** Each entry in `anomalies` is:
+
+```
+{timestamp, metric, kind, value, detail?}
+```
+
+- `timestamp` — the record's `frame_tick` field, from the `benchmarks.jsonl`
+  record, for all three kinds (including `schism`). This keeps `timestamp`
+  one consistent type (frame tick, not wall-clock `ts`) across all three
+  kinds, matching every other frame-tick-based field in `/state`.
+- `metric` — `"specialization_entropy"` (`range_break`), `"rule_kind_diversity"`
+  (`new_rule_kind`), or `"schism"` (`schism`).
+- `value` — the triggering value: the `specialization_entropy` float
+  (`range_break`), the new rule kind string (`new_rule_kind`), or the
+  `schism` record's `value` field (agent count in the seceding cluster,
+  `schism`).
+- `detail` (optional) — kind-specific extra context, e.g. `{direction: "max"|"min"}`
+  for `range_break`, or the `schism` record's own `detail`
+  (`{parent, child, belief, rule}`) for `schism`.
+
+No pagination/`since` cursor: the route recomputes the full anomaly list for
+the current run's `benchmarks.jsonl` on every request (stateless server-side
+reader, no new persisted detection state — Answer 1).
+
+**Consumer:** the viewer's anomaly panel (see
+[11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)), polling
+this route on its own cadence separate from `/state`.
 
 ## Logging endpoints: fire-and-forget contract
 

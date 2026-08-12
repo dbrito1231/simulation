@@ -139,7 +139,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 54 module-level flags, sim_engine.py)
+## Flag index (complete — 55 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -205,6 +205,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `GOD_AUTH_REQUIRED` | False (env-backed, `SIM_GOD_AUTH`; enable via `1`/`true`/`yes`/`on`) | yes | [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_COMPILER_ENABLED` | False (env-backed, `SIM_GOD_COMPILER`) | no (advertised only via `/control/god/capabilities`'s `compiler.enabled`, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_DEJA_VU_REPLAY` | False (env-backed, `SIM_GOD_DEJA_VU_REPLAY`) | yes | [02](02-engine-core.md), [04](04-http-api.md), [12](12-ops.md) |
+| `ANOMALY_RADAR_ENABLED` | True | no (own state carried by `GET /anomalies`'s `enabled` field, not `config.flags` — the engine is not modified, so there is no `/state` key to echo it into) | [04](04-http-api.md), [12](12-ops.md) |
 
 `civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
 Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder

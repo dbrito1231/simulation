@@ -164,6 +164,25 @@
   #actList li, #chronicleList li { padding: 3px 0; }
   #chronicleList .chronicle-kind { color: #d9b96e; font-weight: 600; }
   #chronicleList .chronicle-frame { color: #777; font-size: 10px; }
+  /* Anomaly radar panel (idea-07, ANOMALY_RADAR_ENABLED) -- same list
+     styling family as #chronicleList; hidden via inline display:none in
+     index.html/viewer/anomaly.js when GET /anomalies reports enabled: false. */
+  #anomalyPanel { flex-shrink: 0; }
+  #anomalyList {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 160px;
+    overflow-y: auto;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #aaa;
+  }
+  #anomalyList li { padding: 3px 0; }
+  #anomalyList .anomaly-kind { color: #e37e7e; font-weight: 600; }
+  #anomalyList .anomaly-metric { color: #999; }
+  #anomalyList .anomaly-value { color: #e3c87e; }
+  #anomalyList .anomaly-frame { color: #777; font-size: 10px; }
   /* --- Phase D: council banner + Council panel (lives in the left convPanel column) --- */
   #councilBanner {
     position: fixed; top: 18px; left: 50%; transform: translateX(-50%);

@@ -24,6 +24,7 @@ __all__ = [
     "MEMORY_ENABLED",
     "WIKI_MEMORY",
     "TESTAMENT_ENABLED",
+    "ANOMALY_RADAR_ENABLED",
     "THEORY_OF_MIND_ENABLED",
     "PEER_MODEL_MAX_PEERS",
     "PEER_MODEL_FIELD_CHAR_CAP",
@@ -500,6 +501,13 @@ WIKI_MEMORY = True
 # memoryWiki (no new LLM call site). Meaningful only with WIKI_MEMORY on.
 # Default on; set False for byte-identical baseline revert.
 TESTAMENT_ENABLED = True
+# idea-07 (docs/plans/idea-07-anomaly-radar/plan.md): gates ONLY the
+# server-side GET /anomalies route/reader (simulation/server.py) that reads
+# the current run's benchmarks.jsonl -- no engine mechanic references this
+# flag, no new persisted civilization state, no /state key (Answer 1 in the
+# plan). Default on; set False to disable the route (it still responds with
+# {ok: true, enabled: false, anomalies: []}, never a 404/disabled error).
+ANOMALY_RADAR_ENABLED = True
 # Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
 # module inside the existing fan-out (not an extra call per turn). Advisory
 # prompt context only — no deterministic behavior acts on peerModel. Default

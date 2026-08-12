@@ -122,6 +122,14 @@
       <h2>Chronicle</h2>
       <ul id="chronicleList"></ul>
     </section>
+    <!-- Anomaly radar (idea-07, ANOMALY_RADAR_ENABLED): pure renderer over
+         GET /anomalies, polled on its own cadence -- see
+         specs/11-viewer.md "Anomaly panel". Hidden when the route reports
+         enabled: false rather than showing a stale/empty list. -->
+    <section class="panel-section" id="anomalyPanel" style="display:none">
+      <h2>Anomaly radar</h2>
+      <ul id="anomalyList"></ul>
+    </section>
     </div>
   </aside>
 </div>
@@ -1032,6 +1040,7 @@
 <script src="viewer/council.js"></script>
 <script src="viewer/minimap.js"></script>
 <script src="viewer/polling.js"></script>
+<script src="viewer/anomaly.js"></script>
 <script src="viewer/controls.js"></script>
 <script src="viewer/renderloop.js"></script>
 <script src="viewer/divine-bootstrap.js"></script>

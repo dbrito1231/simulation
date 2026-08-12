@@ -307,6 +307,61 @@ time-limited "under construction" visual state would require either a new
 per-frame cache-bust condition or extra state tracked outside that cache —
 deferred as out of scope for this phase.
 
+## Anomaly panel (`ANOMALY_RADAR_ENABLED`)
+
+A dedicated panel (docs/plans/idea-07-anomaly-radar/plan.md §2 Answer 6)
+listing recent anomalies detected by the read-only anomaly radar
+(`GET /anomalies`, see
+[04-http-api.md](04-http-api.md#anomaly-radar-idea-07)). Each row shows the
+three fields the route returns per entry: **timestamp** (engine frame tick),
+**metric** (`specialization_entropy` / `rule_kind_diversity` / `schism`), and
+**value** (the triggering number, new rule-kind string, or the schism
+record's agent-count value — all sourced from `benchmarks.jsonl`, including
+`schism`, which is never read from the chronicle).
+
+**Own poll cadence, not `/state`.** This feature adds no `/state` key
+(Answers 1, 5) — the panel polls `GET /anomalies` on its own `setInterval`,
+independent of `pollState()`'s `STATE_POLL_MS` cadence and independent of
+`pollDistricts()`'s `DISTRICTS_POLL_MS` cadence (see "Polling and render
+loop" above). It does not block or gate on the `/state` poll succeeding.
+
+**Implementation.** `viewer/anomaly.js` (new file, loaded after
+`viewer/polling.js` in `index.html`) owns the whole panel: it fires
+`pollAnomalies()` immediately on load, then every `ANOMALY_POLL_MS` (5000ms —
+slower than `STATE_POLL_MS`'s 100ms, since anomalies are rare events, and
+independent of `DISTRICTS_POLL_MS`'s 3000ms). The panel markup is
+`<section id="anomalyPanel"><h2>Anomaly radar</h2><ul id="anomalyList">...`,
+a sibling of `#chronicleLog` inside the sidebar's `.panel-section` list in
+`index.html`, styled in `css/council.css` alongside `#chronicleList`'s rules.
+Each row renders `kind` (human label: "Range break" / "New rule kind" /
+"Schism"), `metric`, and `value`, plus `timestamp` as `frame <n>` — same
+"newest first" ordering as `#chronicleList`. A `JSON.stringify(anomalies)`
+key-diff (same technique `#chronicleList` uses for `world.chronicle`) skips
+re-render when the list is unchanged between polls.
+
+**Flag gating is different from every other flagged panel in this file.**
+Every other flag-gated element above (e.g. the Founding banner) reads its
+gate from `world.config.flags.<FLAG>` inside `applyFlags`, because that flag
+is echoed in `/state`. `ANOMALY_RADAR_ENABLED` is **not** echoed in
+`config.flags` (see [01-architecture.md](01-architecture.md)'s flag index) —
+per plan §6, its on/off state is carried by `GET /anomalies`'s own `enabled`
+field instead. The panel therefore determines its own visibility from the
+most recent `/anomalies` response (`enabled: false` → panel hidden / empty
+list `{ok: true, enabled: false, anomalies: []}`), not from
+`world.config.flags`. Concretely: `renderAnomalies()` in `viewer/anomaly.js`
+sets `#anomalyPanel`'s inline `style.display` to `"none"` when `data.enabled`
+is falsy and to `""` otherwise; the panel starts hidden
+(`style="display:none"` in `index.html`) until the first successful poll
+confirms the flag is on, so a slow first response never briefly shows a
+stale/empty list as if the feature were on.
+
+**No client-side detection logic.** The panel only renders the `anomalies`
+array the route already computed; it performs no threshold comparison or
+first-seen tracking itself — that would violate the pure-renderer contract
+(no simulation/detection logic in the browser). It is purely a list render,
+same discipline as the Chronicle panel reads its
+`world.chronicle` array.
+
 ## Daily Council Assembly window
 
 `#councilAssemblyModal` is a sibling of the existing invention-council

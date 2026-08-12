@@ -397,6 +397,36 @@ hands off into Story form fields plus the sticky preview strip so the
 operator can Apply without re-Previewing. Default remains **off**
 (`GOD_COMPILER_ENABLED` false at import unless the env var is set).
 
+## Anomaly radar log reading (`ANOMALY_RADAR_ENABLED`, idea-07)
+
+`GET /anomalies` (see [04-http-api.md](04-http-api.md#anomaly-radar-idea-07))
+is a server-side reader, not a new writer — it adds no new JSONL stream and
+no new `SessionLogger` method. It reads a single existing source:
+
+- **`benchmarks.jsonl`** — the current run's own file, found via the
+  in-process `session_logger.benchmark_path` / `session_logger.dir`
+  reference (`simulation/_server/logging_session.py`, constructed once at
+  server import — see "SessionLogger" above), the same reference
+  `/council-llm-log`'s "prefer the live session" path and
+  `scripts/soak_monitor.py` use to locate a session's logs, except this
+  route never falls back to scanning `simulation/logs/<timestamp>/` for
+  **older** sessions the way `/council-llm-log` does — `frame_tick` anomaly
+  detection is scoped to the current process's own run only, by design
+  (plan §2 Answer 1). A restart starts a fresh session directory and
+  therefore a fresh anomaly history; there is no cross-run tailing.
+
+All three detected anomaly kinds, including schism, come from this one
+source — no live-`SimEngine`/`civilization["chronicle"]` access, no
+`self.lock` acquisition. `_execute_schism`
+(`simulation/sim_engine/mixin_governance_culture.py:486-491`) already writes
+a `metric: "schism"` record to `benchmarks.jsonl` directly on every schism,
+independent of `_sample_benchmarks()`'s periodic sampling loop, gated by
+`SCHISM_ENABLED`/`BENCHMARKS_ENABLED` (plan §2 Answer 2 — corrected from an
+earlier draft of this plan that assumed schism was only in the chronicle).
+
+No new persisted `civilization` state, no `_sample_benchmarks()` change, no
+save/restore migration — the engine itself is not modified by this feature.
+
 ## Debugging workflow
 
 There is **no automated test suite or linter** in this repo. Verification is
@@ -472,6 +502,7 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 | `testament_smoke.py` | No | Emergence Breakthroughs F1 — deterministic Testament smoke: flag-off shape (no testament ring / no death merge), deathbed wiki fold + dedupe + `WIKI_SECTION_CHAR_CAP`, ring cap at `TESTAMENT_CAP`, newborn `memoryWiki` inheritance from parents + newest testament lines, bounded `format_testament_prompt_line` slice, testament save/restore round-trip. Run: `uv run python scripts/testament_smoke.py`. |
 | `contract_smoke.py` | No | Emergence Breakthroughs F3.2 — deterministic contracts/escrow smoke: flag-off apply no-op, coin conservation across offer/fulfill/default/expiry (`_total_tracked_coin`), open contracts + escrow save/restore round-trip. Run: `uv run python scripts/contract_smoke.py`. |
 | `soak_monitor.py` | No (tails a live session's existing logs) | Read-only Always-on-PIANO soak observer. At start selects the newest session directory, tails its `llm.jsonl` and `benchmarks.jsonl`, prints one progress line every 60 seconds (elapsed, decision count/p50, module failures), and writes `simulation/logs/soak-<label>.json`. The summary separates decision records from module records; reports decision p50/p90, error/fallback rates, literal `module_pulse_work`, note-age and pulse observations, plus three decision prompt module-report samples. It selects `module_refresh_failures` (always-on, rate against dispatched pulse work) or `piano_module_drops` (flag-off, rate against per-module latency counts when emitted, otherwise successful `module_total` plus drops), exposing metric name/count/attempts/rate. Usage: `uv run python scripts/soak_monitor.py --label attempt2 [--minutes 45]`. |
+| `idea07_anomaly_radar_smoke.py` | No | Deterministic smoke for the anomaly radar (`ANOMALY_RADAR_ENABLED`, docs/plans/idea-07-anomaly-radar/plan.md): flag-off `GET /anomalies` no-op shape (`{ok: true, enabled: false, anomalies: []}`); flag-on detection of each resolved anomaly kind — `range_break` (a synthetic `specialization_entropy` benchmark record exceeding the prior session max/min), `new_rule_kind` (a `rule_kind_diversity` record introducing a rule kind not seen earlier in the same run), and `schism` (a synthetic `metric: "schism"` benchmark record) — via `server.app.test_client()` against a running `sim_engine`/`server` import, same pattern as `testament_smoke.py`/`contract_smoke.py`. No Ollama call. Run: `uv run python scripts/idea07_anomaly_radar_smoke.py`. |
 | `tom_contention_soak.py` | Yes (starts/stops native `simulation/server.py` twice; Ollama recommended) | F2 Theory of Mind contention gate orchestrator: refuses if Docker `gitserv-sim` is running, any native `simulation/server.py` or soak harness (`tom_contention_soak`/`soak_monitor`) is active, or port `SIM_PORT` (default 5001) is occupied/listening; runs matched native server soaks flag-off then `SIM_THEORY_OF_MIND=1`, each observed by `soak_monitor.py` (`--label tom-baseline` / `tom-flagon`). Starts the server with `sys.executable` (not `uv run`) and stops via process-tree kill (`taskkill /T /F` on Windows, process-group signals on Unix) plus a sweep of orphan `simulation/server.py` PIDs — terminating only the `uv` wrapper on Windows leaves a child `python.exe` serving stale `/state` (wrong `THEORY_OF_MIND_ENABLED` on the flag-on phase). Between phases waits until `/state` is unreachable (hard-fail on timeout); after each start hard-asserts `config.flags.THEORY_OF_MIND_ENABLED` via `/state` matches the phase (`False` baseline, `True` flag-on) and ties readiness to a new log session before `soak_monitor` runs. On exit/failure, `cleanup_all_native_sim_servers` kills native servers and port listeners. Writes per-phase `simulation/logs/soak-tom-baseline.json` and `soak-tom-flagon.json`, combined `simulation/logs/tom-contention-soak-result.json`, and progress to `simulation/logs/tom-contention-soak.log`. `--flagon-only` skips baseline (requires existing `soak-tom-baseline.json`), reruns flag-on only, and rewrites the combined result merging preserved baseline + new flagon. Does not flip `THEORY_OF_MIND_ENABLED` default in code. Usage: `uv run python scripts/tom_contention_soak.py [--minutes 45]` or `--flagon-only`. |
 
 `tom_contention_soak.py` process hygiene: always stop native soak servers with
