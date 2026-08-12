@@ -3,7 +3,7 @@
 The Flask route surface: every endpoint the browser or external tools call,
 what it does, and its request/response shape.
 
-**Canonical for:** the full route table (59 routes), `/state` top-level
+**Canonical for:** the full route table (60 routes), `/state` top-level
 payload key inventory, server startup/shutdown behavior. **See also:**
 [specs/01-architecture.md](01-architecture.md) (data flow, thin-viewer
 contract), [specs/03-cognition.md](03-cognition.md) (what `run_agent_decision`
@@ -13,7 +13,7 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 
 ## Route table
 
-59 routes total in `simulation/server.py`: 27 from their own `@app.route`
+60 routes total in `simulation/server.py`: 28 from their own `@app.route`
 decorator, plus 32 more registered programmatically by three small
 `add_url_rule` loops — `_register_sprite_route()` (called once per file in
 `_SPRITE_FILES`, 8 iterations, serving `/sprites/<name>.js`),
@@ -21,10 +21,10 @@ decorator, plus 32 more registered programmatically by three small
 serving `/css/<name>.css`), and `_register_viewer_route()` (called once per
 file in `_VIEWER_FILES`, 18 iterations, serving `/viewer/<name>.js`) — added
 by the Phase 2 (sprites), Phase 3 (CSS), and Phase 4 (viewer.js)
-file-modularization splits. Of the 59, 6 are the `/control/god/*` routes
+file-modularization splits. Of the 60, 6 are the `/control/god/*` routes
 added in Phase 2 of Sovereign God mode (all `@app.route`-decorated); the
-other 53 are always-registered non-god routes (27 decorated minus the 6 god
-ones = 21, plus the 32 `add_url_rule` routes = 53). The god routes are registered
+other 54 are always-registered non-god routes (28 decorated minus the 6 god
+ones = 22, plus the 32 `add_url_rule` routes = 54). The god routes are registered
 unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
 (`constants.py:644`) is configured at startup and, when `GOD_AUTH_REQUIRED` is
 True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
