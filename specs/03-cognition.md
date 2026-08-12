@@ -5,7 +5,8 @@ decision validation/fallback, model routing, and retry/degradation behavior.
 
 **Canonical for:** all Ollama call settings (models, timeouts, sampling,
 token budgets), `DECISION_SCHEMA`/structured-output mode, prompt template
-sections, `normalize_decision`/`role_fallback_action` rules, model routing +
+sections, `normalize_decision`/`role_fallback_action` rules, decision-audit
+correlation id (`_decision_id` minting), model routing +
 high-stakes policy, retry/degradation ladders, concurrency/context-sizing
 constants. **See also:** [specs/01-architecture.md](01-architecture.md) (data
 flow, flag index), [specs/02-engine-core.md](02-engine-core.md) (tick/think
@@ -1002,6 +1003,52 @@ attempted).
 and stamps `decision["_fallback"] = True` on every return path — one wrapper
 covers all branches. Inert for `apply_decision()` but greppable in `llm.jsonl`;
 key for same-turn retry (trigger 2) and terminal candidate-choice step.
+
+## Decision audit correlation id (`DECISION_AUDIT_ENABLED`)
+
+When `DECISION_AUDIT_ENABLED` is on (default), each successful
+`run_agent_decision()` turn that reaches the final `decision` dict — immediately
+**after** `DECISION_SCHEMA` validation/normalization and the
+`synthesize_divine_response(score_belief_pitch_decision(...))` pipeline, and
+**immediately before** the terminal `log_lm(...)` call that writes the
+`llm.jsonl` record (`server.py:2593-2594`) — receives a freshly minted
+per-decision correlation id.
+
+**Mint site.** One id per logged decision, stamped in `run_agent_decision`'s
+success path only (the same call site that passes `decision=decision` into
+`log_lm`). Error-only returns (`{"error": …, "action": "rest"}`) and paths
+that never produce a normalized decision dict for logging do not mint an id.
+This mirrors the established internal-field pattern used by `_fallback`
+(`simulation/_server/decision_validation.py:550-566`): added to the Python
+`decision` dict **after** schema validation, never part of
+`DECISION_SCHEMA`/`SYSTEM_PROMPT`, never sent to or requested from the model.
+
+**Key name.** `_decision_id` — underscore-prefixed internal field on the
+`decision` dict (alongside `_fallback`). Value: a unique string (UUID4 hex,
+implementation choice). When the flag is off, `run_agent_decision` does not
+stamp `_decision_id` at all.
+
+**Threading to `activity.jsonl`.** The engine's `apply_decision()` reads
+`decision.get("_decision_id")` at its single unconditional tail call
+`self._push_activity(summary)` (`simulation/sim_engine/mixin_decisions.py:1257`)
+and passes it through `_push_activity(..., decision_id=…)` →
+`log_activity(..., decision_id=…)`. Only decision-outcome activity lines carry
+the id; every other `_push_activity` call site omits the parameter unchanged.
+The logged `activity.jsonl` field name is top-level `decision_id` (no
+underscore — it is a log-record field, not a schema decision property).
+
+**Coexistence.** `_decision_id` / `decision_id` are optional: absent on records
+from before the feature shipped, from flag-off runs, or from non-decision
+activity lines. Readers treat a missing id as uncorrelated, not an error. The
+id is minted per call and is not persisted in `state.db`.
+
+**Slim-log sufficient.** The audit reader uses default slim `llm.jsonl` records
+(`decision.reasoning` + `decision.action`); it never requires
+`SIM_LLM_LOG_FULL=1`.
+
+See [12-ops.md](12-ops.md#record-shapes) for both log-stream field shapes and
+[04-http-api.md](04-http-api.md#decision-audit-route) for the reader route's
+scoring semantics.
 
 **Four server-side cognition flags.** `DECISION_RETRY_ENABLED`,
 `FALLBACK_AI_CHOICE_ENABLED`, `FALLBACK_AI_CHOICE_TIMEOUT_S`, and

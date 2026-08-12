@@ -139,7 +139,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 54 module-level flags, sim_engine.py)
+## Flag index (complete — 55 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -205,6 +205,18 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `GOD_AUTH_REQUIRED` | False (env-backed, `SIM_GOD_AUTH`; enable via `1`/`true`/`yes`/`on`) | yes | [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_COMPILER_ENABLED` | False (env-backed, `SIM_GOD_COMPILER`) | no (advertised only via `/control/god/capabilities`'s `compiler.enabled`, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_DEJA_VU_REPLAY` | False (env-backed, `SIM_GOD_DEJA_VU_REPLAY`) | yes | [02](02-engine-core.md), [04](04-http-api.md), [12](12-ops.md) |
+| `DECISION_AUDIT_ENABLED` | True | no | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
+
+`DECISION_AUDIT_ENABLED` gates **both** engine-side correlation-id minting
+(`run_agent_decision` → `llm.jsonl` `decision._decision_id` and
+`apply_decision` → `activity.jsonl` `decision_id`) **and** the dedicated
+`/decision-audit` reader route. When off, neither log stream carries the field
+and the route returns `{enabled: false, …}` — a true no-op on both write and
+read paths, not merely a disabled panel. The flag is **not** echoed in `/state`
+`config.flags`; the viewer learns on/off state from the route's own `enabled`
+field (same pattern as idea-07's dedicated-route viewer echo). Whether an env
+override (e.g. `SIM_DECISION_AUDIT`) is wired is an implementer-phase choice,
+documented in [03-cognition.md](03-cognition.md) once made.
 
 `civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
 Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder

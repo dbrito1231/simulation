@@ -3,7 +3,7 @@
 The Flask route surface: every endpoint the browser or external tools call,
 what it does, and its request/response shape.
 
-**Canonical for:** the full route table (55 routes), `/state` top-level
+**Canonical for:** the full route table (56 routes), `/state` top-level
 payload key inventory, server startup/shutdown behavior. **See also:**
 [specs/01-architecture.md](01-architecture.md) (data flow, thin-viewer
 contract), [specs/03-cognition.md](03-cognition.md) (what `run_agent_decision`
@@ -21,10 +21,10 @@ decorator, plus 30 more registered programmatically by three small
 serving `/css/<name>.css`), and `_register_viewer_route()` (called once per
 file in `_VIEWER_FILES`, 16 iterations, serving `/viewer/<name>.js`) — added
 by the Phase 2 (sprites), Phase 3 (CSS), and Phase 4 (viewer.js)
-file-modularization splits. Of the 55, 6 are the `/control/god/*` routes
+file-modularization splits. Of the 56, 6 are the `/control/god/*` routes
 added in Phase 2 of Sovereign God mode (all `@app.route`-decorated); the
-other 49 are always-registered non-god routes (25 decorated minus the 6 god
-ones = 19, plus the 30 `add_url_rule` routes = 49). The god routes are registered
+other 50 are always-registered non-god routes (26 decorated minus the 6 god
+ones = 20, plus the 30 `add_url_rule` routes = 50). The god routes are registered
 unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
 (`constants.py:644`) is configured at startup and, when `GOD_AUTH_REQUIRED` is
 True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
@@ -54,6 +54,7 @@ per-file detail.
 | `/memory/clean` | POST | Dedupe/trim the memory store | `{frame_tick?}` | `{ok, removed, size}` |
 | `/agent/think` | POST | **Legacy** — calls `run_agent_decision()` directly | full think-payload dict (see specs/03) | validated decision dict |
 | `/council-llm-log` | GET | Slim decision records (`llm.jsonl`) for a council frame window (blueprint pitches/verdicts only). **Scans the live session's `llm.jsonl` first**; only reads older retained session directories when the requested `[start_frame, end_frame]` is not fully covered by the live file's frame range (`frame_tick` is monotonic across restarts, but each session only spans frames recorded while that server run was alive — a past council window may fall entirely in an older session). Out-of-range files are skipped using cached per-file `(min_frame, max_frame)` when possible. Matches from all scanned directories are merged and re-sorted by `frame_tick` | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
+| `/decision-audit` | GET | Read-only decision-intent audit: joins current session `llm.jsonl` decisions to matching `activity.jsonl` outcomes via `_decision_id`/`decision_id`, scores action-category match/mismatch, aggregates per agent. Gated by `DECISION_AUDIT_ENABLED` on both minting and this route — see **Decision audit route** below | — | See **Decision audit route** below |
 | `/state` | GET | World snapshot for the thin viewer (full or delta via `?since=`) | query param `since` (int, optional) — client's last applied `frameTick`; omit or `0` for full | See **/state delta protocol** below and key inventory |
 | `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected). Supports conditional polls via `districtsEpoch` | query param `since` (int, optional) — last seen `epoch` from a prior response | **First / gap:** `{districts: [...], roadNodes: {...}, roadEdges: [...], epoch: int}`. **Unchanged:** when `since == engine.districtsEpoch`, HTTP 200 with tiny body `{unchanged: true, epoch: int}` (no district/road payload). `districtsEpoch` bumps on district founding, tile place/remove, terrain dig/plant, road-graph change, architect paint/revert, restore, and reset |
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
@@ -364,6 +365,89 @@ for the model-routing and concurrency-pool contract.
 render or hide its Compile tab without probing `/control/god/compile`
 directly; `enabled` already folds both `GOD_MODE_ENABLED` and
 `GOD_COMPILER_ENABLED` together.
+
+## Decision audit route
+
+`GET /decision-audit` — dedicated reader for the idea-10 "Why did you do
+that?" self-model-quality audit. Read-only over the current session's
+`llm.jsonl` and `activity.jsonl`; never mutates engine state or logs. Uses
+the default slim `llm.jsonl` shape only (`decision.reasoning` +
+`decision.action`); never requires `SIM_LLM_LOG_FULL=1`.
+
+**Flag gate.** Controlled by `DECISION_AUDIT_ENABLED`
+(`simulation/sim_engine/constants.py`, default `True`). When off, the route
+returns HTTP 200 with `{enabled: false, agents: [], recent: []}` and performs
+no log read or scoring — matching the write-path kill switch that stops
+minting `_decision_id`/`decision_id` entirely. The flag is **not** echoed in
+`/state` `config.flags`; the viewer reads `enabled` from this response
+(following the idea-07 dedicated-route viewer-echo pattern).
+
+**Request.** No query parameters or body.
+
+**Response (enabled).**
+
+```json
+{
+  "enabled": true,
+  "session_id": "<current SessionLogger session id>",
+  "agents": [
+    {
+      "agent_name": "Sage",
+      "scored": 5,
+      "matches": 4,
+      "mismatches": 1,
+      "mismatch_rate": 0.2,
+      "excluded_fallback": 2,
+      "uncorrelated": 0,
+      "unclassified": 1
+    }
+  ],
+  "recent": [
+    {
+      "decision_id": "<uuid>",
+      "agent_name": "Sage",
+      "frame_tick": 1234,
+      "action": "collect_resource",
+      "reasoning_category": "gather",
+      "score": "match",
+      "activity_message": "Sage gathered wood."
+    }
+  ]
+}
+```
+
+Field semantics:
+
+- `agents[]` — per-agent aggregates over correlated, scored records in this
+  session, ranked by `mismatch_rate` descending then `mismatches` descending.
+  `mismatch_rate = mismatches / scored` (0 when `scored == 0`).
+- `recent[]` — bounded list of the most recent scored comparisons (newest
+  first), for drill-down in the viewer panel. `score` is `"match"`,
+  `"mismatch"`, or omitted/null for unclassified/uncorrelated entries if
+  surfaced for debugging.
+- `excluded_fallback` — count of `llm.jsonl` records dropped because
+  `decision._fallback == True` before scoring.
+- `uncorrelated` — records with no `_decision_id` or no matching
+  `activity.jsonl` line.
+- `unclassified` — correlated non-fallback records whose `reasoning` matched
+  no category keyword list.
+
+**Response (disabled).**
+
+```json
+{
+  "enabled": false,
+  "agents": [],
+  "recent": []
+}
+```
+
+**Scoring semantics** (action-category rule, fallback exclusion, category→action
+mapping table, join algorithm): [12-ops.md](12-ops.md#decision-audit--log-reading-pattern-and-scoring-semantics).
+Correlation-id minting/threading: [03-cognition.md](03-cognition.md#decision-audit-correlation-id-decision_audit_enabled).
+
+**Viewer.** [11-viewer.md](11-viewer.md#decision-audit-panel) — polls this route
+on its own cadence; no client-side scoring.
 
 ## Logging endpoints: fire-and-forget contract
 

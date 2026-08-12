@@ -14,8 +14,17 @@ import json
 import os
 import re
 import signal
+import sys
 import threading
+import uuid
 from datetime import datetime, timezone
+
+# run_agent_decision() is defined before the late sim_engine import below; pull
+# DECISION_AUDIT_ENABLED from constants directly so id minting can gate there.
+_sys_path = os.path.dirname(os.path.abspath(__file__))
+if _sys_path not in sys.path:
+    sys.path.insert(0, _sys_path)
+from sim_engine.constants import DECISION_AUDIT_ENABLED  # noqa: E402
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -63,6 +72,7 @@ from _server.model_routing import (
     EXTRA_THINKING_PER_WINDOW, EXTRA_THINKING_WINDOW_S,
     is_high_stakes_turn, resolve_high_stakes, model_for_decision,
 )
+from _server.decision_audit import build_decision_audit
 from _server.logging_session import SessionLogger
 from _server.memory_store import (
     MemoryStore, embed_text, _cosine, _stable_hash, is_scaffold_text,
@@ -2590,6 +2600,9 @@ def run_agent_decision(data):
             agent_data,
         )
 
+        if DECISION_AUDIT_ENABLED:
+            decision["_decision_id"] = uuid.uuid4().hex
+
         log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=error_kind,
                fallback_extra=fallback_extra)
         return decision
@@ -2887,6 +2900,19 @@ def council_llm_log():
                 path, start_frame, end_frame, agent_set))
     entries.sort(key=lambda e: e.get("frame_tick") or 0)
     return jsonify({"entries": entries})
+
+
+@app.route("/decision-audit")
+def decision_audit():
+    """Read-only decision-intent audit (idea-10). Joins llm.jsonl to activity.jsonl."""
+    if not DECISION_AUDIT_ENABLED:
+        return jsonify({"enabled": False, "agents": [], "recent": []})
+    return jsonify(build_decision_audit(
+        session_logger.llm_path,
+        session_logger.activity_path,
+        session_logger.session_id,
+        enabled=True,
+    ))
 
 
 @app.route("/state")

@@ -24,6 +24,7 @@ __all__ = [
     "MEMORY_ENABLED",
     "WIKI_MEMORY",
     "TESTAMENT_ENABLED",
+    "DECISION_AUDIT_ENABLED",
     "THEORY_OF_MIND_ENABLED",
     "PEER_MODEL_MAX_PEERS",
     "PEER_MODEL_FIELD_CHAR_CAP",
@@ -500,6 +501,11 @@ WIKI_MEMORY = True
 # memoryWiki (no new LLM call site). Meaningful only with WIKI_MEMORY on.
 # Default on; set False for byte-identical baseline revert.
 TESTAMENT_ENABLED = True
+# Idea-10 "Why did you do that?" audit: mint a per-decision correlation id in
+# run_agent_decision (llm.jsonl decision._decision_id) and thread it through
+# apply_decision's tail activity push (activity.jsonl decision_id). Default on;
+# when off, neither log stream carries the field (see specs/03-cognition.md).
+DECISION_AUDIT_ENABLED = True
 # Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
 # module inside the existing fan-out (not an extra call per turn). Advisory
 # prompt context only — no deterministic behavior acts on peerModel. Default

@@ -106,8 +106,85 @@ as any server restart today).
   bloat, `simulation/_server/memory_store.py:384-388`). It's a per-session **inspection artifact
   only**, never read back by the running server (state.db carries the
   authoritative memory export across restarts).
-- **Record shapes** beyond the common `ts`/`session_id` envelope:
-  - `activity`: `{type, message, frame_tick}`.
+
+## Decision audit — log-reading pattern and scoring semantics
+
+Read-only observability over the **current session's** `llm.jsonl` (default slim
+shape — `decision.reasoning` is always present; full `request`/`response`
+bodies are never required) and `activity.jsonl`. The reader resolves the live
+session directory the same way other session-scoped routes do (the active
+`SessionLogger` path for this server run — not cross-run tailing of retained
+older directories unless explicitly extended later).
+
+**Join.** For each `llm.jsonl` record with a `decision` object carrying
+`_decision_id`, look up the `activity.jsonl` line whose top-level `decision_id`
+equals that value. At most one outcome line is expected per id (the
+`apply_decision()` tail push). Records with no `_decision_id`, or with an id
+that has no matching activity line, are **uncorrelated** — counted separately,
+not scored as match or mismatch.
+
+**Fallback exclusion (Answer 4).** Before any scoring, drop every `llm.jsonl`
+record whose `decision._fallback == True`. These are filtered out of scoring
+entirely (not merely hidden at display time) — deterministic fallback text is
+not model-stated intent.
+
+**Mismatch rule (Answer 3).** Action-category match only — **not** keyword
+overlap between `reasoning` and the confirming `activity.jsonl` `message`.
+Steps per correlated, non-fallback record:
+
+1. Classify `decision.reasoning` (lowercased) into at most one **implied
+   category** using the keyword lists in the table below (first matching
+   category in table order wins).
+2. If no category matches, the record is **unclassified** — excluded from
+   match/mismatch counts (same bucket as uncorrelated for aggregation
+   denominators: it does not increment `scored`).
+3. Otherwise compare the implied category against the actual
+   `decision.action`. **Match** when `action` belongs to that category's action
+   set; **mismatch** when it does not.
+
+**Action-category mapping** (grounded in `DECISION_ACTIONS`, server.py:351-387):
+
+| Implied category | Reasoning keyword triggers (substring, case-insensitive) | Matching `action` values |
+|---|---|---|
+| `gather` | `gather`, `collect`, `forage`, `harvest`, `hunt`, `fish`, `wood`, `stone`, `food`, `resource` | `collect_resource`, `hunt_wildlife` |
+| `build` | `build`, `construct`, `project`, `contribute`, `repair`, `upgrade`, `terraform`, `structure`, `place block`, `dig`, `plant` | `start_project`, `contribute_resources`, `build_structure`, `repair_structure`, `upgrade_structure`, `start_terraform`, `submit_structure_sprite`, `place_block`, `remove_block`, `dig_terrain`, `plant_terrain` |
+| `social` | `talk`, `speak`, `chat`, `help`, `trade`, `confront`, `deliver`, `caravan`, `nearby`, `message` | `talk_to_nearby`, `confront_agent`, `trade_resource`, `deliver_caravan`, `assign_task` |
+| `governance` | `rule`, `vote`, `treaty`, `council`, `repeal`, `law`, `assembly` | `propose_rule`, `vote_rule`, `repeal_rule`, `propose_treaty`, `vote_treaty`, `council_speak`, `council_propose`, `council_vote` |
+| `roles` | `role`, `switch role`, `become`, `elder`, `builder`, `healer`, `blacksmith` | `change_role`, `switch_role`, `propose_role`, `approve_role`, `reject_role` |
+| `invention` | `blueprint`, `recipe`, `design`, `sprite`, `craft`, `invent`, `propose` | `propose_blueprint`, `approve_blueprint`, `reject_blueprint`, `sage_review_blueprint`, `propose_recipe`, `approve_recipe`, `reject_recipe`, `craft_item` |
+| `belief` | `belief`, `faith`, `worship`, `found belief`, `religion` | `found_belief` |
+| `care` | `heal`, `bury`, `funeral`, `sick`, `wounded`, `cemetery` | `heal_agent`, `bury_agent` |
+| `movement` | `move`, `travel`, `district`, `rest`, `pause`, `go to` | `move_to_district`, `move_to_agent`, `rest` |
+| `contracts` | `contract`, `escrow`, `offer work`, `accept contract` | `offer_contract`, `accept_contract` |
+
+**Per-agent aggregation.** Over the current session's correlated, scored
+records (match + mismatch only): `{scored, matches, mismatches,
+mismatch_rate}` where `mismatch_rate = mismatches / scored` (0 when
+`scored == 0`). Also report `{excluded_fallback, uncorrelated, unclassified}`
+counts for transparency. Agents are ranked for display by `mismatch_rate`
+descending, then `mismatches` descending — surfacing agents whose stated
+reasoning categories systematically disagree with actions taken. No fixed
+minimum threshold beyond `scored >= 1` for inclusion in the ranked list.
+
+**Flag-off reader.** When `DECISION_AUDIT_ENABLED` is off, the route returns
+`enabled: false` with empty aggregates — it does not read or score logs.
+
+See [04-http-api.md](04-http-api.md#decision-audit-route) for the HTTP
+contract and [11-viewer.md](11-viewer.md#decision-audit-panel) for the viewer
+panel.
+
+### Record shapes
+
+Record shapes beyond the common `ts`/`session_id` envelope:
+
+  - `activity`: `{type, message, frame_tick}`; when
+    `DECISION_AUDIT_ENABLED` is on and the line comes from
+    `apply_decision()`'s tail `self._push_activity(summary)` call, an optional
+    `decision_id` field is also present — the same string value as
+    `llm.jsonl`'s matching record's `decision._decision_id`. Omitted on all
+    other activity lines (~100 non-decision `_push_activity` call sites) and
+    whenever the flag is off. Older records simply lack the field (no
+    migration).
   - `conversation`: `{type, kind, from, to, message, frame_tick, outcome?}`.
   - `llm`: built per decision call by closure `log_lm(...)`
     (server.py:2038-2078), stripped in `log_lm_exchange` unless full logging
@@ -117,7 +194,11 @@ as any server restart today).
     nudges_total, nudges_dropped, response_preview?, http_status, decision,
     error, module?, timeout_s?}` — omits full `request`/`response` bodies;
     `response_preview` is a short excerpt of assistant text when present.
-    `decision` is the normalized/applied decision or fallback. PIANO module
+    `decision` is the normalized/applied decision or fallback. When
+    `DECISION_AUDIT_ENABLED` is on, successful decision records may also
+    carry `decision._decision_id` (internal, non-schema — see
+    [03-cognition.md](03-cognition.md#decision-audit-correlation-id-decision_audit_enabled)).
+    Absent when the flag is off or on pre-ship records. PIANO module
     timeout records omit bodies by default and may include `module` /
     `timeout_s`. **`SIM_LLM_LOG_FULL=1`** (env, parsed like other `SIM_*`
     truthy flags — `1`/`true`/`yes`/`on`, read once at import) restores the
@@ -472,6 +553,7 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 | `testament_smoke.py` | No | Emergence Breakthroughs F1 — deterministic Testament smoke: flag-off shape (no testament ring / no death merge), deathbed wiki fold + dedupe + `WIKI_SECTION_CHAR_CAP`, ring cap at `TESTAMENT_CAP`, newborn `memoryWiki` inheritance from parents + newest testament lines, bounded `format_testament_prompt_line` slice, testament save/restore round-trip. Run: `uv run python scripts/testament_smoke.py`. |
 | `contract_smoke.py` | No | Emergence Breakthroughs F3.2 — deterministic contracts/escrow smoke: flag-off apply no-op, coin conservation across offer/fulfill/default/expiry (`_total_tracked_coin`), open contracts + escrow save/restore round-trip. Run: `uv run python scripts/contract_smoke.py`. |
 | `soak_monitor.py` | No (tails a live session's existing logs) | Read-only Always-on-PIANO soak observer. At start selects the newest session directory, tails its `llm.jsonl` and `benchmarks.jsonl`, prints one progress line every 60 seconds (elapsed, decision count/p50, module failures), and writes `simulation/logs/soak-<label>.json`. The summary separates decision records from module records; reports decision p50/p90, error/fallback rates, literal `module_pulse_work`, note-age and pulse observations, plus three decision prompt module-report samples. It selects `module_refresh_failures` (always-on, rate against dispatched pulse work) or `piano_module_drops` (flag-off, rate against per-module latency counts when emitted, otherwise successful `module_total` plus drops), exposing metric name/count/attempts/rate. Usage: `uv run python scripts/soak_monitor.py --label attempt2 [--minutes 45]`. |
+| `idea10_decision_audit_smoke.py` | No | Deterministic smoke for the "Why did you do that?" decision audit (idea-10): reads a sample log directory (read-only-tail idiom of `soak_monitor.py`) and verifies join/scoring — matched pair, mismatched pair, `_fallback` record excluded before scoring, flag-off `{enabled: false}` response shape. Run: `uv run python scripts/idea10_decision_audit_smoke.py`. |
 | `tom_contention_soak.py` | Yes (starts/stops native `simulation/server.py` twice; Ollama recommended) | F2 Theory of Mind contention gate orchestrator: refuses if Docker `gitserv-sim` is running, any native `simulation/server.py` or soak harness (`tom_contention_soak`/`soak_monitor`) is active, or port `SIM_PORT` (default 5001) is occupied/listening; runs matched native server soaks flag-off then `SIM_THEORY_OF_MIND=1`, each observed by `soak_monitor.py` (`--label tom-baseline` / `tom-flagon`). Starts the server with `sys.executable` (not `uv run`) and stops via process-tree kill (`taskkill /T /F` on Windows, process-group signals on Unix) plus a sweep of orphan `simulation/server.py` PIDs — terminating only the `uv` wrapper on Windows leaves a child `python.exe` serving stale `/state` (wrong `THEORY_OF_MIND_ENABLED` on the flag-on phase). Between phases waits until `/state` is unreachable (hard-fail on timeout); after each start hard-asserts `config.flags.THEORY_OF_MIND_ENABLED` via `/state` matches the phase (`False` baseline, `True` flag-on) and ties readiness to a new log session before `soak_monitor` runs. On exit/failure, `cleanup_all_native_sim_servers` kills native servers and port listeners. Writes per-phase `simulation/logs/soak-tom-baseline.json` and `soak-tom-flagon.json`, combined `simulation/logs/tom-contention-soak-result.json`, and progress to `simulation/logs/tom-contention-soak.log`. `--flagon-only` skips baseline (requires existing `soak-tom-baseline.json`), reruns flag-on only, and rewrites the combined result merging preserved baseline + new flagon. Does not flip `THEORY_OF_MIND_ENABLED` default in code. Usage: `uv run python scripts/tom_contention_soak.py [--minutes 45]` or `--flagon-only`. |
 
 `tom_contention_soak.py` process hygiene: always stop native soak servers with

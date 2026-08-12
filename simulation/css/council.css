@@ -134,7 +134,7 @@
   #convList .msg { color: #bbb; }
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
-  #activityLog, #chronicleLog {
+  #activityLog, #chronicleLog, #decisionAuditPanel {
     flex: 1 1 0;
     display: flex;
     flex-direction: column;
@@ -151,7 +151,7 @@
     min-height: 0;
     overflow-y: auto;
   }
-  #actList, #chronicleList {
+  #actList, #chronicleList, #decisionAuditAgentList, #decisionAuditRecent {
     list-style: none;
     margin: 0;
     padding: 0;
@@ -161,9 +161,45 @@
     line-height: 1.5;
     color: #aaa;
   }
-  #actList li, #chronicleList li { padding: 3px 0; }
+  #actList li, #chronicleList li, #decisionAuditAgentList li, #decisionAuditRecent li { padding: 3px 0; }
   #chronicleList .chronicle-kind { color: #d9b96e; font-weight: 600; }
   #chronicleList .chronicle-frame { color: #777; font-size: 10px; }
+  #decisionAuditRecentWrap {
+    margin-top: 6px;
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  #decisionAuditRecentWrap summary {
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    color: #ccc;
+    margin-bottom: 4px;
+    outline: none;
+  }
+  #decisionAuditAgentList .decision-audit-agent-name { color: #7ec8e3; font-weight: 600; }
+  #decisionAuditAgentList .decision-audit-rate { color: #e3a87e; font-weight: 600; }
+  #decisionAuditAgentList .decision-audit-empty,
+  #decisionAuditRecent .decision-audit-empty { color: #777; font-style: italic; }
+  #decisionAuditRecent .decision-audit-frame { color: #777; font-size: 10px; }
+  #decisionAuditRecent .decision-audit-action { color: #ccc; }
+  #decisionAuditRecent .decision-audit-category { color: #999; font-size: 11px; }
+  #decisionAuditRecent .decision-audit-msg { color: #aaa; }
+  .decision-audit-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 0 4px;
+    border-radius: 2px;
+    margin: 0 2px;
+    vertical-align: baseline;
+    text-transform: lowercase;
+  }
+  .decision-audit-badge-match { background: #1e3a2a; color: #b3ffcf; border: 1px solid #3a8a5a; }
+  .decision-audit-badge-mismatch { background: #4a1e1e; color: #ffb3b3; border: 1px solid #a24545; }
+  .decision-audit-badge-muted { background: #2a2a35; color: #888; border: 1px solid #3a3a45; }
   /* --- Phase D: council banner + Council panel (lives in the left convPanel column) --- */
   #councilBanner {
     position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
