@@ -80,6 +80,7 @@ const DIVINE_FEATURE_ICONS = {
   story:   '<svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h6v18H6a2 2 0 0 1-2-2z"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/></svg>',
   laws:    '<svg viewBox="0 0 24 24"><path d="M12 3v18M5 7h14M7 7l-3 6h6zM17 7l3 6h-6z"/></svg>',
   history: '<svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>',
+  audit:   '<svg viewBox="0 0 24 24"><path d="M8 4h8v2H8z"/><path d="M6 6h12v14H6z"/><path d="M9 10h6M9 14h4"/></svg>',
   compile: '<svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>',
   anomaly: '<svg viewBox="0 0 24 24"><path d="M12 2l9 18H3z"/><path d="M12 9v5"/><circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none"/></svg>',
 };
@@ -186,6 +187,17 @@ const DIVINE_FEATURES = {
       "Filter by kind, villager, or time; export a Markdown summary for notes.",
       "Re-run fills a form from a past entry — you must Preview again before Apply.",
       "Revoke last cancellable undoes the newest effect that still allows cancel.",
+    ],
+    gated: true,
+  },
+  audit: {
+    title: "Audit",
+    sub: "Full decision pairs with intent and outcome axes.",
+    guide: [
+      "Read-only — unlock required, same gate as History.",
+      "Intent and Outcome are independent axes; ok on Outcome does not mean success.",
+      "Filters apply client-side over the server entry list.",
+      "Sidebar Decision audit stays separate and uses the default route.",
     ],
     gated: true,
   },

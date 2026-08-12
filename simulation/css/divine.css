@@ -129,6 +129,45 @@
   .divine-history-rerun:hover:not(:disabled) { background: #243848; }
   .divine-history-rerun:disabled { opacity: 0.45; cursor: not-allowed; color: #888; }
   .divine-history-rerun-note { font-size: 10px; color: #7a7a88; }
+  .divine-audit-toolbar {
+    margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid #2a2a34;
+  }
+  .divine-audit-filters { align-items: flex-end; }
+  .divine-audit-legend {
+    margin-bottom: 8px; padding: 8px 10px; border: 1px solid #3a3a48; border-radius: 4px;
+    background: rgba(30, 58, 42, 0.25); font-size: 11px; line-height: 1.45; color: #bbb;
+  }
+  .divine-audit-legend-body { display: block; margin-top: 4px; color: #9a9aa8; }
+  .divine-audit-legend code { font-family: ui-monospace, monospace; color: #c9d4ff; }
+  .divine-audit-summary {
+    margin-bottom: 10px; max-height: 160px; overflow: auto;
+    border: 1px solid #2a2a34; border-radius: 4px;
+  }
+  .divine-audit-summary-table {
+    width: 100%; border-collapse: collapse; font-size: 11px; color: #bbb;
+  }
+  .divine-audit-summary-table th,
+  .divine-audit-summary-table td {
+    padding: 4px 6px; border-bottom: 1px solid #22222c; text-align: left;
+  }
+  .divine-audit-summary-table th { color: #9a9aa8; font-weight: 600; position: sticky; top: 0; background: #16161e; }
+  .divine-audit-entries {
+    list-style: none; margin: 0; padding: 0; max-height: min(52vh, 420px); overflow: auto;
+    border: 1px solid #2a2a34; border-radius: 4px;
+  }
+  .divine-audit-entry {
+    padding: 8px 10px; border-bottom: 1px solid #22222c; font-size: 11px; line-height: 1.45; color: #bbb;
+  }
+  .divine-audit-entry:last-child { border-bottom: none; }
+  .divine-audit-entry-head { margin-bottom: 4px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .divine-audit-frame { color: #7a7a88; font-family: ui-monospace, monospace; }
+  .divine-audit-agent { color: #e3c87e; font-weight: 600; }
+  .divine-audit-action { color: #8ed2ed; }
+  .divine-audit-k { color: #7a7a88; margin-right: 4px; }
+  .divine-audit-entry-reasoning { margin-bottom: 2px; white-space: pre-wrap; word-break: break-word; }
+  .divine-audit-entry-meta { margin-bottom: 2px; color: #9a9aa8; }
+  .divine-audit-entry-activity { color: #ccc; white-space: pre-wrap; word-break: break-word; }
+  .divine-audit-empty { padding: 10px; color: #888; font-size: 11px; list-style: none; }
   .divine-row { margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .divine-row label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #9a9aa8; flex: 1 1 auto; }
   .divine-row input[type=text], .divine-row input[type=password], .divine-row input[type=number],

@@ -114,35 +114,32 @@
         <div id="civPending"></div>
       </div>
     </section>
+    <div id="sidebarLogsScroll">
     <section class="panel-section" id="activityLog">
       <h2>Activity</h2>
       <ul id="actList"></ul>
     </section>
-    <section class="panel-section" id="chronicleLog">
-      <h2>Chronicle</h2>
-      <ul id="chronicleList"></ul>
+    <section class="panel-section" id="decisionAuditPanel">
+      <h2>Decision audit</h2>
+      <ul id="decisionAuditAgentList">
+        <li class="decision-audit-empty">Loading audit data…</li>
+      </ul>
+      <details id="decisionAuditRecentWrap" open>
+        <summary>Recent comparisons</summary>
+        <ul id="decisionAuditRecent"></ul>
+      </details>
     </section>
-    <!-- Anomaly radar (idea-07, ANOMALY_RADAR_ENABLED): pure renderer over
-         GET /anomalies, polled on its own cadence -- see
-         specs/11-viewer.md "Anomaly panel". The outer #anomalySection (not
-         the inner <details>) is hidden when the route reports
-         enabled: false rather than showing a stale/empty list, so this
-         does not fight <details>'s own open/closed state with a second
-         competing display:none. -->
     <section class="panel-section" id="anomalySection" style="display:none">
       <details id="anomalyPanel" open>
         <summary>Anomaly radar</summary>
         <ul id="anomalyList"></ul>
       </details>
     </section>
-    <section class="panel-section" id="decisionAuditPanel" style="display:none">
-      <h2>Decision audit</h2>
-      <ul id="decisionAuditAgentList"></ul>
-      <details id="decisionAuditRecentWrap" open>
-        <summary>Recent comparisons</summary>
-        <ul id="decisionAuditRecent"></ul>
-      </details>
+    <section class="panel-section" id="chronicleLog">
+      <h2>Chronicle</h2>
+      <ul id="chronicleList"></ul>
     </section>
+    </div>
     </div>
   </aside>
 </div>
@@ -200,19 +197,15 @@
       <svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>
       <span class="lbl">History</span>
     </button>
-    <!-- Anomaly radar (idea-07b divine-bar button, docs/plans/idea-07b-
-         anomaly-console/plan.md §2 Answer 1): deliberately NOT
-         locked-dependent and NOT disabled, and gated: false in
-         DIVINE_FEATURES.anomaly -- this is the security boundary that
-         keeps it clickable without a god token, unlike every other .gbtn
-         below except unlock. It never calls godApiFetch()/
-         /control/god/*; fetches plain GET /anomalies only. Starts hidden
-         and is shown/hidden by anomaly.js based on that route's own
-         `enabled` field, independent of GOD_MODE_ENABLED_FLAG's show/hide
-         of the whole #divineBar -- see specs/11-viewer.md "Anomaly panel". -->
+    <button type="button" class="gbtn audit locked-dependent" data-feature="audit" data-tab="audit"
+      id="godAuditTabBtn" disabled
+      data-tip='{"t":"Audit","d":"Full decision pairs with intent and outcome axes."}'>
+      <svg viewBox="0 0 24 24"><path d="M8 4h8v2H8z"/><path d="M6 6h12v14H6z"/><path d="M9 10h6M9 14h4"/></svg>
+      <span class="lbl">Audit</span>
+    </button>
     <button type="button" class="gbtn anomaly" data-feature="anomaly" data-tab="anomaly" style="display:none"
-      data-tip='{"t":"Anomaly","d":"Statistical anomalies detected in village metrics: range breaks, new rule kinds, and schisms."}'>
-      <svg viewBox="0 0 24 24"><path d="M12 2l9 18H3z"/><path d="M12 9v5"/><circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none"/></svg>
+      data-tip='{"t":"Anomaly","d":"Statistical anomalies detected in village metrics."}'>
+      <svg viewBox="0 0 24 24"><path d="M12 2l9 18H3z"/><path d="M12 9v5"/></svg>
       <span class="lbl">Anomaly</span>
     </button>
     <!-- Sovereign God mode Optional Phase 8: dual-gated (GOD_MODE_ENABLED
@@ -259,7 +252,7 @@
     <div class="modal-body" id="divineModalBody"></div>
   </div>
 </div>
-<!-- Hidden holding container: all 8 #divineTab-* panels live here at load so getElementById + wireDivineForm still work -->
+<!-- Hidden holding container: all 9 #divineTab-* panels live here at load so getElementById + wireDivineForm still work -->
 <div id="divineTabHold" style="display:none" aria-hidden="true">
         <div class="divine-tab-panel" id="divineTab-unlock">
           <div class="divine-row">
@@ -997,16 +990,46 @@
           <ul id="godHistoryList" class="divine-result"></ul>
         </div>
 
-        <!-- Anomaly radar (idea-07b divine-bar modal view, docs/plans/
-             idea-07b-anomaly-console/plan.md §2 Answers 1-3). Self-contained
-             poll+render pair (anomaly.js) that never touches
-             godCapabilities/godToken/godAuthorized -- unlike every other tab
-             here, its render path does not depend on the auth state
-             machine. Fetches plain GET /anomalies only; never
-             godApiFetch()/`/control/god/*`; writes nothing to
-             divine.jsonl. -->
+        <div class="divine-tab-panel" id="divineTab-audit" style="display:none">
+          <div id="godDecisionAuditToolbar" class="divine-audit-toolbar">
+            <div class="divine-row divine-audit-filters">
+              <label>Agent
+                <input type="search" id="godDecisionAuditAgentFilter" placeholder="name substring" autocomplete="off" />
+              </label>
+              <label>Intent
+                <select id="godDecisionAuditIntentFilter">
+                  <option value="all">All</option>
+                  <option value="match">match</option>
+                  <option value="mismatch">mismatch</option>
+                  <option value="unclassified">unclassified</option>
+                  <option value="uncorrelated">uncorrelated</option>
+                  <option value="fallback">fallback</option>
+                </select>
+              </label>
+              <label>Outcome
+                <select id="godDecisionAuditOutcomeFilter">
+                  <option value="all">All</option>
+                  <option value="ok">ok</option>
+                  <option value="fail">fail</option>
+                  <option value="unknown">unknown</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div id="godDecisionAuditLegend" class="divine-audit-legend">
+            <strong>Two axes (independent):</strong>
+            <span class="divine-audit-legend-body">
+              <strong>Intent</strong> compares reasoning category to the chosen action (match / mismatch / other buckets).
+              <strong>Outcome</strong> reads the activity summary —
+              <code>ok</code> means the engine wrote a summary, not that the action succeeded (e.g. “heads to gather…” is ok).
+            </span>
+          </div>
+          <div id="godDecisionAuditStatus" class="divine-meta"></div>
+          <div id="godDecisionAuditSummary" class="divine-audit-summary"></div>
+          <ul id="godDecisionAuditEntries" class="divine-audit-entries"></ul>
+        </div>
         <div class="divine-tab-panel" id="divineTab-anomaly" style="display:none">
-          <p class="divine-help divine-help-intro">Statistical anomalies detected from this run's benchmark metrics: range breaks, new rule kinds, and schisms. Read-only observability -- not a divine intervention.</p>
+          <p class="divine-help divine-help-intro">Statistical anomalies from this run's benchmark metrics.</p>
           <div id="divineAnomalyGroups"></div>
         </div>
 

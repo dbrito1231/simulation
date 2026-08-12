@@ -560,6 +560,4 @@ pollState();
 setInterval(pollState, STATE_POLL_MS);
 pollDistricts();
 setInterval(pollDistricts, DISTRICTS_POLL_MS);
-pollDecisionAudit();
-setInterval(pollDecisionAudit, DECISION_AUDIT_POLL_MS);
 

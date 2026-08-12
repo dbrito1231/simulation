@@ -2909,13 +2909,18 @@ def anomalies():
 @app.route("/decision-audit")
 def decision_audit():
     """Read-only decision-intent audit (idea-10)."""
+    view = request.args.get("view")
     if not _sim_engine.DECISION_AUDIT_ENABLED:
-        return jsonify({"enabled": False, "agents": [], "recent": []})
+        result = {"enabled": False, "agents": [], "recent": []}
+        if view == "full":
+            result["entries"] = []
+        return jsonify(result)
     return jsonify(build_decision_audit(
         session_logger.llm_path,
         session_logger.activity_path,
         session_logger.session_id,
         enabled=True,
+        view=view,
     ))
 
 
