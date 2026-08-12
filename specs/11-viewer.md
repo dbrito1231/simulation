@@ -1585,6 +1585,49 @@ from the intervention's optional `presentation` field. There is no full-screen
 flash, no forced camera movement, and no banner (or any other public surface)
 for a private omen or private story event.
 
+## World Wiki modal (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan §2 Answers 5, 6.
+
+A new **full-screen modal** (Answer 6), mirroring the existing Council transcript modal
+pattern (`simulation/css/council.css`, `simulation/viewer/council.js`). The wiki modal
+is the first and only viewer consumer of `GET /wiki`.
+
+**Placement and trigger.** "Click a name anywhere, land on its page" — every existing
+name/id render site in the viewer (agent list, structure list, chronicle, council
+transcript, district/settlement panel, etc.) that already displays one of the twelve
+in-scope entity names links into the wiki modal for that entity. The modal is not a
+standalone panel; it overlays the existing viewer when triggered and closes on dismiss
+(same pattern as the Council transcript modal).
+
+**Content.** The modal displays the clicked entity's page: its fields and its
+cross-links (as clickable hyperlinks that navigate to another entity's wiki page within
+the same modal). Covers all twelve entity kinds: agent, structure, belief, rule,
+chronicle event, district, settlement, treaty, resourceRegistry entry, projectRegistry
+entry, recipe, and — on agent pages only — social ties displayed as labeled ally/rival
+links.
+
+**Pure renderer.** The wiki modal is a pure rendering surface — no client-side
+simulation logic, no decisions, no world-state mutation. It reads only from the `GET
+/wiki` JSON payload (Answer 3's server-side cross-link index) and the existing `world`
+snapshot already in `viewer/state.js`. The thin-viewer contract is preserved.
+
+**Live updates (Answer 5).** When the wiki modal is open, the viewer polls `GET /wiki`
+on the same cadence it polls `GET /state` (~10 Hz). The open page re-renders on each
+fresh payload. No separate dirty-tracking; the route returns fresh data on every call.
+
+**Flag echo.** The viewer reads `world.config.flags.WORLD_WIKI_ENABLED` (echoed by the
+server via `_build_snapshot_config()`) to show or hide the wiki trigger UI (e.g. the
+clickable name links and any wiki-open button). When the flag is `false`, no modal is
+shown and no `GET /wiki` polls are sent.
+
+**Viewer files.** The wiki modal implementation lives in new or extended files under
+`simulation/viewer/` and `simulation/css/` (Phase 3 — not in scope for Phase 1 spec
+update). The `simulation/index.html` shell adds the modal markup element alongside the
+existing Council transcript modal. No new `viewer/*.js` or `css/*.css` files are
+registered or listed here yet — that is the Phase 3 implementer's responsibility.
+
+
 ## Active viewer work
 
 Atmosphere pack (Phase 4) shipped lighting v2, seasonal terrain v2, weather

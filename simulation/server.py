@@ -2939,6 +2939,29 @@ def state():
     return jsonify(engine.snapshot_delta(since))
 
 
+def _districts_snapshot_payload(engine):
+    """Shared district/road shallow-copy; must be called under engine.lock.
+
+    Used by districts_js() and world_wiki() to avoid duplicating the inline
+    extraction logic (Phase 2b, idea-09 plan §2 Answer 3 — mechanical move,
+    no new logic). Returns a dict with "districts", "roadNodes", "roadEdges"
+    but WITHOUT the epoch key so callers can add their own context.
+    """
+    c = engine.civilization
+    districts = [
+        {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
+         "bounds": dict(d["bounds"]),
+         "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
+         "tiles": dict(d.get("tiles") or {}),
+         "terrain": dict(d.get("terrain") or {}),
+         "settlementId": d.get("settlementId")}
+        for did, d in c["districts"].items()
+    ]
+    road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
+    road_edges = [list(e) for e in c["roadEdges"]]
+    return {"districts": districts, "roadNodes": road_nodes, "roadEdges": road_edges}
+
+
 @app.route("/districts.js")
 def districts_js():
     """Live districts/roads for the viewer (world-expansion plan). Despite the
@@ -2947,7 +2970,8 @@ def districts_js():
 
     Under the engine lock, read districtsEpoch and either return a tiny
     unchanged body when ?since= matches, or shallow-copy district/road data
-    into plain dicts/lists. JSON assembly happens after the lock is released."""
+    into plain dicts/lists via _districts_snapshot_payload(). JSON assembly
+    happens after the lock is released."""
     since_raw = request.args.get("since")
     since = None
     if since_raw is not None:
@@ -2961,25 +2985,333 @@ def districts_js():
         if since is not None and since == epoch:
             payload = {"unchanged": True, "epoch": epoch}
         else:
-            c = engine.civilization
-            districts = [
-                {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
-                 "bounds": dict(d["bounds"]),
-                 "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
-                 "tiles": dict(d.get("tiles") or {}),
-                 "terrain": dict(d.get("terrain") or {}),
-                 "settlementId": d.get("settlementId")}
-                for did, d in c["districts"].items()
-            ]
-            road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
-            road_edges = [list(e) for e in c["roadEdges"]]
-            payload = {
-                "districts": districts,
-                "roadNodes": road_nodes,
-                "roadEdges": road_edges,
-                "epoch": epoch,
-            }
+            snap = _districts_snapshot_payload(engine)
+            payload = {**snap, "epoch": epoch}
     return jsonify(payload)
+
+
+@app.route("/wiki")
+def world_wiki():
+    """Read-only cross-linked page model for all twelve entity kinds.
+
+    Gated by WORLD_WIKI_ENABLED. Reads the same engine state as /state and
+    /districts.js (via _districts_snapshot_payload) — no mutation, no LLM
+    calls. Entity kinds: agent, structure, belief, rule, chronicle (Phase 2a),
+    plus district, settlement, treaty, resource, project, recipe, and social
+    ties as agent cross-links (Phase 2b).
+
+    Cross-link rules follow the plan's §2 Answer 2 table exactly:
+    structured id-keyed fields only; type/category strings (recipe station,
+    resourceRegistry gatherZone, treaty→settlement) are NOT linked.
+    Settlements/treaties are gated on PATH1_DIPLOMACY_ENABLED.
+    Social ties are gated on SOCIAL_LAYER_ENABLED (surfaced as labeled links
+    on both agent pages they connect, not as standalone pages).
+    """
+    if not _sim_engine.WORLD_WIKI_ENABLED:
+        return jsonify({"ok": False, "reason": "disabled"})
+
+    with engine.lock:
+        c = engine.civilization
+        env_lit_types = engine._env_lit_types() if _sim_engine.ENV_EFFECTS_ENABLED else set()
+        agent_rows = [engine._agent_snapshot_row(a) for a in engine.agents]
+        struct_rows = [
+            engine._structure_snapshot_row(s, env_lit_types, include_sprite=False)
+            for s in c["structures"]
+        ]
+        rules_active = [dict(r) for r in c.get("rules") or []]
+        rules_pending = [dict(r) for r in c.get("pendingRules") or []]
+        constitution = [dict(p) for p in engine._ensure_constitution()]
+        belief_reg = {}
+        if _sim_engine.CULTURE_ENABLED:
+            raw_reg = engine._belief_registry()
+            belief_reg = {bid: dict(e) for bid, e in raw_reg.items()} if isinstance(raw_reg, dict) else {}
+        chronicle_raw = []
+        if _sim_engine.CHRONICLE_ENABLED and _sim_engine.CULTURE_ENABLED:
+            for entry in list((c.get("chronicle") or [])[-_sim_engine.CHRONICLE_CAP:]):
+                if entry.get("kind") in _sim_engine.CHRONICLE_MILESTONE_KINDS:
+                    chronicle_raw.append(dict(entry))
+        # Extended entities (Phase 2b).
+        dist_snap = _districts_snapshot_payload(engine)
+        resource_reg = {rid: dict(d) for rid, d in c["resourceRegistry"].items()}
+        project_reg = {pid: dict(p) for pid, p in c["projectRegistry"].items()}
+        recipe_reg = {}
+        if _sim_engine.CRAFTING_ENABLED:
+            recipe_reg = {
+                rid: {"name": r["name"], "inputs": dict(r["inputs"]), "station": r.get("station")}
+                for rid, r in engine.RECIPES.items()
+            }
+        settlement_rows = []
+        treaty_rows = []
+        if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+            settlement_rows = list(c.get("settlements") or [])
+            treaty_rows = list(c.get("treaties") or [])
+        social_ties = []
+        if _sim_engine.SOCIAL_LAYER_ENABLED:
+            social_ties = engine._social_ties_snapshot()
+
+    # Build name→id lookup for agent relationship cross-links (name-keyed).
+    name_to_id = {row["name"]: row["id"] for row in agent_rows}
+
+    # Agent pages.
+    agent_pages = []
+    for row in agent_rows:
+        aid = row["id"]
+        links = []
+        for tname, valence in (row.get("relationships") or {}).items():
+            tid = name_to_id.get(tname)
+            if tid is not None:
+                links.append({"targetKind": "agent", "targetId": tid, "relation": valence})
+        current_dist = row.get("currentDistrict")
+        if current_dist is not None:
+            links.append({"targetKind": "district", "targetId": current_dist, "relation": "district"})
+        home_dist = row.get("homeDistrict")
+        if home_dist is not None:
+            links.append({"targetKind": "district", "targetId": home_dist, "relation": "homeDistrict"})
+        fields = {
+            "id": aid,
+            "name": row["name"],
+            "role": row["role"],
+            "color": row["color"],
+            "position": {"x": row["x"], "y": row["y"]},
+            "district": current_dist,
+            "homeDistrict": home_dist,
+            "resources": row.get("resources") or {},
+            "hunger": row.get("hunger"),
+            "health": row.get("health"),
+            "incapacitated": row.get("incapacitated"),
+            "beliefs": row.get("beliefs") or [],
+            "lastAction": row.get("lastAction"),
+            "assignedTask": row.get("assignedTask"),
+            "relationships": row.get("relationships") or {},
+            "lastReasoning": row.get("lastReasoning"),
+            "deceased": row.get("deceased", False),
+            "buried": row.get("buried", False),
+        }
+        if row.get("age") is not None:
+            fields["age"] = row["age"]
+        if row.get("lifeStage") is not None:
+            fields["lifeStage"] = row["lifeStage"]
+        if row.get("skills") is not None:
+            fields["skills"] = row["skills"]
+        if row.get("personalityTraits") is not None:
+            fields["personality"] = row["personalityTraits"]
+        agent_pages.append({"id": aid, "kind": "agent", "fields": fields, "links": links})
+
+    # Social tie cross-links on agent pages (SOCIAL_LAYER_ENABLED only).
+    # Each tie is a canonical pair (from, to, valence); the labeled link appears
+    # on both agent pages — no standalone social-tie page kind.
+    if _sim_engine.SOCIAL_LAYER_ENABLED and social_ties:
+        agent_pages_by_id = {p["id"]: p for p in agent_pages}
+        for tie in social_ties:
+            from_id = tie.get("from")
+            to_id = tie.get("to")
+            valence = tie.get("valence")
+            if not from_id or not to_id:
+                continue
+            if from_id in agent_pages_by_id:
+                agent_pages_by_id[from_id]["links"].append(
+                    {"targetKind": "agent", "targetId": to_id, "relation": f"socialTie:{valence}"}
+                )
+            if to_id in agent_pages_by_id:
+                agent_pages_by_id[to_id]["links"].append(
+                    {"targetKind": "agent", "targetId": from_id, "relation": f"socialTie:{valence}"}
+                )
+
+    # Structure pages.
+    structure_pages = []
+    for s in struct_rows:
+        links = []
+        if s.get("homeOf") is not None:
+            links.append({"targetKind": "agent", "targetId": s["homeOf"], "relation": "homeOf"})
+        if s.get("districtId") is not None:
+            links.append({"targetKind": "district", "targetId": s["districtId"], "relation": "districtId"})
+        fields = {
+            "id": s["id"],
+            "type": s["type"],
+            "districtId": s.get("districtId"),
+            "homeOf": s.get("homeOf"),
+            "condition": s.get("condition"),
+            "isRuin": s.get("isRuin", False),
+            "level": s.get("level", 1),
+            "visualTier": s.get("visualTier", 1),
+            "name": s.get("name"),
+        }
+        structure_pages.append({"id": s["id"], "kind": "structure", "fields": fields, "links": links})
+
+    # Belief pages (CULTURE_ENABLED only).
+    belief_pages = []
+    if _sim_engine.CULTURE_ENABLED:
+        for bid, entry in belief_reg.items():
+            fields = {
+                "id": bid,
+                "name": entry.get("name", bid),
+                "tenet": entry.get("tenet", ""),
+                "affinity": entry.get("affinity", []),
+                "author": entry.get("authoredBy"),
+            }
+            belief_pages.append({"id": bid, "kind": "belief", "fields": fields, "links": []})
+
+    # Rule pages (RULES_ENABLED only).
+    rule_pages = []
+    if _sim_engine.RULES_ENABLED:
+        seen_rule_ids = set()
+        for r, status in (
+            [(r, "enacted") for r in rules_active]
+            + [(r, "pending") for r in rules_pending]
+            + [(r, "constitution") for r in constitution]
+        ):
+            rid = r.get("id")
+            if not rid or rid in seen_rule_ids:
+                continue
+            seen_rule_ids.add(rid)
+            fields = {
+                "id": rid,
+                "text": r.get("text", ""),
+                "kind": r.get("kind", ""),
+                "proposedBy": r.get("proposedBy"),
+                "status": status,
+            }
+            if "value" in r:
+                fields["value"] = r["value"]
+            rule_pages.append({"id": rid, "kind": "rule", "fields": fields, "links": []})
+
+    # Chronicle pages (CHRONICLE_ENABLED and CULTURE_ENABLED only).
+    chronicle_pages = []
+    if _sim_engine.CHRONICLE_ENABLED and _sim_engine.CULTURE_ENABLED:
+        for entry in chronicle_raw:
+            frame = entry.get("frame")
+            kind = entry.get("kind", "")
+            cid = f"chronicle_{frame}_{kind}"
+            fields = {
+                "id": cid,
+                "text": entry.get("text", ""),
+                "frame": frame,
+                "kind": kind,
+            }
+            chronicle_pages.append({"id": cid, "kind": "chronicle", "fields": fields, "links": []})
+
+    # District pages (from _districts_snapshot_payload).
+    # Cross-links: settlementId → settlement (structured id field).
+    district_pages = []
+    for d in dist_snap["districts"]:
+        did = d["id"]
+        links = []
+        if d.get("settlementId") is not None:
+            links.append({"targetKind": "settlement", "targetId": d["settlementId"], "relation": "settlementId"})
+        fields = {
+            "id": did,
+            "kind": d["kind"],
+            "tile": d.get("tile"),
+            "label": d.get("label"),
+            "bounds": d.get("bounds"),
+            "settlementId": d.get("settlementId"),
+        }
+        district_pages.append({"id": did, "kind": "district", "fields": fields, "links": links})
+
+    # Settlement pages (PATH1_DIPLOMACY_ENABLED only).
+    # Cross-links: districts[] → district (list of district ids).
+    settlement_pages = []
+    if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+        for s in settlement_rows:
+            sid = s.get("id")
+            if not sid:
+                continue
+            links = [
+                {"targetKind": "district", "targetId": did, "relation": "districts"}
+                for did in (s.get("districts") or [])
+            ]
+            fields = {
+                "id": sid,
+                "name": s.get("name", sid),
+                "districts": list(s.get("districts") or []),
+            }
+            settlement_pages.append({"id": sid, "kind": "settlement", "fields": fields, "links": links})
+
+    # Treaty pages (PATH1_DIPLOMACY_ENABLED only).
+    # No structured settlement id in the enacted treaty shape (plan §2 Answer 2),
+    # so no treaty→settlement cross-link.
+    treaty_pages = []
+    if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+        for t in treaty_rows:
+            tid = t.get("id")
+            if not tid:
+                continue
+            fields = {
+                "id": tid,
+                "name": t.get("name", tid),
+                "value": t.get("value"),
+                "tariff": t.get("tariff", 0),
+                "frame": t.get("frame"),
+            }
+            treaty_pages.append({"id": tid, "kind": "treaty", "fields": fields, "links": []})
+
+    # Resource pages (resourceRegistry — always present).
+    # gatherZone names a district kind/type, not a specific district id —
+    # not linked per plan §2 Answer 2.
+    resource_pages = []
+    for rid, entry in resource_reg.items():
+        fields = {
+            "id": rid,
+            "name": entry.get("name", rid),
+            "gatherZone": entry.get("gatherZone"),
+            "color": entry.get("color"),
+            "crafted": entry.get("crafted", False),
+        }
+        resource_pages.append({"id": rid, "kind": "resource", "fields": fields, "links": []})
+
+    # Project pages (projectRegistry — always present).
+    # Cross-links: needs (keys) → resource.
+    project_pages = []
+    for pid, entry in project_reg.items():
+        links = [
+            {"targetKind": "resource", "targetId": rid, "relation": "needs"}
+            for rid in (entry.get("needs") or {}).keys()
+        ]
+        fields = {
+            "id": pid,
+            "name": entry.get("name", pid),
+            "needs": dict(entry.get("needs") or {}),
+            "visualStyle": entry.get("visualStyle"),
+            "tier": entry.get("tier"),
+        }
+        project_pages.append({"id": pid, "kind": "project", "fields": fields, "links": links})
+
+    # Recipe pages (CRAFTING_ENABLED only).
+    # Cross-links: inputs (keys) → resource; output (recipe id itself) → resource.
+    # station names a structure type, not a specific instance — not linked
+    # per plan §2 Answer 2.
+    recipe_pages = []
+    if _sim_engine.CRAFTING_ENABLED:
+        for rid, r in recipe_reg.items():
+            links = [
+                {"targetKind": "resource", "targetId": res_id, "relation": "inputs"}
+                for res_id in (r.get("inputs") or {}).keys()
+            ]
+            links.append({"targetKind": "resource", "targetId": rid, "relation": "output"})
+            fields = {
+                "id": rid,
+                "name": r.get("name", rid),
+                "inputs": dict(r.get("inputs") or {}),
+                "station": r.get("station"),
+            }
+            recipe_pages.append({"id": rid, "kind": "recipe", "fields": fields, "links": links})
+
+    return jsonify({
+        "ok": True,
+        "pages": {
+            "agent": agent_pages,
+            "structure": structure_pages,
+            "belief": belief_pages,
+            "rule": rule_pages,
+            "chronicle": chronicle_pages,
+            "district": district_pages,
+            "settlement": settlement_pages,
+            "treaty": treaty_pages,
+            "resource": resource_pages,
+            "project": project_pages,
+            "recipe": recipe_pages,
+        },
+    })
 
 
 @app.route("/control/pause", methods=["POST"])

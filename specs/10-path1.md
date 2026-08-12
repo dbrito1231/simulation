@@ -249,6 +249,52 @@ reuse or conflate them.
 unsheltered agent with no active goal is assigned a `seek_shelter` goal
 (`USE_GOALS`) toward the nearest district offering shelter capacity.
 
+## World Wiki — settlement and treaty pages (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan §2 Answers 1, 2, 3.
+
+This section documents the wiki page shapes for the two entity kinds owned by this spec:
+**settlement** and **treaty**. Both are Path 1 diplomacy data
+(`mixin_diplomacy.py`, gated by `path1_on("PATH1_DIPLOMACY_ENABLED")`). Both are
+read-only projections over existing engine state; the wiki route (`GET /wiki`,
+[specs/04-http-api.md](04-http-api.md)) assembles them in-process and omits both
+page kinds when `PATH1_DIPLOMACY_ENABLED` is off.
+
+### Settlement page
+
+Source: `civilization["settlements"]` (`mixin_snapshot.py:230-238`).
+
+Fields projected onto a settlement page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | settlement id | |
+| `name` | `settlement["name"]` | |
+| `districts` | `settlement["districts"]` | list of district ids; links to district pages |
+
+**Structured links** (from the Answer 2 cross-link table):
+
+- `districts[]` items → district pages (each is a district id)
+
+### Treaty page
+
+Source: `civilization["treaties"]` (enacted treaties only). Enacted treaty shape
+(`mixin_diplomacy.py:802-844`): `{id, name, value, tariff, frame}`.
+
+Fields projected onto a treaty page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | treaty id | |
+| `name` | `treaty["name"]` | |
+| `value` | `treaty["value"]` | numeric treaty value |
+| `tariff` | `treaty["tariff"]` | numeric tariff rate |
+| `frame` | `treaty["frame"]` | tick frame enacted |
+
+**No settlement link (Answer 2 — verified).** The enacted treaty shape carries no
+settlement id field. Treaties do not structurally link to settlement pages in v1.
+
+
 ## Historical rationale and verification
 
 The design rationale for this bundle (motivation, phased rollout, original

@@ -389,3 +389,57 @@ Bounded PvP pair cooldowns live on civilization, not on individual agents:
 expires. Populated only after a successful `confront_agent` resolution;
 `restore_state()` `setdefault`s an empty dict. Full combat contract:
 [07-actions.md](07-actions.md) and [09-systems-society.md](09-systems-society.md#bounded-agent-conflict-confront_agent).
+
+## World Wiki — agent page (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan `docs/plans/idea-09-world-wiki/plan.md` §2 Answers 1 and 2.
+
+One page per living or deceased agent. Each page is a read-only projection over
+`agents[]` from `/state`, assembled by the wiki route (`GET /wiki`,
+[specs/04-http-api.md](04-http-api.md)) in-process. Source: per-agent row produced by
+`_agent_snapshot_row()` (`mixin_snapshot.py:113-134`). Zero new world-state mutation.
+
+### Fields projected onto an agent page
+
+| Field | Notes |
+|---|---|
+| `id` | agent id |
+| `name` | display name |
+| `role` | current role slug |
+| `color` | CSS color string |
+| `position` | `{x, y}` current position |
+| `district` | current district id |
+| `homeDistrict` | home (starting) district id |
+| `resources` | held resource dict |
+| `hunger` | current hunger value |
+| `health` | current health value |
+| `incapacitated` | bool — currently collapsed |
+| `beliefs` | agent's belief list |
+| `lastAction` | last action kind string |
+| `assignedTask` | current task assignment, if any |
+| `age` | float age in years — **only when `LIFECYCLE_ENABLED`** |
+| `lifeStage` | `"young"` / `"adult"` / `"elder"` life-stage label — **only when `LIFECYCLE_ENABLED`** |
+| `skills` | skill dict (`SKILL_KINDS`) — **only when `CULTURE_ENABLED`** |
+| `personality` | personality trait list — **only when `CULTURE_ENABLED`** |
+| `deceased` | bool — `true` when `deathFrame` is set |
+| `buried` | bool — `true` when `buried` flag is set |
+| `relationships` | filtered non-neutral ties dict (`ally`/`rival` only, same filtering as `/state`) |
+| `lastReasoning` | last LLM reasoning string, capped to 160 chars; `null` when absent |
+
+### Structured links
+
+From the Answer 2 cross-link table ([specs/04-http-api.md](04-http-api.md#cross-link-table)):
+
+- `relationships` (name-keyed) → agent pages: each key is an agent name that resolves
+  to exactly one agent page.
+- `homeDistrict` / `district` → district page: each is a district id that resolves to
+  exactly one district page.
+
+### Social ties
+
+Social ties (`ally`/`rival` pairs) appear as labeled `links` entries on the two agent
+pages they connect — one entry per pair per page, rendered as a cross-link to the
+other agent's page. They are **not** a standalone page kind. See
+[specs/09-systems-society.md](09-systems-society.md) for the social-tie engine
+mechanics and the `_social_ties_snapshot()` canonicalization contract
+(`mixin_snapshot.py:79-103`). Social tie link data is **not** duplicated in this section.

@@ -293,6 +293,7 @@ class _SnapshotMixin:
                 "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
                 "GOD_AUTH_REQUIRED": GOD_AUTH_REQUIRED,
                 "GOD_DEJA_VU_REPLAY": GOD_DEJA_VU_REPLAY,
+                "WORLD_WIKI_ENABLED": WORLD_WIKI_ENABLED,
             },
         }
 

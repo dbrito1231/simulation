@@ -961,3 +961,76 @@ offerer→acceptor rival hit only when both parties are living (`deathFrame is
 None`); dead-party defaults still refund escrow via `_route_escrow_refund_coin`
 but do not mutate corpse relationships. `MAX_OPEN_CONTRACTS = 20` caps
 simultaneous open+accepted records.
+
+## World Wiki — economy entity pages (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan §2 Answers 1, 2, 3.
+
+This section documents the wiki page shapes for the three entity kinds owned by this
+spec: **resourceRegistry entry**, **projectRegistry entry**, and **recipe**. All are
+read-only projections over existing engine state; the wiki route (`GET /wiki`,
+[specs/04-http-api.md](04-http-api.md)) assembles them in-process.
+
+### resourceRegistry page
+
+Source: `civilization["resourceRegistry"]` (from `mixin_snapshot.py:184-190`, populated
+from `BASE_RESOURCES` / `CRAFTED_RESOURCES`, `constants.py`). One page per entry.
+
+Fields projected onto a resource page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | registry key (e.g. `"wood"`, `"stone"`) | |
+| `name` | registry entry name | |
+| `gatherZone` | `entry["gatherZone"]` | district *kind* string (e.g. `"forest"`) — NOT linked |
+| `color` | `entry["color"]` | hex color string (e.g. `"#4CAF50"`) |
+| `crafted` | `entry.get("crafted", False)` | `True` for crafted resources; defaults `False` for base resources |
+
+**Not linked:** `gatherZone` names a district *kind* (category string), not a specific
+district id — multiple live districts may share the same kind, so there is no
+guaranteed single target page. Auto-linking is excluded per Answer 2's
+kind-vs-instance rule.
+
+### projectRegistry page
+
+Source: `civilization["projectRegistry"]` (from `mixin_snapshot.py:185-188`). One page
+per entry. Projects are funded build-cost recipes (`PROJECT_TEMPLATES`, `constants.py`).
+
+Fields projected onto a project page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | registry key | |
+| `name` | entry name | |
+| `needs` | `{resource_id: qty, ...}` | cost dict; keys are resource ids |
+| `visualStyle` | entry `visualStyle` | |
+| `tier` | entry `tier` | |
+
+**Structured links** (from the Answer 2 cross-link table):
+
+- `needs` keys → resource pages (each key is a resource id from `resourceRegistry`)
+
+### recipe page
+
+Source: `civilization["recipes"]` (from `mixin_snapshot.py:189-190`, seeded from
+`SEED_RECIPES`, `constants.py:1929-1932`). One page per recipe.
+
+Fields projected onto a recipe page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | recipe id (equals the output resource id) | |
+| `name` | `recipe["name"]` | display name |
+| `inputs` | `{resource_id: qty, ...}` | ingredient dict; keys are resource ids |
+| `station` | `recipe["station"]` | structure *type* string (e.g. `"workshop"`) — NOT linked |
+
+**Structured links** (from the Answer 2 cross-link table):
+
+- `output` → resource page — recipe id IS the output resource id; the link target is `rid` (the recipe key) with `relation: "output"`
+- `inputs` keys → resource pages (each key is a resource id)
+
+**Not linked:** `station` names a structure *type* (category string such as
+`"workshop"` or `"forge"`), not a specific built structure instance. Zero, one, or
+many structures of that type may exist at any time, so there is no guaranteed single
+target page. Auto-linking is excluded per Answer 2's kind-vs-instance rule.
+

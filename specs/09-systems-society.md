@@ -936,3 +936,84 @@ When `TESTAMENT_ENABLED`, also samples `cultural_carryover` (oldest surviving
 testament entry's generation gap and `survival_ratio` in `detail`).
 Each metric is written to `SessionLogger`'s `benchmarks` stream via
 `_log_benchmark` — see [12-ops.md](12-ops.md) for the JSONL sink.
+
+## World Wiki — society entity pages (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan §2 Answers 1, 2, 3.
+
+This section documents the wiki page shapes for the four entity kinds owned by this
+spec: **belief**, **rule**, **chronicle event**, and **social tie** (which is not a
+standalone page — see below). All are read-only projections over existing engine state;
+the wiki route (`GET /wiki`, [specs/04-http-api.md](04-http-api.md)) assembles them
+in-process.
+
+### Belief page
+
+Source: `civilization["beliefRegistry"]` (only when `CULTURE_ENABLED`,
+`mixin_snapshot.py:204`). One page per entry (belief/meme).
+
+Fields projected onto a belief page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | belief id | |
+| `name` | `entry["name"]` | |
+| `tenet` | `entry["tenet"]` | text of the belief |
+| `affinity` | `entry["affinity"]` | rule *kind* string (e.g. `"resource_tax"`) — NOT linked |
+| `author` | `entry["author"]` | agent name of the originating agent |
+
+**Not linked:** `affinity` names a rule *kind* (category string), not a specific rule
+instance id. Multiple active, pending, and constitution rules may share the same kind;
+there is no single target page. Auto-linking is excluded per Answer 2's
+kind-vs-instance rule.
+
+### Rule page
+
+Source: `civilization["rules"]`, `civilization["pendingRules"]`, and
+`civilization["constitution"]` (`mixin_snapshot.py:191-193`). One page per entry across
+all three lists. Gated by `RULES_ENABLED`.
+
+Fields projected onto a rule page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | rule id | |
+| `text` | rule text | free prose — not scanned for links |
+| `kind` | rule kind string (e.g. `"resource_tax"`) | category string — NOT linked |
+| `proposedBy` | agent name | |
+| `status` | `"enacted"`, `"pending"`, or `"constitution"` | derived from which list the rule appears in |
+| `value` | numeric modifier | when present |
+
+**Not linked:** rule `kind` is a category string, not an instance id. Rule `text` is
+free prose and is excluded from auto-linking per Answer 2.
+
+### Chronicle event page
+
+Source: top-level `chronicle` (only when `CHRONICLE_ENABLED and CULTURE_ENABLED`,
+`_chronicle_snapshot()`, `mixin_snapshot.py:105-111`): bounded `{text, frame, kind}`
+rows filtered to `CHRONICLE_MILESTONE_KINDS`.
+
+Fields projected onto a chronicle page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | synthesized from `frame` + `kind` (e.g. `"chronicle_1234_district_founded"`) | no persistent chronicle id in engine state |
+| `text` | chronicle `text` | free prose — NOT scanned for links |
+| `frame` | `chronicle["frame"]` | tick frame of the event |
+| `kind` | `chronicle["kind"]` | milestone kind (e.g. `"district_founded"`) |
+
+**Not linked:** `text` is free prose. Auto-linking of chronicle text is excluded per
+Answer 2 ("No free-text scanning of chronicle/reasoning/rule-description strings").
+
+### Social tie — cross-link only, no standalone page
+
+Source: `socialTies` (`_social_ties_snapshot()`, `mixin_snapshot.py:79-103`). Gated by
+`SOCIAL_LAYER_ENABLED`.
+
+Social ties are **not** a thirteenth page kind. The engine server-canonicalizes each
+tie to one entry per pair (sorted `(source_id, target_id)`, valence conflicts resolved
+to `"rival"`). In the wiki, each tie is rendered as a labeled cross-link on **both**
+agent pages it connects — e.g., on agent A's page: `{targetKind: "agent", targetId: B_id, relation: "ally"}`.
+This matches the Answer 2 reconciliation: there is no single tie instance to navigate
+*to*, only a relationship between two agents, each of whom already has their own page.
+

@@ -207,6 +207,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `GOD_DEJA_VU_REPLAY` | False (env-backed, `SIM_GOD_DEJA_VU_REPLAY`) | yes | [02](02-engine-core.md), [04](04-http-api.md), [12](12-ops.md) |
 | `ANOMALY_RADAR_ENABLED` | True | no (own state carried by `GET /anomalies`'s `enabled` field, not `config.flags` — the engine is not modified, so there is no `/state` key to echo it into) | [04](04-http-api.md), [12](12-ops.md) |
 | `DECISION_AUDIT_ENABLED` | True | no (own state carried by `GET /decision-audit`'s `enabled` field, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
+| `WORLD_WIKI_ENABLED` | True | yes | [04](04-http-api.md), [11](11-viewer.md) |
 
 `DECISION_AUDIT_ENABLED` gates both engine-side correlation-id minting
 (`run_agent_decision` to `llm.jsonl` and `apply_decision` to `activity.jsonl`)
