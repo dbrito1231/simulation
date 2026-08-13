@@ -846,6 +846,7 @@ _VIEWER_FILES = (
     "divine-auth-sight.js", "divine-modal.js", "divine-sight-voice.js",
     "divine-voice.js", "divine-miracles-story.js", "divine-history.js",
     "anomaly.js",
+    "world-wiki.js",
 )
 
 
@@ -3122,7 +3123,9 @@ def world_wiki():
     for s in struct_rows:
         links = []
         if s.get("homeOf") is not None:
-            links.append({"targetKind": "agent", "targetId": s["homeOf"], "relation": "homeOf"})
+            # homeOf is stored as agent name; resolve to agent id for cross-link.
+            owner_id = name_to_id.get(s["homeOf"], s["homeOf"])
+            links.append({"targetKind": "agent", "targetId": owner_id, "relation": "homeOf"})
         if s.get("districtId") is not None:
             links.append({"targetKind": "district", "targetId": s["districtId"], "relation": "districtId"})
         fields = {

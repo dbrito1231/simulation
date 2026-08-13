@@ -10,7 +10,7 @@ drawing rules (structure sprite resolution order, seasonal variants).
 **Files:** `simulation/index.html` (markup shell), `simulation/css/*.css`
 (styles, split into 6 ordered files — see "css/*.css: split stylesheet"
 below), `simulation/viewer/*.js` (polling, render loop, sidebar, Divine
-Console; split into 17 ordered files — see "viewer/*.js: split viewer client
+Console, World Wiki; split into 18 ordered files — see "viewer/*.js: split viewer client
 script" below), `simulation/sprites/*.js` (stateless Canvas helpers, split
 into 8 ordered files — see "sprites/*.js: pure stateless drawing" below).
 **See also:** [01-architecture.md](01-architecture.md) for the
@@ -21,7 +21,7 @@ labels.
 
 ## Thin-viewer contract
 
-`simulation/viewer/setup.js` (first of the 17 split viewer files, see
+`simulation/viewer/setup.js` (first of the 18 split viewer files, see
 "viewer/*.js: split viewer client script" below) states the whole viewer's
 contract in a banner comment at the top of the file: it is a **PURE
 RENDERER** — it polls `GET /state`
@@ -799,7 +799,8 @@ earlier one, never the reverse.
 ## viewer/*.js: split viewer client script
 
 `simulation/viewer.js` was split (Phase 4 of the file-modularization plan)
-into 17 plain files, loaded via ordered `<script>` tags in `index.html`
+into 18 plain files (17 original + `world-wiki.js` added in idea-09 Phase 3),
+loaded via ordered `<script>` tags in `index.html`
 (after `sprites/*.js`, in the same relative position the single
 `viewer.js` tag occupied before) and served from fixed Flask routes under
 `/viewer/<name>.js` (see [12-ops.md](12-ops.md)). There is no bundler and no
@@ -830,6 +831,7 @@ move, no logic changed.
 | 15 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
 | 16 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
 | 17 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`). Decision-audit polling starts in `decision-audit.js` itself. |
+| 18 | `viewer/world-wiki.js` | World Wiki modal: `openWorldWiki(kind, id)` global entry point, `fetchWiki()` / `renderWikiModal()` / `renderWikiIndex()` / `renderWikiPageContent()`, back-navigation stack, delegated `.wiki-link` click handler (capture phase, stops propagation). Gated on `WORLD_WIKI_ENABLED_FLAG` (set in `polling.js`). Polls `GET /wiki` every 3 s while modal is open; no polls when closed. Pure renderer — no world-state mutation. |
 
 ## Civ-1 physical props
 
@@ -1613,19 +1615,45 @@ simulation logic, no decisions, no world-state mutation. It reads only from the 
 snapshot already in `viewer/state.js`. The thin-viewer contract is preserved.
 
 **Live updates (Answer 5).** When the wiki modal is open, the viewer polls `GET /wiki`
-on the same cadence it polls `GET /state` (~10 Hz). The open page re-renders on each
-fresh payload. No separate dirty-tracking; the route returns fresh data on every call.
+every 3 s (WIKI_POLL_MS). The open page re-renders on each fresh payload. No separate
+dirty-tracking; the route returns fresh data on every call. Polling stops when the
+modal is closed.
 
 **Flag echo.** The viewer reads `world.config.flags.WORLD_WIKI_ENABLED` (echoed by the
-server via `_build_snapshot_config()`) to show or hide the wiki trigger UI (e.g. the
-clickable name links and any wiki-open button). When the flag is `false`, no modal is
-shown and no `GET /wiki` polls are sent.
+server via `_build_snapshot_config()`), stored as `WORLD_WIKI_ENABLED_FLAG` in
+`viewer/polling.js`. When `false`, no wiki links are rendered and no `GET /wiki` polls
+are sent.
 
-**Viewer files.** The wiki modal implementation lives in new or extended files under
-`simulation/viewer/` and `simulation/css/` (Phase 3 — not in scope for Phase 1 spec
-update). The `simulation/index.html` shell adds the modal markup element alongside the
-existing Council transcript modal. No new `viewer/*.js` or `css/*.css` files are
-registered or listed here yet — that is the Phase 3 implementer's responsibility.
+**Viewer files (Phase 3 implementation).** The wiki modal lives in:
+- `simulation/viewer/world-wiki.js` — all modal logic (file 18 in the viewer split
+  table above). Entry point: global `openWorldWiki(kind, id)`.
+- `simulation/css/council.css` — wiki modal CSS appended to the existing council CSS
+  file (same file that owns `#councilTranscriptModal` and `#councilAssemblyModal`
+  styles).
+- `simulation/index.html` — modal markup `#worldWikiModal` / `#worldWikiDialog`
+  added alongside `#councilTranscriptModal`.
+- `simulation/viewer/polling.js` — `WORLD_WIKI_ENABLED_FLAG` variable + `applyFlags`
+  entry.
+- `simulation/viewer/sidebar.js` — wiki-link chips wired into: agent list rows
+  (`.agent-wiki-btn` chip on each agent name), agent detail relationship chips
+  (resolves peer agent by name via `getAgents()`), rule chips in civ panel, recipe
+  chips in civ panel.
+- `simulation/viewer/council.js` — settlement name links (settlement list) and daily
+  council transcript `ct-who` spans (resolves agent by name via `getAgents()`).
+
+**Click-through wiring.** A capture-phase delegated `click` handler on `document`
+catches all `[data-wiki-kind][data-wiki-id]` elements and calls
+`openWorldWiki(kind, id)`, stopping propagation so existing list-item selection
+handlers are not also triggered. All wiki-linkable elements carry these two
+`data-*` attributes and the `wiki-link` class (for styling).
+
+**Agent → structure → district → settlement chain.** The wiki modal renders
+reverse links: on an agent's page, `viewer/world-wiki.js` scans all structure pages
+in the fetched `/wiki` payload to find those whose `homeOf` link targets this agent,
+and renders them as clickable "Home structure" links. From the structure page, the
+`districtId` forward link goes to a district page; from the district page, the
+`settlementId` link goes to a settlement page. This satisfies the required
+click-through chain without any server-side change.
 
 
 ## Active viewer work

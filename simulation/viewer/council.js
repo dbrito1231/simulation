@@ -231,7 +231,11 @@ function renderDailyCouncilTranscriptEntry(entry) {
   const who = entry.who || entry.proposer || entry.elder || entry.candidate || "Council";
   const text = entry.text || entry.message || entry.title || entry.topic || entry.outcome || entry.type || "event";
   const feeling = entry.feeling ? ` <span class="ct-reasoning">feeling: ${escapeHtml(entry.feeling)}</span>` : "";
-  return `<div class="ct-entry">${time}<span class="ct-who">${escapeHtml(who)}</span>: ${escapeHtml(text)}${feeling}</div>`;
+  const targetAgent = WORLD_WIKI_ENABLED_FLAG ? getAgents().find((a) => a.name === who) : null;
+  const whoHtml = targetAgent
+    ? `<span class="ct-who wiki-link" data-wiki-kind="agent" data-wiki-id="${targetAgent.id}">${escapeHtml(who)}</span>`
+    : `<span class="ct-who">${escapeHtml(who)}</span>`;
+  return `<div class="ct-entry">${time}${whoHtml}: ${escapeHtml(text)}${feeling}</div>`;
 }
 
 function councilEntryTimeLabel(entry, record) {
@@ -382,7 +386,10 @@ function renderSettlements(civ) {
   settlementsMetaEl.textContent = `${settlements.length} settlement(s)${nightNote}`;
   settlementsListEl.innerHTML = settlements.map((s) => {
     const districts = (s.districts || []).length;
-    return `<li><span class="civ-value">${escapeHtml(s.name || s.id)}</span> ` +
+    const nameEl = WORLD_WIKI_ENABLED_FLAG && s.id
+      ? `<span class="wiki-link civ-value" data-wiki-kind="settlement" data-wiki-id="${escapeHtml(String(s.id))}">${escapeHtml(s.name || s.id)}</span>`
+      : `<span class="civ-value">${escapeHtml(s.name || s.id)}</span>`;
+    return `<li>${nameEl} ` +
       `<span class="civ-label">(${districts} district${districts === 1 ? "" : "s"})</span></li>`;
   }).join("");
 }
