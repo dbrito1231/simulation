@@ -124,11 +124,16 @@
     </section>
     <!-- Anomaly radar (idea-07, ANOMALY_RADAR_ENABLED): pure renderer over
          GET /anomalies, polled on its own cadence -- see
-         specs/11-viewer.md "Anomaly panel". Hidden when the route reports
-         enabled: false rather than showing a stale/empty list. -->
-    <section class="panel-section" id="anomalyPanel" style="display:none">
-      <h2>Anomaly radar</h2>
-      <ul id="anomalyList"></ul>
+         specs/11-viewer.md "Anomaly panel". The outer #anomalySection (not
+         the inner <details>) is hidden when the route reports
+         enabled: false rather than showing a stale/empty list, so this
+         does not fight <details>'s own open/closed state with a second
+         competing display:none. -->
+    <section class="panel-section" id="anomalySection" style="display:none">
+      <details id="anomalyPanel" open>
+        <summary>Anomaly radar</summary>
+        <ul id="anomalyList"></ul>
+      </details>
     </section>
     </div>
   </aside>
@@ -186,6 +191,21 @@
       data-tip='{"t":"History","d":"A log of what you have done, newest first."}'>
       <svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>
       <span class="lbl">History</span>
+    </button>
+    <!-- Anomaly radar (idea-07b divine-bar button, docs/plans/idea-07b-
+         anomaly-console/plan.md §2 Answer 1): deliberately NOT
+         locked-dependent and NOT disabled, and gated: false in
+         DIVINE_FEATURES.anomaly -- this is the security boundary that
+         keeps it clickable without a god token, unlike every other .gbtn
+         below except unlock. It never calls godApiFetch()/
+         /control/god/*; fetches plain GET /anomalies only. Starts hidden
+         and is shown/hidden by anomaly.js based on that route's own
+         `enabled` field, independent of GOD_MODE_ENABLED_FLAG's show/hide
+         of the whole #divineBar -- see specs/11-viewer.md "Anomaly panel". -->
+    <button type="button" class="gbtn anomaly" data-feature="anomaly" data-tab="anomaly" style="display:none"
+      data-tip='{"t":"Anomaly","d":"Statistical anomalies detected in village metrics: range breaks, new rule kinds, and schisms."}'>
+      <svg viewBox="0 0 24 24"><path d="M12 2l9 18H3z"/><path d="M12 9v5"/><circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none"/></svg>
+      <span class="lbl">Anomaly</span>
     </button>
     <!-- Sovereign God mode Optional Phase 8: dual-gated (GOD_MODE_ENABLED
          AND GOD_COMPILER_ENABLED / SIM_GOD_COMPILER=1). Hidden by
@@ -967,6 +987,19 @@
             <div id="godHistoryFilterStatus" class="divine-meta"></div>
           </div>
           <ul id="godHistoryList" class="divine-result"></ul>
+        </div>
+
+        <!-- Anomaly radar (idea-07b divine-bar modal view, docs/plans/
+             idea-07b-anomaly-console/plan.md §2 Answers 1-3). Self-contained
+             poll+render pair (anomaly.js) that never touches
+             godCapabilities/godToken/godAuthorized -- unlike every other tab
+             here, its render path does not depend on the auth state
+             machine. Fetches plain GET /anomalies only; never
+             godApiFetch()/`/control/god/*`; writes nothing to
+             divine.jsonl. -->
+        <div class="divine-tab-panel" id="divineTab-anomaly" style="display:none">
+          <p class="divine-help divine-help-intro">Statistical anomalies detected from this run's benchmark metrics: range breaks, new rule kinds, and schisms. Read-only observability -- not a divine intervention.</p>
+          <div id="divineAnomalyGroups"></div>
         </div>
 
         <!-- Sovereign God mode Optional Phase 8 (docs/archive/plan-sovereign-god-

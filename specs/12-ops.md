@@ -427,6 +427,34 @@ earlier draft of this plan that assumed schism was only in the chronicle).
 No new persisted `civilization` state, no `_sample_benchmarks()` change, no
 save/restore migration — the engine itself is not modified by this feature.
 
+**Expanded coverage (idea-07b, docs/plans/idea-07b-anomaly-console/plan.md
+§2 Answer 4).** `range_break` widens from the single
+`specialization_entropy` metric to the 12-metric `RANGE_BREAK_METRICS`
+allowlist (see [04-http-api.md](04-http-api.md#anomaly-radar-idea-07) for the
+exact list), with session-lifetime max/min tracking generalized to be
+per-metric rather than a single shared max/min. This is still a read of the
+same one existing source above — no new JSONL stream, no new writer, no
+change to what `_sample_benchmarks()` emits. Each entry additionally carries
+a `severity` field: `range_break` is magnitude-scaled against the prior
+session-lifetime bound it broke (still no new persisted state — only the
+per-metric running max/min the detection rule already tracks during the
+forward pass); `schism` and `new_rule_kind` use a fixed severity each, since
+neither has a magnitude to scale (see
+[04-http-api.md](04-http-api.md#anomaly-radar-idea-07) for the exact
+thresholds and degenerate-case handling).
+
+**Not a god intervention; no `divine.jsonl` entry (idea-07b §2 Answer 1).**
+The divine-bar Anomaly button and its `#divineTab-anomaly` view
+(see [11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)) call
+this same read-only `GET /anomalies` route via plain `fetch()` — never
+`godApiFetch()`, never any `/control/god/*` route. `divine.jsonl` (the
+Sovereign God mode intervention audit trail, see "Sovereign God mode" above)
+is written only by `/control/god/*` apply calls; viewing anomalies through
+the divine bar's chrome writes nothing to it. The Anomaly button is
+deliberately not `locked-dependent` and registers `gated: false` in
+`DIVINE_FEATURES` — it needs no god token and is not gated the way every
+other divine-bar tool is.
+
 ## Debugging workflow
 
 There is **no automated test suite or linter** in this repo. Verification is
@@ -502,7 +530,7 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 | `testament_smoke.py` | No | Emergence Breakthroughs F1 — deterministic Testament smoke: flag-off shape (no testament ring / no death merge), deathbed wiki fold + dedupe + `WIKI_SECTION_CHAR_CAP`, ring cap at `TESTAMENT_CAP`, newborn `memoryWiki` inheritance from parents + newest testament lines, bounded `format_testament_prompt_line` slice, testament save/restore round-trip. Run: `uv run python scripts/testament_smoke.py`. |
 | `contract_smoke.py` | No | Emergence Breakthroughs F3.2 — deterministic contracts/escrow smoke: flag-off apply no-op, coin conservation across offer/fulfill/default/expiry (`_total_tracked_coin`), open contracts + escrow save/restore round-trip. Run: `uv run python scripts/contract_smoke.py`. |
 | `soak_monitor.py` | No (tails a live session's existing logs) | Read-only Always-on-PIANO soak observer. At start selects the newest session directory, tails its `llm.jsonl` and `benchmarks.jsonl`, prints one progress line every 60 seconds (elapsed, decision count/p50, module failures), and writes `simulation/logs/soak-<label>.json`. The summary separates decision records from module records; reports decision p50/p90, error/fallback rates, literal `module_pulse_work`, note-age and pulse observations, plus three decision prompt module-report samples. It selects `module_refresh_failures` (always-on, rate against dispatched pulse work) or `piano_module_drops` (flag-off, rate against per-module latency counts when emitted, otherwise successful `module_total` plus drops), exposing metric name/count/attempts/rate. Usage: `uv run python scripts/soak_monitor.py --label attempt2 [--minutes 45]`. |
-| `idea07_anomaly_radar_smoke.py` | No | Deterministic smoke for the anomaly radar (`ANOMALY_RADAR_ENABLED`, docs/plans/idea-07-anomaly-radar/plan.md): flag-off `GET /anomalies` no-op shape (`{ok: true, enabled: false, anomalies: []}`); flag-on detection of each resolved anomaly kind — `range_break` (a synthetic `specialization_entropy` benchmark record exceeding the prior session max/min), `new_rule_kind` (a `rule_kind_diversity` record introducing a rule kind not seen earlier in the same run), and `schism` (a synthetic `metric: "schism"` benchmark record) — via `server.app.test_client()` against a running `sim_engine`/`server` import, same pattern as `testament_smoke.py`/`contract_smoke.py`. No Ollama call. Run: `uv run python scripts/idea07_anomaly_radar_smoke.py`. |
+| `idea07_anomaly_radar_smoke.py` | No | Deterministic smoke for the anomaly radar (`ANOMALY_RADAR_ENABLED`, docs/plans/idea-07-anomaly-radar/plan.md, expanded coverage per docs/plans/idea-07b-anomaly-console/plan.md): flag-off `GET /anomalies` no-op shape (`{ok: true, enabled: false, anomalies: []}`); flag-on detection of each resolved anomaly kind — `range_break` per-metric session max/min breaks across several of the 12 `RANGE_BREAK_METRICS` allowlist metrics (not `specialization_entropy` alone), confirming a non-allowlisted monotonic counter (e.g. `memory_store_size`) produces **no** `range_break`; `new_rule_kind` (a `rule_kind_diversity` record introducing a rule kind not seen earlier in the same run); and `schism` (a synthetic `metric: "schism"` benchmark record) — plus the `severity` field: magnitude-scaled tiers (`low`/`medium`/`high` by `break_amount / prior_range` thresholds, including the `prior_range == 0` degenerate case forced to `medium`) for `range_break`, and the fixed `high`/`low` values for `schism`/`new_rule_kind` respectively — via `server.app.test_client()` against a running `sim_engine`/`server` import, same pattern as `testament_smoke.py`/`contract_smoke.py`. No Ollama call. Run: `uv run python scripts/idea07_anomaly_radar_smoke.py`. |
 | `tom_contention_soak.py` | Yes (starts/stops native `simulation/server.py` twice; Ollama recommended) | F2 Theory of Mind contention gate orchestrator: refuses if Docker `gitserv-sim` is running, any native `simulation/server.py` or soak harness (`tom_contention_soak`/`soak_monitor`) is active, or port `SIM_PORT` (default 5001) is occupied/listening; runs matched native server soaks flag-off then `SIM_THEORY_OF_MIND=1`, each observed by `soak_monitor.py` (`--label tom-baseline` / `tom-flagon`). Starts the server with `sys.executable` (not `uv run`) and stops via process-tree kill (`taskkill /T /F` on Windows, process-group signals on Unix) plus a sweep of orphan `simulation/server.py` PIDs — terminating only the `uv` wrapper on Windows leaves a child `python.exe` serving stale `/state` (wrong `THEORY_OF_MIND_ENABLED` on the flag-on phase). Between phases waits until `/state` is unreachable (hard-fail on timeout); after each start hard-asserts `config.flags.THEORY_OF_MIND_ENABLED` via `/state` matches the phase (`False` baseline, `True` flag-on) and ties readiness to a new log session before `soak_monitor` runs. On exit/failure, `cleanup_all_native_sim_servers` kills native servers and port listeners. Writes per-phase `simulation/logs/soak-tom-baseline.json` and `soak-tom-flagon.json`, combined `simulation/logs/tom-contention-soak-result.json`, and progress to `simulation/logs/tom-contention-soak.log`. `--flagon-only` skips baseline (requires existing `soak-tom-baseline.json`), reruns flag-on only, and rewrites the combined result merging preserved baseline + new flagon. Does not flip `THEORY_OF_MIND_ENABLED` default in code. Usage: `uv run python scripts/tom_contention_soak.py [--minutes 45]` or `--flagon-only`. |
 
 `tom_contention_soak.py` process hygiene: always stop native soak servers with

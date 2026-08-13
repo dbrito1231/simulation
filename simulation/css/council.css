@@ -180,9 +180,22 @@
   }
   #anomalyList li { padding: 3px 0; }
   #anomalyList .anomaly-kind { color: #e37e7e; font-weight: 600; }
-  #anomalyList .anomaly-metric { color: #999; }
-  #anomalyList .anomaly-value { color: #e3c87e; }
-  #anomalyList .anomaly-frame { color: #777; font-size: 10px; }
+  #anomalyPanel summary {
+    cursor: pointer; font-size: 13px; font-weight: 600; color: #fff;
+    margin-bottom: 6px; outline: none;
+  }
+  /* Shared severity/metric/value/frame styling for both surfaces (sidebar
+     #anomalyList and the divine-bar modal's #divineAnomalyGroups rows). */
+  .anomaly-metric { color: #999; }
+  .anomaly-value { color: #e3c87e; }
+  .anomaly-frame { color: #777; font-size: 10px; }
+  .anomaly-severity {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    padding: 1px 5px; border-radius: 3px; margin-left: 2px;
+  }
+  .anomaly-severity-high { background: #4a1f1f; color: #f28b82; }
+  .anomaly-severity-medium { background: #4a3a1f; color: #f2c078; }
+  .anomaly-severity-low { background: #22303a; color: #8fc3e0; }
   /* --- Phase D: council banner + Council panel (lives in the left convPanel column) --- */
   #councilBanner {
     position: fixed; top: 18px; left: 50%; transform: translateX(-50%);

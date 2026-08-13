@@ -147,6 +147,21 @@
   .divine-result { margin-top: 6px; font-size: 11px; line-height: 1.5; color: #bbb; }
   .divine-result:empty { display: none; }
   .divine-error { color: #ef9a9a; font-weight: 600; }
+  /* Anomaly radar modal (idea-07b): per-kind collapsible groups inside
+     #divineTab-anomaly, native <details>/<summary>, same pattern as
+     .divine-preview-panel summary above and #anomalyPanel/#councilPanel
+     summary (css/council.css). */
+  .divine-anomaly-group { margin-bottom: 10px; }
+  .divine-anomaly-group summary {
+    cursor: pointer; font: 600 12px system-ui, sans-serif; color: #d9b96e; margin-bottom: 4px;
+  }
+  .divine-anomaly-group .anomaly-group-count { color: #ccc; font-weight: 400; }
+  .divine-anomaly-group ul { list-style: none; margin: 0; padding: 0; font-size: 12px; color: #bbb; }
+  .divine-anomaly-group ul li { padding: 4px 0; border-bottom: 1px solid #23232e; }
+  .divine-anomaly-group ul li:last-child { border-bottom: none; }
+  .anomaly-detail-row { margin-top: 2px; font-size: 10px; color: #999; }
+  .anomaly-detail-kv { margin-right: 8px; }
+  .anomaly-detail-key { color: #7a7a88; }
   .divine-applied-banner { color: #a5d6a7; font-weight: 600; margin-bottom: 3px; }
   .divine-warning { color: #ffcc80; font-weight: 600; }
   .divine-meta { color: #7a7a88; font-size: 10px; margin-top: 3px; }

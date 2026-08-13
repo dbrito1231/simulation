@@ -309,58 +309,219 @@ deferred as out of scope for this phase.
 
 ## Anomaly panel (`ANOMALY_RADAR_ENABLED`)
 
-A dedicated panel (docs/plans/idea-07-anomaly-radar/plan.md §2 Answer 6)
-listing recent anomalies detected by the read-only anomaly radar
-(`GET /anomalies`, see
-[04-http-api.md](04-http-api.md#anomaly-radar-idea-07)). Each row shows the
-three fields the route returns per entry: **timestamp** (engine frame tick),
-**metric** (`specialization_entropy` / `rule_kind_diversity` / `schism`), and
-**value** (the triggering number, new rule-kind string, or the schism
-record's agent-count value — all sourced from `benchmarks.jsonl`, including
-`schism`, which is never read from the chronicle).
+Two surfaces over one route (docs/plans/idea-07-anomaly-radar/plan.md §2
+Answer 6; expanded to two surfaces + richer rendering + expanded server-side
+detection by docs/plans/idea-07b-anomaly-console/plan.md §2 Answers 1-4):
+a compact, always-available sidebar panel, and a fuller divine-bar console
+view. Both read the same read-only anomaly radar route (`GET /anomalies`,
+see [04-http-api.md](04-http-api.md#anomaly-radar-idea-07)) and both are pure
+renderers — neither performs threshold comparison, first-seen tracking, or
+any other detection logic client-side; that would violate the pure-renderer
+contract (no simulation/detection logic in the browser). Each entry the
+route returns carries **timestamp** (engine frame tick — also the "jump-to
+frame" reference, see [04-http-api.md](04-http-api.md#anomaly-radar-idea-07)),
+**metric** (one of the 12 `RANGE_BREAK_METRICS` allowlist names for
+`range_break`, `rule_kind_diversity` for `new_rule_kind`, or `schism` for
+`schism`), **kind**, **value**, optional **detail**, and **severity**
+(`"high"` / `"medium"` / `"low"` — magnitude-scaled against the prior
+session-lifetime bound for `range_break`, fixed for `schism` (`"high"`) and
+`new_rule_kind` (`"low"`) — see
+[04-http-api.md](04-http-api.md#anomaly-radar-idea-07) for the full shape,
+thresholds, and rationale).
 
-**Own poll cadence, not `/state`.** This feature adds no `/state` key
-(Answers 1, 5) — the panel polls `GET /anomalies` on its own `setInterval`,
+**Own poll cadence, not `/state`.** This feature adds no `/state` key (idea-07
+Answers 1, 5) — both surfaces poll `GET /anomalies` on their own schedule,
 independent of `pollState()`'s `STATE_POLL_MS` cadence and independent of
 `pollDistricts()`'s `DISTRICTS_POLL_MS` cadence (see "Polling and render
-loop" above). It does not block or gate on the `/state` poll succeeding.
+loop" above). Neither blocks or gates on the `/state` poll succeeding.
 
-**Implementation.** `viewer/anomaly.js` (new file, loaded after
-`viewer/polling.js` in `index.html`) owns the whole panel: it fires
+**Implementation — sidebar panel.** `viewer/anomaly.js` (loaded after
+`viewer/polling.js` in `index.html`) owns the sidebar panel: it fires
 `pollAnomalies()` immediately on load, then every `ANOMALY_POLL_MS` (5000ms —
 slower than `STATE_POLL_MS`'s 100ms, since anomalies are rare events, and
-independent of `DISTRICTS_POLL_MS`'s 3000ms). The panel markup is
-`<section id="anomalyPanel"><h2>Anomaly radar</h2><ul id="anomalyList">...`,
-a sibling of `#chronicleLog` inside the sidebar's `.panel-section` list in
-`index.html`, styled in `css/council.css` alongside `#chronicleList`'s rules.
-Each row renders `kind` (human label: "Range break" / "New rule kind" /
-"Schism"), `metric`, and `value`, plus `timestamp` as `frame <n>` — same
-"newest first" ordering as `#chronicleList`. A `JSON.stringify(anomalies)`
-key-diff (same technique `#chronicleList` uses for `world.chronicle`) skips
-re-render when the list is unchanged between polls.
+independent of `DISTRICTS_POLL_MS`'s 3000ms). The panel markup converts from
+a plain `<section>` to the same collapsible pattern
+`#settlementsPanel`/`#councilPanel` already use in `index.html`
+(idea-07b §2 Answer 3):
 
-**Flag gating is different from every other flagged panel in this file.**
-Every other flag-gated element above (e.g. the Founding banner) reads its
-gate from `world.config.flags.<FLAG>` inside `applyFlags`, because that flag
-is echoed in `/state`. `ANOMALY_RADAR_ENABLED` is **not** echoed in
-`config.flags` (see [01-architecture.md](01-architecture.md)'s flag index) —
-per plan §6, its on/off state is carried by `GET /anomalies`'s own `enabled`
-field instead. The panel therefore determines its own visibility from the
-most recent `/anomalies` response (`enabled: false` → panel hidden / empty
-list `{ok: true, enabled: false, anomalies: []}`), not from
-`world.config.flags`. Concretely: `renderAnomalies()` in `viewer/anomaly.js`
-sets `#anomalyPanel`'s inline `style.display` to `"none"` when `data.enabled`
-is falsy and to `""` otherwise; the panel starts hidden
-(`style="display:none"` in `index.html`) until the first successful poll
-confirms the flag is on, so a slow first response never briefly shows a
-stale/empty list as if the feature were on.
+```html
+<section class="panel-section" id="anomalySection" style="display:none">
+  <details id="anomalyPanel" open>
+    <summary>Anomaly radar</summary>
+    <ul id="anomalyList"></ul>
+  </details>
+</section>
+```
 
-**No client-side detection logic.** The panel only renders the `anomalies`
-array the route already computed; it performs no threshold comparison or
-first-seen tracking itself — that would violate the pure-renderer contract
-(no simulation/detection logic in the browser). It is purely a list render,
-same discipline as the Chronicle panel reads its
-`world.chronicle` array.
+The outer `<section id="anomalySection">` (not the inner `<details>`) is what
+`renderAnomalies()` hides/shows via inline `style.display` for the
+flag-off/flag-on switch described below — mirroring `#settlementsSection`
+wrapping `#settlementsPanel` and `#councilSection` wrapping `#councilPanel`,
+so this feature does not fight `<details>`'s own `open`/closed state with a
+second, competing `display:none`. `<summary>Anomaly radar</summary>` is the
+clickable expand/collapse header; clicking it toggles native `<details>`
+open/closed state — no custom toggle JS, matching the existing pattern
+exactly. `#anomalyList` is styled in `css/council.css` alongside
+`#chronicleList`'s rules. Each row renders `kind` (human label: "Range
+break" / "New rule kind" / "Schism"), `metric`, `value`, `severity`, and
+`timestamp` as `frame <n>` — same "newest first" ordering as
+`#chronicleList`. A `JSON.stringify(anomalies)` key-diff (same technique
+`#chronicleList` uses for `world.chronicle`) skips re-render when the list is
+unchanged between polls.
+
+**Implementation — divine-bar button + modal (idea-07b §2 Answer 1, §4).** A
+new `.gbtn` in `#divineBar`'s `.bar-buttons` (`simulation/index.html`),
+`data-feature="anomaly"` `data-tab="anomaly"`, following the markup shape of
+the other `.gbtn` elements (icon svg, `<span class="lbl">`, `data-tip`) —
+**with two deliberate omissions that are this feature's security boundary**:
+
+- It does **not** carry the `locked-dependent` class and is **not**
+  `disabled`. Every other `.gbtn` except `unlock` (`sight`, `voice`,
+  `matrix`, `miracles`, `story`, `laws`, `history`, `compile`) carries both,
+  and `divine-auth-sight.js`'s `updateDivineBarAuthUi()` re-enables them via
+  `divineBarEl.querySelectorAll(".gbtn.locked-dependent").forEach((btn) => {
+  btn.disabled = !effective; })` (`divine-auth-sight.js:861`) only once
+  `godEffectivelyAuthorized()` is true. Omitting `locked-dependent` means this
+  selector never touches the Anomaly button — it is clickable immediately,
+  without connecting a god token, mirroring only the `unlock` button's
+  always-enabled precedent.
+- Its `DIVINE_FEATURES.anomaly` entry (`viewer/divine-bootstrap.js`, added
+  alongside the existing `unlock`/`sight`/`voice`/`matrix`/`miracles`/
+  `story`/`laws`/`history`/`compile` entries) sets `gated: false` — the same
+  shape as the `unlock` entry (`title`, `sub`, `guide`, `gated`). `unlock` is
+  currently the sole `gated: false` precedent in this registry; `anomaly` is
+  the second.
+
+**Still hidden when god mode is off.** Both omissions above only affect
+behavior once `#divineBar` itself is visible. `#divineBar` ships
+`style="display:none"` and is revealed only when `GOD_MODE_ENABLED_FLAG`
+(mirroring `/state`'s `config.flags.GOD_MODE_ENABLED`) is true — this is
+unchanged by idea-07b and applies to the Anomaly button like every other
+`.gbtn`. This is accepted as correct (idea-07b §2 Answer 1) precisely
+because the sidebar panel above is the always-available surface regardless
+of god-mode state; the divine-bar button is an additional, richer view for
+operators who already have the bar open, not the feature's only surface.
+
+**Not a god intervention.** The Anomaly view fetches via plain
+`fetch("/anomalies")`, exactly like `viewer/anomaly.js`'s existing
+`pollAnomalies()` — **never** `godApiFetch()` (`viewer/divine-auth-sight.js`),
+which attaches the `X-God-Token` header and is reserved for
+`/control/god/*` routes. The Anomaly view never calls any `/control/god/*`
+route, and using it writes nothing to `divine.jsonl` (see
+[12-ops.md](12-ops.md#anomaly-radar-log-reading-anomaly_radar_enabled-idea-07)).
+It is read-only observability borrowing the bar's chrome, not a divine
+intervention.
+
+**`#divineTab-anomaly` panel.** A new `.divine-tab-panel` inside
+`#divineTabHold` (`simulation/index.html`), alongside the existing 8
+`#divineTab-<name>` panels (`unlock`, `sight`, `voice`, `matrix`, `miracles`,
+`story`, `laws`, `history`, plus the optional `compile`), wired through the
+same `openDivineModal`/`showGodTab` tab-switch machinery
+(`viewer/divine-modal.js`) every other tab uses — `data-tab="anomaly"` on the
+new `.gbtn` routes clicks there. Unlike the other 8 tabs, its render path
+never touches `godCapabilities`/`godToken`/`godAuthorized`; it is a
+self-contained poll+render pair independent of the auth state machine.
+Inside `#divineTab-anomaly`, anomalies are grouped by `kind` into three
+collapsible `<details>` sections (idea-07b §2 Answers 2-3), reusing the same
+native `<details>/<summary>` pattern as the sidebar panel and
+`#settlementsPanel`/`#councilPanel` — no custom toggle JS:
+
+```html
+<details class="divine-anomaly-group" open>
+  <summary>Range break (<span class="anomaly-group-count"></span>)</summary>
+  <ul></ul>
+</details>
+<!-- one such <details> per kind: range_break, new_rule_kind, schism -->
+```
+
+Each kind's `<summary>` shows a per-kind count (idea-07b §2 Answer 2,
+"grouping by kind, per-kind counts") computed client-side by filtering the
+same flat `anomalies` array the sidebar panel already receives — grouping
+already-returned data by an existing field (`kind`) is not detection logic,
+so no server-side payload change is needed for this (confirmed in
+[04-http-api.md](04-http-api.md#anomaly-radar-idea-07), "No per-kind
+grouping field added to the response"). Each row inside a group renders the
+same fields as the sidebar row plus the previously-unused `detail` field
+(idea-07b §2 Answer 2), rendered as a small key/value list when present
+(e.g. `direction: max` for `range_break`, or `parent`/`child`/`belief`/`rule`
+for `schism`) — every dynamic string routed through `escapeHtml()`, same
+discipline as every other Divine Console render path.
+
+**Flag gating is different from every other flagged panel in this file, and
+now spans two surfaces.** Every other flag-gated element above (e.g. the
+Founding banner) reads its gate from `world.config.flags.<FLAG>` inside
+`applyFlags`, because that flag is echoed in `/state`. `ANOMALY_RADAR_ENABLED`
+is **not** echoed in `config.flags` (see
+[01-architecture.md](01-architecture.md)'s flag index) — per idea-07 plan §6,
+its on/off state is carried by `GET /anomalies`'s own `enabled` field
+instead, and idea-07b §6 confirms this is still the single flag that must
+gate **both** surfaces (no second flag is added for the divine-bar button).
+Concretely:
+
+- `renderAnomalies()` in `viewer/anomaly.js` sets `#anomalySection`'s inline
+  `style.display` to `"none"` when `data.enabled` is falsy and to `""`
+  otherwise; the section starts hidden (`style="display:none"` in
+  `index.html`) until the first successful poll confirms the flag is on, so
+  a slow first response never briefly shows a stale/empty list as if the
+  feature were on.
+- The divine-bar Anomaly `.gbtn` reads the same `enabled` field from its own
+  poll (or the sidebar's already-fetched response, to avoid a duplicate
+  request on every page load) and sets its own `style.display` to `"none"`
+  when falsy — independent of `GOD_MODE_ENABLED_FLAG`'s show/hide of
+  `#divineBar` as a whole. Both conditions apply: the button is visible only
+  when god mode is on **and** `ANOMALY_RADAR_ENABLED` reports `enabled: true`.
+
+**No client-side detection logic.** Neither surface performs threshold
+comparison or first-seen tracking; both only render the `anomalies` array
+(and, for the modal, `detail`/`severity`, plus client-side grouping by the
+existing `kind` field) the route already computed — same discipline as the
+Chronicle panel reading its `world.chronicle` array.
+
+**Implementation notes (Phase 3, concrete details).** Both surfaces are
+implemented in the single existing `viewer/anomaly.js` (no new viewer file,
+so `_VIEWER_FILES` in `simulation/server.py` is unchanged) and both are
+driven by one `pollAnomalies()`/`renderAnomalies()` pair — there is no
+separate modal-only poll loop; `#divineAnomalyGroups` (see below) is kept
+up to date on every 5s tick regardless of whether the modal is currently
+open, since the tab panel simply sits hidden in `#divineTabHold` until
+opened.
+
+- `#divineAnomalyGroups` — the container `<div>` inside
+  `#divineTab-anomaly` that `renderAnomalyModal()` fills with one
+  `.divine-anomaly-group` `<details>` per kind, in the fixed order
+  `range_break`, `new_rule_kind`, `schism` (`ANOMALY_KIND_ORDER` in
+  `viewer/anomaly.js`) — always all three, even when a kind currently has
+  zero entries (rendered as `<li class="civ-label">None detected yet</li>`),
+  so the section list itself never reflows as new kinds first appear.
+- The divine-bar Anomaly `.gbtn` carries no `id` (matching every other
+  `.gbtn` except the ones with a `data-tip` status pip); `viewer/anomaly.js`
+  selects it via `document.querySelector('.gbtn[data-feature="anomaly"]')`.
+  It ships `style="display:none"` in `simulation/index.html` and is
+  revealed only by `updateAnomalyBarButton()` once a poll confirms
+  `enabled: true` — mirroring `#anomalySection`'s own hidden-until-confirmed
+  start state.
+- `viewer/divine-modal.js`'s `GOD_TABS` array (used by `openDivineModal()`
+  to validate/reset the requested tab name and to hide sibling panels) gains
+  `"anomaly"` as a 10th entry. This is a required, minimal edit to a file
+  outside this feature's normal ownership (`viewer/divine-modal.js` is not
+  listed as in-scope for the anomaly console) — without it,
+  `openDivineModal("anomaly")` would silently reset to `"unlock"` and the
+  new button would never open its tab. The anomaly tab still bypasses every
+  other piece of that file's auth-dependent machinery (no
+  `godCapabilities`/`godToken`/`godAuthorized` checks in its render path).
+- Severity renders as an uppercase badge, `<span class="anomaly-severity
+  anomaly-severity-{high|medium|low}">` — shared CSS class names between
+  both surfaces (`css/council.css` for `.anomaly-severity*`/
+  `.anomaly-metric`/`.anomaly-value`/`.anomaly-frame`; `css/divine.css` for
+  `.divine-anomaly-group`/`.anomaly-detail-row`/`.anomaly-detail-kv`
+  covering the modal's per-kind `<details>` chrome and the `detail`
+  key/value rendering). The sidebar row and each modal row use the same
+  class names so the two surfaces stay visually consistent without
+  duplicating rules.
+- `#anomalyPanel summary` and `.divine-anomaly-group summary` follow the
+  same clickable-header styling convention as `#councilPanel summary`
+  (`css/council.css`) and `.divine-preview-panel summary` (`css/divine.css`)
+  respectively — no new interaction pattern, only new selectors.
 
 ## Daily Council Assembly window
 

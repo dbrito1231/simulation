@@ -65,7 +65,7 @@ per-file detail.
 | `/control/god/apply` | POST | Apply an exact previewed command (requires God auth when `GOD_AUTH_REQUIRED`) | `{previewId, requestId}` | `engine.god_apply(previewId, requestId)` |
 | `/control/god/cancel` | POST | Cancel an active omen/providence/timed event (requires God auth when `GOD_AUTH_REQUIRED`) | `{targetId}` | `engine.god_cancel(targetId)` |
 | `/control/god/compile` | POST | Optional Phase 8: compile free operator prose into a DRAFT `story_event` preview (requires God auth when `GOD_AUTH_REQUIRED`; also requires `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`, otherwise a clean rejection) | `{prose}` (string, up to `GOD_COMPILER_PROSE_MAX_CHARS = 800` chars) | `engine.god_compile_prose(prose)` — `{compileOk, previewId, commandDigest, previewOutcome, normalizedCommand, reversibilityClass, expiresAt}` or `{compileOk: false, reason}` |
-| `/anomalies` | GET | Anomaly radar (idea-07): read-side, server-side reader over the current run's `benchmarks.jsonl`, gated by `ANOMALY_RADAR_ENABLED` (see [01-architecture.md](01-architecture.md)) | — | see "Anomaly radar" below |
+| `/anomalies` | GET | Anomaly radar (idea-07, expanded idea-07b): read-side, server-side reader over the current run's `benchmarks.jsonl`, gated by `ANOMALY_RADAR_ENABLED` (see [01-architecture.md](01-architecture.md)) | — | see "Anomaly radar" below |
 
 `/agent/think` is legacy: the server-authoritative engine never calls it over
 HTTP. Instead, `_ENGINE_DEPS["llm_decide"]` (server.py:2604-2633) is wired
@@ -368,10 +368,19 @@ directly; `enabled` already folds both `GOD_MODE_ENABLED` and
 
 ## Anomaly radar (idea-07)
 
+Expanded metric coverage and payload fields per idea-07b — anchor kept
+stable as `#anomaly-radar-idea-07` for existing cross-references from
+[11-viewer.md](11-viewer.md) and [12-ops.md](12-ops.md).
+
 `GET /anomalies` is a **read-only** route (docs/plans/idea-07-anomaly-radar/plan.md
-§2). It adds no engine state and no `/state` key — `simulation/sim_engine/mixin_decisions.py`
-and `mixin_snapshot.py` are untouched (Answers 1, 5). The engine is not
-modified; the route is purely a server-side reader.
+§2; expanded coverage and payload fields per
+docs/plans/idea-07b-anomaly-console/plan.md §2). It adds no engine state and
+no `/state` key — `simulation/sim_engine/mixin_decisions.py` and
+`mixin_snapshot.py` are untouched (idea-07 Answers 1, 5; idea-07b confirms
+the same — see idea-07b §3 "Not owning"). The engine is not modified; the
+route is purely a server-side reader. No new flag: this route stays gated by
+the existing `ANOMALY_RADAR_ENABLED` (idea-07b §6 — see "Combined kill
+switch" below).
 
 **Gate:** `ANOMALY_RADAR_ENABLED` (`sim_engine/constants.py`, default `True` —
 see [01-architecture.md](01-architecture.md)'s flag index). Because the flag
@@ -383,6 +392,17 @@ plan §6):
 - **Flag off:** `{ok: true, enabled: false, anomalies: []}` — a clean no-op
   shape, not a 404/disabled error.
 - **Flag on:** `{ok: true, enabled: true, anomalies: [...]}`.
+
+**Combined kill switch (idea-07b §6).** `ANOMALY_RADAR_ENABLED = False` is
+the sole flag for this whole feature — idea-07b deliberately adds no second
+flag for the divine-bar button/modal it introduces. The route's `enabled`
+field above is the single signal both viewer surfaces read to hide
+themselves: the sidebar `#anomalySection` (wrapping the `#anomalyPanel`
+`<details>`) and the divine-bar Anomaly `.gbtn` both key off the most recent
+`GET /anomalies` response's `enabled` field, not
+off `config.flags` (which does not carry this flag — see "Gate" above). See
+[11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled) for exactly
+how each surface hides.
 
 **Detection source (Answers 1-2).** The handler reads a single thing,
 scoped to the *current* server process's own run — no cross-run tailing of
@@ -410,43 +430,162 @@ gates only the separate chronicle push a few lines earlier). This makes the
 schism source consistent with the other two kinds — a pure
 `benchmarks.jsonl` read.
 
-**Detected anomaly kinds (Answers 2-4; no other kind is in scope — an
-"unusual death cluster" from the original idea text was never answered in
-plan §2 and is not implemented):**
+**Detected anomaly kinds (idea-07 Answers 2-4, idea-07b §2 Answer 4; no other
+kind is in scope — an "unusual death cluster" from the original idea text
+was never answered in either plan and is not implemented):**
 
 | `kind` | Source | Detection rule | Answer |
 |---|---|---|---|
-| `range_break` | `benchmarks.jsonl`, `metric: "specialization_entropy"` records | Fires when a sampled `specialization_entropy` value exceeds every prior value seen so far **this run** (a new session-lifetime max) or falls below every prior value seen so far this run (a new session-lifetime min). No computed theoretical entropy ceiling; no bound recomputed as `EMERGENT_ROLES` adds roles. | §2 Answer 3 |
-| `new_rule_kind` | `benchmarks.jsonl`, `metric: "rule_kind_diversity"` records, `detail.kinds` | Fires on the first time a rule kind appears in `detail.kinds` that has not appeared in any earlier `rule_kind_diversity` record this run (mirrors `civilization["ruleKindsEverEnacted"]`). No per-rule-id tracking; no proposer-origin (LLM vs. deterministic auto-proposed) distinction. | §2 Answer 4 |
-| `schism` | `benchmarks.jsonl`, `metric: "schism"` records | Every `metric: "schism"` record is reported — written directly by `_execute_schism` on every schism, independent of `_sample_benchmarks()`. | §2 Answer 2 |
+| `range_break` | `benchmarks.jsonl`, records whose `metric` is one of the **`RANGE_BREAK_METRICS` allowlist** (below) | Fires when a sampled value for an allowlisted metric exceeds every prior value seen so far **this run** for that same metric (a new session-lifetime max) or falls below every prior value seen so far this run for that same metric (a new session-lifetime min). Session-lifetime max/min tracking is per-metric (a separate running max/min per allowlisted metric name, not one shared max/min across all of them). No computed theoretical ceiling/floor; no bound recomputed as `EMERGENT_ROLES` adds roles. | idea-07 §2 Answer 3; idea-07b §2 Answer 4 |
+| `new_rule_kind` | `benchmarks.jsonl`, `metric: "rule_kind_diversity"` records, `detail.kinds` | Fires on the first time a rule kind appears in `detail.kinds` that has not appeared in any earlier `rule_kind_diversity` record this run (mirrors `civilization["ruleKindsEverEnacted"]`). No per-rule-id tracking; no proposer-origin (LLM vs. deterministic auto-proposed) distinction. | idea-07 §2 Answer 4 |
+| `schism` | `benchmarks.jsonl`, `metric: "schism"` records | Every `metric: "schism"` record is reported — written directly by `_execute_schism` on every schism, independent of `_sample_benchmarks()`. | idea-07 §2 Answer 2 |
+
+**`RANGE_BREAK_METRICS` allowlist (idea-07b §2 Answer 4, exhaustive — exactly
+these 12, no others, no monotonic-counter auto-detection).** Named
+module-level constant in `simulation/_server/anomaly_radar.py` so this list
+and the code cannot drift:
+
+```
+specialization_entropy, rule_adherence, meme_adoption,
+ecology_scarcity_index, wealth_gini, skill_spread, cultural_carryover,
+peer_prediction_accuracy, contract_default_rate, storage_utilization,
+structure_condition, population_median_age
+```
+
+All 12 are bounded/ratio metrics emitted by `_sample_benchmarks()`
+(`simulation/sim_engine/mixin_decisions.py`). Monotonic counters emitted by
+the same function — `memory_store_size`, `chronicle_size`,
+`god_interventions`, `contracts_opened`, `contracts_fulfilled` — are
+deliberately **excluded**: they set a new session max on nearly every sample
+and would bury real signal under constant `range_break` noise. This is a
+fixed curated list, not a computed "all numeric metrics minus detected
+counters" heuristic — that broader option was considered and explicitly not
+chosen (idea-07b §2 Answer 4).
 
 **Response shape.** Each entry in `anomalies` is:
 
 ```
-{timestamp, metric, kind, value, detail?}
+{timestamp, metric, kind, value, detail?, severity}
 ```
 
 - `timestamp` — the record's `frame_tick` field, from the `benchmarks.jsonl`
   record, for all three kinds (including `schism`). This keeps `timestamp`
   one consistent type (frame tick, not wall-clock `ts`) across all three
-  kinds, matching every other frame-tick-based field in `/state`.
-- `metric` — `"specialization_entropy"` (`range_break`), `"rule_kind_diversity"`
-  (`new_rule_kind`), or `"schism"` (`schism`).
-- `value` — the triggering value: the `specialization_entropy` float
+  kinds, matching every other frame-tick-based field in `/state`. This same
+  field **is** the "jump-to frame" reference the original idea-07 idea text
+  asked for (idea-07b §2 Answer 2, "a jump-to frame reference — the original
+  idea-07 text's 'jump-to link', which was never implemented"): no separate
+  duplicate field is added, since `timestamp` already carries the frame
+  number for every kind. The viewer surfaces it as a clearly labeled frame
+  reference (see [11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled));
+  there is no click-to-navigate/scrub behavior implemented, because this
+  codebase has no timeline-scrub or replay UI to jump to — the reference is
+  for the operator to manually correlate against `benchmarks.jsonl` or other
+  log tooling, not an in-app navigation target.
+- `metric` — for `range_break`, one of the 12 `RANGE_BREAK_METRICS` allowlist
+  names above (was `"specialization_entropy"`-only before idea-07b); for
+  `new_rule_kind`, `"rule_kind_diversity"`; for `schism`, `"schism"`.
+- `value` — the triggering value: the allowlisted metric's float value
   (`range_break`), the new rule kind string (`new_rule_kind`), or the
   `schism` record's `value` field (agent count in the seceding cluster,
   `schism`).
 - `detail` (optional) — kind-specific extra context, e.g. `{direction: "max"|"min"}`
   for `range_break`, or the `schism` record's own `detail`
   (`{parent, child, belief, rule}`) for `schism`.
+- `severity` (new, idea-07b §2 Answer 2) — one of `"high"` / `"medium"` /
+  `"low"`. `range_break` is **magnitude-scaled** against the prior
+  session-lifetime bound it broke; `schism` and `new_rule_kind` have no
+  magnitude to scale and use a fixed severity each (final decision,
+  superseding the earlier fixed-per-`kind` mapping design, which was flagged
+  during Phase 1 review as conveying no information beyond `kind` itself).
+  All three rules below are computable during the single forward pass
+  `compute_anomalies()` already makes over `benchmarks.jsonl` — no persisted
+  detection state, no engine access, no lock, per idea-07 Answer 1.
+
+  **`range_break` — magnitude-scaled.** For each allowlisted metric,
+  `compute_anomalies()` already tracks a running `(prior_max, prior_min)`
+  per metric name as it walks the file in order (needed to detect the break
+  itself — see the `range_break` detection rule above). At the moment a
+  record breaks the bound, the running `(prior_max, prior_min)` pair reflects
+  every value seen for that metric **before** this record (i.e. captured
+  prior to folding the current value into the running max/min). Compute:
+
+  ```
+  break_amount = value - prior_max   (max-break, direction == "max")
+  break_amount = prior_min - value   (min-break, direction == "min")
+  prior_range  = prior_max - prior_min
+  ```
+
+  `break_amount` is always `>= 0` by construction (the record only fires
+  `range_break` because it exceeded that specific bound). Normalization
+  basis is **`prior_range`** (the prior observed session-lifetime spread for
+  that metric), not the bound value itself: all 12 `RANGE_BREAK_METRICS` are
+  bounded/ratio metrics that can legitimately sit at or near 0 (e.g.
+  `wealth_gini`, `contract_default_rate`), so normalizing against the raw
+  bound (`value / prior_max`) would blow up or flip sign whenever a bound is
+  0 or negative-adjacent; normalizing against the metric's own observed
+  spread this run is well-defined for every metric in the allowlist and
+  expresses "how big is this break relative to how much this metric has
+  actually moved so far" — exactly the magnitude signal severity is meant to
+  carry.
+
+  ```
+  ratio = break_amount / prior_range   (only when prior_range > 0)
+
+  ratio <  0.25                -> "low"
+  0.25 <= ratio < 1.0           -> "medium"
+  ratio >= 1.0                  -> "high"
+  ```
+
+  Tier boundaries are exclusive-low/inclusive-high as written above: a break
+  smaller than a quarter of the metric's entire prior spread is `"low"`; a
+  break between a quarter and a full prior spread is `"medium"`; a break
+  that equals or exceeds the metric's entire prior spread (a swing bigger
+  than everything seen so far this run, combined) is `"high"`.
+
+  **Degenerate case — `prior_range == 0`.** This is guaranteed on a metric's
+  very first `range_break` this run (only one distinct value has been seen,
+  so `prior_max == prior_min`) and can also recur later for a metric that
+  was perfectly flat since the run started before this break. `ratio` is
+  undefined here (0/0), so `compute_anomalies()` MUST special-case
+  `prior_range == 0` and skip the division entirely — it never divides by
+  `prior_range` without first checking it is `> 0`. The fixed result for
+  this case is `"medium"`: there is no historical spread yet to judge
+  magnitude against, so the reader falls back to the same neutral tier the
+  old fixed-per-`kind` mapping used unconditionally for every `range_break`,
+  rather than overstating an unmeasurable jump as `"high"` or dismissing it
+  as `"low"`. (There is no separate "prior bound is 0" case to handle: 0 is
+  a normal value for these bounded/ratio metrics and is never itself a
+  denominator under range-based normalization — the only denominator is
+  `prior_range`, already covered above.)
+
+  **`schism` — fixed `"high"`.** Always `"high"`: a schism is a
+  civilization-splitting event structurally, not a continuous quantity —
+  there is nothing to scale a magnitude against (the `value` field is the
+  seceding cluster's agent count, not a bound the record broke).
+
+  **`new_rule_kind` — fixed `"low"`.** Always `"low"`: a "new rule kind" is
+  an inherently binary event (a kind either has appeared before this run or
+  it hasn't) with no continuous quantity to normalize — routine cultural
+  evolution, matching the original design's rationale.
+
+**No per-kind grouping field added to the response.** idea-07b §2 Answer 2's
+"grouping by kind, per-kind counts" is implemented entirely in the viewer,
+client-side, from the same flat `anomalies` array documented above (see
+[11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)) — grouping
+already-returned data by an existing field is not detection logic, so it
+does not need a server-side change or violate the "pure renderer" viewer
+contract. `GET /anomalies`'s shape is otherwise unchanged: `{ok, enabled,
+anomalies: [...]}` at the top level.
 
 No pagination/`since` cursor: the route recomputes the full anomaly list for
 the current run's `benchmarks.jsonl` on every request (stateless server-side
-reader, no new persisted detection state — Answer 1).
+reader, no new persisted detection state — idea-07 Answer 1).
 
-**Consumer:** the viewer's anomaly panel (see
-[11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)), polling
-this route on its own cadence separate from `/state`.
+**Consumer:** the viewer's anomaly panel and the divine-bar Anomaly modal
+view (see
+[11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)), both
+polling this route on their own cadence separate from `/state`.
 
 ## Logging endpoints: fire-and-forget contract
 
