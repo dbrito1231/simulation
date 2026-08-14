@@ -632,4 +632,3 @@ Fields projected onto a structure page:
 **Not linked:** structure `type` is a category string — a recipe's `station` field
 names this type string, not a specific built structure id, so that cross-reference
 is intentionally excluded from auto-linking (see Answer 2 table in specs/04).
-

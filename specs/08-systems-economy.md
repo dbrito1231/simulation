@@ -1033,4 +1033,3 @@ Fields projected onto a recipe page:
 `"workshop"` or `"forge"`), not a specific built structure instance. Zero, one, or
 many structures of that type may exist at any time, so there is no guaranteed single
 target page. Auto-linking is excluded per Answer 2's kind-vs-instance rule.
-

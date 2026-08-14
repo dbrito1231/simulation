@@ -821,16 +821,17 @@ move, no logic changed.
 | 6 | `viewer/council.js` | Council panel (`renderCouncil`), council transcript modal (`openCouncilTranscript`), Daily Council Assembly modal, settlements |
 | 7 | `viewer/minimap.js` | Minimap render (`renderMinimap`) and click/drag-to-navigate |
 | 8 | `viewer/polling.js` | `/state` polling (`pollState`), `applyFlags`, social-tie/wildlife/shipment drawing (`drawSocialTies`, `drawWildlife`, `drawShipments`) |
-| 9 | `viewer/controls.js` | Pause/Resume/Reset controls (`postControl`, `syncPauseButton`, `doReset`), reset keyboard shortcut |
-| 10 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
-| 11 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
-| 12 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
-| 13 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers |
-| 14 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
-| 15 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
-| 16 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
-| 17 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`). Decision-audit polling starts in `decision-audit.js` itself. |
-| 18 | `viewer/world-wiki.js` | World Wiki modal: `openWorldWiki(kind, id)` global entry point, `fetchWiki()` / `renderWikiModal()` / `renderWikiIndex()` / `renderWikiPageContent()`, back-navigation stack, delegated `.wiki-link` click handler (capture phase, stops propagation). Gated on `WORLD_WIKI_ENABLED_FLAG` (set in `polling.js`). Polls `GET /wiki` every 3 s while modal is open; no polls when closed. Pure renderer — no world-state mutation. |
+| 9 | `viewer/anomaly.js` | Anomaly Radar sidebar panel and Divine Console anomaly tab: `pollAnomalies()` / `renderAnomalies()` plus modal rendering; read-only `GET /anomalies` polling |
+| 10 | `viewer/controls.js` | Pause/Resume/Reset controls (`postControl`, `syncPauseButton`, `doReset`), reset keyboard shortcut |
+| 11 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
+| 12 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
+| 13 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
+| 14 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers |
+| 15 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
+| 16 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
+| 17 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
+| 18 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`). Decision-audit polling starts in `decision-audit.js` itself. |
+| 19 | `viewer/world-wiki.js` | World Wiki modal: `openWorldWiki(kind, id)` global entry point, `fetchWiki()` / `renderWikiModal()` / `renderWikiIndex()` / `renderWikiPageContent()`, back-navigation stack, delegated `.wiki-link` click handler (capture phase, stops propagation). Gated on `WORLD_WIKI_ENABLED_FLAG` (set in `polling.js`). Polls `GET /wiki` every 3 s while modal is open; no polls when closed. Pure renderer — no world-state mutation. |
 
 ## Civ-1 physical props
 
@@ -1624,7 +1625,7 @@ server via `_build_snapshot_config()`), stored as `WORLD_WIKI_ENABLED_FLAG` in
 are sent.
 
 **Viewer files (Phase 3 implementation).** The wiki modal lives in:
-- `simulation/viewer/world-wiki.js` — all modal logic (file 18 in the viewer split
+- `simulation/viewer/world-wiki.js` — all modal logic (file 19 in the viewer split
   table above). Entry point: global `openWorldWiki(kind, id)`.
 - `simulation/css/council.css` — wiki modal CSS appended to the existing council CSS
   file (same file that owns `#councilTranscriptModal` and `#councilAssemblyModal`

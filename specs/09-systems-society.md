@@ -1016,4 +1016,3 @@ to `"rival"`). In the wiki, each tie is rendered as a labeled cross-link on **bo
 agent pages it connects — e.g., on agent A's page: `{targetKind: "agent", targetId: B_id, relation: "ally"}`.
 This matches the Answer 2 reconciliation: there is no single tie instance to navigate
 *to*, only a relationship between two agents, each of whom already has their own page.
-
