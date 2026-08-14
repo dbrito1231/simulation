@@ -28,14 +28,8 @@ if (GOD_AUTH_REQUIRED_FLAG) {
 }
 
 // --- Bottom bar + modal (relocated from sidebar tabs) --------------------
-// "anomaly" added here (idea-07b Phase 3, out-of-scope-but-required fix):
-// openDivineModal() resets any name not in this list back to "unlock", so
-// the new divine-bar Anomaly button would silently fail to open its tab
-// without this entry. See specs/11-viewer.md "Anomaly panel" for why the
-// anomaly tab still reuses this same tab-switch machinery despite never
-// touching godCapabilities/godToken/godAuthorized.
-const GOD_TABS = ["unlock", "sight", "voice", "matrix", "miracles", "story", "laws", "history", "compile", "anomaly"];
-const DIVINE_WIDE_MODAL_FEATURES = new Set(["matrix", "story", "laws", "compile"]);
+const GOD_TABS = ["unlock", "sight", "voice", "matrix", "miracles", "story", "laws", "history", "audit", "anomaly", "compile"];
+const DIVINE_WIDE_MODAL_FEATURES = new Set(["matrix", "story", "laws", "audit", "compile"]);
 const godBarButtons = Array.from(document.querySelectorAll("#divineBar .gbtn"));
 let divineModalOpenFeature = null;
 
@@ -156,6 +150,7 @@ renderDivineFavoritesBar();
 
 function closeDivineModal() {
   clearDivineFeatureGuide();
+  if (typeof stopGodDecisionAuditPoll === "function") stopGodDecisionAuditPoll();
   if (divineModalOpenFeature) {
     const panel = document.getElementById("divineTab-" + divineModalOpenFeature);
     if (panel && divineTabHoldEl) divineTabHoldEl.appendChild(panel);
@@ -173,6 +168,9 @@ function openDivineModal(name) {
   const feature = DIVINE_FEATURES[name] || DIVINE_FEATURES.unlock;
   // Reparent any currently open panel back to the hold first.
   if (divineModalOpenFeature && divineModalOpenFeature !== name) {
+    if (divineModalOpenFeature === "audit" && typeof stopGodDecisionAuditPoll === "function") {
+      stopGodDecisionAuditPoll();
+    }
     const prev = document.getElementById("divineTab-" + divineModalOpenFeature);
     if (prev && divineTabHoldEl) {
       prev.style.display = "none";
@@ -206,6 +204,7 @@ function openDivineModal(name) {
   }
   if (name === "laws") renderGodLawsActive();
   if (name === "history") renderGodHistory();
+  if (name === "audit") renderGodDecisionAudit();
   renderGodPinRow();
   reorderDivineModalBodyChildren();
 }

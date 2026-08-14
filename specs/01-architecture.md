@@ -206,6 +206,13 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `GOD_COMPILER_ENABLED` | False (env-backed, `SIM_GOD_COMPILER`) | no (advertised only via `/control/god/capabilities`'s `compiler.enabled`, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_DEJA_VU_REPLAY` | False (env-backed, `SIM_GOD_DEJA_VU_REPLAY`) | yes | [02](02-engine-core.md), [04](04-http-api.md), [12](12-ops.md) |
 | `ANOMALY_RADAR_ENABLED` | True | no (own state carried by `GET /anomalies`'s `enabled` field, not `config.flags` — the engine is not modified, so there is no `/state` key to echo it into) | [04](04-http-api.md), [12](12-ops.md) |
+| `DECISION_AUDIT_ENABLED` | True | no (own state carried by `GET /decision-audit`'s `enabled` field, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
+
+`DECISION_AUDIT_ENABLED` gates both engine-side correlation-id minting
+(`run_agent_decision` to `llm.jsonl` and `apply_decision` to `activity.jsonl`)
+and the dedicated `/decision-audit` reader. When off, neither log stream
+carries the field and the route returns `{enabled: false, ...}`. The viewer
+learns the state from that route's `enabled` field.
 
 `civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
 Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder

@@ -3,7 +3,7 @@
 The Flask route surface: every endpoint the browser or external tools call,
 what it does, and its request/response shape.
 
-**Canonical for:** the full route table (55 routes), `/state` top-level
+**Canonical for:** the full route table (59 routes), `/state` top-level
 payload key inventory, server startup/shutdown behavior. **See also:**
 [specs/01-architecture.md](01-architecture.md) (data flow, thin-viewer
 contract), [specs/03-cognition.md](03-cognition.md) (what `run_agent_decision`
@@ -13,18 +13,18 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 
 ## Route table
 
-55 routes total in `simulation/server.py`: 25 from their own `@app.route`
-decorator, plus 30 more registered programmatically by three small
+59 routes total in `simulation/server.py`: 27 from their own `@app.route`
+decorator, plus 32 more registered programmatically by three small
 `add_url_rule` loops — `_register_sprite_route()` (called once per file in
 `_SPRITE_FILES`, 8 iterations, serving `/sprites/<name>.js`),
 `_register_css_route()` (called once per file in `_CSS_FILES`, 6 iterations,
 serving `/css/<name>.css`), and `_register_viewer_route()` (called once per
-file in `_VIEWER_FILES`, 16 iterations, serving `/viewer/<name>.js`) — added
+file in `_VIEWER_FILES`, 18 iterations, serving `/viewer/<name>.js`) — added
 by the Phase 2 (sprites), Phase 3 (CSS), and Phase 4 (viewer.js)
-file-modularization splits. Of the 55, 6 are the `/control/god/*` routes
+file-modularization splits. Of the 59, 6 are the `/control/god/*` routes
 added in Phase 2 of Sovereign God mode (all `@app.route`-decorated); the
-other 49 are always-registered non-god routes (25 decorated minus the 6 god
-ones = 19, plus the 30 `add_url_rule` routes = 49). The god routes are registered
+other 53 are always-registered non-god routes (27 decorated minus the 6 god
+ones = 21, plus the 32 `add_url_rule` routes = 53). The god routes are registered
 unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
 (`constants.py:644`) is configured at startup and, when `GOD_AUTH_REQUIRED` is
 True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
@@ -39,7 +39,7 @@ per-file detail.
 |---|---|---|---|---|
 | `/` | GET | Serve the viewer shell | — | `index.html` |
 | `/css/<name>.css` | GET | Serve one of the 6 split viewer stylesheets (`base.css`, `panels.css`, `agents.css`, `council.css`, `divine.css`, `responsive.css`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.css` file |
-| `/viewer/<name>.js` | GET | Serve one of the 16 split viewer client script files (`setup.js`, `state.js`, `render.js`, `sidebar.js`, `council.js`, `minimap.js`, `polling.js`, `controls.js`, `renderloop.js`, `divine-bootstrap.js`, `divine-auth-sight.js`, `divine-modal.js`, `divine-sight-voice.js`, `divine-voice.js`, `divine-miracles-story.js`, `divine-history.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
+| `/viewer/<name>.js` | GET | Serve one of the 18 split viewer client script files (`setup.js`, `state.js`, `render.js`, `sidebar.js`, `council.js`, `minimap.js`, `polling.js`, `decision-audit.js`, `controls.js`, `renderloop.js`, `divine-bootstrap.js`, `divine-auth-sight.js`, `divine-modal.js`, `divine-sight-voice.js`, `divine-voice.js`, `divine-miracles-story.js`, `divine-history.js`, `anomaly.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
 | `/sprites/<name>.js` | GET | Serve one of the 8 split pure Canvas renderer files (`core.js`, `tiles.js`, `props.js`, `structures.js`, `agents.js`, `world.js`, `wildlife.js`, `shipments.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
 | `/wildlife.png` | GET | Serve the wildlife spritesheet PNG (variable-size atlas from user PNGs; 404 falls back to canvas helpers / procedural grids in `sprites/wildlife.js`) | — | `wildlife.png` |
 | `/wildlife_refsheet.html` | GET | Dev/debug — labeled 4×4 grid calling live `drawWildlifeCreature`; not part of the sim viewer loop | — | `wildlife_refsheet.html` |
@@ -66,6 +66,7 @@ per-file detail.
 | `/control/god/cancel` | POST | Cancel an active omen/providence/timed event (requires God auth when `GOD_AUTH_REQUIRED`) | `{targetId}` | `engine.god_cancel(targetId)` |
 | `/control/god/compile` | POST | Optional Phase 8: compile free operator prose into a DRAFT `story_event` preview (requires God auth when `GOD_AUTH_REQUIRED`; also requires `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`, otherwise a clean rejection) | `{prose}` (string, up to `GOD_COMPILER_PROSE_MAX_CHARS = 800` chars) | `engine.god_compile_prose(prose)` — `{compileOk, previewId, commandDigest, previewOutcome, normalizedCommand, reversibilityClass, expiresAt}` or `{compileOk: false, reason}` |
 | `/anomalies` | GET | Anomaly radar (idea-07, expanded idea-07b): read-side, server-side reader over the current run's `benchmarks.jsonl`, gated by `ANOMALY_RADAR_ENABLED` (see [01-architecture.md](01-architecture.md)) | — | see "Anomaly radar" below |
+| `/decision-audit` | GET | Read-only decision-intent audit over the current session's `llm.jsonl` and `activity.jsonl`, gated by `DECISION_AUDIT_ENABLED` | — | see "Decision audit route" below |
 
 `/agent/think` is legacy: the server-authoritative engine never calls it over
 HTTP. Instead, `_ENGINE_DEPS["llm_decide"]` (server.py:2604-2633) is wired
@@ -586,6 +587,19 @@ reader, no new persisted detection state — idea-07 Answer 1).
 view (see
 [11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)), both
 polling this route on their own cadence separate from `/state`.
+
+## Decision audit route
+
+`GET /decision-audit` is a read-only current-session join of `llm.jsonl` and
+`activity.jsonl`. `DECISION_AUDIT_ENABLED` defaults to `True`; when disabled,
+the route returns HTTP 200 with `{enabled: false, agents: [], recent: []}`
+without reading either log. When enabled it returns `{enabled: true,
+session_id, agents, recent}`. `agents` contains per-agent scored/match/
+mismatch aggregates, and `recent` is a bounded newest-first list of scored
+comparisons. The reader caches parsed sources by path, byte size, and mtime so
+the viewer's three-second poll does not reparse unchanged logs. Correlation and
+scoring semantics are canonical in [03-cognition.md](03-cognition.md) and
+[12-ops.md](12-ops.md).
 
 ## Logging endpoints: fire-and-forget contract
 

@@ -63,6 +63,7 @@ from _server.model_routing import (
     EXTRA_THINKING_PER_WINDOW, EXTRA_THINKING_WINDOW_S,
     is_high_stakes_turn, resolve_high_stakes, model_for_decision,
 )
+from _server.decision_audit import build_decision_audit
 from _server.logging_session import SessionLogger
 from _server.memory_store import (
     MemoryStore, embed_text, _cosine, _stable_hash, is_scaffold_text,
@@ -841,7 +842,7 @@ for _css_filename in _CSS_FILES:
 _VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 _VIEWER_FILES = (
     "setup.js", "state.js", "render.js", "sidebar.js", "council.js", "minimap.js",
-    "polling.js", "controls.js", "renderloop.js", "divine-bootstrap.js",
+    "polling.js", "decision-audit.js", "controls.js", "renderloop.js", "divine-bootstrap.js",
     "divine-auth-sight.js", "divine-modal.js", "divine-sight-voice.js",
     "divine-voice.js", "divine-miracles-story.js", "divine-history.js",
     "anomaly.js",
@@ -2617,9 +2618,10 @@ AVAILABLE_ACTIONS = list(DECISION_ACTIONS)
 
 # Import the engine module whether server.py is run as a script (cwd-relative)
 # or imported as simulation.server (package-relative).
-import sys as _sys  # noqa: E402
-_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import sim_engine as _sim_engine  # noqa: E402
+try:  # Script execution keeps simulation/ on sys.path.
+    import sim_engine as _sim_engine  # noqa: E402
+except ModuleNotFoundError:  # Package import uses the relative engine package.
+    from . import sim_engine as _sim_engine  # noqa: E402
 
 # Phase D (TECH_TREE_ENABLED) prompt/schema amendments, applied only when the
 # engine flag is on so that flag-off prompts and request payloads stay
@@ -2902,6 +2904,24 @@ def anomalies():
         return jsonify({"ok": True, "enabled": False, "anomalies": []})
     found = compute_anomalies(session_logger.benchmark_path)
     return jsonify({"ok": True, "enabled": True, "anomalies": found})
+
+
+@app.route("/decision-audit")
+def decision_audit():
+    """Read-only decision-intent audit (idea-10)."""
+    view = request.args.get("view")
+    if not _sim_engine.DECISION_AUDIT_ENABLED:
+        result = {"enabled": False, "agents": [], "recent": []}
+        if view == "full":
+            result["entries"] = []
+        return jsonify(result)
+    return jsonify(build_decision_audit(
+        session_logger.llm_path,
+        session_logger.activity_path,
+        session_logger.session_id,
+        enabled=True,
+        view=view,
+    ))
 
 
 @app.route("/state")

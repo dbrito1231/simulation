@@ -134,15 +134,16 @@
   #convList .msg { color: #bbb; }
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
-  #activityLog, #chronicleLog {
-    flex: 1 1 0;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
+  #activityLog, #chronicleLog, #decisionAuditPanel {
     padding-bottom: 12px;
   }
-  /* Activity moved into #sidebarBody, which now splits space between
-     Civilization and Activity -- see #sidebarBody rules above. */
+  #decisionAuditPanel {
+    padding-bottom: 16px;
+  }
+  #decisionAuditPanel h2 {
+    font-size: 14px;
+  }
+  /* Activity / Decision audit / Chronicle live in #sidebarLogsScroll (panels.css). */
   /* Agents is now the primary (and only unbounded) content left in
      #convPanel, so it needs its own scroll region rather than relying on
      unconstrained natural height (the old cause of Activity being squeezed). */
@@ -156,46 +157,76 @@
     margin: 0;
     padding: 0;
     overflow-y: auto;
-    flex: 1;
+    max-height: 100px;
     font-size: 12px;
     line-height: 1.5;
     color: #aaa;
   }
-  #actList li, #chronicleList li { padding: 3px 0; }
-  #chronicleList .chronicle-kind { color: #d9b96e; font-weight: 600; }
-  #chronicleList .chronicle-frame { color: #777; font-size: 10px; }
-  /* Anomaly radar panel (idea-07, ANOMALY_RADAR_ENABLED) -- same list
-     styling family as #chronicleList; hidden via inline display:none in
-     index.html/viewer/anomaly.js when GET /anomalies reports enabled: false. */
-  #anomalyPanel { flex-shrink: 0; }
-  #anomalyList {
+  #decisionAuditAgentList, #decisionAuditRecent {
     list-style: none;
     margin: 0;
     padding: 0;
-    max-height: 160px;
     overflow-y: auto;
     font-size: 12px;
     line-height: 1.5;
     color: #aaa;
   }
+  #decisionAuditAgentList {
+    max-height: min(200px, 22vh);
+  }
+  #decisionAuditRecent {
+    max-height: min(260px, 28vh);
+  }
+  #actList li, #chronicleList li, #decisionAuditAgentList li, #decisionAuditRecent li { padding: 3px 0; }
+  #chronicleList .chronicle-kind { color: #d9b96e; font-weight: 600; }
+  #chronicleList .chronicle-frame { color: #777; font-size: 10px; }
+  #decisionAuditRecentWrap {
+    margin-top: 6px;
+  }
+  #decisionAuditRecentWrap summary {
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 600;
+    color: #ccc;
+    margin-bottom: 4px;
+    outline: none;
+  }
+  #decisionAuditAgentList .decision-audit-agent-name { color: #7ec8e3; font-weight: 600; }
+  #decisionAuditAgentList .decision-audit-rate { color: #e3a87e; font-weight: 600; }
+  #decisionAuditAgentList .decision-audit-empty,
+  #decisionAuditRecent .decision-audit-empty { color: #777; font-style: italic; }
+  #decisionAuditRecent .decision-audit-frame { color: #777; font-size: 10px; }
+  #decisionAuditRecent .decision-audit-action { color: #ccc; }
+  #decisionAuditRecent .decision-audit-category { color: #999; font-size: 11px; }
+  #decisionAuditRecent .decision-audit-msg { color: #aaa; }
+  #anomalyPanel { flex-shrink: 0; }
+  #anomalyList { list-style: none; margin: 0; padding: 0; max-height: 160px; overflow-y: auto; font-size: 12px; line-height: 1.5; color: #aaa; }
   #anomalyList li { padding: 3px 0; }
   #anomalyList .anomaly-kind { color: #e37e7e; font-weight: 600; }
-  #anomalyPanel summary {
-    cursor: pointer; font-size: 13px; font-weight: 600; color: #fff;
-    margin-bottom: 6px; outline: none;
-  }
-  /* Shared severity/metric/value/frame styling for both surfaces (sidebar
-     #anomalyList and the divine-bar modal's #divineAnomalyGroups rows). */
+  #anomalyPanel summary { cursor: pointer; font-size: 13px; font-weight: 600; color: #fff; margin-bottom: 6px; outline: none; }
   .anomaly-metric { color: #999; }
   .anomaly-value { color: #e3c87e; }
   .anomaly-frame { color: #777; font-size: 10px; }
-  .anomaly-severity {
-    font-size: 10px; font-weight: 700; text-transform: uppercase;
-    padding: 1px 5px; border-radius: 3px; margin-left: 2px;
-  }
+  .anomaly-severity { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 1px 5px; border-radius: 3px; margin-left: 2px; }
   .anomaly-severity-high { background: #4a1f1f; color: #f28b82; }
   .anomaly-severity-medium { background: #4a3a1f; color: #f2c078; }
   .anomaly-severity-low { background: #22303a; color: #8fc3e0; }
+  .decision-audit-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 600;
+    padding: 0 4px;
+    border-radius: 2px;
+    margin: 0 2px;
+    vertical-align: baseline;
+    text-transform: lowercase;
+  }
+  .decision-audit-badge-match { background: #1e3a2a; color: #b3ffcf; border: 1px solid #3a8a5a; }
+  .decision-audit-badge-mismatch { background: #4a1e1e; color: #ffb3b3; border: 1px solid #a24545; }
+  .decision-audit-badge-muted { background: #2a2a35; color: #888; border: 1px solid #3a3a45; }
+  .decision-audit-badge-outcome-ok { background: #1e3a2a; color: #b3ffcf; border: 1px solid #3a8a5a; }
+  .decision-audit-badge-outcome-fail { background: #4a1e1e; color: #ffb3b3; border: 1px solid #a24545; }
+  .decision-audit-badge-outcome-unknown { background: #2a2a35; color: #aaa; border: 1px solid #4a4a55; }
   /* --- Phase D: council banner + Council panel (lives in the left convPanel column) --- */
   #councilBanner {
     position: fixed; top: 18px; left: 50%; transform: translateX(-50%);

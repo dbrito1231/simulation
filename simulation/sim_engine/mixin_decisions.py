@@ -1254,7 +1254,7 @@ class _DecisionsMixin:
             if ru:
                 self._mark_top_dirty("socialTies")
 
-        self._push_activity(summary)
+        self._push_activity(summary, decision_id=decision.get("_decision_id"))
         # A successful action can change the actor's material context, role,
         # or beliefs.  Village-wide project/rule events can change every
         # agent's desire/reflection, so make all notes eligible then.
