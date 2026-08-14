@@ -53,6 +53,9 @@ class _GovernanceCultureMixin:
         c = self.civilization
         if not SCHISM_ENABLED:
             return c.get("rules") or []
+        if sid == self._primary_settlement_id():
+            rules = c.get("rules")
+            return rules if isinstance(rules, list) else []
         bucket = c.get("rulesBySettlement") or {}
         if sid in bucket:
             return bucket[sid]
@@ -77,6 +80,9 @@ class _GovernanceCultureMixin:
         c = self.civilization
         if not SCHISM_ENABLED:
             return c.get("constitution") or []
+        if sid == self._primary_settlement_id():
+            constitution = c.get("constitution")
+            return constitution if isinstance(constitution, list) else []
         bucket = c.get("constitutionBySettlement") or {}
         if sid in bucket:
             return bucket[sid]
@@ -113,6 +119,9 @@ class _GovernanceCultureMixin:
         c = self.civilization
         if not SCHISM_ENABLED:
             return c.get("customRuleModifiers") or {}
+        if sid == self._primary_settlement_id():
+            modifiers = c.get("customRuleModifiers")
+            return modifiers if isinstance(modifiers, dict) else {}
         bucket = c.get("customRuleModifiersBySettlement") or {}
         if sid in bucket:
             return bucket[sid]
@@ -513,6 +522,8 @@ class _GovernanceCultureMixin:
         c = self.civilization
         if not SCHISM_ENABLED or sid == self._primary_settlement_id():
             c["constitution"] = constitution
+            if SCHISM_ENABLED:
+                c.setdefault("constitutionBySettlement", {})[sid] = constitution
         else:
             c.setdefault("constitutionBySettlement", {})[sid] = constitution
 
