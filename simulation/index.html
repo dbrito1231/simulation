@@ -1059,6 +1059,27 @@
     <ul id="deadAgentsList"></ul>
   </div>
 </div>
+<div id="worldWikiModal" role="dialog" aria-labelledby="wikiTitle" aria-modal="true">
+  <div id="worldWikiDialog">
+    <header>
+      <div class="wiki-title-wrap">
+        <h3 id="wikiTitle">World Wiki</h3>
+        <span id="wikiSubtitle"></span>
+      </div>
+      <button id="wikiBackBtn" type="button" disabled>&#8592; Back</button>
+      <button id="wikiCloseBtn" type="button">Close</button>
+    </header>
+    <div id="worldWikiBody">
+      <div id="wikiSidebar">
+        <input type="search" id="wikiSearch" placeholder="Filter entities…" autocomplete="off" />
+        <div id="wikiIndex"></div>
+      </div>
+      <div id="wikiContent">
+        <div id="wikiBody"></div>
+      </div>
+    </div>
+  </div>
+</div>
 <div id="councilTranscriptModal" role="dialog" aria-labelledby="councilTranscriptTitle" aria-modal="true">
   <div id="councilTranscriptDialog">
     <header>
@@ -1115,5 +1136,6 @@
 <script src="viewer/divine-voice.js"></script>
 <script src="viewer/divine-miracles-story.js"></script>
 <script src="viewer/divine-history.js"></script>
+<script src="viewer/world-wiki.js"></script>
 </body>
 </html>

@@ -3,7 +3,7 @@
 The Flask route surface: every endpoint the browser or external tools call,
 what it does, and its request/response shape.
 
-**Canonical for:** the full route table (59 routes), `/state` top-level
+**Canonical for:** the full route table (61 routes), `/state` top-level
 payload key inventory, server startup/shutdown behavior. **See also:**
 [specs/01-architecture.md](01-architecture.md) (data flow, thin-viewer
 contract), [specs/03-cognition.md](03-cognition.md) (what `run_agent_decision`
@@ -13,18 +13,18 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 
 ## Route table
 
-59 routes total in `simulation/server.py`: 27 from their own `@app.route`
-decorator, plus 32 more registered programmatically by three small
+61 routes total in `simulation/server.py`: 28 from their own `@app.route`
+decorator, plus 33 more registered programmatically by three small
 `add_url_rule` loops — `_register_sprite_route()` (called once per file in
 `_SPRITE_FILES`, 8 iterations, serving `/sprites/<name>.js`),
 `_register_css_route()` (called once per file in `_CSS_FILES`, 6 iterations,
 serving `/css/<name>.css`), and `_register_viewer_route()` (called once per
-file in `_VIEWER_FILES`, 18 iterations, serving `/viewer/<name>.js`) — added
+file in `_VIEWER_FILES`, 19 iterations, serving `/viewer/<name>.js`) — added
 by the Phase 2 (sprites), Phase 3 (CSS), and Phase 4 (viewer.js)
-file-modularization splits. Of the 59, 6 are the `/control/god/*` routes
+file-modularization splits. Of the 61, 6 are the `/control/god/*` routes
 added in Phase 2 of Sovereign God mode (all `@app.route`-decorated); the
-other 53 are always-registered non-god routes (27 decorated minus the 6 god
-ones = 21, plus the 32 `add_url_rule` routes = 53). The god routes are registered
+other 55 are always-registered non-god routes (28 decorated minus the 6 god
+ones = 22, plus the 33 `add_url_rule` routes = 55). The god routes are registered
 unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
 (`constants.py:644`) is configured at startup and, when `GOD_AUTH_REQUIRED` is
 True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
@@ -39,7 +39,7 @@ per-file detail.
 |---|---|---|---|---|
 | `/` | GET | Serve the viewer shell | — | `index.html` |
 | `/css/<name>.css` | GET | Serve one of the 6 split viewer stylesheets (`base.css`, `panels.css`, `agents.css`, `council.css`, `divine.css`, `responsive.css`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.css` file |
-| `/viewer/<name>.js` | GET | Serve one of the 18 split viewer client script files (`setup.js`, `state.js`, `render.js`, `sidebar.js`, `council.js`, `minimap.js`, `polling.js`, `decision-audit.js`, `controls.js`, `renderloop.js`, `divine-bootstrap.js`, `divine-auth-sight.js`, `divine-modal.js`, `divine-sight-voice.js`, `divine-voice.js`, `divine-miracles-story.js`, `divine-history.js`, `anomaly.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
+| `/viewer/<name>.js` | GET | Serve one of the 19 split viewer client script files (`setup.js`, `state.js`, `render.js`, `sidebar.js`, `council.js`, `minimap.js`, `polling.js`, `decision-audit.js`, `controls.js`, `renderloop.js`, `divine-bootstrap.js`, `divine-auth-sight.js`, `divine-modal.js`, `divine-sight-voice.js`, `divine-voice.js`, `divine-miracles-story.js`, `divine-history.js`, `anomaly.js`, `world-wiki.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
 | `/sprites/<name>.js` | GET | Serve one of the 8 split pure Canvas renderer files (`core.js`, `tiles.js`, `props.js`, `structures.js`, `agents.js`, `world.js`, `wildlife.js`, `shipments.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
 | `/wildlife.png` | GET | Serve the wildlife spritesheet PNG (variable-size atlas from user PNGs; 404 falls back to canvas helpers / procedural grids in `sprites/wildlife.js`) | — | `wildlife.png` |
 | `/wildlife_refsheet.html` | GET | Dev/debug — labeled 4×4 grid calling live `drawWildlifeCreature`; not part of the sim viewer loop | — | `wildlife_refsheet.html` |
@@ -56,6 +56,7 @@ per-file detail.
 | `/council-llm-log` | GET | Slim decision records (`llm.jsonl`) for a council frame window (blueprint pitches/verdicts only). **Scans the live session's `llm.jsonl` first**; only reads older retained session directories when the requested `[start_frame, end_frame]` is not fully covered by the live file's frame range (`frame_tick` is monotonic across restarts, but each session only spans frames recorded while that server run was alive — a past council window may fall entirely in an older session). Out-of-range files are skipped using cached per-file `(min_frame, max_frame)` when possible. Matches from all scanned directories are merged and re-sorted by `frame_tick` | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
 | `/state` | GET | World snapshot for the thin viewer (full or delta via `?since=`) | query param `since` (int, optional) — client's last applied `frameTick`; omit or `0` for full | See **/state delta protocol** below and key inventory |
 | `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected). Supports conditional polls via `districtsEpoch` | query param `since` (int, optional) — last seen `epoch` from a prior response | **First / gap:** `{districts: [...], roadNodes: {...}, roadEdges: [...], epoch: int}`. **Unchanged:** when `since == engine.districtsEpoch`, HTTP 200 with tiny body `{unchanged: true, epoch: int}` (no district/road payload). `districtsEpoch` bumps on district founding, tile place/remove, terrain dig/plant, road-graph change, architect paint/revert, restore, and reset |
+| `/wiki` | GET | World wiki - cross-linked page model for all twelve entity kinds. Gated by `WORLD_WIKI_ENABLED`; returns `{ok: false, reason: "disabled"}` when flag is off. No LLM calls (skeleton-only). Merges `/state`-side entities with district/road data from the internal `_districts_snapshot_payload(engine)` helper in-process - no HTTP round-trip to `/districts.js` | - | See *World wiki route* below |
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
 | `/control/resume` | POST | Resume the tick loop | — | `{ok: true, paused: false}` |
 | `/control/reset` | POST | Reset the world, optionally with a new roster size (requires password) | `{password: string, agents?: int}` — `password` must match `SIM_RESET_PASSWORD` (server.py, read once at import; default `"reset"` when unset/blank); `agents` optional (omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` on success; `{ok: false, error: "unauthorized"}` with HTTP 401 on wrong/missing password (no reset) |
@@ -172,6 +173,112 @@ mirroring the think-payload summary agents see when planning caravans and local
 spending ([08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
 Each settlement id matches `civilization.settlements[*].id`; missing keys
 migrate to `{}` on restore.
+
+## World wiki route (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan `docs/plans/idea-09-world-wiki/plan.md` §2 Answers 1–6.
+
+`GET /wiki` returns a read-only cross-linked page model assembled entirely in-process
+from two internal data sources under `engine.lock`: the engine's existing snapshot
+machinery (same functions `/state` already calls) and the extracted
+`_districts_snapshot_payload(engine)` district/road helper (see *Districts merge
+mechanism* below). No HTTP round-trip to `/districts.js`. No LLM calls — skeleton-only
+(Answer 4). Zero new world-state mutation.
+
+**Reuse contract (idea-03-agent-interview).** This route and its entity projection are
+explicitly designed as a reusable surface. `idea-03-agent-interview` (production order
+item 7) is expected to build on this same projection rather than reconstruct it.
+Implementers of idea-03 must not fork or duplicate the entity read logic; they extend
+the wiki route or compose with its output.
+
+### Gate
+
+`WORLD_WIKI_ENABLED` (`sim_engine/constants.py`, default `True`, env-backed name TBD
+by Phase 2a implementer if an env override is added). When `False`, `GET /wiki`
+returns `{"ok": false, "reason": "disabled"}` (HTTP 200). The flag is echoed to the viewer
+via `/state` `config.flags` (`_build_snapshot_config()`,
+`sim_engine/mixin_snapshot.py`), so the viewer can show or hide wiki UI without probing
+`/wiki` directly.
+
+### Response shape
+
+When enabled, `GET /wiki` returns:
+
+```json
+{
+  "ok": true,
+  "pages": {
+    "agent":      [ {<agent page>} ],
+    "structure":  [ {<structure page>} ],
+    "belief":     [ {<belief page>} ],
+    "rule":       [ {<rule page>} ],
+    "chronicle":  [ {<chronicle page>} ],
+    "district":   [ {<district page>} ],
+    "settlement": [ {<settlement page>} ],
+    "treaty":     [ {<treaty page>} ],
+    "resource":   [ {<resourceRegistry page>} ],
+    "project":    [ {<projectRegistry page>} ],
+    "recipe":     [ {<recipe page>} ]
+  }
+}
+```
+
+`settlement` and `treaty` are omitted (empty or absent) when
+`PATH1_DIPLOMACY_ENABLED` is off.
+
+**Phase 2a / 2b complete.** The route now returns all eleven page-kind arrays. Phase 2a
+implemented `agent`, `structure`, `belief`, `rule`, and `chronicle`. Phase 2b added
+`district`, `settlement`, `treaty`, `resource`, `project`, `recipe` and social-tie
+cross-links on agent pages.
+
+Social ties are **not** a standalone page kind — they appear as labeled `links` entries
+on the two agent pages they connect (ally/rival). Each page object carries at minimum:
+`{id, kind, fields: {...}, links: [{targetKind, targetId, relation}]}`. The exact
+per-field inventory is documented in the owning spec section for each entity kind
+(specs/05, 08, 09, 10).
+
+**Live cadence (Answer 5).** The route is polled fresh on every request — no dirty-
+tracking, no separate epoch. It piggybacks on the same underlying data that
+`/state`/`/districts.js` already read; the viewer polls it on the same cadence it
+already polls `/state` (~10 Hz or on demand when the wiki modal is open).
+
+### Districts merge mechanism (Answer 3)
+
+The district/road shallow-copy logic from `districts_js()` (`simulation/server.py`) has
+been extracted into a small internal helper, `_districts_snapshot_payload(engine)`, in
+`server.py` — a **mechanical move of existing lines, no new logic**.
+Both `districts_js()` and the wiki route call this helper under `engine.lock`.
+`/districts.js`'s own `districtsEpoch` conditional-poll protocol and its existing
+viewer consumer are untouched; the wiki route is an independent read-side consumer of
+the same underlying data.
+
+### Cross-link table (Answer 2 — structured fields only)
+
+Only real structured references get auto-linked. Free-text fields (chronicle `text`,
+agent `lastReasoning`, rule description prose) are never scanned.
+
+| Source field | Target kind | Linkable? | Reason |
+|---|---|---|---|
+| agent `relationships` (name-keyed) | agent | yes | resolves to exactly one agent by name |
+| agent `homeDistrict`/`district` | district | yes | district id |
+| structure `homeOf` | agent | yes | agent id |
+| structure `districtId` | district | yes | district id |
+| district `settlementId` | settlement | yes | settlement id |
+| settlement `districts[]` | district | yes | district ids (reverse of above) |
+| `socialTies` `from`/`to` | agent | yes | agent ids; rendered as one labeled link on each of the two agent pages, not a standalone page (server-canonicalized to one entry per pair with valence conflicts resolved to `"rival"` — `_social_ties_snapshot()`, `mixin_snapshot.py:79-103`) |
+| projectRegistry `needs` (keys) | resource | yes | resource ids |
+| recipe `output` | resource | yes | produced resource id |
+| recipe `inputs` (keys) | resource | yes | resource ids |
+| belief `affinity` | rule | **no** | names a rule *kind* (e.g. `resource_tax`), not a rule id; no single target instance |
+| recipe `station` | structure | **no** | names a structure *type* (e.g. `"workshop"`), not a specific built structure's id; zero, one, or many instances may exist |
+| resourceRegistry `gatherZone` | district | **no** | names a district *kind* (e.g. `"forest"`), not a specific district id; multiple instances may exist |
+| treaty (any field) | settlement | **no** | verified treaty shape carries no settlement id field (`mixin_diplomacy.py:802-844`) |
+| chronicle `text` | any | **no** | free prose; excluded per Answer 2 |
+
+The exclusion pattern: any field naming a **kind/category/type string** rather than a
+**specific instance id** does not get auto-linked — there is no guaranteed single target
+page to resolve to.
+
 
 ## Sovereign God mode
 

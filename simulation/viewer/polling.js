@@ -14,6 +14,8 @@ let STRUCTURE_UPGRADES_ENABLED = true;
 let GOD_MODE_ENABLED_FLAG = false;
 // Mirrors config.flags.GOD_AUTH_REQUIRED (default false = open Divine Console).
 let GOD_AUTH_REQUIRED_FLAG = false;
+// Mirrors config.flags.WORLD_WIKI_ENABLED — gates all wiki polling and links.
+let WORLD_WIKI_ENABLED_FLAG = true;
 
 function applyFlags(flags) {
   if (!flags) return;
@@ -42,6 +44,7 @@ function applyFlags(flags) {
   if ("WEATHER_ENABLED" in flags) WEATHER_ENABLED = !!flags.WEATHER_ENABLED;
   if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
   if ("GOD_AUTH_REQUIRED" in flags) GOD_AUTH_REQUIRED_FLAG = !!flags.GOD_AUTH_REQUIRED;
+  if ("WORLD_WIKI_ENABLED" in flags) WORLD_WIKI_ENABLED_FLAG = !!flags.WORLD_WIKI_ENABLED;
   applyGodDejaVuAvailability();
 }
 

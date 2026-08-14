@@ -26,6 +26,7 @@ __all__ = [
     "TESTAMENT_ENABLED",
     "ANOMALY_RADAR_ENABLED",
     "DECISION_AUDIT_ENABLED",
+    "WORLD_WIKI_ENABLED",
     "THEORY_OF_MIND_ENABLED",
     "PEER_MODEL_MAX_PEERS",
     "PEER_MODEL_FIELD_CHAR_CAP",
@@ -514,6 +515,9 @@ ANOMALY_RADAR_ENABLED = True
 # apply_decision's activity record (activity.jsonl decision_id). Default on;
 # when off, neither log stream carries the field.
 DECISION_AUDIT_ENABLED = True
+# World wiki (idea-09-world-wiki): read-only cross-linked page model served
+# at GET /wiki. Default on; when False the route returns the disabled shape.
+WORLD_WIKI_ENABLED = True
 # Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
 # module inside the existing fan-out (not an extra call per turn). Advisory
 # prompt context only — no deterministic behavior acts on peerModel. Default

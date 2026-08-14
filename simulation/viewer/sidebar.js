@@ -547,7 +547,12 @@ function renderAgentDetail() {
     ? tieNames.map((name) => {
         const tie = relationships[name];
         const cls = tie === "ally" ? "ally" : tie === "rival" ? "rival" : "";
-        return `<span class="agent-tie-chip ${cls}">${escapeHtml(name)} (${escapeHtml(tie)})</span>`;
+        const targetAgent = WORLD_WIKI_ENABLED_FLAG
+          ? getAgents().find((a) => a.name === name)
+          : null;
+        return targetAgent
+          ? `<span class="agent-tie-chip wiki-link ${cls}" data-wiki-kind="agent" data-wiki-id="${targetAgent.id}">${escapeHtml(name)} (${escapeHtml(tie)})</span>`
+          : `<span class="agent-tie-chip ${cls}">${escapeHtml(name)} (${escapeHtml(tie)})</span>`;
       }).join("")
     : `<span class="civ-label">no notable ties</span>`;
 
@@ -666,9 +671,12 @@ function renderAgentPanel() {
     agentListEl.innerHTML = sortedLiving.map((a) => {
       const selected = selectedAgentId === a.id;
       const critical = isAgentCritical(a);
+      const wikiBtn = WORLD_WIKI_ENABLED_FLAG
+        ? ` <span class="wiki-link agent-wiki-btn" data-wiki-kind="agent" data-wiki-id="${a.id}" title="Open in World Wiki">&#128218;</span>`
+        : "";
       return `<li class="agent-row${selected ? " agent-selected" : ""}${critical ? " agent-critical" : ""}" data-agent-id="${a.id}">` +
         `<span class="dot" style="background:${a.color}"></span>` +
-        `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}${escapeHtml(agentAgeLabel(a))}</span>` +
+        `<span><span class="agent-main">${escapeHtml(a.name)}${wikiBtn} — ${escapeHtml(a.role)}${escapeHtml(agentAgeLabel(a))}</span>` +
         `<span class="agent-status">${escapeHtml(humanizeAction(a))}${agentVitalsHtml(a)}</span>` +
         agentThoughtHtml(a) +
         `</span></li>`;
@@ -854,7 +862,10 @@ function renderSidebar() {
       civRecipeListEl.innerHTML = recipeIds.map((id) => {
         const r = recipes[id];
         const ins = Object.entries(r.inputs || {}).map(([k, v]) => `${k}×${v}`).join("+");
-        return `<span class="res-chip civ-value">${escapeHtml(r.name || id)} <span class="civ-label">(${escapeHtml(ins)})</span></span>`;
+        const nameEl = WORLD_WIKI_ENABLED_FLAG
+          ? `<span class="wiki-link" data-wiki-kind="recipe" data-wiki-id="${escapeHtml(id)}">${escapeHtml(r.name || id)}</span>`
+          : escapeHtml(r.name || id);
+        return `<span class="res-chip civ-value">${nameEl} <span class="civ-label">(${escapeHtml(ins)})</span></span>`;
       }).join("");
     } else {
       civRecipeRow.style.display = "none";
@@ -870,7 +881,10 @@ function renderSidebar() {
         const status = r.status ? ` <span class="civ-label">[${escapeHtml(r.status)}]</span>` : "";
         const amendment = r.supersedes
           ? ` <span class="civ-label">→ ${escapeHtml(r.supersedes)}</span>` : "";
-        return `<span class="res-chip civ-value">${escapeHtml(r.name || r.id)}${status}${amendment}</span>`;
+        const nameEl = WORLD_WIKI_ENABLED_FLAG && r.id
+          ? `<span class="wiki-link" data-wiki-kind="rule" data-wiki-id="${escapeHtml(String(r.id))}">${escapeHtml(r.name || r.id)}</span>`
+          : escapeHtml(r.name || r.id);
+        return `<span class="res-chip civ-value">${nameEl}${status}${amendment}</span>`;
       }
       ).join("");
       const pending = pendingRules.map((r) => {

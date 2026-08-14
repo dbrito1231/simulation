@@ -10,7 +10,7 @@ drawing rules (structure sprite resolution order, seasonal variants).
 **Files:** `simulation/index.html` (markup shell), `simulation/css/*.css`
 (styles, split into 6 ordered files — see "css/*.css: split stylesheet"
 below), `simulation/viewer/*.js` (polling, render loop, sidebar, Divine
-Console; split into 17 ordered files — see "viewer/*.js: split viewer client
+Console, World Wiki; split into 19 ordered files — see "viewer/*.js: split viewer client
 script" below), `simulation/sprites/*.js` (stateless Canvas helpers, split
 into 8 ordered files — see "sprites/*.js: pure stateless drawing" below).
 **See also:** [01-architecture.md](01-architecture.md) for the
@@ -21,7 +21,7 @@ labels.
 
 ## Thin-viewer contract
 
-`simulation/viewer/setup.js` (first of the 17 split viewer files, see
+`simulation/viewer/setup.js` (first of the 19 split viewer files, see
 "viewer/*.js: split viewer client script" below) states the whole viewer's
 contract in a banner comment at the top of the file: it is a **PURE
 RENDERER** — it polls `GET /state`
@@ -299,9 +299,8 @@ here — see [Divine Audit tab](#divine-audit-tab).
 **Visibility.** Driven by the route's `enabled` field — **not** `/state`
 `config.flags` (the flag is not echoed there). When `enabled: false`, the panel
 **stays visible** and shows empty-state copy ("Decision audit disabled") in
-`#decisionAuditAgentList`; it is **not** force-hidden (force-hide read as empty
-black space). The recent `<details>` wrap is hidden. Polling continues on the
-same cadence so re-enable is detected without a page reload. When
+`#decisionAuditAgentList`; it is **not** force-hidden (force-hide reads as empty
+black space). The recent `<details>` wrap is hidden and polling stops. When
 `enabled: true`, the panel renders aggregates as below. Full entry list and
 outcome axis remain on the [Divine Audit tab](#divine-audit-tab) only.
 
@@ -799,7 +798,8 @@ earlier one, never the reverse.
 ## viewer/*.js: split viewer client script
 
 `simulation/viewer.js` was split (Phase 4 of the file-modularization plan)
-into 17 plain files, loaded via ordered `<script>` tags in `index.html`
+into 19 plain files (18 original + `world-wiki.js` added in idea-09 Phase 3),
+loaded via ordered `<script>` tags in `index.html`
 (after `sprites/*.js`, in the same relative position the single
 `viewer.js` tag occupied before) and served from fixed Flask routes under
 `/viewer/<name>.js` (see [12-ops.md](12-ops.md)). There is no bundler and no
@@ -821,15 +821,17 @@ move, no logic changed.
 | 6 | `viewer/council.js` | Council panel (`renderCouncil`), council transcript modal (`openCouncilTranscript`), Daily Council Assembly modal, settlements |
 | 7 | `viewer/minimap.js` | Minimap render (`renderMinimap`) and click/drag-to-navigate |
 | 8 | `viewer/polling.js` | `/state` polling (`pollState`), `applyFlags`, social-tie/wildlife/shipment drawing (`drawSocialTies`, `drawWildlife`, `drawShipments`) |
-| 9 | `viewer/controls.js` | Pause/Resume/Reset controls (`postControl`, `syncPauseButton`, `doReset`), reset keyboard shortcut |
-| 10 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
-| 11 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
-| 12 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
-| 13 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers |
-| 14 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
-| 15 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
-| 16 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
-| 17 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`). Decision-audit polling starts in `decision-audit.js` itself. |
+| 9 | `viewer/anomaly.js` | Anomaly Radar sidebar panel and Divine Console anomaly tab: `pollAnomalies()` / `renderAnomalies()` plus modal rendering; read-only `GET /anomalies` polling |
+| 10 | `viewer/controls.js` | Pause/Resume/Reset controls (`postControl`, `syncPauseButton`, `doReset`), reset keyboard shortcut |
+| 11 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
+| 12 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
+| 13 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
+| 14 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers |
+| 15 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
+| 16 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
+| 17 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
+| 18 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`). Decision-audit polling starts in `decision-audit.js` itself. |
+| 19 | `viewer/world-wiki.js` | World Wiki modal: `openWorldWiki(kind, id)` global entry point, `fetchWiki()` / `renderWikiModal()` / `renderWikiIndex()` / `renderWikiPageContent()`, back-navigation stack, delegated `.wiki-link` click handler (capture phase, stops propagation). Gated on `WORLD_WIKI_ENABLED_FLAG` (set in `polling.js`). Polls `GET /wiki` every 3 s while modal is open; no polls when closed. Pure renderer — no world-state mutation. |
 
 ## Civ-1 physical props
 
@@ -1584,6 +1586,75 @@ Presentation class: `divine-banner-soft` (default) or `divine-banner-thunder`
 from the intervention's optional `presentation` field. There is no full-screen
 flash, no forced camera movement, and no banner (or any other public surface)
 for a private omen or private story event.
+
+## World Wiki modal (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan §2 Answers 5, 6.
+
+A new **full-screen modal** (Answer 6), mirroring the existing Council transcript modal
+pattern (`simulation/css/council.css`, `simulation/viewer/council.js`). The wiki modal
+is the first and only viewer consumer of `GET /wiki`.
+
+**Placement and trigger.** "Click a name anywhere, land on its page" — every existing
+name/id render site in the viewer (agent list, structure list, chronicle, council
+transcript, district/settlement panel, etc.) that already displays one of the twelve
+in-scope entity names links into the wiki modal for that entity. The modal is not a
+standalone panel; it overlays the existing viewer when triggered and closes on dismiss
+(same pattern as the Council transcript modal).
+
+**Content.** The modal displays the clicked entity's page: its fields and its
+cross-links (as clickable hyperlinks that navigate to another entity's wiki page within
+the same modal). Covers all twelve entity kinds: agent, structure, belief, rule,
+chronicle event, district, settlement, treaty, resourceRegistry entry, projectRegistry
+entry, recipe, and — on agent pages only — social ties displayed as labeled ally/rival
+links.
+
+**Pure renderer.** The wiki modal is a pure rendering surface — no client-side
+simulation logic, no decisions, no world-state mutation. It reads only from the `GET
+/wiki` JSON payload (Answer 3's server-side cross-link index) and the existing `world`
+snapshot already in `viewer/state.js`. The thin-viewer contract is preserved.
+
+**Live updates (Answer 5).** When the wiki modal is open, the viewer polls `GET /wiki`
+every 3 s (WIKI_POLL_MS). The open page re-renders on each fresh payload. No separate
+dirty-tracking; the route returns fresh data on every call. Polling stops when the
+modal is closed.
+
+**Flag echo.** The viewer reads `world.config.flags.WORLD_WIKI_ENABLED` (echoed by the
+server via `_build_snapshot_config()`), stored as `WORLD_WIKI_ENABLED_FLAG` in
+`viewer/polling.js`. When `false`, no wiki links are rendered and no `GET /wiki` polls
+are sent.
+
+**Viewer files (Phase 3 implementation).** The wiki modal lives in:
+- `simulation/viewer/world-wiki.js` — all modal logic (file 19 in the viewer split
+  table above). Entry point: global `openWorldWiki(kind, id)`.
+- `simulation/css/council.css` — wiki modal CSS appended to the existing council CSS
+  file (same file that owns `#councilTranscriptModal` and `#councilAssemblyModal`
+  styles).
+- `simulation/index.html` — modal markup `#worldWikiModal` / `#worldWikiDialog`
+  added alongside `#councilTranscriptModal`.
+- `simulation/viewer/polling.js` — `WORLD_WIKI_ENABLED_FLAG` variable + `applyFlags`
+  entry.
+- `simulation/viewer/sidebar.js` — wiki-link chips wired into: agent list rows
+  (`.agent-wiki-btn` chip on each agent name), agent detail relationship chips
+  (resolves peer agent by name via `getAgents()`), rule chips in civ panel, recipe
+  chips in civ panel.
+- `simulation/viewer/council.js` — settlement name links (settlement list) and daily
+  council transcript `ct-who` spans (resolves agent by name via `getAgents()`).
+
+**Click-through wiring.** A capture-phase delegated `click` handler on `document`
+catches all `[data-wiki-kind][data-wiki-id]` elements and calls
+`openWorldWiki(kind, id)`, stopping propagation so existing list-item selection
+handlers are not also triggered. All wiki-linkable elements carry these two
+`data-*` attributes and the `wiki-link` class (for styling).
+
+**Agent → structure → district → settlement chain.** The wiki modal renders
+reverse links: on an agent's page, `viewer/world-wiki.js` scans all structure pages
+in the fetched `/wiki` payload to find those whose `homeOf` link targets this agent,
+and renders them as clickable "Home structure" links. From the structure page, the
+`districtId` forward link goes to a district page; from the district page, the
+`settlementId` link goes to a settlement page. This satisfies the required
+click-through chain without any server-side change.
+
 
 ## Active viewer work
 

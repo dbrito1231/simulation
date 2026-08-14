@@ -570,3 +570,65 @@ assigns the next free slot to a corpse via the `bury_agent` action
 ([07-actions.md](07-actions.md)). A working cemetery structure (not disrepaired)
 is required before burial succeeds; a district with `kind == "cemetery"` bypasses
 the normal `PROJECT_KIND` build-district resolution.
+
+## World Wiki — district and structure pages (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan §2 Answers 1, 2, 3.
+
+This section documents the wiki page shapes for the two entity kinds owned by this spec:
+**district** and **structure**. Both are read-only projections over existing engine state;
+the wiki route (`GET /wiki`, [specs/04-http-api.md](04-http-api.md)) assembles them
+in-process.
+
+### District page
+
+Source: `civilization["districts"]` (live runtime dict, cold-started from
+`STARTER_DISTRICTS`) and district/road data from `_districts_snapshot_payload(engine)`
+(extracted from the `districts_js()` inline block; see
+[specs/04-http-api.md](04-http-api.md) — Districts merge mechanism).
+
+Fields projected onto a district page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | district key | |
+| `kind` | `district["kind"]` | e.g. `"farm"`, `"village"` |
+| `tile` | `district["tile"]` | ground tile id used by the renderer |
+| `label` | `district["label"]` | display name; `null` for ocean |
+| `bounds` | `district["bounds"]` | `{x1,y1,x2,y2}` |
+| `settlementId` | `district["settlementId"]` (when present) | links to settlement page |
+
+**Structured links** (from the Answer 2 cross-link table):
+
+- `settlementId` → settlement page (when present; district is a member of that settlement)
+
+**Not linked:** district `kind` is a category string, not an instance id — no
+auto-link is generated to other districts of the same kind.
+
+### Structure page
+
+Source: `civilization["structures"]` list (`_structure_snapshot_row()`,
+`mixin_snapshot.py:136-156`).
+
+Fields projected onto a structure page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | `structure["id"]` | |
+| `type` | `structure["type"]` | e.g. `"house"`, `"workshop"` |
+| `districtId` | `structure["districtId"]` | links to district page |
+| `homeOf` | `structure["homeOf"]` | agent id; links to agent page |
+| `condition` | `structure["condition"]` | 0–100 |
+| `isRuin` | `structure["isRuin"]` | bool |
+| `level` | `structure["level"]` | numeric level |
+| `visualTier` | `structure["visualTier"]` | 1–3 |
+| `name` | `structure["name"]` | custom blueprint name if present |
+
+**Structured links** (from the Answer 2 cross-link table):
+
+- `homeOf` → agent page (when set)
+- `districtId` → district page
+
+**Not linked:** structure `type` is a category string — a recipe's `station` field
+names this type string, not a specific built structure id, so that cross-reference
+is intentionally excluded from auto-linking (see Answer 2 table in specs/04).
