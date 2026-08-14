@@ -485,7 +485,7 @@ records. This route and its cache never mutate world state or logs.
 
 ## Viewer static assets
 
-The thin viewer loads 18 fixed JavaScript files from the Flask app beside `index.html`
+The thin viewer loads 19 fixed JavaScript files from the Flask app beside `index.html`
 (see [04-http-api.md](04-http-api.md)):
 
 | Path | File | Notes |
@@ -499,6 +499,7 @@ The thin viewer loads 18 fixed JavaScript files from the Flask app beside `index
 | `/viewer/minimap.js` | `simulation/viewer/minimap.js` | Required — minimap render + navigation |
 | `/viewer/polling.js` | `simulation/viewer/polling.js` | Required — `/state` polling, flag sync, social ties/wildlife/shipment drawing |
 | `/viewer/anomaly.js` | `simulation/viewer/anomaly.js` | Required — anomaly radar and console read-only `/anomalies` consumer |
+| `/viewer/world-wiki.js` | `simulation/viewer/world-wiki.js` | Required — World Wiki modal read-only `/wiki` consumer |
 | `/viewer/controls.js` | `simulation/viewer/controls.js` | Required — Pause/Resume/Reset controls |
 | `/viewer/renderloop.js` | `simulation/viewer/renderloop.js` | Required — `tick`/`tickBody` render loop |
 | `/viewer/divine-bootstrap.js` | `simulation/viewer/divine-bootstrap.js` | Required — Divine Console state, DOM refs, feature registry/guide, agent/pin selects |

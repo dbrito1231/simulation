@@ -10,7 +10,7 @@ drawing rules (structure sprite resolution order, seasonal variants).
 **Files:** `simulation/index.html` (markup shell), `simulation/css/*.css`
 (styles, split into 6 ordered files — see "css/*.css: split stylesheet"
 below), `simulation/viewer/*.js` (polling, render loop, sidebar, Divine
-Console, World Wiki; split into 18 ordered files — see "viewer/*.js: split viewer client
+Console, World Wiki; split into 19 ordered files — see "viewer/*.js: split viewer client
 script" below), `simulation/sprites/*.js` (stateless Canvas helpers, split
 into 8 ordered files — see "sprites/*.js: pure stateless drawing" below).
 **See also:** [01-architecture.md](01-architecture.md) for the
@@ -21,7 +21,7 @@ labels.
 
 ## Thin-viewer contract
 
-`simulation/viewer/setup.js` (first of the 18 split viewer files, see
+`simulation/viewer/setup.js` (first of the 19 split viewer files, see
 "viewer/*.js: split viewer client script" below) states the whole viewer's
 contract in a banner comment at the top of the file: it is a **PURE
 RENDERER** — it polls `GET /state`
@@ -299,9 +299,8 @@ here — see [Divine Audit tab](#divine-audit-tab).
 **Visibility.** Driven by the route's `enabled` field — **not** `/state`
 `config.flags` (the flag is not echoed there). When `enabled: false`, the panel
 **stays visible** and shows empty-state copy ("Decision audit disabled") in
-`#decisionAuditAgentList`; it is **not** force-hidden (force-hide read as empty
-black space). The recent `<details>` wrap is hidden. Polling continues on the
-same cadence so re-enable is detected without a page reload. When
+`#decisionAuditAgentList`; it is **not** force-hidden (force-hide reads as empty
+black space). The recent `<details>` wrap is hidden and polling stops. When
 `enabled: true`, the panel renders aggregates as below. Full entry list and
 outcome axis remain on the [Divine Audit tab](#divine-audit-tab) only.
 
@@ -799,7 +798,7 @@ earlier one, never the reverse.
 ## viewer/*.js: split viewer client script
 
 `simulation/viewer.js` was split (Phase 4 of the file-modularization plan)
-into 18 plain files (17 original + `world-wiki.js` added in idea-09 Phase 3),
+into 19 plain files (18 original + `world-wiki.js` added in idea-09 Phase 3),
 loaded via ordered `<script>` tags in `index.html`
 (after `sprites/*.js`, in the same relative position the single
 `viewer.js` tag occupied before) and served from fixed Flask routes under

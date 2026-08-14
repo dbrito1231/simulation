@@ -959,8 +959,8 @@ Fields projected onto a belief page:
 | `id` | belief id | |
 | `name` | `entry["name"]` | |
 | `tenet` | `entry["tenet"]` | text of the belief |
-| `affinity` | `entry["affinity"]` | rule *kind* string (e.g. `"resource_tax"`) — NOT linked |
-| `author` | `entry["author"]` | agent name of the originating agent |
+| `affinity` | `entry["affinity"]` | list of rule *kind* strings (e.g. `["resource_tax"]`) — NOT linked |
+| `authoredBy` | `entry["authoredBy"]` | agent name of the originating agent |
 
 **Not linked:** `affinity` names a rule *kind* (category string), not a specific rule
 instance id. Multiple active, pending, and constitution rules may share the same kind;

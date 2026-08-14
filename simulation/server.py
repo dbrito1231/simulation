@@ -3044,8 +3044,8 @@ def world_wiki():
         settlement_rows = []
         treaty_rows = []
         if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
-            settlement_rows = list(c.get("settlements") or [])
-            treaty_rows = list(c.get("treaties") or [])
+            settlement_rows = [dict(row) for row in (c.get("settlements") or [])]
+            treaty_rows = [dict(row) for row in (c.get("treaties") or [])]
         social_ties = []
         if _sim_engine.SOCIAL_LAYER_ENABLED:
             social_ties = engine._social_ties_snapshot()
@@ -3094,7 +3094,7 @@ def world_wiki():
             fields["lifeStage"] = row["lifeStage"]
         if row.get("skills") is not None:
             fields["skills"] = row["skills"]
-        if row.get("personalityTraits") is not None:
+        if _sim_engine.CULTURE_ENABLED and row.get("personalityTraits") is not None:
             fields["personality"] = row["personalityTraits"]
         agent_pages.append({"id": aid, "kind": "agent", "fields": fields, "links": links})
 
@@ -3122,6 +3122,7 @@ def world_wiki():
     structure_pages = []
     for s in struct_rows:
         links = []
+        owner_id = None
         if s.get("homeOf") is not None:
             # homeOf is stored as agent name; resolve to agent id for cross-link.
             owner_id = name_to_id.get(s["homeOf"], s["homeOf"])
@@ -3132,7 +3133,7 @@ def world_wiki():
             "id": s["id"],
             "type": s["type"],
             "districtId": s.get("districtId"),
-            "homeOf": s.get("homeOf"),
+            "homeOf": owner_id,
             "condition": s.get("condition"),
             "isRuin": s.get("isRuin", False),
             "level": s.get("level", 1),
@@ -3150,7 +3151,7 @@ def world_wiki():
                 "name": entry.get("name", bid),
                 "tenet": entry.get("tenet", ""),
                 "affinity": entry.get("affinity", []),
-                "author": entry.get("authoredBy"),
+                "authoredBy": entry.get("authoredBy"),
             }
             belief_pages.append({"id": bid, "kind": "belief", "fields": fields, "links": []})
 

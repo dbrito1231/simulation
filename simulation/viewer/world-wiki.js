@@ -310,6 +310,7 @@ document.addEventListener("keydown", (event) => {
 // Delegated click handler for all wiki-link elements site-wide.
 // Also handles wiki-index-item clicks inside the modal.
 document.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) return;
   const el = event.target.closest("[data-wiki-kind][data-wiki-id]");
   if (!el) return;
   const kind = el.dataset.wikiKind;

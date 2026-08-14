@@ -11,6 +11,14 @@ const decisionAuditRecentEl = document.getElementById("decisionAuditRecent");
 const decisionAuditRecentWrapEl = document.getElementById("decisionAuditRecentWrap");
 
 let lastDecisionAuditKey = "";
+let decisionAuditPollTimer = null;
+
+function stopDecisionAuditPoll() {
+  if (decisionAuditPollTimer != null) {
+    clearInterval(decisionAuditPollTimer);
+    decisionAuditPollTimer = null;
+  }
+}
 
 function truncateAuditText(text, maxLen) {
   const s = String(text || "");
@@ -35,6 +43,7 @@ function decisionAuditScoreBadge(score) {
 function renderDecisionAuditPanel(data) {
   if (!decisionAuditPanelEl) return;
   if (!data || !data.enabled) {
+    stopDecisionAuditPoll();
     decisionAuditPanelEl.style.display = "";
     decisionAuditAgentListEl.innerHTML =
       '<li class="decision-audit-empty">Decision audit disabled</li>';
@@ -120,7 +129,7 @@ async function pollDecisionAudit() {
 }
 
 pollDecisionAudit();
-setInterval(pollDecisionAudit, DECISION_AUDIT_POLL_MS);
+decisionAuditPollTimer = setInterval(pollDecisionAudit, DECISION_AUDIT_POLL_MS);
 
 // --- Divine Audit tab (idea-10 full view) --------------------------------
 const GOD_DECISION_AUDIT_POLL_MS = DECISION_AUDIT_POLL_MS;
@@ -270,6 +279,7 @@ function renderGodDecisionAuditPanel(data) {
   if (!godDecisionAuditSummaryEl && !godDecisionAuditEntriesEl) return;
 
   if (!data || !data.enabled) {
+    stopGodDecisionAuditPoll();
     lastGodDecisionAuditKey = "";
     if (godDecisionAuditStatusEl) {
       godDecisionAuditStatusEl.textContent = "Decision audit disabled.";

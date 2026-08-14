@@ -91,8 +91,8 @@ def _build_wiki_pages(engine, sem):
         settlement_rows = []
         treaty_rows = []
         if sem.path1_on("PATH1_DIPLOMACY_ENABLED"):
-            settlement_rows = list(c.get("settlements") or [])
-            treaty_rows = list(c.get("treaties") or [])
+            settlement_rows = [dict(row) for row in (c.get("settlements") or [])]
+            treaty_rows = [dict(row) for row in (c.get("treaties") or [])]
         social_ties = []
         if sem.SOCIAL_LAYER_ENABLED:
             social_ties = engine._social_ties_snapshot()
@@ -139,7 +139,7 @@ def _build_wiki_pages(engine, sem):
             fields["lifeStage"] = row["lifeStage"]
         if row.get("skills") is not None:
             fields["skills"] = row["skills"]
-        if row.get("personalityTraits") is not None:
+        if sem.CULTURE_ENABLED and row.get("personalityTraits") is not None:
             fields["personality"] = row["personalityTraits"]
         agent_pages.append({"id": aid, "kind": "agent", "fields": fields, "links": links})
 
@@ -164,15 +164,17 @@ def _build_wiki_pages(engine, sem):
     structure_pages = []
     for s in struct_rows:
         links = []
+        owner_id = None
         if s.get("homeOf") is not None:
-            links.append({"targetKind": "agent", "targetId": s["homeOf"], "relation": "homeOf"})
+            owner_id = name_to_id.get(s["homeOf"], s["homeOf"])
+            links.append({"targetKind": "agent", "targetId": owner_id, "relation": "homeOf"})
         if s.get("districtId") is not None:
             links.append({"targetKind": "district", "targetId": s["districtId"], "relation": "districtId"})
         fields = {
             "id": s["id"],
             "type": s["type"],
             "districtId": s.get("districtId"),
-            "homeOf": s.get("homeOf"),
+            "homeOf": owner_id,
             "condition": s.get("condition"),
             "isRuin": s.get("isRuin", False),
             "level": s.get("level", 1),
@@ -189,7 +191,7 @@ def _build_wiki_pages(engine, sem):
                 "name": entry.get("name", bid),
                 "tenet": entry.get("tenet", ""),
                 "affinity": entry.get("affinity", []),
-                "author": entry.get("authoredBy"),
+                "authoredBy": entry.get("authoredBy"),
             }
             belief_pages.append({"id": bid, "kind": "belief", "fields": fields, "links": []})
 
@@ -498,7 +500,7 @@ def test_belief_page_shape():
         for page in beliefs:
             assert_true(page.get("kind") == "belief", f"wrong kind: {page.get('kind')}")
             f = page["fields"]
-            for key in ("id", "name", "tenet", "affinity", "author"):
+            for key in ("id", "name", "tenet", "affinity", "authoredBy"):
                 assert_true(key in f, f"belief page fields missing {key!r}")
             assert_true(isinstance(f["affinity"], list), "affinity should be a list")
     finally:
