@@ -266,9 +266,9 @@ The day-boundary saga trigger needs dialogue from `conversation.jsonl`, which
 the engine does not write directly — `SessionLogger` owns that stream (table
 above). The read side uses the same injection seam as the write side:
 
-- **Function.** `read_conversation_window(start_frame, end_frame)` — implemented
+- **Function.** `read_conversation_window(start_frame, end_frame, max_records=None)` — implemented
   in `simulation/_server/logging_session.py` (`read_conversation_window(conversation_path,
-  start_frame, end_frame)`); `simulation/server.py` wraps it with
+  start_frame, end_frame, max_records=None)`); `simulation/server.py` wraps it with
   `session_logger.conversation_path` and injects the wrapper into `_ENGINE_DEPS`.
   Opens the **current run's** `conversation.jsonl` only; **no cross-session
   tailing** (same discipline as the anomaly-radar plan's benchmarks reader).
@@ -276,7 +276,9 @@ above). The read side uses the same injection seam as the write side:
   `[start_frame, end_frame)`, matching the schema documented in the
   `conversation.jsonl` row above (`{type, kind, from, to, message,
   frame_tick, outcome?}`). Synthetic `kind: "session_start"` lines are
-  excluded by the frame filter.
+  excluded by the frame filter. Saga passes `SAGA_DIALOGUE_EXCERPT_CAP` as
+  `max_records`, so matching-record parsing stops at the prompt's bounded
+  excerpt size rather than materializing a full chatty-day window.
 - **Injection.** A new `"read_conversation_window": ...` entry in
   `_ENGINE_DEPS` (`server.py:2668-2697`), alongside `log_conversation` and
   `lm_complete`. The engine's day-boundary handler calls it synchronously

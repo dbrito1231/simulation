@@ -1117,6 +1117,27 @@ SAGA_SYSTEM_PROMPT = (
     "Summarize only the facts provided — do not invent events, names, or lore. "
     "Write about 150 words in plain prose, past tense, as a village newspaper dispatch."
 )
+SAGA_PROMPT_EXCERPT_LINE_CAP = 10
+
+
+def _normalized_saga_dialogue_lines(dialogue):
+    """Return a bounded, one-line-per-excerpt dialogue prompt section."""
+    lines = []
+    for row in dialogue:
+        if not isinstance(row, dict):
+            continue
+        speaker = str(row.get("from") or "?")
+        target = str(row.get("to") or "?")
+        message = str(row.get("message") or "")
+        normalized = message.replace("\r\n", "\n").replace("\r", "\n")
+        for excerpt in normalized.split("\n"):
+            excerpt = " ".join(excerpt.split())
+            if not excerpt:
+                continue
+            lines.append(f"- {speaker} to {target}: {excerpt}")
+            if len(lines) >= SAGA_PROMPT_EXCERPT_LINE_CAP:
+                return lines
+    return lines
 
 
 def _build_chronicle_saga_user_prompt(saga_context):
@@ -1139,14 +1160,7 @@ def _build_chronicle_saga_user_prompt(saga_context):
         parts.append("Chronicle entries this day:\n" + "\n".join(lines))
     dialogue = saga_context.get("dialogue") or []
     if dialogue:
-        lines = []
-        for row in dialogue:
-            if not isinstance(row, dict):
-                continue
-            speaker = row.get("from") or "?"
-            target = row.get("to") or "?"
-            message = row.get("message") or ""
-            lines.append(f"- {speaker} to {target}: {message}")
+        lines = _normalized_saga_dialogue_lines(dialogue)
         if lines:
             parts.append("Conversation excerpts this day:\n" + "\n".join(lines))
     daily_council = saga_context.get("daily_council")
@@ -2741,10 +2755,10 @@ def _llm_decide(payload):
     return run_agent_decision(payload)
 
 
-def read_conversation_window(start_frame, end_frame):
+def read_conversation_window(start_frame, end_frame, max_records=None):
     """Engine-injected reader for the current run's conversation.jsonl."""
     return _read_conversation_window_from_path(
-        session_logger.conversation_path, start_frame, end_frame)
+        session_logger.conversation_path, start_frame, end_frame, max_records)
 
 
 _ENGINE_DEPS = {

@@ -1322,9 +1322,9 @@ class _GovernanceCultureMixin:
         reader = self.d.get("read_conversation_window")
         if callable(reader):
             try:
-                raw = reader(start_frame, end_frame) or []
+                raw = reader(start_frame, end_frame, SAGA_DIALOGUE_EXCERPT_CAP) or []
                 if isinstance(raw, list):
-                    dialogue = list(raw[:SAGA_DIALOGUE_EXCERPT_CAP])
+                    dialogue = raw
             except Exception:
                 dialogue = []
         daily_council = None

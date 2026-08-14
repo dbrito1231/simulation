@@ -1143,7 +1143,9 @@ the completed day's window in `civilization["chronicle"]`; (2) a **bounded**
 excerpt of the day's `conversation.jsonl` dialogue (via the injected read
 function — capped at `SAGA_DIALOGUE_EXCERPT_CAP = 10` lines in
 `constants.py`, a small multiple of `CHRONICLE_PROMPT_ENTRIES = 3`, not the
-full day's transcript); (3) civilization counters and daily-council verdict
+full day's transcript). Prompt excerpts normalize CRLF/CR to LF, collapse
+each rendered excerpt to one line, and stop at 10 rendered lines before prompt
+construction; (3) civilization counters and daily-council verdict
 context when present. Saga text is **never** folded into `_chronicle_prompt_line()` or any
 agent think payload ([09](09-systems-society.md#saga-chronicle_saga_enabled)).
 

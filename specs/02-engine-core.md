@@ -175,7 +175,8 @@ the lock here).
 **Dialogue cap.** The under-lock snapshot passes at most
 `SAGA_DIALOGUE_EXCERPT_CAP = 10` `conversation.jsonl` lines into `saga_context`
 (a small multiple of `CHRONICLE_PROMPT_ENTRIES = 3`, not the full day's
-transcript).
+transcript). The reader receives that cap before parsing/materializing matching
+records, so a chatty day cannot first allocate an unbounded transcript.
 
 **Cognition isolation.** Saga text is stored only in `civilization["saga"]`;
 it is never injected into agent think payloads ([09](09-systems-society.md#saga-chronicle_saga_enabled)).

@@ -158,8 +158,11 @@ def exercise_dialogue_cap(checks):
         for i in range(20)
     ]
 
-    def reader(start, end):
-        return [row for row in many_lines if start <= row["frame_tick"] < end]
+    def reader(start, end, max_records=None):
+        checks.check(max_records == se.SAGA_DIALOGUE_EXCERPT_CAP,
+                     "dialogue_reader_receives_excerpt_cap", max_records)
+        rows = [row for row in many_lines if start <= row["frame_tick"] < end]
+        return rows[:max_records] if max_records is not None else rows
 
     engine = make_engine({"read_conversation_window": reader})
     ctx = engine._snapshot_saga_context(0, se.DAY_FRAMES, se.DAY_FRAMES, 1)
@@ -196,6 +199,9 @@ def exercise_read_conversation_window(checks):
                      [r.get("message") for r in window])
         checks.check(all(r.get("type") == "conversation" for r in window),
                      "conversation_window_type_only")
+        capped = read_conversation_window(path, 10, 100, max_records=1)
+        checks.check(len(capped) == 1 and capped[0].get("message") == "in window",
+                     "conversation_window_stops_at_record_cap", capped)
         checks.check(read_conversation_window(path, 100, 100) == [],
                      "conversation_window_empty_when_start_eq_end")
         checks.check(read_conversation_window("/no/such/file.jsonl", 0, 10) == [],
@@ -238,15 +244,15 @@ def exercise_snapshot_flag_and_projection(checks):
 def exercise_engine_reader_dep(checks):
     captured = {}
 
-    def reader(start, end):
-        captured["window"] = (start, end)
+    def reader(start, end, max_records=None):
+        captured["window"] = (start, end, max_records)
         return [{"type": "conversation", "frame_tick": start + 1}]
 
     engine = make_engine({"read_conversation_window": reader})
     engine.frameTick = se.DAY_FRAMES - 1
     engine._tick_once()
     wait_for_saga(engine)
-    checks.check(captured.get("window") == (0, se.DAY_FRAMES),
+    checks.check(captured.get("window") == (0, se.DAY_FRAMES, se.SAGA_DIALOGUE_EXCERPT_CAP),
                  "engine_calls_reader_with_completed_day_window",
                  captured.get("window"))
 
