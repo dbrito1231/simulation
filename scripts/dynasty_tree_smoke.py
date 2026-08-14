@@ -79,8 +79,9 @@ def test_birth_appends_children():
 
 
 def test_restore_back_compat():
-    old_l = se.LIFECYCLE_ENABLED
+    old_l, old_d = se.LIFECYCLE_ENABLED, se.DYNASTY_TREE_ENABLED
     se.LIFECYCLE_ENABLED = True
+    se.DYNASTY_TREE_ENABLED = True
     old_db_path = se.DB_PATH
     try:
         engine = make_engine(2)
@@ -108,9 +109,11 @@ def test_restore_back_compat():
         restored_parent = next(a for a in engine.agents if a["name"] == parent["name"])
         assert_true(child["name"] in restored_parent.get("children", []),
                     "restore_state did not rebuild parent children from child parents")
+        assert_true(child["name"] in {a["name"] for a in engine._heirs_of(restored_parent)},
+                    "reconstructed children link not used by _heirs_of")
     finally:
         se.DB_PATH = old_db_path
-        se.LIFECYCLE_ENABLED = old_l
+        se.LIFECYCLE_ENABLED, se.DYNASTY_TREE_ENABLED = old_l, old_d
     print("  OK restore back-compat setdefaults and inverse children rebuild")
 
 
