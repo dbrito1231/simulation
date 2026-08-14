@@ -19,7 +19,6 @@
 const ANOMALY_POLL_MS = 5000;
 const ANOMALY_KIND_ORDER = ["range_break", "new_rule_kind", "schism"];
 
-const anomalyPanelEl = document.getElementById("anomalyPanel");
 const anomalySectionEl = document.getElementById("anomalySection");
 const anomalyListEl = document.getElementById("anomalyList");
 const anomalyBarBtnEl = document.querySelector('.gbtn[data-feature="anomaly"]');
