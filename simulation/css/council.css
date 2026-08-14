@@ -365,7 +365,7 @@
   #convList .msg { color: #bbb; }
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
-  #activityLog, #chronicleLog, #decisionAuditPanel {
+  #activityLog, #chronicleLog, #sagaLog, #decisionAuditPanel {
     padding-bottom: 12px;
   }
   #decisionAuditPanel {
@@ -408,9 +408,9 @@
   #decisionAuditRecent {
     max-height: min(260px, 28vh);
   }
-  #actList li, #chronicleList li, #decisionAuditAgentList li, #decisionAuditRecent li { padding: 3px 0; }
+  #actList li, #chronicleList li, #sagaList li, #decisionAuditAgentList li, #decisionAuditRecent li { padding: 3px 0; }
   #chronicleList .chronicle-kind { color: #d9b96e; font-weight: 600; }
-  #chronicleList .chronicle-frame { color: #777; font-size: 10px; }
+  #chronicleList .chronicle-frame, #sagaList .chronicle-frame { color: #777; font-size: 10px; }
   #decisionAuditRecentWrap {
     margin-top: 6px;
   }

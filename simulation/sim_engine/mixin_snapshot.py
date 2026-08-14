@@ -110,6 +110,17 @@ class _SnapshotMixin:
             if (kind := entry.get("kind")) in CHRONICLE_MILESTONE_KINDS
         ][-CHRONICLE_CAP:]
 
+    def _saga_snapshot(self):
+        """Return the viewer projection of the persisted saga ring."""
+        return [
+            {
+                "text": str(entry.get("text") or ""),
+                "frame": entry.get("frame"),
+                "dayIndex": entry.get("dayIndex"),
+            }
+            for entry in self.civilization.get("saga") or []
+        ][-SAGA_CAP:]
+
     def _agent_snapshot_row(self, a):
         """One agent row for /state (lock held)."""
         return {
@@ -266,6 +277,7 @@ class _SnapshotMixin:
                 "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
                 "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
                 "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
+                "CHRONICLE_SAGA_ENABLED": CHRONICLE_SAGA_ENABLED,
                 "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
                 "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
                 "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
@@ -333,6 +345,8 @@ class _SnapshotMixin:
             snapshot["socialTies"] = self._social_ties_snapshot()
         if CHRONICLE_ENABLED and CULTURE_ENABLED:
             snapshot["chronicle"] = self._chronicle_snapshot()
+        if CHRONICLE_SAGA_ENABLED:
+            snapshot["saga"] = self._saga_snapshot()
         if CROP_GROWTH_ENABLED or WILDLIFE_ENABLED:
             snapshot["districtEcology"] = self._district_ecology_snapshot()
         if WILDLIFE_ENABLED:
@@ -367,6 +381,8 @@ class _SnapshotMixin:
             return "socialTies", self._social_ties_snapshot()
         if key == "chronicle" and CHRONICLE_ENABLED and CULTURE_ENABLED:
             return "chronicle", self._chronicle_snapshot()
+        if key == "saga" and CHRONICLE_SAGA_ENABLED:
+            return "saga", self._saga_snapshot()
         if key == "districtEcology" and (CROP_GROWTH_ENABLED or WILDLIFE_ENABLED):
             return "districtEcology", self._district_ecology_snapshot()
         if key == "god" and GOD_MODE_ENABLED:

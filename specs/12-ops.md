@@ -4,7 +4,8 @@ How the sim is observed and debugged in the absence of a test suite: JSONL
 session logs, `/log/*` ingestion, and the `scripts/` toolbox.
 
 **Canonical for:** `SessionLogger`'s file layout and record shapes, the
-never-raise logging contract, Ollama's own server log location, and what
+never-raise logging contract, `_ENGINE_DEPS` server→engine injection (including
+`read_conversation_window` for chronicle saga), Ollama's own server log location, and what
 each of the `scripts/*.py` tools does and whether it needs Ollama.
 **See also:** [04-http-api.md](04-http-api.md) for `/log/event` and
 `/log/benchmark` route shapes (not repeated here); [03-cognition.md](03-cognition.md)
@@ -244,6 +245,55 @@ as any server restart today).
 - **Ollama's own server log** (not written by `SessionLogger`, and not
   under `simulation/logs/`) lives at `%LOCALAPPDATA%\Ollama\server.log` —
   token usage and per-request checkpoints, useful alongside `llm.jsonl`.
+
+## Engine dependency injection (`_ENGINE_DEPS`)
+
+`SimEngine` receives server-side callables through `_ENGINE_DEPS`
+(`simulation/server.py:2668-2697`), wired once at import when
+`engine = _sim_engine.SimEngine(_ENGINE_DEPS, ...)` is constructed. The engine
+invokes them as `self.d["..."]()` — e.g. every agent speech already calls
+`self.d["log_conversation"](...)` (`mixin_world_state.py:177`), and background
+cognition calls `self.d["lm_complete"](...)`.
+
+Existing entries include `log_activity` → `session_logger.log_activity`,
+`log_conversation` → `session_logger.log_conversation`, `lm_complete`,
+`log_benchmark`, `flush_benchmarks`, `run_piano_module`, `run_chronicle_saga`, and the other keys
+listed at `server.py:2668-2697`.
+
+### Chronicle saga: `read_conversation_window` (`CHRONICLE_SAGA_ENABLED`)
+
+The day-boundary saga trigger needs dialogue from `conversation.jsonl`, which
+the engine does not write directly — `SessionLogger` owns that stream (table
+above). The read side uses the same injection seam as the write side:
+
+- **Function.** `read_conversation_window(start_frame, end_frame)` — implemented
+  in `simulation/_server/logging_session.py` (`read_conversation_window(conversation_path,
+  start_frame, end_frame)`); `simulation/server.py` wraps it with
+  `session_logger.conversation_path` and injects the wrapper into `_ENGINE_DEPS`.
+  Opens the **current run's** `conversation.jsonl` only; **no cross-session
+  tailing** (same discipline as the anomaly-radar plan's benchmarks reader).
+  Returns `conversation`-typed records whose `frame_tick` falls in
+  `[start_frame, end_frame)`, matching the schema documented in the
+  `conversation.jsonl` row above (`{type, kind, from, to, message,
+  frame_tick, outcome?}`). Synthetic `kind: "session_start"` lines are
+  excluded by the frame filter.
+- **Injection.** A new `"read_conversation_window": ...` entry in
+  `_ENGINE_DEPS` (`server.py:2668-2697`), alongside `log_conversation` and
+  `lm_complete`. The engine's day-boundary handler calls it synchronously
+  under `self.lock` (local file I/O, not network — [02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled)).
+
+### Chronicle saga: `llm.jsonl` tag
+
+The day-boundary saga `lm_complete` dispatch ([03](03-cognition.md)) logs a
+slim record via `session_logger.log_lm_exchange` inside
+`run_chronicle_saga(saga_context)` (`server.py`), injected as
+`"run_chronicle_saga"` in `_ENGINE_DEPS`. Tag: `"module": "chronicle_saga"`
+(same optional field PIANO module timeouts use — `server.py:1095-1101`), plus
+`frame_tick` at the day boundary, `latency_ms`, optional `response_preview`
+(truncated saga text), and `error` when the call fails or returns empty (the
+engine worker still writes `SAGA_FALLBACK_TEXT` to `civilization["saga"]` —
+see [02](02-engine-core.md)). Omit `agent_name` — this is a village-wide
+background dispatch, not an agent decision turn.
 
 ## Sovereign God mode — security contract
 

@@ -1584,6 +1584,8 @@ class _ThinkJobMixin:
                 if ft % DAY_FRAMES == 0:
                     self._maybe_convene_daily_council()
                 self._maybe_advance_daily_council()
+            if CHRONICLE_SAGA_ENABLED and ft % DAY_FRAMES == 0:
+                self._maybe_append_daily_saga()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
             if BENCHMARKS_ENABLED and (ft % BENCHMARK_TICK_FRAMES == 0 or ft == FIRST_BENCHMARK_FRAME):

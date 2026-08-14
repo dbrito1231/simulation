@@ -105,6 +105,8 @@ const convListEl = document.getElementById("convList");
 const actListEl = document.getElementById("actList");
 const chronicleLogEl = document.getElementById("chronicleLog");
 const chronicleListEl = document.getElementById("chronicleList");
+const sagaLogEl = document.getElementById("sagaLog");
+const sagaListEl = document.getElementById("sagaList");
 const timeNowEl = document.getElementById("timeNow");
 const timeUptimeEl = document.getElementById("timeUptime");
 const timeCalendarEl = document.getElementById("timeCalendar");
@@ -359,6 +361,7 @@ let lastAgentPanelKey = "";
 let lastAgentDetailKey = "";
 let lastLogKey = "";
 let lastChronicleKey = "";
+let lastSagaKey = "";
 let foundingFramesSeen = null; // null until first snapshot processed (see founding-banner logic)
 let foundingBannerTimer = null;
 let disasterFramesSeen = null;
@@ -969,6 +972,28 @@ function renderSidebar() {
           `</li>`;
       }).join("") || `<li class="civ-label">No village milestones yet</li>`;
       chronicleListEl.scrollTop = scrollTop;
+    }
+  }
+
+  if (!CHRONICLE_SAGA_ENABLED) {
+    sagaLogEl.style.display = "none";
+  } else {
+    sagaLogEl.style.display = "";
+    const saga = world.saga || [];
+    const sagaKey = JSON.stringify(saga);
+    if (sagaKey !== lastSagaKey) {
+      lastSagaKey = sagaKey;
+      const scrollTop = sagaListEl.scrollTop;
+      sagaListEl.innerHTML = saga.slice().reverse().map((entry) => {
+        const metaParts = [];
+        if (entry.dayIndex != null) metaParts.push(`day ${entry.dayIndex}`);
+        if (entry.frame != null) metaParts.push(`frame ${entry.frame}`);
+        const meta = metaParts.join(" · ");
+        return `<li>${escapeHtml(entry.text || "")}` +
+          (meta ? ` <span class="chronicle-frame">${escapeHtml(meta)}</span>` : "") +
+          `</li>`;
+      }).join("") || `<li class="civ-label">No village paper yet</li>`;
+      sagaListEl.scrollTop = scrollTop;
     }
   }
 

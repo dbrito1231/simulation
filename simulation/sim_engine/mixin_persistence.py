@@ -370,6 +370,7 @@ class _PersistenceMixin:
                     if isinstance(civ.get("projectRegistry"), dict):
                         civ["projectRegistry"].setdefault("library", dict(PROJECT_TEMPLATES["library"]))
                     civ.setdefault("chronicle", [])
+                    civ.setdefault("saga", [])
                     civ.setdefault("libraryKnowledge", [])
                     civ.setdefault("memeTexts", {})
                     civ.setdefault("memeMutations", 0)

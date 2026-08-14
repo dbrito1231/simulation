@@ -18,6 +18,7 @@ __all__ = [
     "ACTIVITY_CUES_ENABLED",
     "SOCIAL_LAYER_ENABLED",
     "CHRONICLE_ENABLED",
+    "CHRONICLE_SAGA_ENABLED",
     "FOUNDING_EVENTS_ENABLED",
     "WORLD_CLOCK_HUD_ENABLED",
     "SEASONAL_AGENTS_ENABLED",
@@ -401,6 +402,9 @@ __all__ = [
     "LIBRARY_STUDY_GAIN",
     "LIBRARY_STUDY_WEIGHT_CAP",
     "CHRONICLE_CAP",
+    "SAGA_CAP",
+    "SAGA_DIALOGUE_EXCERPT_CAP",
+    "SAGA_FALLBACK_TEXT",
     "CHRONICLE_PROMPT_ENTRIES",
     "TESTAMENT_CAP",
     "TESTAMENT_PROMPT_ENTRIES",
@@ -482,6 +486,9 @@ ACTIVITY_CUES_ENABLED = True
 # chronicle. These never alter social/culture simulation state or prompts.
 SOCIAL_LAYER_ENABLED = True
 CHRONICLE_ENABLED = True
+# Daily village saga dispatch ring (viewer-only; never prompt-facing).
+# Phase 2: day-boundary sim-fast lm_complete dispatch via run_chronicle_saga.
+CHRONICLE_SAGA_ENABLED = True
 # Read-only viewer projection: announces a newly founded district as a
 # chronicle milestone + a brief banner (index.html). Gates only the
 # _found_district chronicle call and the banner trigger -- district founding
@@ -1727,6 +1734,12 @@ LIBRARY_STUDY_WEIGHT_CAP = 5         # study-gain upgrade-weight cap (knowledge-
 # prompt line ("Village history: ...") so a long-running village develops a
 # legible past without growing the prompt unboundedly.
 CHRONICLE_CAP = 100
+# Saga: capped ring of daily ~150-word dispatches (sibling to chronicle, not prompt-facing).
+SAGA_CAP = 100
+# Bounded conversation.jsonl lines included in the day-boundary saga prompt.
+SAGA_DIALOGUE_EXCERPT_CAP = 10
+# Deterministic fallback when lm_complete fails or returns empty (never blocks tick).
+SAGA_FALLBACK_TEXT = "A quiet day passed in the village; little was recorded."
 CHRONICLE_PROMPT_ENTRIES = 3         # how many recent entries to fold into the prompt line
 # Testament (TESTAMENT_ENABLED): capped ring of attributed lesson lines folded
 # into one prompt line ("Village testament: ...") the way the chronicle works.
