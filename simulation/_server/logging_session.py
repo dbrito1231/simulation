@@ -250,3 +250,54 @@ class SessionLogger:
             "preview_id": preview_id,
         }
         self._append(self.compiler_path, record)
+
+
+def read_conversation_window(conversation_path, start_frame, end_frame, max_records=None):
+    """Return conversation.jsonl records whose frame_tick is in [start_frame, end_frame).
+
+    Reads only the given path (current run's file). Missing file, malformed
+    lines, and I/O errors yield partial/empty results — never raises. A supplied
+    `max_records` stops parsing after that many matching records."""
+    try:
+        start = int(start_frame)
+        end = int(end_frame)
+    except (TypeError, ValueError):
+        return []
+    if end <= start or not conversation_path:
+        return []
+    if max_records is not None:
+        try:
+            max_records = int(max_records)
+        except (TypeError, ValueError):
+            return []
+        if max_records <= 0:
+            return []
+    records = []
+    try:
+        with open(conversation_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                if record.get("type") != "conversation":
+                    continue
+                tick = record.get("frame_tick")
+                if tick is None:
+                    continue
+                try:
+                    tick = int(tick)
+                except (TypeError, ValueError):
+                    continue
+                if start <= tick < end:
+                    records.append(record)
+                    if max_records is not None and len(records) >= max_records:
+                        break
+    except OSError:
+        return []
+    return records

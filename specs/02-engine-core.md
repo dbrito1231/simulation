@@ -31,6 +31,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | within the 150-batch, `SAGE_REVIEW_ENABLED` | 150 | `_maybe_skip_sage_review`, `_maybe_amnesty_denied_sage_reviews` |
 | within the 150-batch, `TECH_TREE_ENABLED` | 150 | `_maybe_era_transition`, `_maybe_dissolve_council` |
 | `DAILY_COUNCIL_ENABLED` | day boundary (`frameTick % DAY_FRAMES == 0`) and deterministic phase gate | `_maybe_convene_daily_council`, `_maybe_advance_daily_council` |
+| `CHRONICLE_SAGA_ENABLED` | day boundary (`frameTick % DAY_FRAMES == 0`) | `_maybe_append_daily_saga` — see [Chronicle saga](#chronicle-saga-chronicle_saga_enabled) |
 | within the 150-batch, `CULTURE_ENABLED` | 150 | `_maybe_study_at_library` |
 | within the 150-batch, `CEMETERY_ENABLED` | 150 | `_maybe_handle_burials` |
 | within the 150-batch, `ECONOMY_ENABLED` | 150 | `_maybe_mint_coin`, `_maybe_fund_project_coin` |
@@ -124,6 +125,61 @@ lifecycle gate (~10 s at 30/s).
   exception (next `RULES_TICK_FRAMES` pass). Phase machine:
   [09-systems-society.md](09-systems-society.md). Council turns replace the
   selected agent's ordinary think turn — no extra worker-pool slot.
+
+### Chronicle saga (`CHRONICLE_SAGA_ENABLED`) {#chronicle-saga-chronicle_saga_enabled}
+
+When `CHRONICLE_SAGA_ENABLED` (default True — [01](01-architecture.md)), every
+day boundary (`frameTick % DAY_FRAMES == 0`) fires a village saga dispatch.
+The trigger stays engine-side in `_tick_once` (same gate shape as Daily
+Council above) and is gated only by the flag — it **never** early-returns on
+an empty chronicle window.
+
+**Under-lock snapshot.** While holding `self.lock`, `_maybe_append_daily_saga()`
+(`mixin_governance_culture.py`) gathers the completed day's inputs into one
+`saga_context` payload: chronicle-ring entries
+for the day window, civilization counters (`births`, `deaths`, daily-council
+verdict fields when present), and a bounded dialogue excerpt from
+`self.d["read_conversation_window"](start_frame, end_frame)` — the new
+server-injected dependency ([12](12-ops.md)) that reads the current run's
+`conversation.jsonl` via `session_logger.conversation_path`. This call is
+synchronous local file I/O (not a network call) and is safe inside the lock,
+unlike `lm_complete`.
+
+**Outside-lock LLM + write-back.** After releasing the lock, the handler
+dispatches one `self.d["run_chronicle_saga"](saga_context)` call onto
+`self.piano_workers` (shared with PIANO — `PIANO_CONCURRENT_LLM = 2`, never
+`self._executor`) via `_run_daily_saga_worker` (`mixin_governance_culture.py`).
+The server helper calls `lm_complete` with `MODEL_FAST`/`sim-fast` ([03](03-cognition.md)).
+When the call returns, the worker re-acquires the lock and appends the result
+to `civilization["saga"]` — the same snapshot → release → dispatch → reacquire →
+write shape as `_build_think_payload` / `run_agent_decision` / `apply_decision`
+(`mixin_think_job.py`), **not** the single in-lock `lm_complete` in
+`_spawn_newborn` (`mixin_lifecycle.py`). In-flight work is tracked on
+`self._saga_inflight` (a `concurrent.futures.Future`) for smokes; `_tick_once`
+never waits on it.
+
+**Day window.** At day boundary after `frameTick` increments in `_tick_once`,
+the completed day is `[frameTick - DAY_FRAMES, frameTick)` (same convention as
+Daily Council's `day = frameTick // DAY_FRAMES` at the boundary frame).
+
+**Always-fire / empty-day behavior.** Every day boundary produces a saga entry.
+When the day's chronicle window and dialogue excerpt are both empty, the call
+still fires with explicit "nothing notable happened" context so the model can
+emit a quiet-day line (~"a quiet day passed"). If `lm_complete` itself fails or
+times out, the deterministic fallback string `SAGA_FALLBACK_TEXT`
+(`constants.py`) is written instead — the tick loop never blocks and the trigger
+never silently skips a day (mirrors the birth-persona "never blocks the simulation
+on the LLM" discipline in `_spawn_newborn`, except the network call runs outside
+the lock here).
+
+**Dialogue cap.** The under-lock snapshot passes at most
+`SAGA_DIALOGUE_EXCERPT_CAP = 10` `conversation.jsonl` lines into `saga_context`
+(a small multiple of `CHRONICLE_PROMPT_ENTRIES = 3`, not the full day's
+transcript). The reader receives that cap before parsing/materializing matching
+records, so a chatty day cannot first allocate an unbounded transcript.
+
+**Cognition isolation.** Saga text is stored only in `civilization["saga"]`;
+it is never injected into agent think payloads ([09](09-systems-society.md#saga-chronicle_saga_enabled)).
 
 ## Roster / cold start
 
@@ -319,8 +375,20 @@ Daily Council transcript persistence mirrors `memory`: authoritative in-RAM
 list; DB save deletes/re-inserts atomically. Restore rehydrates. At adjourn,
 retention keeps newest `DAILY_COUNCIL_TRANSCRIPT_RETENTION_MEETINGS = 30`
 distinct `meeting_id` values. Audit table never in LLM prompts; bounded digest
-in `civ` blob is prompt-facing ([03](03-cognition.md)). `clear_state()` deletes
-`state.db` plus `state.db-wal`/`state.db-shm`.
+in `civ` blob is prompt-facing ([03](03-cognition.md)).
+
+**Chronicle saga ring (`CHRONICLE_SAGA_ENABLED`).** `civilization["saga"]` is
+a capped ring of daily dispatch records `{text, frame, dayIndex}` (sibling to
+`civilization["chronicle"]`, not prompt-facing — [09](09-systems-society.md#saga-chronicle_saga_enabled)).
+Ring cap: `SAGA_CAP = 100`. Day-boundary append: `_maybe_append_daily_saga()`
+(`mixin_governance_culture.py`), gated from `_tick_once` (`mixin_think_job.py`).
+`restore_state()` applies `setdefault("saga", [])` on the civilization blob so
+older saves without the field load without raising — same setdefault-only
+back-compat discipline as the other post-v2 fields above (line 300). The ring
+is projected to `/state` when the flag is on (implementation in
+`mixin_snapshot.py`, Phase 1).
+
+`clear_state()` deletes `state.db` plus `state.db-wal`/`state.db-shm`.
 
 ## Sovereign God mode (Phase 2 — secure kernel)
 

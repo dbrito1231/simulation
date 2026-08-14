@@ -15,6 +15,7 @@ import os
 import re
 import signal
 import threading
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -64,7 +65,7 @@ from _server.model_routing import (
     is_high_stakes_turn, resolve_high_stakes, model_for_decision,
 )
 from _server.decision_audit import build_decision_audit
-from _server.logging_session import SessionLogger
+from _server.logging_session import SessionLogger, read_conversation_window as _read_conversation_window_from_path
 from _server.memory_store import (
     MemoryStore, embed_text, _cosine, _stable_hash, is_scaffold_text,
     extract_plain_answer,
@@ -1108,6 +1109,104 @@ def run_piano_module(module, agent_name, context, frame_tick=None, timeout_s=Non
             eng._record_llm_orphan_timeout()
         return None
     except Exception:
+        return None
+
+
+SAGA_SYSTEM_PROMPT = (
+    "You write brief village chronicle dispatches for a pixel-art simulation. "
+    "Summarize only the facts provided — do not invent events, names, or lore. "
+    "Write about 150 words in plain prose, past tense, as a village newspaper dispatch."
+)
+SAGA_PROMPT_EXCERPT_LINE_CAP = 10
+
+
+def _normalized_saga_dialogue_lines(dialogue):
+    """Return a bounded, one-line-per-excerpt dialogue prompt section."""
+    lines = []
+    for row in dialogue:
+        if not isinstance(row, dict):
+            continue
+        speaker = str(row.get("from") or "?")
+        target = str(row.get("to") or "?")
+        message = str(row.get("message") or "")
+        normalized = message.replace("\r\n", "\n").replace("\r", "\n")
+        for excerpt in normalized.split("\n"):
+            excerpt = " ".join(excerpt.split())
+            if not excerpt:
+                continue
+            lines.append(f"- {speaker} to {target}: {excerpt}")
+            if len(lines) >= SAGA_PROMPT_EXCERPT_LINE_CAP:
+                return lines
+    return lines
+
+
+def _build_chronicle_saga_user_prompt(saga_context):
+    """Format snapshotted day facts into the saga user prompt."""
+    parts = [f"Day {saga_context.get('day_index', 0)} summary request."]
+    if saga_context.get("quiet_day"):
+        parts.append(
+            "Nothing notable was recorded in the chronicle or conversation logs for this day.")
+    counters = saga_context.get("counters") or {}
+    parts.append(
+        f"Village counters: {counters.get('births', 0)} births, "
+        f"{counters.get('deaths', 0)} deaths (lifetime totals).")
+    entries = saga_context.get("chronicle_entries") or []
+    if entries:
+        lines = []
+        for entry in entries:
+            kind = entry.get("kind") or "event"
+            text = entry.get("text") or ""
+            lines.append(f"- [{kind}] {text}")
+        parts.append("Chronicle entries this day:\n" + "\n".join(lines))
+    dialogue = saga_context.get("dialogue") or []
+    if dialogue:
+        lines = _normalized_saga_dialogue_lines(dialogue)
+        if lines:
+            parts.append("Conversation excerpts this day:\n" + "\n".join(lines))
+    daily_council = saga_context.get("daily_council")
+    if daily_council:
+        verdict = daily_council.get("verdict")
+        if verdict:
+            parts.append(
+                "Daily Council verdict: "
+                + json.dumps(verdict, default=str)[:300])
+    return "\n\n".join(parts)
+
+
+def run_chronicle_saga(saga_context):
+    """Background chronicle saga runner (MODEL_FAST). Returns text or None."""
+    if not isinstance(saga_context, dict):
+        return None
+    user_prompt = _build_chronicle_saga_user_prompt(saga_context)
+    frame_tick = saga_context.get("frame")
+    started = time.time()
+    try:
+        text = lm_complete(
+            SAGA_SYSTEM_PROMPT,
+            user_prompt,
+            max_tokens=220,
+            temperature=0.4,
+        )
+        latency_ms = (time.time() - started) * 1000.0
+        record = {
+            "frame_tick": frame_tick,
+            "module": "chronicle_saga",
+            "latency_ms": round(latency_ms, 1),
+        }
+        if text and str(text).strip():
+            record["response_preview"] = str(text).strip()[:200]
+        else:
+            record["error"] = "empty_response"
+        session_logger.log_lm_exchange(record)
+        return str(text).strip() if text and str(text).strip() else None
+    except Exception as exc:
+        latency_ms = (time.time() - started) * 1000.0
+        session_logger.log_lm_exchange({
+            "frame_tick": frame_tick,
+            "module": "chronicle_saga",
+            "latency_ms": round(latency_ms, 1),
+            "error": str(exc)[:200],
+        })
         return None
 
 
@@ -2656,6 +2755,12 @@ def _llm_decide(payload):
     return run_agent_decision(payload)
 
 
+def read_conversation_window(start_frame, end_frame, max_records=None):
+    """Engine-injected reader for the current run's conversation.jsonl."""
+    return _read_conversation_window_from_path(
+        session_logger.conversation_path, start_frame, end_frame, max_records)
+
+
 _ENGINE_DEPS = {
     "ROLES": ROLES,
     "ROLE_PROJECT": ROLE_PROJECT,
@@ -2670,6 +2775,7 @@ _ENGINE_DEPS = {
     "memory_store": memory_store,
     "log_activity": session_logger.log_activity,
     "log_conversation": session_logger.log_conversation,
+    "read_conversation_window": read_conversation_window,
     "log_benchmark": session_logger.log_benchmark,
     "flush_benchmarks": session_logger.flush_benchmarks,
     "log_divine": session_logger.log_divine,
@@ -2681,6 +2787,7 @@ _ENGINE_DEPS = {
     "SPRITE_GRID_MAX": SPRITE_GRID_MAX,
     "canonical_effect_vector": canonical_effect_vector,
     "run_piano_module": run_piano_module,
+    "run_chronicle_saga": run_chronicle_saga,
     "run_meta_update": run_meta_update,
     "normalize_decision": normalize_decision,
     "synthesize_divine_response": synthesize_divine_response,

@@ -6,7 +6,8 @@ memes, culture (skills/teaching/library/chronicle), messaging, benchmarks,
 and the governance-specific slice of lifecycle succession.
 
 **Canonical for:** `TECH_TREE_ENABLED`, `DAILY_COUNCIL_ENABLED`, `SAGE_REVIEW_ENABLED`,
-`RULES_ENABLED`, `MEMES_ENABLED`, `CULTURE_ENABLED`, `AGENT_MESSAGING`,
+`RULES_ENABLED`, `MEMES_ENABLED`, `CULTURE_ENABLED`, `CHRONICLE_SAGA_ENABLED`,
+`AGENT_MESSAGING`,
 `BENCHMARKS_ENABLED` semantics; the succession/harvest_quota/rationing rule
 kinds under `LIFECYCLE_ENABLED`.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index;
@@ -711,6 +712,27 @@ minutes) evicting real history (deaths/elections/beliefs) within about a day
 at the old cap; 100 entries absorbs many more disasters before crowding out
 anything else, at a negligible cost (~80 extra short strings in `/state` and
 `state.db`).
+
+### Saga (`CHRONICLE_SAGA_ENABLED`, default True) {#saga-chronicle_saga_enabled}
+
+A sibling ring to `civilization["chronicle"]`, stored in
+`civilization["saga"]`: one ~150-word daily dispatch per sim day, appended at
+the day boundary when `CHRONICLE_SAGA_ENABLED` is on ([02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled),
+[03](03-cognition.md)). Entries are `{text, frame, dayIndex}`; the ring is
+capped at `SAGA_CAP = 100` (same magnitude as `CHRONICLE_CAP`).
+
+**Not prompt-facing.** Saga text is explicitly **not** part of the
+`CHRONICLE_ENABLED` `/state` chronicle projection, **not** folded into
+`_chronicle_prompt_line()` / the "Village history: ..." prompt line, and
+**never** injected into any agent think payload — a ~150-word saga paragraph
+landing there would crowd out the milestone entries (`death`/`election`/
+`belief_founded`/etc.) the chronicle projection's filter list documents above.
+Saga is viewer/read-only summary only (Phase 3 panel); cognition must never
+read it back.
+
+Kill switch: set `CHRONICLE_SAGA_ENABLED = False` in
+`simulation/sim_engine/constants.py` and restart; no env-var override. Echoed
+in `/state` `config.flags.CHRONICLE_SAGA_ENABLED` ([01](01-architecture.md)).
 
 ### Testament (`TESTAMENT_ENABLED`, default True) {#testament_enabled}
 

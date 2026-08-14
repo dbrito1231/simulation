@@ -29,8 +29,8 @@ catalog — not repeated here).
 > `MODEL_FAST = "sim-fast"` (`llama3.2:3b`, `num_ctx=4096`) are distinct
 > models split **by workload kind, not by decision stakes**: ALL decision
 > turns route to `MODEL_SMART`; `MODEL_FAST` serves only background cognition
-> (PIANO modules, memory summarizer/wiki merge, meta system, belief pitch —
-> every direct `lm_complete()` caller). This supersedes an initial Phase 3
+> (PIANO modules, memory summarizer/wiki merge, meta system, belief pitch,
+> chronicle saga — every direct `lm_complete()` caller). This supersedes an initial Phase 3
 > attempt that routed routine decisions to `sim-fast`: a live soak measured
 > `piano_module_drops` at ~25-38% (vs. ~9% pre-migration) and rising module
 > latencies, because routine decisions and PIANO modules contended for
@@ -56,7 +56,8 @@ catalog — not repeated here).
 | Invention-only turn | `INVENTION_SYSTEM_PROMPT` | `MODEL_SMART` (sprite/invention always high-stakes) | `INVENTION_MAX_TOKENS`=1024 | `INVENTION_TEMPERATURE`=0.6 | 75s | as above |
 | Daily Council turn | slim council-turn prompt | `MODEL_SMART`; routine settings except an elder verdict uses the high-stakes settings | bounded routine output | routine temperature | routine timeout, or 75s for elder verdict | routine sampling, or high-stakes sampling for elder verdict |
 | Sprite-design turn | `SPRITE_UPGRADE_SYSTEM_PROMPT` | `MODEL_SMART` | 768 | 0.3 | 75s | as above |
-| Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/80/90/100/220 per call site; PIANO=`PIANO_MODULE_MAX_TOKENS`=90) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`); PIANO fan-out 15s (`PIANO_MODULE_TIMEOUT_S`), always-on refresh 60s (`MODULE_REFRESH_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
+| Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring, chronicle saga) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/80/90/100/220 per call site; PIANO=`PIANO_MODULE_MAX_TOKENS`=90; saga ≈150-word target at implementation) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`); PIANO fan-out 15s (`PIANO_MODULE_TIMEOUT_S`), always-on refresh 60s (`MODULE_REFRESH_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
+| Chronicle saga (day boundary, `CHRONICLE_SAGA_ENABLED`) | caller-built prompt: day's chronicle window + bounded `conversation.jsonl` excerpt + civ counters | `MODEL_FAST` (`sim-fast`) | caller-set (~150-word target) | caller-set (~0.4) | 30s (`lm_complete` default) | `NON_THINKING_SAMPLING` + `think:false` |
 
 Routine and high-stakes rows both use `MODEL_SMART`; separate rows because
 `is_high_stakes_turn` still determines timeout, max_tokens, and
@@ -99,7 +100,7 @@ route to `sim-fast`, regardless of `is_high_stakes_turn(data)`.
 sampling/thinking (`THINKING_SAMPLING` vs `NON_THINKING_SAMPLING`) — only
 model-id selection was removed. `MODEL_FAST` is for background cognition only
 (PIANO modules, memory summarizer/wiki merge, meta system, belief-pitch
-scoring — every direct `lm_complete()` caller); see Concurrency & context
+scoring, chronicle saga — every direct `lm_complete()` caller); see Concurrency & context
 sizing for contention rationale. Fallback: Ollama has no LM-Studio-style
 `"local-model"` alias — if `looks_like_model_not_found_error` fires, that is
 a **setup failure**: the server logs a `[server]` line pointing at
@@ -1112,6 +1113,51 @@ sharing that per-model context budget. Decision prompts (~3,100-3,400 routine,
 up to ~6,163 invention-only) must stay under `sim-smart`'s per-slot share at
 `OLLAMA_NUM_PARALLEL=3` against `num_ctx=20480`; `exceed_context_size_error`
 (see Retries) is the enforced backstop.
+
+### Chronicle saga LLM (`CHRONICLE_SAGA_ENABLED`)
+
+One `lm_complete` call per sim day at the day boundary
+(`frameTick % DAY_FRAMES == 0`, gated by `CHRONICLE_SAGA_ENABLED` — trigger
+details in [02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled)). This
+is a **background** call site: always `MODEL_FAST`/`sim-fast` via
+`self.d["run_chronicle_saga"](saga_context)` (server wrapper around
+`lm_complete` — `server.py:1312-1316`).
+
+**Lock discipline (contrast with `_spawn_newborn`).** All saga inputs are
+snapshotted under `self.lock` (chronicle-ring window, `births`/`deaths`
+counters, and a bounded dialogue excerpt returned by
+`self.d["read_conversation_window"](start_frame, end_frame)` — [12](12-ops.md)).
+The network call runs **fully outside** the lock, then the lock is re-acquired
+only to append into `civilization["saga"]`. Same snapshot → release → dispatch
+→ reacquire → write shape as `_build_think_payload` /
+`run_agent_decision` / `apply_decision` (`mixin_think_job.py:35,1417`,
+`server.py:2006`) — **not** the single synchronous in-lock `lm_complete` in
+`_spawn_newborn` (`mixin_lifecycle.py:1186-1253`).
+
+**Pool.** Dispatched onto `self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`,
+`constants.py:1358`) — shared capacity with PIANO module calls, never
+`self._executor` / `MAX_CONCURRENT_LLM`.
+
+**Prompt composition.** The user prompt combines: (1) chronicle entries from
+the completed day's window in `civilization["chronicle"]`; (2) a **bounded**
+excerpt of the day's `conversation.jsonl` dialogue (via the injected read
+function — capped at `SAGA_DIALOGUE_EXCERPT_CAP = 10` lines in
+`constants.py`, a small multiple of `CHRONICLE_PROMPT_ENTRIES = 3`, not the
+full day's transcript). Prompt excerpts normalize CRLF/CR to LF, collapse
+each rendered excerpt to one line, and stop at 10 rendered lines before prompt
+construction; (3) civilization counters and daily-council verdict
+context when present. Saga text is **never** folded into `_chronicle_prompt_line()` or any
+agent think payload ([09](09-systems-society.md#saga-chronicle_saga_enabled)).
+
+**Always-fire / degradation.** The call fires every day boundary even when
+both chronicle and dialogue windows are empty (explicit quiet-day context in
+the user prompt via `quiet_day: true` on `saga_context`). On `lm_complete`
+failure/timeout/empty response, the worker writes the deterministic fallback
+`SAGA_FALLBACK_TEXT = "A quiet day passed in the village; little was recorded."`
+(`constants.py`) to `civilization["saga"]` instead of blocking the tick loop.
+Server-side dispatch: `run_chronicle_saga(saga_context)` in `server.py`, injected
+as `"run_chronicle_saga"` in `_ENGINE_DEPS`. Distinct `llm.jsonl` logging via
+`session_logger.log_lm_exchange` with `"module": "chronicle_saga"` ([12](12-ops.md)).
 
 `PIANO_MODULES` (`constants.py:483`, default `True` since Sid-parity Phase 1) —
 Perception/Social/Desire/Reflection module fan-out is the default cognition

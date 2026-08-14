@@ -269,6 +269,14 @@ mechanism the season tint already uses.
     key. **Chronicle** is a curated projection of top-level `world.chronicle`,
     distinct from the raw Activity feed; it preserves scroll position across
     snapshot updates and is hidden cleanly when `CHRONICLE_ENABLED` is off.
+    **Village paper** (`#sagaLog`, `#sagaList`) is a pure renderer for top-level
+    `world.saga` (daily LLM narrative entries `{text, frame, dayIndex}` from the
+    engine's saga ring — not folded into chronicle or founding/disaster banners).
+    It renders newest-first, preserves scroll position across snapshot updates
+    (`lastSagaKey` change detection in `viewer/sidebar.js`), escapes dynamic
+    text, hides when `CHRONICLE_SAGA_ENABLED` is off, and uses a muted placeholder
+    when empty. Delta merge in `viewer/state.js` includes `"saga"` alongside
+    `"chronicle"` so incremental polls retain the array.
     **Decision audit** polls `GET /decision-audit` on its own cadence (see
     [Decision audit panel](#decision-audit-panel)); when the route returns
     `enabled: false` the section stays visible with empty-state copy rather
@@ -721,7 +729,7 @@ value was changed, and no rule was reordered relative to its neighbors.
 | 1 | `css/base.css` | Reset, `#wrap`/`#canvasWrap`/`#world`, map controls (`#pauseBtn`/`#resetBtn`/`#zoomInBtn`/`#zoomOutBtn`/`#zoomFitBtn`), `#worldClockHud`, `#minimap` |
 | 2 | `css/panels.css` | `#sidebar`/`#convPanel` shared chrome (headers, `#lmStatus`, `#sidebarBody`, `.panel-section`), `#civPanel` civilization stats (project sprite, resource/custom/recipe/rule chip lists, progress bar, bench groups) |
 | 3 | `css/agents.css` | `#agentList`, `#agentRollup`, `#agentDetail`, `#agentFollowBtn`, `.agents-panel-head`, the deceased-agents modal (`#deadAgentsBtn`/`#deadAgentsModal`/`#deadAgentsDialog`/`#deadAgentsList`) |
-| 4 | `css/council.css` | Council transcript modal, `#worldLoading`, conversation/activity/chronicle/decision-audit lists (`#convList`/`#actList`/`#chronicleList`/`#decisionAuditAgentList`/`#decisionAuditRecent`), council banner/panel (`#councilBanner`, `.council-card`, `#councilHistory`), the Daily Council Assembly modal (`#councilAssemblyModal` and its canvas/tally/transcript rules) |
+| 4 | `css/council.css` | Council transcript modal, `#worldLoading`, conversation/activity/chronicle/saga/decision-audit lists (`#convList`/`#actList`/`#chronicleList`/`#sagaList`/`#decisionAuditAgentList`/`#decisionAuditRecent`), council banner/panel (`#councilBanner`, `.council-card`, `#councilHistory`), the Daily Council Assembly modal (`#councilAssemblyModal` and its canvas/tally/transcript rules) |
 | 5 | `css/divine.css` | Divine Console bottom bar and modal (`.divine-bar`, `.gbtn`, `.modal`, every `.divine-*`/`.god-sight-*` rule), `#tooltip`, `#godPublicBanner`, `.chronicle-presentation-thunder` |
 | 6 | `css/responsive.css` | The two `@media (max-width: …)` blocks (900px and 620px breakpoints) |
 

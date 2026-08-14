@@ -1281,6 +1281,103 @@ class _GovernanceCultureMixin:
         recent = chronicle[-CHRONICLE_PROMPT_ENTRIES:]
         return "; ".join(e["text"] for e in recent)
 
+    # --- Chronicle saga (CHRONICLE_SAGA_ENABLED; viewer-only ring) ---
+    def _push_saga(self, text, frame=None, day_index=None):
+        """Append one daily dispatch to civilization[\"saga\"]. Never prompt-facing."""
+        if not CHRONICLE_SAGA_ENABLED:
+            return
+        saga = self.civilization.setdefault("saga", [])
+        entry = {
+            "text": text,
+            "frame": self.frameTick if frame is None else frame,
+            "dayIndex": self.frameTick // DAY_FRAMES if day_index is None else day_index,
+        }
+        saga.append(entry)
+        if len(saga) > SAGA_CAP:
+            del saga[:-SAGA_CAP]
+
+    def _chronicle_entries_for_frame_window(self, start_frame, end_frame):
+        """Chronicle-ring entries whose frame falls in [start_frame, end_frame)."""
+        chronicle = self.civilization.get("chronicle") or []
+        out = []
+        for entry in chronicle:
+            if not isinstance(entry, dict):
+                continue
+            frame = entry.get("frame")
+            if frame is None:
+                continue
+            try:
+                tick = int(frame)
+            except (TypeError, ValueError):
+                continue
+            if start_frame <= tick < end_frame:
+                out.append(entry)
+        return out
+
+    def _snapshot_saga_context(self, start_frame, end_frame, frame, day_index):
+        """Under-lock inputs for one day-boundary saga dispatch."""
+        chronicle_entries = self._chronicle_entries_for_frame_window(start_frame, end_frame)
+        c = self.civilization
+        dialogue = []
+        reader = self.d.get("read_conversation_window")
+        if callable(reader):
+            try:
+                raw = reader(start_frame, end_frame, SAGA_DIALOGUE_EXCERPT_CAP) or []
+                if isinstance(raw, list):
+                    dialogue = raw
+            except Exception:
+                dialogue = []
+        daily_council = None
+        dc = c.get("dailyCouncil")
+        if isinstance(dc, dict):
+            verdict = dc.get("verdict")
+            daily_council = {
+                "phase": dc.get("phase"),
+                "verdict": json.loads(json.dumps(verdict, default=str)) if verdict else None,
+            }
+        quiet_day = not chronicle_entries and not dialogue
+        return {
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "frame": frame,
+            "day_index": day_index,
+            "chronicle_entries": [dict(entry) for entry in chronicle_entries],
+            "counters": {"births": c.get("births", 0), "deaths": c.get("deaths", 0)},
+            "dialogue": dialogue,
+            "daily_council": daily_council,
+            "quiet_day": quiet_day,
+        }
+
+    def _run_daily_saga_worker(self, saga_context):
+        """Background worker: lm_complete outside lock, then reacquire to append."""
+        text = None
+        runner = self.d.get("run_chronicle_saga")
+        if callable(runner):
+            try:
+                text = runner(saga_context)
+            except Exception:
+                text = None
+        if not text or not str(text).strip():
+            text = SAGA_FALLBACK_TEXT
+        with self.lock:
+            self._push_saga(
+                str(text).strip(),
+                frame=saga_context.get("frame"),
+                day_index=saga_context.get("day_index"),
+            )
+
+    def _maybe_append_daily_saga(self):
+        """Day-boundary saga: snapshot under lock, dispatch lm_complete on piano_workers."""
+        if not CHRONICLE_SAGA_ENABLED or self.frameTick % DAY_FRAMES != 0:
+            return
+        ft = self.frameTick
+        start_frame = ft - DAY_FRAMES
+        end_frame = ft
+        day_index = ft // DAY_FRAMES
+        saga_context = self._snapshot_saga_context(start_frame, end_frame, ft, day_index)
+        self._saga_inflight = self.piano_workers.submit(
+            self._run_daily_saga_worker, saga_context)
+
     # --- Testament (TESTAMENT_ENABLED + WIKI_MEMORY prerequisite) ---
     def _push_testament_entry(self, text, author, generation):
         """Append one attributed lesson line to civilization["testament"],

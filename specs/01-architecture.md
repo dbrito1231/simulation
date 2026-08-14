@@ -168,6 +168,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `ACTIVITY_CUES_ENABLED` | True | yes | [11](11-viewer.md) |
 | `SOCIAL_LAYER_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `CHRONICLE_ENABLED` | True | yes | [09](09-systems-society.md) |
+| `CHRONICLE_SAGA_ENABLED` | True | yes | [09](09-systems-society.md#saga-chronicle_saga_enabled), [02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled), [03](03-cognition.md), [12](12-ops.md) |
 | `FOUNDING_EVENTS_ENABLED` | True | yes | [05](05-world.md) |
 | `WORLD_CLOCK_HUD_ENABLED` | True | yes | [11](11-viewer.md) |
 | `SEASONAL_AGENTS_ENABLED` | True | yes | [11](11-viewer.md) |
