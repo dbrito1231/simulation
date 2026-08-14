@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "simulation"))
 
+from _server import decision_audit  # noqa: E402
 from _server.decision_audit import build_decision_audit  # noqa: E402
 
 
@@ -300,6 +301,38 @@ def test_uncorrelated_and_unclassified(tmpdir: Path) -> None:
     print("  OK uncorrelated and unclassified buckets")
 
 
+def test_file_identity_cache(tmpdir: Path) -> None:
+    llm_path, activity_path, session_id = _sample_session(tmpdir)
+    write_jsonl(llm_path, [
+        _llm_line("Sage", 100, "collect_resource", "gather wood", "cache-id"),
+    ])
+    write_jsonl(activity_path, [
+        _activity_line("Sage gathered wood.", 100, "cache-id"),
+    ])
+    decision_audit._PARSE_CACHE.clear()
+    original_read = decision_audit._read_jsonl
+    calls = 0
+
+    def counted_read(path: str):
+        nonlocal calls
+        calls += 1
+        return original_read(path)
+
+    decision_audit._read_jsonl = counted_read
+    try:
+        build_decision_audit(str(llm_path), str(activity_path), session_id)
+        build_decision_audit(str(llm_path), str(activity_path), session_id)
+        assert_true(calls == 2, f"unchanged sources reparsed ({calls} reads)")
+        with activity_path.open("a", encoding="utf-8") as fh:
+            fh.write("\n")
+        build_decision_audit(str(llm_path), str(activity_path), session_id)
+        assert_true(calls == 4, f"changed source did not invalidate cache ({calls} reads)")
+    finally:
+        decision_audit._read_jsonl = original_read
+        decision_audit._PARSE_CACHE.clear()
+    print("  OK file-identity parse cache")
+
+
 def main() -> None:
     print("idea10_decision_audit_smoke")
     with tempfile.TemporaryDirectory() as tmp:
@@ -315,6 +348,7 @@ def main() -> None:
         test_outcome_ok_summary(tmpdir)
         test_outcome_unknown_missing_activity(tmpdir)
         test_uncorrelated_and_unclassified(tmpdir)
+        test_file_identity_cache(tmpdir)
     print("PASS")
 
 
