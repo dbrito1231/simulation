@@ -90,6 +90,7 @@ from _server.decision_validation import (
     role_fallback_action, role_fallback_candidates, synthesize_divine_response,
     normalize_decision, _infer_terraform_decision,
 )
+from _server.anomaly_radar import compute_anomalies
 
 app = Flask(__name__)
 CORS(app)
@@ -843,6 +844,7 @@ _VIEWER_FILES = (
     "polling.js", "controls.js", "renderloop.js", "divine-bootstrap.js",
     "divine-auth-sight.js", "divine-modal.js", "divine-sight-voice.js",
     "divine-voice.js", "divine-miracles-story.js", "divine-history.js",
+    "anomaly.js",
 )
 
 
@@ -2887,6 +2889,19 @@ def council_llm_log():
                 path, start_frame, end_frame, agent_set))
     entries.sort(key=lambda e: e.get("frame_tick") or 0)
     return jsonify({"entries": entries})
+
+
+@app.route("/anomalies")
+def anomalies():
+    """Anomaly radar (idea-07, docs/plans/idea-07-anomaly-radar/plan.md):
+    read-only, server-side reader over the current run's benchmarks.jsonl,
+    located via the existing session_logger reference. No live-engine or
+    civilization["chronicle"] access, no self.lock -- see
+    specs/04-http-api.md's "Anomaly radar (idea-07)" section."""
+    if not _sim_engine.ANOMALY_RADAR_ENABLED:
+        return jsonify({"ok": True, "enabled": False, "anomalies": []})
+    found = compute_anomalies(session_logger.benchmark_path)
+    return jsonify({"ok": True, "enabled": True, "anomalies": found})
 
 
 @app.route("/state")

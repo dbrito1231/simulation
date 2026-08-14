@@ -81,6 +81,7 @@ const DIVINE_FEATURE_ICONS = {
   laws:    '<svg viewBox="0 0 24 24"><path d="M12 3v18M5 7h14M7 7l-3 6h6zM17 7l3 6h-6z"/></svg>',
   history: '<svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>',
   compile: '<svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>',
+  anomaly: '<svg viewBox="0 0 24 24"><path d="M12 2l9 18H3z"/><path d="M12 9v5"/><circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none"/></svg>',
 };
 const DIVINE_PREVIEW_TIP = {
   t: "Preview",
@@ -198,6 +199,20 @@ const DIVINE_FEATURES = {
       "Compile never applies directly; it only fills the Story form for you.",
     ],
     gated: true,
+  },
+  // idea-07b §2 Answer 1: the second gated: false precedent alongside
+  // unlock -- clickable without a god token. Read-only observability that
+  // borrows the bar's chrome; never calls godApiFetch()/`/control/god/*`.
+  anomaly: {
+    title: "Anomaly",
+    sub: "Statistical anomalies detected in village metrics.",
+    guide: [
+      "Range breaks, new rule kinds, and schisms detected from this run's benchmark metrics.",
+      "Read-only — this view never changes the village and is not a divine intervention.",
+      "Available even without a god token; the sidebar's Anomaly radar panel shows the same data.",
+      "Hidden automatically if the server's ANOMALY_RADAR_ENABLED flag is off.",
+    ],
+    gated: false,
   },
 };
 

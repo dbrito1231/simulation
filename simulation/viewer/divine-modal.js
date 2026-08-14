@@ -28,7 +28,13 @@ if (GOD_AUTH_REQUIRED_FLAG) {
 }
 
 // --- Bottom bar + modal (relocated from sidebar tabs) --------------------
-const GOD_TABS = ["unlock", "sight", "voice", "matrix", "miracles", "story", "laws", "history", "compile"];
+// "anomaly" added here (idea-07b Phase 3, out-of-scope-but-required fix):
+// openDivineModal() resets any name not in this list back to "unlock", so
+// the new divine-bar Anomaly button would silently fail to open its tab
+// without this entry. See specs/11-viewer.md "Anomaly panel" for why the
+// anomaly tab still reuses this same tab-switch machinery despite never
+// touching godCapabilities/godToken/godAuthorized.
+const GOD_TABS = ["unlock", "sight", "voice", "matrix", "miracles", "story", "laws", "history", "compile", "anomaly"];
 const DIVINE_WIDE_MODAL_FEATURES = new Set(["matrix", "story", "laws", "compile"]);
 const godBarButtons = Array.from(document.querySelectorAll("#divineBar .gbtn"));
 let divineModalOpenFeature = null;
