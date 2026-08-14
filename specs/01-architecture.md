@@ -225,6 +225,7 @@ no env override by default (consistent with most flags in this index). Because
 Lineage panel** (Phase 3) and the `_heirs_of` children-array read — **not**
 whether `children` is written at birth (the write stays unconditional within
 `LIFECYCLE_ENABLED`, same as `parents` today).
+| `PREDICTION_MARKET_ENABLED` | True | yes | [04](04-http-api.md), [11](11-viewer.md) |
 
 `DECISION_AUDIT_ENABLED` gates **both** engine-side correlation-id minting
 (`run_agent_decision` → `llm.jsonl` `decision._decision_id` and
@@ -236,6 +237,20 @@ read paths, not merely a disabled panel. The flag is **not** echoed in `/state`
 field (same pattern as idea-07's dedicated-route viewer echo). Whether an env
 override (e.g. `SIM_DECISION_AUDIT`) is wired is an implementer-phase choice,
 documented in [03-cognition.md](03-cognition.md) once made.
+
+`PREDICTION_MARKET_ENABLED` gates **server-side route behavior** on the three
+`/predictions/*` routes (`POST /predictions/submit`, `POST /predictions/resolve`,
+`GET /predictions/history`) — when off, they perform no `predictions.json`
+file I/O and return their disabled shapes (see [04-http-api.md](04-http-api.md#prediction-market-routes))
+— **and** viewer rendering of the prediction panel. It is distinct from
+engine-mechanic flags: no `_tick_once` system reads it; the only
+`sim_engine/` footprint is the `constants.py` definition plus the
+`config.flags` echo line in `_build_snapshot_config`
+(`mixin_snapshot.py:256-298`). Unlike `memory_store.json`, whose entries mirror
+into `state.db`'s `memory` table and can reach agent think-payloads,
+`predictions.json` is never read by `_build_think_payload()`, any
+`mixin_*.py`, or `save_state()` / `restore_state()` — see
+[02-engine-core.md](02-engine-core.md#persistence).
 
 `civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
 Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder

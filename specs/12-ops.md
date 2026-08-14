@@ -539,11 +539,12 @@ records. This route and its cache never mutate world state or logs.
 
 ## Viewer static assets
 
-The thin viewer loads 19 fixed JavaScript files from the Flask app beside `index.html`
+The thin viewer loads 20 fixed JavaScript files from the Flask app beside `index.html`
 (see [04-http-api.md](04-http-api.md)):
 
 | Path | File | Notes |
 |---|---|---|
+| `/viewer/predictions.js` | `simulation/viewer/predictions.js` | Required — prediction-market panel renderer and `/predictions/*` client; polls history only while the panel is visible |
 | `/viewer/setup.js` | `simulation/viewer/setup.js` | Required — boot/canvas setup, zoom, feature flags |
 | `/viewer/state.js` | `simulation/viewer/state.js` | Required — world snapshot (`MOCK_STATE`, `world`), delta merge, districts cache |
 | `/viewer/render.js` | `simulation/viewer/render.js` | Required — convenience accessors + drawing (terrain cache, weather/night overlays, agents, structures) |

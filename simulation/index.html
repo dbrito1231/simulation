@@ -143,7 +143,20 @@
       <h2>Village paper</h2>
       <ul id="sagaList"></ul>
     </section>
-    </div>
+    <section class="panel-section" id="predictionMarketPanel" style="display:none">
+      <details id="predictionMarketDetails" open>
+        <summary>
+          Prediction market
+          <span id="predictionMarketHitRate" class="prediction-hit-rate">Hit rate: —</span>
+        </summary>
+        <div class="prediction-market-body">
+          <div id="predictionMarketQuestion" class="prediction-question"></div>
+          <div id="predictionMarketChoices" class="prediction-choices"></div>
+          <div id="predictionMarketStatus" class="prediction-status"></div>
+          <ul id="predictionMarketHistory"></ul>
+        </div>
+      </details>
+    </section>
     </div>
   </aside>
 </div>
@@ -1145,6 +1158,7 @@
 <script src="viewer/sidebar.js"></script>
 <script src="viewer/decision-audit.js"></script>
 <script src="viewer/council.js"></script>
+<script src="viewer/predictions.js"></script>
 <script src="viewer/minimap.js"></script>
 <script src="viewer/polling.js"></script>
 <script src="viewer/anomaly.js"></script>

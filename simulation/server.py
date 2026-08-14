@@ -18,6 +18,12 @@ import threading
 import time
 from datetime import datetime, timezone
 
+# run_agent_decision() is defined before the late sim_engine import below; pull
+# DECISION_AUDIT_ENABLED from constants directly so id minting can gate there.
+_sys_path = os.path.dirname(os.path.abspath(__file__))
+if _sys_path not in sys.path:
+    sys.path.insert(0, _sys_path)
+from sim_engine.constants import DECISION_AUDIT_ENABLED, PREDICTION_MARKET_ENABLED  # noqa: E402
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -70,6 +76,7 @@ from _server.memory_store import (
     MemoryStore, embed_text, _cosine, _stable_hash, is_scaffold_text,
     extract_plain_answer,
 )
+from _server.predictions_store import PredictionsStore
 from _server.structured_output import (
     _ollama_error_parts, looks_like_model_not_found_error,
     looks_like_response_format_error,
@@ -328,6 +335,15 @@ session_logger.log_benchmark("memory_store_loaded", _load_count)
 # into that module's namespace now that it exists. See prompt_format.py's
 # module docstring for the full rationale.
 _prompt_format.memory_store = memory_store
+
+PREDICTIONS_STORE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "predictions.json")
+predictions_store = PredictionsStore(PREDICTIONS_STORE_PATH)
+_pred_load_status, _pred_load_count = getattr(
+    predictions_store, "_load_status", ("absent", 0))
+print(
+    f"[server] PredictionsStore {_pred_load_status} "
+    f"({_pred_load_count} predictions) from {PREDICTIONS_STORE_PATH}")
 
 # --- Blueprint validation constants (GATHER_ZONES etc.) now live in
 # _server/validation_constants.py (imported above).
@@ -842,8 +858,8 @@ for _css_filename in _CSS_FILES:
 # directory traversal.
 _VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 _VIEWER_FILES = (
-    "setup.js", "state.js", "render.js", "sidebar.js", "council.js", "minimap.js",
-    "polling.js", "decision-audit.js", "controls.js", "renderloop.js", "divine-bootstrap.js",
+    "setup.js", "state.js", "render.js", "sidebar.js", "council.js", "decision-audit.js",
+    "predictions.js", "minimap.js", "polling.js", "controls.js", "renderloop.js", "divine-bootstrap.js",
     "divine-auth-sight.js", "divine-modal.js", "divine-sight-voice.js",
     "divine-voice.js", "divine-miracles-story.js", "divine-history.js",
     "anomaly.js",
@@ -3034,6 +3050,59 @@ def decision_audit():
         enabled=True,
         view=view,
     ))
+
+
+@app.route("/predictions/submit", methods=["POST"])
+def predictions_submit():
+    """Store a pending spectator prediction (idea-04)."""
+    if not PREDICTION_MARKET_ENABLED:
+        return jsonify({"ok": False})
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        pred_id = predictions_store.submit(
+            body.get("kind"),
+            body.get("question"),
+            body.get("pick"),
+            body.get("ballot_frame_tick"),
+        )
+        if pred_id is None:
+            return jsonify({"ok": False})
+        return jsonify({"ok": True, "id": pred_id})
+    except Exception:
+        return jsonify({"ok": False})
+
+
+@app.route("/predictions/resolve", methods=["POST"])
+def predictions_resolve():
+    """Mark a pending prediction correct/incorrect (idea-04)."""
+    if not PREDICTION_MARKET_ENABLED:
+        return jsonify({"ok": False})
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        ok = predictions_store.resolve(
+            body.get("id"),
+            body.get("correct"),
+            body.get("verdict"),
+        )
+        return jsonify({"ok": bool(ok)})
+    except Exception:
+        return jsonify({"ok": False})
+
+
+@app.route("/predictions/history")
+def predictions_history():
+    """Shared calibration history for the prediction panel (idea-04)."""
+    if not PREDICTION_MARKET_ENABLED:
+        return jsonify({"enabled": False, "predictions": [], "hitRate": None})
+    try:
+        payload = predictions_store.history()
+        return jsonify({
+            "enabled": True,
+            "predictions": payload["predictions"],
+            "hitRate": payload["hitRate"],
+        })
+    except Exception:
+        return jsonify({"enabled": True, "predictions": [], "hitRate": None})
 
 
 @app.route("/state")

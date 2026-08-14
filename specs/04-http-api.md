@@ -3,7 +3,7 @@
 The Flask route surface: every endpoint the browser or external tools call,
 what it does, and its request/response shape.
 
-**Canonical for:** the full route table (61 routes), `/state` top-level
+**Canonical for:** the full route table (65 routes), `/state` top-level
 payload key inventory, server startup/shutdown behavior. **See also:**
 [specs/01-architecture.md](01-architecture.md) (data flow, thin-viewer
 contract), [specs/03-cognition.md](03-cognition.md) (what `run_agent_decision`
@@ -13,18 +13,18 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 
 ## Route table
 
-61 routes total in `simulation/server.py`: 28 from their own `@app.route`
-decorator, plus 33 more registered programmatically by three small
+65 routes total in `simulation/server.py`: 31 from their own `@app.route`
+decorator, plus 34 more registered programmatically by three small
 `add_url_rule` loops — `_register_sprite_route()` (called once per file in
 `_SPRITE_FILES`, 8 iterations, serving `/sprites/<name>.js`),
 `_register_css_route()` (called once per file in `_CSS_FILES`, 6 iterations,
 serving `/css/<name>.css`), and `_register_viewer_route()` (called once per
 file in `_VIEWER_FILES`, 19 iterations, serving `/viewer/<name>.js`) — added
 by the Phase 2 (sprites), Phase 3 (CSS), and Phase 4 (viewer.js)
-file-modularization splits. Of the 61, 6 are the `/control/god/*` routes
+file-modularization splits. Of the 65, 6 are the `/control/god/*` routes
 added in Phase 2 of Sovereign God mode (all `@app.route`-decorated); the
-other 55 are always-registered non-god routes (28 decorated minus the 6 god
-ones = 22, plus the 33 `add_url_rule` routes = 55). The god routes are registered
+other 59 are always-registered non-god routes (31 decorated minus the 6 god
+ones = 25, plus the 34 `add_url_rule` routes = 59). The god routes are registered
 unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
 (`constants.py:644`) is configured at startup and, when `GOD_AUTH_REQUIRED` is
 True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
@@ -91,6 +91,10 @@ When the epoch differs (or `since` is omitted), the handler shallow-copies
 district/road data into plain dicts/lists under the lock, then `jsonify`s
 outside the lock. The viewer keeps its last full payload on `unchanged`
 responses.
+
+| `/predictions/submit` | POST | Store a pending spectator prediction against an open Daily Council ballot. Gated by `PREDICTION_MARKET_ENABLED` | `{kind, question, pick, ballot_frame_tick}` | `{ok, id}` |
+| `/predictions/resolve` | POST | Mark a pending prediction correct/incorrect after the ballot verdict is known. Gated by `PREDICTION_MARKET_ENABLED` | `{id, correct, verdict}` | `{ok}` |
+| `/predictions/history` | GET | Shared calibration history and hit-rate for the prediction panel. Gated by `PREDICTION_MARKET_ENABLED` | â€” | `{enabled, predictions, hitRate}` |
 
 ## `/state` delta protocol
 

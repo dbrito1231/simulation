@@ -408,6 +408,16 @@ is projected to `/state` when the flag is on (implementation in
 
 `clear_state()` deletes `state.db` plus `state.db-wal`/`state.db-shm`.
 
+**Spectator predictions (`predictions.json`).** Unlike
+`simulation/memory_store.json`, whose entries mirror into the `state.db`
+`memory` table and are merged back into the world on `restore_state()` /
+`import_entries()`, `simulation/predictions.json` is **not** part of full-state
+save/restore. No `persistence.py` function opens it; `save_state()` /
+`restore_state()` never read or write prediction rows; predictions never reach
+`civilization` / `agents` or `_build_think_payload()`. Only the three
+`/predictions/*` route handlers (see [04-http-api.md](04-http-api.md#prediction-market-routes))
+touch this file.
+
 ## Sovereign God mode (Phase 2 — secure kernel)
 
 `GOD_MODE_ENABLED` (sim_engine/constants.py:644, env `SIM_GOD_MODE`, read at

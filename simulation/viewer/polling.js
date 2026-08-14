@@ -35,6 +35,7 @@ function applyFlags(flags) {
   if ("SOCIAL_LAYER_ENABLED" in flags) SOCIAL_LAYER_ENABLED = !!flags.SOCIAL_LAYER_ENABLED;
   if ("CHRONICLE_ENABLED" in flags) CHRONICLE_ENABLED = !!flags.CHRONICLE_ENABLED;
   if ("CHRONICLE_SAGA_ENABLED" in flags) CHRONICLE_SAGA_ENABLED = !!flags.CHRONICLE_SAGA_ENABLED;
+  if ("PREDICTION_MARKET_ENABLED" in flags) PREDICTION_MARKET_ENABLED = !!flags.PREDICTION_MARKET_ENABLED;
   if ("FOUNDING_EVENTS_ENABLED" in flags) FOUNDING_EVENTS_ENABLED = !!flags.FOUNDING_EVENTS_ENABLED;
   if ("ENV_EFFECTS_ENABLED" in flags) ENV_EFFECTS_ENABLED = !!flags.ENV_EFFECTS_ENABLED;
   if ("WORLD_CLOCK_HUD_ENABLED" in flags) WORLD_CLOCK_HUD_ENABLED = !!flags.WORLD_CLOCK_HUD_ENABLED;
@@ -233,6 +234,7 @@ async function pollState() {
       }
     }
     renderDailyCouncil((snapshot.civilization || {}).dailyCouncil);
+    updatePredictionsPanel((snapshot.civilization || {}).dailyCouncil);
     syncPauseButton();
     if (terrainCanvas) hideWorldLoading();
   } catch (err) {
