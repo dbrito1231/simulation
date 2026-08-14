@@ -208,8 +208,11 @@ reads `agent.get("children") or []`, filtered to living agents, when
 `DYNASTY_TREE_ENABLED` is True; when that flag is False, `_heirs_of` falls
 back to the pre-change parents-scan (every living agent whose `parents`
 contains the deceased's name). Same heir set when `children` is consistent,
-load-bearing for succession/goods/home/belief inheritance via `_inherit_from()`. When
-`MEMES_ENABLED`, the newborn's belief set is unioned from both parents at birth
+load-bearing for succession/goods/home/belief inheritance via `_inherit_from()`.
+When `restore_state()` loads an older save whose child records have `parents`
+but whose parent records lack `children`, it rebuilds the inverse links once
+all agents are loaded and keeps existing names deduplicated. When `MEMES_ENABLED`,
+the newborn's belief set is unioned from both parents at birth
 (`mixin_lifecycle.py:1198`); `inheritedBeliefs` is a static list snapshot of
 that union (empty when memes are off or neither parent has beliefs). The full
 live bloodline-vs-conversation belief diff is **out of scope** (see

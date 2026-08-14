@@ -99,10 +99,19 @@ def test_restore_back_compat():
                     "inheritedTestament not back-filled")
         assert_true(restored_agent.get("inheritedBeliefs") == [],
                     "inheritedBeliefs not back-filled")
+        child = engine.agents[0]
+        parent = engine.agents[1]
+        child["parents"] = [parent["name"]]
+        parent.pop("children", None)
+        engine.save_state()
+        assert_true(engine.restore_state(), "restore_state should rebuild inverse links")
+        restored_parent = next(a for a in engine.agents if a["name"] == parent["name"])
+        assert_true(child["name"] in restored_parent.get("children", []),
+                    "restore_state did not rebuild parent children from child parents")
     finally:
         se.DB_PATH = old_db_path
         se.LIFECYCLE_ENABLED = old_l
-    print("  OK restore back-compat setdefaults")
+    print("  OK restore back-compat setdefaults and inverse children rebuild")
 
 
 def _build_heirs_fixture(engine):

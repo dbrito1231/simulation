@@ -365,7 +365,10 @@ backfill for post-v2 fields still runs on every restore (forward-compat).
 (`mixin_persistence.py:540-544`), Phase 1 adds `setdefault`-only back-compat for
 `children`, `inheritedTestament`, and `inheritedBeliefs` — same discipline as
 `parents`/`deathFrame`, no schema bump. A restored save with `parents` set but
-no `children` key must not raise and must back-fill `children == []`;
+no `children` key must not raise and must back-fill `children == []`.
+After all agents load, restore also reconstructs each known parent's inverse
+`children` link from the child's persisted `parents` names, without
+duplicating existing entries;
 likewise `inheritedTestament` and `inheritedBeliefs` default to `[]` when
 absent. Every reader (`_heirs_of()`, viewer projection) must use
 `agent.get("children") or []` defensively even after back-compat lands, matching

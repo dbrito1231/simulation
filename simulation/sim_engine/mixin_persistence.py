@@ -570,6 +570,29 @@ class _PersistenceMixin:
                     agents.append(a)
                 if not agents or not civ:
                     return False
+                if LIFECYCLE_ENABLED:
+                    # Older saves may retain child-to-parent links but lack
+                    # inverse parent-to-children arrays. Rebuild those links
+                    # after every agent has loaded, preserving persisted
+                    # children and avoiding duplicates.
+                    by_name = {a.get("name"): a for a in agents if a.get("name")}
+                    for child in agents:
+                        parents = child.get("parents")
+                        if not isinstance(parents, (list, tuple)):
+                            continue
+                        child_name = child.get("name")
+                        if not child_name:
+                            continue
+                        for parent_name in parents:
+                            parent = by_name.get(parent_name)
+                            if parent is None:
+                                continue
+                            children = parent.get("children")
+                            if not isinstance(children, list):
+                                children = []
+                                parent["children"] = children
+                            if child_name not in children:
+                                children.append(child_name)
                 self.civilization = civ
                 self._rebuild_role_maps()
                 if SCHISM_ENABLED:
