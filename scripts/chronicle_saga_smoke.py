@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "simulation"))
 
 import sim_engine as se  # noqa: E402
+import server  # noqa: E402
 from _server.logging_session import read_conversation_window  # noqa: E402
 
 OUT_PATH = ROOT / "scripts" / "out" / "chronicle_saga_smoke.json"
@@ -171,6 +172,21 @@ def exercise_dialogue_cap(checks):
                  len(ctx.get("dialogue") or []))
 
 
+def exercise_prompt_dialogue_char_cap(checks):
+    oversized = {"from": "A", "to": "B", "message": "x" * 1000000}
+    lines = server._normalized_saga_dialogue_lines([oversized])
+    rendered = lines[0] if lines else ""
+    checks.check(
+        rendered.endswith("x" * server.SAGA_PROMPT_EXCERPT_CHAR_CAP),
+        "dialogue_prompt_message_char_cap",
+        len(rendered),
+    )
+    checks.check(
+        "x" * (server.SAGA_PROMPT_EXCERPT_CHAR_CAP + 1) not in rendered,
+        "dialogue_prompt_oversized_message_truncated",
+    )
+
+
 def exercise_read_conversation_window(checks):
     lines = [
         {"type": "conversation", "kind": "speech", "from": "A", "to": "B",
@@ -283,6 +299,7 @@ def main():
         exercise_empty_chronicle_day(checks)
         exercise_lm_complete_success_path(checks)
         exercise_dialogue_cap(checks)
+        exercise_prompt_dialogue_char_cap(checks)
         exercise_read_conversation_window(checks)
         exercise_restore_saga_setdefault(checks)
         exercise_snapshot_flag_and_projection(checks)

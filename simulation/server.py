@@ -1118,6 +1118,9 @@ SAGA_SYSTEM_PROMPT = (
     "Write about 150 words in plain prose, past tense, as a village newspaper dispatch."
 )
 SAGA_PROMPT_EXCERPT_LINE_CAP = 10
+# Bound each normalized conversation message before it is copied into the
+# saga prompt; line-count bounds alone do not protect against one huge message.
+SAGA_PROMPT_EXCERPT_CHAR_CAP = 300
 
 
 def _normalized_saga_dialogue_lines(dialogue):
@@ -1134,6 +1137,7 @@ def _normalized_saga_dialogue_lines(dialogue):
             excerpt = " ".join(excerpt.split())
             if not excerpt:
                 continue
+            excerpt = excerpt[:SAGA_PROMPT_EXCERPT_CHAR_CAP]
             lines.append(f"- {speaker} to {target}: {excerpt}")
             if len(lines) >= SAGA_PROMPT_EXCERPT_LINE_CAP:
                 return lines
