@@ -139,7 +139,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 56 module-level flags, sim_engine.py)
+## Flag index (complete — 64 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -226,6 +226,7 @@ Lineage panel** (Phase 3) and the `_heirs_of` children-array read — **not**
 whether `children` is written at birth (the write stays unconditional within
 `LIFECYCLE_ENABLED`, same as `parents` today).
 | `PREDICTION_MARKET_ENABLED` | True | yes | [04](04-http-api.md), [11](11-viewer.md) |
+| `AGENT_INTERVIEW_ENABLED` | True | yes | [03](03-cognition.md), [04](04-http-api.md), [11](11-viewer.md) |
 
 `DECISION_AUDIT_ENABLED` gates **both** engine-side correlation-id minting
 (`run_agent_decision` → `llm.jsonl` `decision._decision_id` and
@@ -251,6 +252,13 @@ into `state.db`'s `memory` table and can reach agent think-payloads,
 `predictions.json` is never read by `_build_think_payload()`, any
 `mixin_*.py`, or `save_state()` / `restore_state()` — see
 [02-engine-core.md](02-engine-core.md#persistence).
+
+`AGENT_INTERVIEW_ENABLED` gates the read-only `POST /agent/interview` route
+and is echoed in `/state` `config.flags`. The route is independent of God-mode
+auth and never mutates world state; its Divine Console button is separately
+visible only while both `AGENT_INTERVIEW_ENABLED` and `GOD_MODE_ENABLED` are
+true. Concurrency and prompt behavior are canonical in
+[03-cognition.md](03-cognition.md#agent-interview-operator-qa-out-of-world-debug-surface).
 
 `civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
 Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder

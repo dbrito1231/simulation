@@ -3,7 +3,7 @@
 The Flask route surface: every endpoint the browser or external tools call,
 what it does, and its request/response shape.
 
-**Canonical for:** the full route table (65 routes), `/state` top-level
+**Canonical for:** the full route table (66 routes), `/state` top-level
 payload key inventory, server startup/shutdown behavior. **See also:**
 [specs/01-architecture.md](01-architecture.md) (data flow, thin-viewer
 contract), [specs/03-cognition.md](03-cognition.md) (what `run_agent_decision`
@@ -13,7 +13,7 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 
 ## Route table
 
-65 routes total in `simulation/server.py`: 31 from their own `@app.route`
+66 routes total in `simulation/server.py`: 32 from their own `@app.route`
 decorator, plus 34 more registered programmatically by three small
 `add_url_rule` loops — `_register_sprite_route()` (called once per file in
 `_SPRITE_FILES`, 8 iterations, serving `/sprites/<name>.js`),
@@ -21,10 +21,10 @@ decorator, plus 34 more registered programmatically by three small
 serving `/css/<name>.css`), and `_register_viewer_route()` (called once per
 file in `_VIEWER_FILES`, 20 iterations, serving `/viewer/<name>.js`) — added
 by the Phase 2 (sprites), Phase 3 (CSS), and Phase 4 (viewer.js)
-file-modularization splits. Of the 65, 6 are the `/control/god/*` routes
+file-modularization splits. Of the 66, 6 are the `/control/god/*` routes
 added in Phase 2 of Sovereign God mode (all `@app.route`-decorated); the
-other 59 are always-registered non-god routes (31 decorated minus the 6 god
-ones = 25, plus the 34 `add_url_rule` routes = 59). The god routes are registered
+other 60 are always-registered non-god routes (32 decorated minus the 6 god
+ones = 26, plus the 34 `add_url_rule` routes = 60). The god routes are registered
 unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
 (`constants.py:644`) is configured at startup and, when `GOD_AUTH_REQUIRED` is
 True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
@@ -53,6 +53,7 @@ per-file detail.
 | `/meta/update` | POST | Build an autobiography + persona directive (experimental, off by default) | `{agent, report, frame_tick?}` | `{ok, autobiography, persona}` |
 | `/memory/clean` | POST | Dedupe/trim the memory store | `{frame_tick?}` | `{ok, removed, size}` |
 | `/agent/think` | POST | **Legacy** — calls `run_agent_decision()` directly | full think-payload dict (see specs/03) | validated decision dict |
+| `/agent/interview` | POST | Read-only, out-of-world Q&A over one agent's own memory/relationships/beliefs (no auth, not a God-mode intervention) — see **Agent interview route** below | `{agentId, question}` (`question` capped at `INTERVIEW_QUESTION_MAX_CHARS = 500` chars) | `{ok: true, agentId, agentName, answer}` or `{ok: false, reason}` — see below |
 | `/council-llm-log` | GET | Slim decision records (`llm.jsonl`) for a council frame window (blueprint pitches/verdicts only). **Scans the live session's `llm.jsonl` first**; only reads older retained session directories when the requested `[start_frame, end_frame]` is not fully covered by the live file's frame range (`frame_tick` is monotonic across restarts, but each session only spans frames recorded while that server run was alive — a past council window may fall entirely in an older session). Out-of-range files are skipped using cached per-file `(min_frame, max_frame)` when possible. Matches from all scanned directories are merged and re-sorted by `frame_tick` | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
 | `/state` | GET | World snapshot for the thin viewer (full or delta via `?since=`) | query param `since` (int, optional) — client's last applied `frameTick`; omit or `0` for full | See **/state delta protocol** below and key inventory |
 | `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected). Supports conditional polls via `districtsEpoch` | query param `since` (int, optional) — last seen `epoch` from a prior response | **First / gap:** `{districts: [...], roadNodes: {...}, roadEdges: [...], epoch: int}`. **Unchanged:** when `since == engine.districtsEpoch`, HTTP 200 with tiny body `{unchanged: true, epoch: int}` (no district/road payload). `districtsEpoch` bumps on district founding, tile place/remove, terrain dig/plant, road-graph change, architect paint/revert, restore, and reset |
@@ -713,6 +714,134 @@ comparisons. The reader caches parsed sources by path, byte size, and mtime so
 the viewer's three-second poll does not reparse unchanged logs. Correlation and
 scoring semantics are canonical in [03-cognition.md](03-cognition.md) and
 [12-ops.md](12-ops.md).
+
+## Agent interview route {#agent-interview-route}
+
+`POST /agent/interview` — read-only, out-of-world debug Q&A over a single
+agent's own memory, relationships, and beliefs. "Click a villager, ask a
+question, get an answer generated strictly from *that agent's* memory store,
+relationships, and beliefs" (idea text). Distinct from
+`burning_bush_message` (God speaking as a voice inside the world): an
+interview answer is never authored *into* the world, is excluded from the
+emergence record, and mutates nothing.
+
+**No auth.** Unlike the `/control/god/*` routes, this route requires no
+`X-God-Token`, regardless of `GOD_AUTH_REQUIRED`, and is reachable by direct
+HTTP call whenever `AGENT_INTERVIEW_ENABLED` is on — independent of whether
+`GOD_MODE_ENABLED` is on or off. This mirrors `/state`'s own no-auth
+contract: an interview answer is generated strictly from private per-agent
+state (memory tiers, `relationships`, `beliefs`) that is otherwise exposed,
+filtered, only through `/state`'s agent snapshot (non-neutral `relationships`
+only, no raw memory — [06-agents.md](06-agents.md)) or through the
+authenticated `GET /control/god/sight`. The Divine Console's own trigger
+button for this route is separately gated on `GOD_MODE_ENABLED` — see
+[11-viewer.md](11-viewer.md#divine-console-sovereign-god-mode-phase-7) — but
+that is a UI-visibility gate on the *button*, not on the route itself; a
+server administrator with `GOD_MODE_ENABLED=False` still has a live,
+unauthenticated `/agent/interview` route reachable by direct HTTP call (e.g.
+`curl`), with no viewer button to trigger it.
+
+**Not a God-mode intervention.** The route reads an agent's existing
+`_agent_snapshot_row()` projection plus `agent["memory"]`/`agent["memoryWiki"]`
+directly and returns an answer to the operator only. It writes nothing to
+`agent["memory"]`, `beliefs`, `relationships`, `civilization`, or any
+snapshot field; sets no `intervened` mark; and produces no `divine.jsonl`
+entry, `divine_response`, activity line, or chronicle line. It never calls
+`god_preview()`/`god_apply()` and is never listed in
+`/control/god/capabilities`'s `kinds`. See
+[01-architecture.md](01-architecture.md#control-plane-data-flow-sovereign-god-mode)
+for the general God-mode control-plane boundary this route sits outside of.
+
+**Flag gate.** `AGENT_INTERVIEW_ENABLED` (`simulation/sim_engine/constants.py`,
+default `True`). When off, the route returns HTTP 200 with the clean-error
+body shape below (`{"ok": false, "reason": "agent interview disabled"}`) and
+performs no context assembly or LLM call — same "true no-op on the write
+path, plain-200 body" shape `DECISION_AUDIT_ENABLED` uses above
+(`{"enabled": False, "agents": [], "recent": []}`), not a silently-degraded
+answer and not a distinct HTTP error status (Phase 2 implementer note:
+resolves this section's earlier "non-200" wording in favor of matching
+`DECISION_AUDIT_ENABLED`'s own actual precedent and the single unified
+`{"ok": false, "reason": ...}` shape documented for every clean-error case
+in the Response section above). Echoed in `/state` `config.flags` (see
+[01-architecture.md](01-architecture.md)).
+
+**Request.**
+
+```json
+{"agentId": 3, "question": "Who do you trust in the village, and why?"}
+```
+
+- `agentId` — required; must resolve to a living agent (an unknown or
+  deceased agent id is rejected, not silently substituted).
+- `question` — required, non-empty string, capped at
+  `INTERVIEW_QUESTION_MAX_CHARS = 500` chars
+  (`simulation/sim_engine/constants.py`) — see
+  [03-cognition.md](03-cognition.md#agent-interview-operator-qa-out-of-world-debug-surface).
+  A missing/non-string/empty/oversized `question` is rejected by the route
+  itself, before any engine read or LLM call — following the same
+  "clear error naming the offending field, reject rather than truncate"
+  contract `GOD_COMPILER_PROSE_MAX_CHARS`'s `prose` validation uses.
+
+**Response (success).**
+
+```json
+{
+  "ok": true,
+  "agentId": 3,
+  "agentName": "Sage",
+  "answer": "<agent-voiced answer, generated from that agent's own memory/relationships/beliefs>"
+}
+```
+
+**Response (clean error — flag off, unknown agent, oversized/missing
+question, occupied interview capacity, or `MEMORY_ENABLED`/`WIKI_MEMORY`
+unavailable).**
+
+```json
+{"ok": false, "reason": "<short, specific machine-readable reason string>"}
+```
+
+**`MEMORY_ENABLED`/`WIKI_MEMORY` degrade path (non-default choice — refuse,
+do not thin the answer).** The idea text promises an answer "generated
+strictly from that agent's memory store, relationships, and beliefs."
+`relationships` and `beliefs` are unconditional agent fields and always
+exist, but the memory-store half (`agent["memory"]`'s three tiers, and the
+`agent["memoryWiki"]` sections `WIKI_MEMORY` populates) exists only when
+`MEMORY_ENABLED` is True. `run_agent_interview()` checks both flags
+independently, in the same clean-error position (before agent lookup, before
+any LLM call): when `MEMORY_ENABLED` is off, or when `WIKI_MEMORY` is off,
+the route returns the clean-error shape above with a distinct `reason`
+string naming the off flag, and makes **no** LLM call — it must not silently
+answer from relationships/beliefs alone (or with an empty memoryWiki
+section), since a thinner, unflagged answer would look identical to a full
+one to the operator reading it. This is the opposite of
+`god_compile_prose`'s pattern (which has no comparable partial-context mode
+to begin with) and is a deliberate, non-default design choice for this route
+specifically.
+
+**Prompt construction, model, and concurrency pool.** Fully specced in
+[03-cognition.md](03-cognition.md#agent-interview-operator-qa-out-of-world-debug-surface):
+`_agent_snapshot_row()` called in-process (no HTTP round-trip) plus direct
+`agent["memory"]`/`agent["memoryWiki"]` reads, `sim-smart` model, and the new
+`INTERVIEW_CONCURRENT_LLM = 1` pool — independent of `MAX_CONCURRENT_LLM` and
+`PIANO_CONCURRENT_LLM`.
+
+Acquiring the dedicated slot is timed for one second. If another interview
+still holds it, the route returns HTTP 200 with
+`{"ok": false, "reason": "agent interview capacity unavailable; try again shortly"}`
+and makes no LLM call; it never leaves a Flask worker blocked indefinitely.
+
+**Never in the action-sync set.** This route adds no agent-facing action; it
+never appears in `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT`/
+`apply_decision`/`available_actions`/`ACTION_LABELS` — see
+[01-architecture.md](01-architecture.md#action-sync-invariant). No agent ever
+sees or chooses an "interview" action.
+
+**Viewer.** [11-viewer.md](11-viewer.md#divine-console-sovereign-god-mode-phase-7)
+— a new `.gbtn interview` Divine Console button, dual-gated on
+`AGENT_INTERVIEW_ENABLED` and `GOD_MODE_ENABLED`, is this route's only
+current client; the route itself remains callable independent of that UI
+(see "No auth" above).
 
 ## Logging endpoints: fire-and-forget contract
 

@@ -1085,13 +1085,15 @@ via `drawShipments(ctx, world.frameTick)`, called right after
 ## Divine Console (Sovereign God mode, Phase 7)
 
 The Divine Console is a fixed bottom action bar plus a large modal dialog —
-not a sidebar panel. Twelve feature buttons (**Unlock**, **Sight**, **Voice**,
+not a sidebar panel. Thirteen feature entries (**Unlock**, **Sight**, **Voice**,
 **Matrix**, **Miracles**, **Story**, **Laws**, **History**, **Audit**, **Anomaly**,
-**Lineage**, plus **Compile** when the server reports the Optional Phase 8 compiler enabled — see below) live in
+**Lineage**, **Compile**, and **Interview**) live in
 `#divineBar` (`position: fixed; bottom: 0; left: 0; right: 0`). Clicking a
 button opens `#divineModalScrim` / `#divineModal` (`role="dialog"`,
-`aria-modal="true"`), whose body is `#divineModalBody`. At load time the nine
-`#divineTab-<name>` panel nodes (including `#divineTab-audit` and `#divineTab-lineage`) sit in a hidden holding container
+`aria-modal="true"`), whose body is `#divineModalBody`. Compile is visible only
+when its server capability is enabled; Interview is visible only when both
+`AGENT_INTERVIEW_ENABLED` and `GOD_MODE_ENABLED` are true. At load time all 13
+`#divineTab-<name>` panel nodes sit in a hidden holding container
 `#divineTabHold` so `wireDivineForm()` and other `getElementById` bindings
 still resolve at startup; **opening a feature reparents** (moves, never clones)
 the matching `#divineTab-<name>` into `#divineModalBody`, and **closing**
@@ -1710,6 +1712,22 @@ and renders them as clickable "Home structure" links. From the structure page, t
 `districtId` forward link goes to a district page; from the district page, the
 `settlementId` link goes to a settlement page. This satisfies the required
 click-through chain without any server-side change.
+
+### Interview (out-of-world debug Q&A)
+
+`#godInterviewTabBtn` opens `#divineTab-interview` through the existing
+Divine Console tab registry and reparenting logic. The panel uses the shared
+agent-select population path, a question textarea with a 500-character UX
+limit, one **Ask** button, and `#godInterviewResult`. It calls
+`POST /agent/interview` and renders `answer` or `reason` with `textContent`;
+it owns no simulation state and has no Preview/Apply step.
+
+The button is dual-gated by the `/state` flags `AGENT_INTERVIEW_ENABLED` and
+`GOD_MODE_ENABLED`, and it also follows the console's existing unlock UI.
+This is only a viewer visibility rule: the route itself is unauthenticated,
+independent of God mode, and read-only. `viewer/polling.js` mirrors the feature
+flag, `viewer/divine-history.js` applies the dual gate, and
+`viewer/divine-modal.js` owns the request/render handler.
 
 
 ## Active viewer work
