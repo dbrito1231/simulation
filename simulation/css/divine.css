@@ -168,6 +168,23 @@
   .divine-audit-entry-meta { margin-bottom: 2px; color: #9a9aa8; }
   .divine-audit-entry-activity { color: #ccc; white-space: pre-wrap; word-break: break-word; }
   .divine-audit-empty { padding: 10px; color: #888; font-size: 11px; list-style: none; }
+  .divine-lineage-panel { font-size: 11px; color: #bbb; }
+  .divine-lineage-content { margin-top: 8px; }
+  .divine-lineage-section { margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #2a2a34; }
+  .divine-lineage-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .divine-lineage-heading { margin: 0 0 4px; font: 600 11px system-ui, sans-serif; color: #d9b96e; }
+  .divine-lineage-empty { color: #888; font-style: italic; }
+  .divine-lineage-names { line-height: 1.6; }
+  .divine-lineage-link {
+    padding: 0; margin: 0; border: none; background: none; cursor: pointer;
+    font: inherit; color: #8ed2ed; text-decoration: underline;
+  }
+  .divine-lineage-link:hover { color: #b8e8ff; }
+  .divine-lineage-list, .divine-lineage-beliefs {
+    margin: 0; padding-left: 18px; line-height: 1.5;
+  }
+  .divine-lineage-entry-text { color: #ddd; }
+  .divine-lineage-entry-meta { font-size: 10px; color: #7a7a88; margin-top: 2px; }
   .divine-row { margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .divine-row label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #9a9aa8; flex: 1 1 auto; }
   .divine-row input[type=text], .divine-row input[type=password], .divine-row input[type=number],

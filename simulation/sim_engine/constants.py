@@ -372,6 +372,7 @@ __all__ = [
     "RIVAL_PRICE_SURCHARGE",
     "MINT_RATE",
     "HOMELESS_NUDGE_FRAMES",
+    "DYNASTY_TREE_ENABLED",
     "LIFECYCLE_ENABLED",
     "LIFECYCLE_TICK_FRAMES",
     "AGE_YEARS_PER_TICK",
@@ -1657,6 +1658,10 @@ SCHISM_COOLDOWN_FRAMES = RULE_PROPOSE_COOLDOWN * 6
 # RULE_KINDS stays {resource_tax, custom, priority} -- prompts/behavior for
 # lifecycle-only kinds are suppressed.
 LIFECYCLE_ENABLED = True
+# Idea-02 Dynasty tree: persisted children[] linkage and birth-time testament/
+# belief snapshots. Gates _heirs_of children-array read and the Divine Lineage
+# viewer (Phase 3); birth writes stay unconditional within LIFECYCLE_ENABLED.
+DYNASTY_TREE_ENABLED = True
 # Aging: 1 "year" per LIFECYCLE_TICK_FRAMES (~10s at 30 ticks/s) is far too
 # fast for a multi-day soak to show generational turnover in real time, so
 # ages advance in small fractional steps. 2026-07-10: 0.02 (~1y/8.3min) wiped

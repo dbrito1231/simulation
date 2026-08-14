@@ -125,7 +125,7 @@ an emergent role, so the single elder role remains a seed-only invariant.
 | Task/build | `assignedTask`, `idleCycles`, `lastTaskedFrame`, `lastContributedFrame`, `consecutiveIdleMoves`, `homeStructureId`, `reorgTask` |
 | Invention/sprite | `inventionTurn`, `inventionRetryUsed`, `inventionBuildContext`, `spriteDesignTurn` |
 | Rejection-note fields | `lastBlueprintRejection`, `lastGatherRejection`, `lastUpgradeRejection`, `lastSpriteRejection`, `lastProjectRejection`, `lastTerraformRejection`, `lastCraftRejection`, `lastRepairRejection`, `lastRecipeRejection`, `lastBurialRejection`, `lastTradeRejection`, `lastShelterNote`, `lastHomelessNudgeFrame` — each surfaces *why* the agent's last attempt at that action was rejected, back into its next prompt |
-| Lifecycle (`LIFECYCLE_ENABLED`) | `age` (float, `None` when disabled), `lastQuotaResetFrame`, `gatherCountThisPeriod`, `lastQuotaRejection`, `lastRationingRejection`, `parents`, `deathFrame`, `buried`, `restingPlaceId`, `restingDistrictId` |
+| Lifecycle (`LIFECYCLE_ENABLED`) | `age` (float, `None` when disabled), `lastQuotaResetFrame`, `gatherCountThisPeriod`, `lastQuotaRejection`, `lastRationingRejection`, `parents` (list of two parent names or `None` on cold-start agents with no birth record), `children` (list of descendant names, never null — cold-start/`restore_state` default `[]`), `inheritedTestament` (list of `{text, author, frame, generation}` snapshot copies — birth-time testament inheritance; see [09-systems-society.md](09-systems-society.md#testament_enabled)), `inheritedBeliefs` (list snapshot of the birth-time parent belief union when `MEMES_ENABLED`; empty list when memes are off or neither parent has beliefs — persist/restore like `inheritedTestament`; live bloodline-vs-conversation belief diff is out of scope), `deathFrame`, `buried`, `restingPlaceId`, `restingDistrictId` |
 | Culture (`CULTURE_ENABLED`) | `skills` (dict per `SKILL_KINDS`, starts at 0.0), `personalityTraits`, `lastTeachFrame` |
 | Divine Matrix | `divineHold` (bool — veto hold or architect limbo pauses think/move), `godKeys` (set of god-granted key tags for architect door zones; persisted as sorted list), `architectLimbo` (`null` or `{zoneId, priorX, priorY, priorTargetX, priorTargetY, priorDistrict}` — Sight shows active/zoneId only) |
 
@@ -133,7 +133,7 @@ Post-build setup (`core.py:374-381`) staggers `thinkInterval = 360 + i*60`
 (elder forced to `240`) and `thinkTimer = i*30` per roster index `i`, and sets each
 agent's initial movement target to its starting district.
 
-## `/state` agent snapshot (`SimEngine.snapshot()`, `mixin_snapshot.py:379-388`, per-agent row built by `_agent_snapshot_row`, `mixin_snapshot.py:119-138`)
+## `/state` agent snapshot (`SimEngine.snapshot()`, `mixin_snapshot.py:382-390`, per-agent row built by `_agent_snapshot_row`, `mixin_snapshot.py:113-138`)
 
 Not every internal field above is echoed to the viewer's `agents` array in
 `/state` (specs/04-http-api.md) — the snapshot is a filtered/derived view built
@@ -150,6 +150,20 @@ transformed, not passed through raw:
 
 Both are unconditional (no feature flag gates them) since the underlying
 fields always exist on every agent.
+
+Lineage fields (`LIFECYCLE_ENABLED`, always emitted on every agent row so the
+viewer can read them without existence checks):
+
+- `parents` — internal `parents` as-is (`null` on cold-start agents with no
+  birth record; two parent names after birth). When lifecycle is off: `null`.
+- `children` — `list(agent.children or [])` (never null when lifecycle is on).
+  When lifecycle is off: `[]`.
+- `inheritedTestament` — `list(agent.inheritedTestament or [])` (birth-time
+  testament snapshot copies; see Lifecycle table above). When lifecycle is off:
+  `[]`.
+- `inheritedBeliefs` — `list(agent.inheritedBeliefs or [])` (birth-time parent
+  belief union when `MEMES_ENABLED`; empty when memes off). When lifecycle is
+  off: `[]`.
 
 ## Speeds
 
@@ -183,7 +197,23 @@ by roster index `i` — so a fresh world already spans young/adult ages, not one
 generation.
 
 Births need housing headroom, the food surplus above, and two ally adults sharing
-a district; capped at one per `BIRTH_MIN_INTERVAL_FRAMES`. Newly-generated agents
+a district; capped at one per `BIRTH_MIN_INTERVAL_FRAMES`. At birth,
+`_spawn_newborn` (`mixin_lifecycle.py:1186-1253`) sets
+`newborn["parents"] = [parent_a["name"], parent_b["name"]]` and appends the
+newborn's name to both `parent_a["children"]` and `parent_b["children"]` at
+the same point — `children` is a list of names (mirroring `parents`), never
+null; cold-start agents get `children = []` via `_make_agents` (Phase 1,
+alongside `a["parents"] = None`). `_heirs_of()` (`mixin_lifecycle.py:144-153`)
+reads `agent.get("children") or []`, filtered to living agents, when
+`DYNASTY_TREE_ENABLED` is True; when that flag is False, `_heirs_of` falls
+back to the pre-change parents-scan (every living agent whose `parents`
+contains the deceased's name). Same heir set when `children` is consistent,
+load-bearing for succession/goods/home/belief inheritance via `_inherit_from()`. When
+`MEMES_ENABLED`, the newborn's belief set is unioned from both parents at birth
+(`mixin_lifecycle.py:1198`); `inheritedBeliefs` is a static list snapshot of
+that union (empty when memes are off or neither parent has beliefs). The full
+live bloodline-vs-conversation belief diff is **out of scope** (see
+`docs/plans/idea-02-dynasty-tree/plan.md` §2 Answer 4). Newly-generated agents
 beyond the hand-written `AGENT_DEFS` pool get synthetic ids starting at
 `nextGeneratedAgentId = 1000`
 (`core.py:503`, incremented in `mixin_lifecycle.py:1108-1111`). Natural death rolls apply once past
@@ -236,11 +266,19 @@ thing evicted by the char-budget's oldest-first trim.
 ### Testament inheritance (`TESTAMENT_ENABLED`, default True)
 
 See [09-systems-society.md](09-systems-society.md#testament_enabled) for the
-civilization ring and prompt line. Summary for the agent data-shape lens:
+civilization ring, `inheritedTestament` snapshot shape, and prompt line.
+Summary for the agent data-shape lens:
 when `TESTAMENT_ENABLED` and `WIKI_MEMORY` are both True, `_spawn_newborn`
 (`mixin_lifecycle.py`) seeds the newborn's `memoryWiki` from both parents'
 sections plus the newest `TESTAMENT_PROMPT_ENTRIES` testament lines (each
-section capped at `WIKI_SECTION_CHAR_CAP`). On death,
+section capped at `WIKI_SECTION_CHAR_CAP`). Inside
+`_seed_newborn_wiki_from_testament`
+(`mixin_governance_culture.py:1331-1366`), the same
+`testament[-TESTAMENT_PROMPT_ENTRIES:]` slice that feeds the wiki also sets
+`newborn["inheritedTestament"]` — a deterministic birth-time snapshot copy of
+those entry dicts (`{text, author, frame, generation}`) so lineage can trace
+which testament entries an heir inherited after the village-wide ring later
+caps or drops older entries. On death,
 `_merge_testament_on_death` (`mixin_governance_culture.py`) folds the
 deceased's `lessons` and optional `relationships` wiki text into
 `civilization["testament"]` deterministically — no new LLM call. With the

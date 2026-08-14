@@ -46,7 +46,9 @@ function applyFlags(flags) {
   if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
   if ("GOD_AUTH_REQUIRED" in flags) GOD_AUTH_REQUIRED_FLAG = !!flags.GOD_AUTH_REQUIRED;
   if ("WORLD_WIKI_ENABLED" in flags) WORLD_WIKI_ENABLED_FLAG = !!flags.WORLD_WIKI_ENABLED;
+  if ("DYNASTY_TREE_ENABLED" in flags) DYNASTY_TREE_ENABLED = !!flags.DYNASTY_TREE_ENABLED;
   applyGodDejaVuAvailability();
+  applyDynastyTreeLineageGate();
 }
 
 function applyGodDejaVuAvailability() {

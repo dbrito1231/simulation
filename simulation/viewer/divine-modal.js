@@ -28,7 +28,7 @@ if (GOD_AUTH_REQUIRED_FLAG) {
 }
 
 // --- Bottom bar + modal (relocated from sidebar tabs) --------------------
-const GOD_TABS = ["unlock", "sight", "voice", "matrix", "miracles", "story", "laws", "history", "audit", "anomaly", "compile"];
+const GOD_TABS = ["unlock", "sight", "voice", "matrix", "miracles", "story", "laws", "history", "audit", "anomaly", "lineage", "compile"];
 const DIVINE_WIDE_MODAL_FEATURES = new Set(["matrix", "story", "laws", "audit", "compile"]);
 const godBarButtons = Array.from(document.querySelectorAll("#divineBar .gbtn"));
 let divineModalOpenFeature = null;
@@ -205,6 +205,7 @@ function openDivineModal(name) {
   if (name === "laws") renderGodLawsActive();
   if (name === "history") renderGodHistory();
   if (name === "audit") renderGodDecisionAudit();
+  if (name === "lineage") renderGodLineage();
   renderGodPinRow();
   reorderDivineModalBodyChildren();
 }
@@ -410,6 +411,147 @@ function refreshGodSightIfOpen() {
   if ((godActiveTab === "sight" || godActiveTab === "voice") && godEffectivelyAuthorized()) refreshGodSight();
   if (godActiveTab === "laws") renderGodLawsActive();
 }
+
+function applyDynastyTreeLineageGate() {
+  const btn = document.getElementById("godLineageTabBtn");
+  if (btn) btn.style.display = DYNASTY_TREE_ENABLED ? "" : "none";
+  if (!DYNASTY_TREE_ENABLED && godActiveTab === "lineage") showGodTab("history");
+}
+
+let godLineageSelectKey = null;
+let godLineageContentKey = null;
+
+function godLineageAgentByName(name) {
+  if (!name) return null;
+  return getAgents().find((a) => a.name === name) || null;
+}
+
+function godLineageDisplayName(name) {
+  const agent = godLineageAgentByName(name);
+  const suffix = agent && agent.deceased ? " (deceased)" : "";
+  return String(name) + suffix;
+}
+
+function godLineageNameLink(name) {
+  const label = godLineageDisplayName(name);
+  return `<button type="button" class="divine-lineage-link" data-lineage-name="${escapeHtml(String(name))}">${escapeHtml(label)}</button>`;
+}
+
+function godRenderLineageNames(names) {
+  const list = Array.isArray(names) ? names.filter(Boolean) : [];
+  if (!list.length) return "";
+  return list.map((n) => godLineageNameLink(n)).join(", ");
+}
+
+function godRenderLineagePanel(agent) {
+  if (!agent) {
+    return `<div class="divine-note">No agents in the world yet.</div>`;
+  }
+  let html = `<section class="divine-lineage-section"><h3 class="divine-lineage-heading">Parents</h3>`;
+  const parents = agent.parents;
+  if (!parents || !parents.length) {
+    html += `<div class="divine-lineage-empty">Founding generation — no parents</div>`;
+  } else {
+    html += `<div class="divine-lineage-names">${godRenderLineageNames(parents)}</div>`;
+  }
+  html += `</section><section class="divine-lineage-section"><h3 class="divine-lineage-heading">Children</h3>`;
+  const children = agent.children || [];
+  if (!children.length) {
+    html += `<div class="divine-lineage-empty">No children</div>`;
+  } else {
+    html += `<div class="divine-lineage-names">${godRenderLineageNames(children)}</div>`;
+  }
+  html += `</section><section class="divine-lineage-section"><h3 class="divine-lineage-heading">Inherited testament</h3>`;
+  const testament = agent.inheritedTestament || [];
+  if (!testament.length) {
+    html += `<div class="divine-lineage-empty">None</div>`;
+  } else {
+    html += `<ul class="divine-lineage-list">` + testament.map((entry) => {
+      const text = escapeHtml(String(entry.text || ""));
+      const author = escapeHtml(String(entry.author || "—"));
+      const frame = escapeHtml(String(entry.frame ?? "—"));
+      const generation = escapeHtml(String(entry.generation ?? "—"));
+      return `<li><div class="divine-lineage-entry-text">${text}</div>` +
+        `<div class="divine-lineage-entry-meta">author ${author} · frame ${frame} · gen ${generation}</div></li>`;
+    }).join("") + `</ul>`;
+  }
+  html += `</section><section class="divine-lineage-section"><h3 class="divine-lineage-heading">Inherited beliefs</h3>`;
+  const beliefs = agent.inheritedBeliefs || [];
+  if (!beliefs.length) {
+    html += `<div class="divine-lineage-empty">None</div>`;
+  } else {
+    html += `<ul class="divine-lineage-beliefs">` + beliefs.map((b) =>
+      `<li>${escapeHtml(String(b))}</li>`
+    ).join("") + `</ul>`;
+  }
+  html += `</section>`;
+  return html;
+}
+
+function renderGodLineage() {
+  const selectEl = document.getElementById("godLineageAgentSelect");
+  const contentEl = document.getElementById("godLineageContent");
+  if (!selectEl || !contentEl) return;
+
+  const agents = getAgents().slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const listKey = agents.map((a) => `${a.id}:${a.deceased ? 1 : 0}:${a.name}`).join("|");
+  const prior = selectEl.value;
+
+  if (listKey !== godLineageSelectKey) {
+    godLineageSelectKey = listKey;
+    selectEl.innerHTML = agents.length
+      ? agents.map((a) => {
+          const suffix = a.deceased ? " (deceased)" : "";
+          const sel = prior === a.name ? " selected" : "";
+          return `<option value="${escapeHtml(a.name)}"${sel}>${escapeHtml(a.name)}${escapeHtml(suffix)}</option>`;
+        }).join("")
+      : `<option value="">(no agents)</option>`;
+    if (prior && Array.from(selectEl.options).some((o) => o.value === prior)) {
+      selectEl.value = prior;
+    } else if (agents.length && !selectEl.value) {
+      selectEl.value = agents[0].name;
+    }
+  }
+
+  const agent = agents.find((a) => a.name === selectEl.value) || null;
+  const contentKey = agent ? JSON.stringify({
+    p: agent.parents,
+    c: agent.children,
+    t: agent.inheritedTestament,
+    b: agent.inheritedBeliefs,
+  }) : "";
+  if (contentKey === godLineageContentKey) return;
+  godLineageContentKey = contentKey;
+  contentEl.innerHTML = godRenderLineagePanel(agent);
+}
+
+(function wireGodLineagePanel() {
+  const selectEl = document.getElementById("godLineageAgentSelect");
+  const contentEl = document.getElementById("godLineageContent");
+  if (selectEl && !selectEl.dataset.wired) {
+    selectEl.dataset.wired = "1";
+    selectEl.addEventListener("change", () => {
+      godLineageContentKey = null;
+      renderGodLineage();
+    });
+  }
+  if (contentEl && !contentEl.dataset.wired) {
+    contentEl.dataset.wired = "1";
+    contentEl.addEventListener("click", (e) => {
+      const link = e.target.closest(".divine-lineage-link");
+      if (!link || !selectEl) return;
+      const name = link.getAttribute("data-lineage-name");
+      if (!name) return;
+      if (Array.from(selectEl.options).some((o) => o.value === name)) {
+        selectEl.value = name;
+        godLineageContentKey = null;
+        renderGodLineage();
+      }
+    });
+  }
+})();
+
+applyDynastyTreeLineageGate();
 
 function renderGodError(el, message) {
   el.innerHTML = `<div class="divine-error">${escapeHtml(String(message))}</div>`;

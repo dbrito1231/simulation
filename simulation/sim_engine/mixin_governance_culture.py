@@ -1439,14 +1439,17 @@ class _GovernanceCultureMixin:
     def _seed_newborn_wiki_from_testament(self, newborn, parent_a, parent_b):
         """Inherit parent wiki sections plus the newest testament entries,
         each capped at WIKI_SECTION_CHAR_CAP."""
+        testament = self.civilization.get("testament") or []
+        testament_slice = testament[-TESTAMENT_PROMPT_ENTRIES:]
         if not TESTAMENT_ENABLED or not WIKI_MEMORY:
+            newborn["inheritedTestament"] = []
             return
         wiki = newborn.setdefault("memoryWiki", {
             "relationships": "", "goals": "", "lessons": "",
         })
         pa_wiki = parent_a.get("memoryWiki") or {}
         pb_wiki = parent_b.get("memoryWiki") or {}
-        testament = self.civilization.get("testament") or []
+        newborn["inheritedTestament"] = [dict(e) for e in testament_slice]
 
         def _join_unique(*parts):
             seen = set()
@@ -1464,7 +1467,7 @@ class _GovernanceCultureMixin:
 
         testament_texts = [
             (e.get("text") or "").strip()
-            for e in testament[-TESTAMENT_PROMPT_ENTRIES:]
+            for e in testament_slice
             if (e.get("text") or "").strip()
         ]
         wiki["lessons"] = _join_unique(
