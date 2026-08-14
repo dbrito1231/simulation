@@ -184,6 +184,8 @@ def exercise_read_conversation_window(checks):
          "message": "at end exclusive", "frame_tick": 100},
         {"type": "conversation", "kind": "speech", "from": "C", "to": "D",
          "message": "after window", "frame_tick": 101},
+        json.dumps(["valid JSON array, not a conversation record"]),
+        json.dumps("valid JSON string, not a conversation record"),
         "not valid json",
     ]
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".jsonl") as fh:

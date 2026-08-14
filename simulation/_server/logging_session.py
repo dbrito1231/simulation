@@ -283,6 +283,8 @@ def read_conversation_window(conversation_path, start_frame, end_frame, max_reco
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if not isinstance(record, dict):
+                    continue
                 if record.get("type") != "conversation":
                     continue
                 tick = record.get("frame_tick")

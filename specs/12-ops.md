@@ -275,8 +275,10 @@ above). The read side uses the same injection seam as the write side:
   Returns `conversation`-typed records whose `frame_tick` falls in
   `[start_frame, end_frame)`, matching the schema documented in the
   `conversation.jsonl` row above (`{type, kind, from, to, message,
-  frame_tick, outcome?}`). Synthetic `kind: "session_start"` lines are
-  excluded by the frame filter. Saga passes `SAGA_DIALOGUE_EXCERPT_CAP` as
+  frame_tick, outcome?}`). Malformed lines and valid JSON values that are not
+  objects are ignored; neither can raise from the reader. Synthetic
+  `kind: "session_start"` lines are excluded by the frame filter. Saga passes
+  `SAGA_DIALOGUE_EXCERPT_CAP` as
   `max_records`, so matching-record parsing stops at the prompt's bounded
   excerpt size rather than materializing a full chatty-day window.
 - **Injection.** A new `"read_conversation_window": ...` entry in
