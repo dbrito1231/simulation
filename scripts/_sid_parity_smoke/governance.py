@@ -174,6 +174,9 @@ def test_custom_rule_effect_and_constitution(engine):
     }
     enact({"id": "wood_charter", "name": "Wood Charter", "kind": "custom",
            "description": "Gatherers bring in extra wood.", "effect": effect})
+    assert_true(engine.civilization["constitution"]
+                is engine.civilization["constitutionBySettlement"]["home"],
+                "home constitution replacement broke its keyed alias")
     assert_true(sum(p.get("id") == "wood_charter" for p in engine.civilization["constitution"]) == 1,
                 f"ordinary enactment duplicated a constitution provision: {engine.civilization['constitution']}")
     assert_true("wood_charter" in engine.civilization["customRuleModifiers"],
@@ -197,7 +200,8 @@ def test_custom_rule_effect_and_constitution(engine):
                 "superseded rule remained active")
     constitution = {p["id"]: p for p in engine.civilization["constitution"]}
     assert_true(constitution["wood_charter"]["status"] == "superseded"
-                and constitution["wood_charter"]["supersededBy"] == "wood_charter_amendment",
+                and constitution["wood_charter"]["supersededBy"] == "wood_charter_amendment"
+                and constitution["wood_charter_amendment"]["status"] == "active",
                 f"constitution did not record amendment: {constitution}")
     assert_true(sum(p.get("id") == "wood_charter" for p in engine.civilization["constitution"]) == 1
                 and sum(p.get("id") == "wood_charter_amendment" for p in engine.civilization["constitution"]) == 1
@@ -337,7 +341,11 @@ def test_custom_rule_nonbuild_district(engine):
     assert_true(engine._normalize_custom_rule_effect(effect) is not None,
                 "non-buildable forest district was rejected by effect grammar")
     elder = next(a for a in engine.agents if a["role"] == "elder")
-    engine.civilization["customRuleModifiers"] = {"forest_charter": effect}
+    engine.civilization["customRuleModifiers"].clear()
+    engine.civilization["customRuleModifiers"]["forest_charter"] = effect
+    assert_true(engine.civilization["customRuleModifiers"]
+                is engine.civilization["customRuleModifiersBySettlement"]["home"],
+                "home custom modifier map does not share its keyed alias")
     elder["currentDistrict"] = "forest"
     assert_true(engine._custom_rule_modifier("collect_resource", elder, "wood") == 1,
                 "forest district subject did not match its live action context")
@@ -354,14 +362,19 @@ def test_constitution_restore_migration(engine):
         "condition": {"action": "collect_resource"},
         "modifier": {"kind": "add", "value": 1},
     }
-    engine.civilization["rules"] = [{
+    engine.civilization["rules"].clear()
+    engine.civilization["rules"].append({
         "id": "legacy_wood_charter", "name": "Legacy Wood Charter", "kind": "custom",
         "description": "An old saved charter.", "effect": effect, "enacted": True,
         "enactedFrame": 12,
-    }]
+    })
     engine.civilization.pop("constitution", None)
+    engine.civilization.pop("constitutionBySettlement", None)
     engine.civilization.pop("customRuleModifiers", None)
     engine._ensure_constitution()
+    assert_true(engine.civilization["constitution"]
+                is engine.civilization["constitutionBySettlement"]["home"],
+                "constitution migration did not preserve the flat/home alias")
     engine._rebuild_custom_rule_modifiers()
     engine._ensure_constitution()  # repeated restore must not duplicate the provision
     assert_true(len(engine.civilization["constitution"]) == 1,
@@ -371,11 +384,11 @@ def test_constitution_restore_migration(engine):
                 "legacy rule was not restored as an active compiled provision")
     # Existing duplicate rows from the short-lived first Phase-4 implementation
     # collapse deterministically to the latest provision/status.
-    engine.civilization["rules"] = []
-    engine.civilization["constitution"] = [
+    engine.civilization["rules"].clear()
+    engine._set_constitution_for_settlement("home", [
         {"id": "retired_legacy", "name": "Retired", "status": "active"},
         {"id": "retired_legacy", "name": "Retired", "status": "repealed"},
-    ]
+    ])
     engine._ensure_constitution()
     assert_true(engine.civilization["constitution"] == [
         {"id": "retired_legacy", "name": "Retired", "status": "repealed"}],

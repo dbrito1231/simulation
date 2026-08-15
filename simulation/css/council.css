@@ -338,18 +338,13 @@
     opacity: 0;
     visibility: hidden;
   }
-  #conversationLog {
-    flex: 1 1 0;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
   #convList {
     list-style: none;
     margin: 0;
     padding: 0;
     overflow-y: auto;
     flex: 1;
+    min-height: 0;
     font-family: ui-monospace, monospace;
     font-size: 15px;
     line-height: 1.65;
@@ -365,48 +360,19 @@
   #convList .msg { color: #bbb; }
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
-  #activityLog, #chronicleLog, #sagaLog, #decisionAuditPanel {
+  #sagaLog {
     padding-bottom: 12px;
   }
-  #decisionAuditPanel {
-    padding-bottom: 16px;
-  }
-  #decisionAuditPanel h2 {
-    font-size: 14px;
-  }
-  /* Activity / Decision audit / Chronicle live in #sidebarLogsScroll (panels.css). */
-  /* Agents is now the primary (and only unbounded) content left in
-     #convPanel, so it needs its own scroll region rather than relying on
-     unconstrained natural height (the old cause of Activity being squeezed). */
-  #agentsPanel {
-    flex: 1 1 0;
+  #actList, #chronicleList, #decisionAuditAgentList, #decisionAuditRecent {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    flex: 1;
     min-height: 0;
-    overflow-y: auto;
-  }
-  #actList, #chronicleList {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    overflow-y: auto;
-    max-height: 100px;
     font-size: 12px;
     line-height: 1.5;
     color: #aaa;
-  }
-  #decisionAuditAgentList, #decisionAuditRecent {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    overflow-y: auto;
-    font-size: 12px;
-    line-height: 1.5;
-    color: #aaa;
-  }
-  #decisionAuditAgentList {
-    max-height: min(200px, 22vh);
-  }
-  #decisionAuditRecent {
-    max-height: min(260px, 28vh);
   }
   #actList li, #chronicleList li, #sagaList li, #decisionAuditAgentList li, #decisionAuditRecent li { padding: 3px 0; }
   #chronicleList .chronicle-kind { color: #d9b96e; font-weight: 600; }

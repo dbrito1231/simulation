@@ -153,11 +153,15 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    margin-bottom: 8px;
   }
-  .agents-panel-head h2 { margin: 0; }
+  .agents-panel-head .panel-head {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding-right: 0;
+  }
   #deadAgentsBtn {
     flex-shrink: 0;
+    margin-right: 16px;
     padding: 4px 8px;
     font: 11px sans-serif;
     background: #2a2a35;

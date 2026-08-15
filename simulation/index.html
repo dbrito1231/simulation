@@ -22,40 +22,49 @@
     <h1>Agents &amp; Activity</h1>
     <section class="panel-section" id="agentsPanel">
       <div class="agents-panel-head">
-        <h2>Agents <span id="livingAgentCount" class="civ-label"></span></h2>
+        <button class="panel-head" type="button" aria-expanded="true">
+          <span class="panel-arrow" aria-hidden="true">▼</span>
+          <span>Agents <span id="livingAgentCount" class="civ-label"></span></span>
+        </button>
         <button id="deadAgentsBtn" type="button" hidden>Deceased (0)</button>
       </div>
-      <div id="agentRollup"></div>
-      <ul id="agentList"></ul>
-      <div id="agentDetail"></div>
+      <div class="panel-body">
+        <div id="agentRollup"></div>
+        <ul id="agentList"></ul>
+        <div id="agentDetail"></div>
+      </div>
     </section>
     <section class="panel-section" id="conversationLog" style="display:none">
-      <h2>Conversations</h2>
-      <ul id="convList"></ul>
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Conversations</span>
+      </button>
+      <div class="panel-body"><ul id="convList"></ul></div>
     </section>
     <section class="panel-section" id="settlementsSection" style="display:none">
-      <details id="settlementsPanel" open>
-        <summary>Settlements</summary>
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Settlements</span>
+      </button>
+      <div class="panel-body">
         <div id="settlementsMeta"></div>
         <ul id="settlementsList"></ul>
-      </details>
+      </div>
     </section>
     <section class="panel-section" id="councilSection" style="display:none">
-      <details id="councilPanel" open>
-        <summary>Council</summary>
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Council</span>
+      </button>
+      <div class="panel-body">
         <div id="councilMeta"></div>
         <div id="councilCards"></div>
         <ul id="councilHistory"></ul>
-      </details>
+      </div>
     </section>
   </aside>
   <div id="canvasWrap">
     <canvas id="world" width="1600" height="1000"></canvas>
-    <button id="pauseBtn">Pause</button>
-    <button id="resetBtn">Reset</button>
-    <button id="zoomOutBtn" title="Zoom out">&minus;</button>
-    <button id="zoomInBtn" title="Zoom in">+</button>
-    <button id="zoomFitBtn" title="Fit whole world">Fit</button>
     <div id="worldClockHud" aria-live="polite"></div>
     <canvas id="minimap" width="220" height="160"></canvas>
     <div id="councilBanner"></div>
@@ -71,14 +80,36 @@
       <span id="statusLabel">Ollama: offline</span>
     </div>
     <div id="sidebarBody">
+    <section class="panel-section" id="mapControlsPanel">
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Controls</span>
+      </button>
+      <div class="panel-body map-controls">
+        <button id="pauseBtn">Pause</button>
+        <button id="resetBtn">Reset</button>
+        <button id="zoomOutBtn" title="Zoom out">&minus;</button>
+        <button id="zoomInBtn" title="Zoom in">+</button>
+        <button id="zoomFitBtn" title="Fit whole world">Fit</button>
+      </div>
+    </section>
     <section class="panel-section" id="timePanel">
-      <h2>Time</h2>
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Time</span>
+      </button>
+      <div class="panel-body">
       <div class="civ-row"><span class="civ-label">Now (EST):</span> <span class="civ-value" id="timeNow">—</span></div>
       <div class="civ-row"><span class="civ-label">Uptime:</span> <span class="civ-value" id="timeUptime">—</span></div>
       <div class="civ-row"><span class="civ-label">Calendar:</span> <span class="civ-value" id="timeCalendar">—</span></div>
+      </div>
     </section>
     <section class="panel-section" id="civPanel">
-      <h2>Civilization</h2>
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Civilization</span>
+      </button>
+      <div class="panel-body">
       <div class="civ-row"><span class="civ-label" id="civLevelLabel">Level:</span> <span class="civ-value" id="civLevel">1</span></div>
       <div class="civ-row"><span class="civ-label">Structures:</span> <span class="civ-value" id="civStructures">0</span></div>
       <div class="civ-row" id="civUpgradesRow" style="display:none"><span class="civ-label">Upgradable:</span> <span class="civ-value" id="civUpgrades">0</span></div>
@@ -114,21 +145,30 @@
         <span class="civ-label">Pending:</span>
         <div id="civPending"></div>
       </div>
+      </div>
     </section>
     <div id="sidebarLogsScroll">
     <section class="panel-section" id="activityLog">
-      <h2>Activity</h2>
-      <ul id="actList"></ul>
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Activity</span>
+      </button>
+      <div class="panel-body"><ul id="actList"></ul></div>
     </section>
     <section class="panel-section" id="decisionAuditPanel">
-      <h2>Decision audit</h2>
-      <ul id="decisionAuditAgentList">
-        <li class="decision-audit-empty">Loading audit data…</li>
-      </ul>
-      <details id="decisionAuditRecentWrap" open>
-        <summary>Recent comparisons</summary>
-        <ul id="decisionAuditRecent"></ul>
-      </details>
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Decision audit</span>
+      </button>
+      <div class="panel-body">
+        <ul id="decisionAuditAgentList">
+          <li class="decision-audit-empty">Loading audit data…</li>
+        </ul>
+        <details id="decisionAuditRecentWrap" open>
+          <summary>Recent comparisons</summary>
+          <ul id="decisionAuditRecent"></ul>
+        </details>
+      </div>
     </section>
     <section class="panel-section" id="anomalySection" style="display:none">
       <details id="anomalyPanel" open>
@@ -137,8 +177,11 @@
       </details>
     </section>
     <section class="panel-section" id="chronicleLog">
-      <h2>Chronicle</h2>
-      <ul id="chronicleList"></ul>
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Chronicle</span>
+      </button>
+      <div class="panel-body"><ul id="chronicleList"></ul></div>
     </section>
     <section class="panel-section" id="sagaLog">
       <h2>Village paper</h2>
@@ -1185,6 +1228,7 @@
 <script src="viewer/setup.js"></script>
 <script src="viewer/state.js"></script>
 <script src="viewer/render.js"></script>
+<script src="viewer/panels.js"></script>
 <script src="viewer/sidebar.js"></script>
 <script src="viewer/decision-audit.js"></script>
 <script src="viewer/council.js"></script>

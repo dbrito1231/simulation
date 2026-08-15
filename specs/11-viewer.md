@@ -10,7 +10,7 @@ drawing rules (structure sprite resolution order, seasonal variants).
 **Files:** `simulation/index.html` (markup shell), `simulation/css/*.css`
 (styles, split into 6 ordered files — see "css/*.css: split stylesheet"
 below), `simulation/viewer/*.js` (polling, render loop, sidebar, Divine
-Console, World Wiki, Prediction Market; split into 20 ordered files — see "viewer/*.js: split viewer client
+Console, World Wiki, Prediction Market; split into 21 ordered files — see "viewer/*.js: split viewer client
 script" below), `simulation/sprites/*.js` (stateless Canvas helpers, split
 into 8 ordered files — see "sprites/*.js: pure stateless drawing" below).
 **See also:** [01-architecture.md](01-architecture.md) for the
@@ -21,7 +21,7 @@ labels.
 
 ## Thin-viewer contract
 
-`simulation/viewer/setup.js` (first of the 20 split viewer files, see
+`simulation/viewer/setup.js` (first of the 21 split viewer files, see
 "viewer/*.js: split viewer client script" below) states the whole viewer's
 contract in a banner comment at the top of the file: it is a **PURE
 RENDERER** — it polls `GET /state`
@@ -225,7 +225,7 @@ mechanism the season tint already uses.
   (`viewer/minimap.js`) draws a scaled-down world plus a viewport rectangle
   from scroll position/`zoomLevel`; clicking it
   recenters the main view.
-- **Two side panels**, both filled by `renderSidebar()`:
+- **Two sidebars**, both filled by `renderSidebar()`:
   - **Left panel** (`#convPanel`), titled "Agents & Activity": the **Agents**
     section (`#agentsPanel` — rollup header, living-agent list with
     vitals/crisis sort, and the selected-agent detail panel), then a
@@ -236,26 +236,27 @@ mechanism the season tint already uses.
     (`viewer/setup.js`, both `false`). These are viewer-only display flags, not
     server `config.flags`; flip either to `true` to restore its section. The
     underlying `world.conversation` and `civ.settlements` data still arrives in
-    `/state` regardless. `#agentsPanel` is a flex child of `#convPanel` with its
-    own `overflow-y: auto` (`css/council.css`), so a long agent roster scrolls
-    within the section instead of being clipped by the panel's own
-    `overflow: hidden`.
+    `/state` regardless.
   - **Right panel** (`#sidebar`): the "AI Simulation World" title, LM/server
-    status dot+label, then `#sidebarBody` (a flex column, `overflow: hidden`)
-    holding **Time** (`#timePanel`, EST clock/uptime/calendar — fixed,
-    `flex-shrink: 0`, natural height), **Civilization** (`#civPanel`
-    era/level/structures/active builds/resources), then `#sidebarLogsScroll`
-    (shared overflow region for the log panels below). Civilization scrolls
-    on its own with a capped height (`flex: 0 1 auto; max-height:
-    min(180px, 22vh); overflow-y: auto` in `css/panels.css`). Inside
-    `#sidebarLogsScroll` (`flex: 1 1 0; min-height: 0; overflow-y: auto` —
-    same file), in order: **Activity** (`#activityLog`, world-event feed,
-    `#actList`), **Decision audit** (`#decisionAuditPanel` — see
-    [Decision audit panel](#decision-audit-panel)), **Chronicle**
-    (`#chronicleLog`, `#chronicleList`). Nested list `max-height` rules in
-    `css/council.css` apply to `#actList` / `#chronicleList` / decision-audit
-    sub-lists; the outer `#sidebarLogsScroll` wheel target prevents nested
-    overflow from trapping scroll. The Civilization panel's **Village resources**
+    status dot+label, then the scrolling `#sidebarBody`. Its first section is
+    **Controls** (`#mapControlsPanel`), followed by **Time** (`#timePanel`, EST
+    clock/uptime/calendar), **Civilization** (`#civPanel`, era/level/
+    structures/active builds/resources), then `#sidebarLogsScroll`, which
+    groups the remaining log sections without introducing a second scroll
+    trap. Controls contains the existing Pause, Reset, zoom out, zoom in, and
+    Fit buttons (`#pauseBtn`, `#resetBtn`, `#zoomOutBtn`, `#zoomInBtn`,
+    `#zoomFitBtn`); these controls are no longer a fixed cluster over the map.
+    Inside `#sidebarLogsScroll`, in exact DOM order: **Activity**
+    (`#activityLog`, world-event feed, `#actList`), **Decision audit**
+    (`#decisionAuditPanel` — see [Decision audit panel](#decision-audit-panel)),
+    **Anomaly radar** (`#anomalySection`), **Chronicle** (`#chronicleLog`,
+    `#chronicleList`), **Village paper** (`#sagaLog`, `#sagaList`), and
+    **Prediction market** (`#predictionMarketPanel`). Activity, Decision audit,
+    and Chronicle are three of the ten common collapsible panels; Anomaly radar,
+    Village paper, and Prediction market retain their upstream non-collapsible
+    markup. The common bounded `.panel-body` provides internal list scrolling
+    for the collapsible panels, while the outer `#sidebarBody` scrolls the
+    complete right-hand stack. The Civilization panel's **Village resources**
     row (`#civResources` headline + `#civResourceList` chips) shows
     `civ.stockpile` **plus** every agent inventory, keyed through
     `resourceRegistry`, filtered to `n > 0` (retired or zero holdings never
@@ -281,6 +282,49 @@ mechanism the season tint already uses.
     [Decision audit panel](#decision-audit-panel)); when the route returns
     `enabled: false` the section stays visible with empty-state copy rather
     than force-hiding.
+
+### Collapsible sidebar-panel contract
+
+Exactly ten sidebar sections participate in the common collapsible contract:
+
+- Left `#convPanel`: Agents (`#agentsPanel`), Conversations
+  (`#conversationLog`), Settlements (`#settlementsSection`), and Council
+  (`#councilSection`).
+- Right: Controls (`#mapControlsPanel`), Time (`#timePanel`), Civilization
+  (`#civPanel`), Activity (`#activityLog`), Chronicle (`#chronicleLog`), and
+  Decision audit (`#decisionAuditPanel`).
+
+Each is a `section.panel-section` with a real `button.panel-head` toggle whose
+contents include a `.panel-arrow`, followed by a `.panel-body` wrapping the
+section's existing content. The button's `aria-expanded` value always matches
+the visible state. Expanded headers show `▼`; collapsed headers show `▶`, and
+the owning section carries `.panel-collapsed` only while collapsed. Because
+`.panel-head` is a native button, Enter and Space activate it. Clicking
+anywhere in the visual header toggles the panel except another interactive
+`button` or `a`; in particular, `#deadAgentsBtn` opens the deceased-agent list
+without toggling Agents.
+
+`viewer/panels.js` owns this viewer-only state and persists collapsed panel ids
+in `localStorage` under `sim.panels.collapsed`. Missing or unusable stored state
+means every panel starts expanded. Collapse changes only the section class and
+body wrapper; it never writes the section's inline `display`, because feature
+visibility code independently owns Conversations, Settlements, Chronicle, and
+Council visibility and Decision audit's disabled empty state.
+
+Both sidebar columns scroll through their bounded panel stack. Every expanded
+`.panel-body` has `min-height: 160px`, `max-height: min(46vh, 420px)`, and
+internal vertical scrolling; a collapsed panel shrinks to its header. Existing
+list nodes such as `#actList`, `#convList`, `#chronicleList`,
+`#decisionAuditAgentList`, and `#decisionAuditRecent` remain the same nodes so
+renderer-managed scroll positions survive polling updates.
+
+Settlements and Council use this common section/button/body contract rather
+than native `<details>` elements. The nested
+`details#decisionAuditRecentWrap` remains a `<details>` because it is an audit
+sub-section, not one of the ten panels. Upstream-added Anomaly radar, Village
+paper, and Prediction market sections retain their own established markup and
+are outside this ten-panel contract. `#minimap` and `#worldClockHud` remain
+fixed over the map.
 - **`ACTION_LABELS`** (`viewer/sidebar.js`) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
   `humanizeAction(agent)` (`viewer/sidebar.js`) special-cases
@@ -313,13 +357,16 @@ black space). The recent `<details>` wrap is hidden and polling stops. When
 outcome axis remain on the [Divine Audit tab](#divine-audit-tab) only.
 
 **Placement.** Right sidebar (`#sidebar` / `#sidebarBody`), inside
-`#sidebarLogsScroll` with Activity and Chronicle — **not** below Chronicle.
-Order: Activity (`#activityLog`) → **Decision audit** (`#decisionAuditPanel`)
-→ Chronicle (`#chronicleLog`). `#sidebarLogsScroll` is the shared overflow-y
-region (`flex: 1 1 0; min-height: 0; overflow-y: auto` in `css/panels.css`) so
-nested list overflow cannot trap the wheel. `#decisionAuditPanel` is
-`flex-shrink: 0` with a larger min-height (`min-height: min(360px, 42vh)` in
-`css/panels.css`). Element ids: `#decisionAuditPanel` container,
+`#sidebarLogsScroll` after Activity and before Anomaly radar — **not** below
+Chronicle. Exact order: Activity (`#activityLog`) → **Decision audit**
+(`#decisionAuditPanel`) → Anomaly radar (`#anomalySection`) → Chronicle
+(`#chronicleLog`) → Village paper (`#sagaLog`) → Prediction market
+(`#predictionMarketPanel`). Decision audit, Activity, and Chronicle are common
+collapsible panels; the other three retain upstream non-collapsible markup.
+`#sidebarLogsScroll` groups these sections inside the scrolling `#sidebarBody`;
+the audit's `.panel-body` uses the same bounded sizing and internal overflow as
+the other collapsible sections.
+Element ids: `#decisionAuditPanel` container,
 `#decisionAuditAgentList` for per-agent rows, `#decisionAuditRecent` for the
 bounded `recent[]` drill-down list (wrapped in `#decisionAuditRecentWrap`
 `<details>`).
@@ -819,7 +866,7 @@ earlier one, never the reverse.
 ## viewer/*.js: split viewer client script
 
 `simulation/viewer.js` was split (Phase 4 of the file-modularization plan)
-into 19 plain files (18 original + `world-wiki.js` added in idea-09 Phase 3),
+into 21 plain files,
 loaded via ordered `<script>` tags in `index.html`
 (after `sprites/*.js`, in the same relative position the single
 `viewer.js` tag occupied before) and served from fixed Flask routes under
@@ -837,23 +884,24 @@ move, no logic changed.
 | 1 | `viewer/setup.js` | Thin-viewer contract banner, canvas/DPR setup, offscreen-terrain-cache scaffolding, zoom (`zoomLevel`/`applyZoom`/`zoomFit`), all feature flags (`SURVIVAL_ENABLED`, `DYNASTY_TREE_ENABLED`, etc.), viewer-only display toggles (`SHOW_CONVERSATIONS`/`SHOW_SETTLEMENTS`) |
 | 2 | `viewer/state.js` | World snapshot: `MOCK_STATE`, module-level `world`, `mergeStateDelta()`, districts cache (`districtsData`/`districtsKey`/`districtsEpoch`), `getDistricts`/`findDistrictBounds`/`getDistrictBounds` |
 | 3 | `viewer/render.js` | Convenience accessors (`getAgents`/`getCiv`/etc.) plus drawing: terrain cache build (`buildTerrainCache`), season/night/golden-hour/weather overlays, `drawWorld`, per-agent/structure drawing (`drawAgent`, `drawStructureWithShadow`, hit-flash) |
-| 4 | `viewer/sidebar.js` | Sidebar render: `renderSidebar()`, `ACTION_LABELS`/`humanizeAction`, benchmarks, agent detail/rollup/panel, deceased-agents modal, founding/disaster banners, `renderWorldClockHud` |
-| 5 | `viewer/decision-audit.js` | Decision audit: sidebar panel (`pollDecisionAudit()`/`renderDecisionAuditPanel()` on default `GET /decision-audit`; poll bootstraps at module load here) + Divine Audit tab (`pollGodDecisionAudit()`/`renderGodDecisionAudit()` on `?view=full` when tab open); pure renderer |
-| 6 | `viewer/council.js` | Council panel (`renderCouncil`), council transcript modal (`openCouncilTranscript`), Daily Council Assembly modal, settlements |
-| 7 | `viewer/predictions.js` | Prediction market: renders the open Daily Council ballot question/choices from `/state`, submits picks to `POST /predictions/submit`, resolves after verdict, and polls `GET /predictions/history` for calibration while the panel is visible |
-| 8 | `viewer/minimap.js` | Minimap render (`renderMinimap`) and click/drag-to-navigate |
-| 9 | `viewer/polling.js` | `/state` polling (`pollState`), `applyFlags`, social-tie/wildlife/shipment drawing (`drawSocialTies`, `drawWildlife`, `drawShipments`) |
-| 10 | `viewer/anomaly.js` | Anomaly Radar sidebar panel and Divine Console anomaly tab: `pollAnomalies()` / `renderAnomalies()` plus modal rendering; read-only `GET /anomalies` polling |
-| 11 | `viewer/controls.js` | Pause/Resume/Reset controls (`postControl`, `syncPauseButton`, `doReset`), reset keyboard shortcut |
-| 12 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
-| 13 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
-| 14 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
-| 15 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers, and Lineage tab render (`renderGodLineage`/`applyDynastyTreeLineageGate`); read-only family tree from `/state` |
-| 16 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
-| 17 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
-| 18 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
-| 19 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`). Decision-audit polling starts in `decision-audit.js` itself. |
-| 20 | `viewer/world-wiki.js` | World Wiki modal: `openWorldWiki(kind, id)` global entry point, `fetchWiki()` / `renderWikiModal()` / `renderWikiIndex()` / `renderWikiPageContent()`, back-navigation stack, delegated `.wiki-link` click handler (capture phase, stops propagation). Gated on `WORLD_WIKI_ENABLED_FLAG` (set in `polling.js`). Polls `GET /wiki` every 3 s while modal is open; no polls when closed. Pure renderer — no world-state mutation. |
+| 4 | `viewer/panels.js` | Collapsible sidebar-panel wiring: header activation, `.panel-collapsed`/`aria-expanded`/arrow synchronization, and `sim.panels.collapsed` persistence |
+| 5 | `viewer/sidebar.js` | Sidebar render: `renderSidebar()`, `ACTION_LABELS`/`humanizeAction`, benchmarks, agent detail/rollup/panel, deceased-agents modal, founding/disaster banners, `renderWorldClockHud` |
+| 6 | `viewer/decision-audit.js` | Decision audit: sidebar panel (`pollDecisionAudit()`/`renderDecisionAuditPanel()` on default `GET /decision-audit`; poll bootstraps at module load here) + Divine Audit tab (`pollGodDecisionAudit()`/`renderGodDecisionAudit()` on `?view=full` when tab open); pure renderer |
+| 7 | `viewer/council.js` | Council panel (`renderCouncil`), council transcript modal (`openCouncilTranscript`), Daily Council Assembly modal, settlements |
+| 8 | `viewer/predictions.js` | Prediction market: renders the open Daily Council ballot question/choices from `/state`, submits picks to `POST /predictions/submit`, resolves after verdict, and polls `GET /predictions/history` for calibration while the panel is visible |
+| 9 | `viewer/minimap.js` | Minimap render (`renderMinimap`) and click/drag-to-navigate |
+| 10 | `viewer/polling.js` | `/state` polling (`pollState`), `applyFlags`, social-tie/wildlife/shipment drawing (`drawSocialTies`, `drawWildlife`, `drawShipments`) |
+| 11 | `viewer/anomaly.js` | Anomaly Radar sidebar panel and Divine Console anomaly tab: `pollAnomalies()` / `renderAnomalies()` plus modal rendering; read-only `GET /anomalies` polling |
+| 12 | `viewer/controls.js` | Pause/Resume/Reset controls (`postControl`, `syncPauseButton`, `doReset`), reset keyboard shortcut |
+| 13 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
+| 14 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
+| 15 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
+| 16 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers, and Lineage tab render (`renderGodLineage`/`applyDynastyTreeLineageGate`); read-only family tree from `/state` |
+| 17 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
+| 18 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
+| 19 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
+| 20 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`). Decision-audit polling starts in `decision-audit.js` itself. |
+| 21 | `viewer/world-wiki.js` | World Wiki modal: `openWorldWiki(kind, id)` global entry point, `fetchWiki()` / `renderWikiModal()` / `renderWikiIndex()` / `renderWikiPageContent()`, back-navigation stack, delegated `.wiki-link` click handler (capture phase, stops propagation). Gated on `WORLD_WIKI_ENABLED_FLAG` (set in `polling.js`). Polls `GET /wiki` every 3 s while modal is open; no polls when closed. Pure renderer — no world-state mutation. |
 
 ## Civ-1 physical props
 
@@ -1739,7 +1787,7 @@ server via `_build_snapshot_config()`), stored as `WORLD_WIKI_ENABLED_FLAG` in
 are sent.
 
 **Viewer files (Phase 3 implementation).** The wiki modal lives in:
-- `simulation/viewer/world-wiki.js` — all modal logic (file 19 in the viewer split
+- `simulation/viewer/world-wiki.js` — all modal logic (file 21 in the viewer split
   table above). Entry point: global `openWorldWiki(kind, id)`.
 - `simulation/css/council.css` — wiki modal CSS appended to the existing council CSS
   file (same file that owns `#councilTranscriptModal` and `#councilAssemblyModal`

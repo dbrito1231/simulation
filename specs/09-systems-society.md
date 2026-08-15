@@ -636,6 +636,12 @@ paths. Thin accessors (`_rules_for_settlement`, `_pending_for_settlement`,
 `_registry_for_settlement`, `_settlement_id_for_agent`, etc.) live in
 `mixin_governance_culture.py`.
 
+For the constitution ledger specifically, replacing the home list must update
+both `constitution` and `constitutionBySettlement["home"]` to reference the
+same replacement object. Non-home constitution ledgers remain keyed and
+independent, and restoration/migration preserves this relationship
+idempotently.
+
 **Global (not forked per settlement):** `treaties`, treaty tariffs
 (`_enacted_treaty_tariff`), `beliefPitchCalls`, `memeMutations`,
 `ruleKindsEverEnacted`, `taxDue`/`taxPaid`, succession office

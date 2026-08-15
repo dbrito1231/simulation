@@ -853,11 +853,11 @@ for _css_filename in _CSS_FILES:
 # directory traversal.
 _VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 _VIEWER_FILES = (
-    "setup.js", "state.js", "render.js", "sidebar.js", "council.js", "decision-audit.js",
-    "predictions.js", "minimap.js", "polling.js", "controls.js", "renderloop.js", "divine-bootstrap.js",
+    "setup.js", "state.js", "render.js", "panels.js", "sidebar.js", "decision-audit.js",
+    "council.js", "predictions.js", "minimap.js", "polling.js", "anomaly.js",
+    "controls.js", "renderloop.js", "divine-bootstrap.js",
     "divine-auth-sight.js", "divine-modal.js", "divine-sight-voice.js",
     "divine-voice.js", "divine-miracles-story.js", "divine-history.js",
-    "anomaly.js",
     "world-wiki.js",
 )
 

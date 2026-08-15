@@ -33,7 +33,7 @@ for the action catalog.
   re-exports at module level, so `import server; server.<name>` still resolves
   every name external callers (scripts/) rely on — pure move split, no
   behavior change.
-- `simulation/index.html` (shell) + `simulation/viewer/*.js` (19 files) +
+- `simulation/index.html` (shell) + `simulation/viewer/*.js` (21 files) +
   `simulation/sprites/*.js` (8 files) + `simulation/css/*.css` (6 files) poll
   `GET /state` (~10 Hz, delta
   after the first full snapshot) and render;
