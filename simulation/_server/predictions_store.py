@@ -109,13 +109,19 @@ class PredictionsStore:
         self._persist()
         return pid
 
-    def resolve(self, prediction_id, correct, verdict):
+    def resolve(self, prediction_id, correct, verdict, resolved_frame_tick=None):
         if prediction_id is None:
             return False
         pid = str(prediction_id)
         if not isinstance(correct, bool):
             return False
         if not isinstance(verdict, str) or not verdict.strip():
+            return False
+        # Older clients may omit the resolution frame; when supplied it must
+        # be a JSON integer so history can correlate the verdict to /state.
+        if resolved_frame_tick is not None and (
+            not isinstance(resolved_frame_tick, int) or isinstance(resolved_frame_tick, bool)
+        ):
             return False
         with self._lock:
             target = None
@@ -129,7 +135,7 @@ class PredictionsStore:
                 return False
             target["correct"] = correct
             target["verdict"] = verdict.strip()
-            target["resolved_frame_tick"] = None
+            target["resolved_frame_tick"] = resolved_frame_tick
         self._persist()
         return True
 

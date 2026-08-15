@@ -423,7 +423,9 @@ Council ballot projection. `viewer/predictions.js` renders the current question
 and choices from `/state` and submits one pick per open ballot through
 `POST /predictions/submit`; it never mutates engine state. After a verdict,
 the module resolves the pending prediction through `POST /predictions/resolve`
-and refreshes calibration history from `GET /predictions/history`. History
+and refreshes calibration history from `GET /predictions/history`. Resolution
+requests include the current `world.frameTick` as `resolved_frame_tick` so
+stored history can be correlated to the verdict frame. History
 polling is gated by `PREDICTION_MARKET_ENABLED` and stops when the panel is
 hidden or the flag is off. All dynamic text is escaped before insertion.
 
@@ -846,13 +848,13 @@ move, no logic changed.
 | 12 | `viewer/renderloop.js` | Render loop (`tick`/`tickBody`), decoupled from polling |
 | 13 | `viewer/divine-bootstrap.js` | Divine Console (Sovereign God mode Phase 7) state vars, DOM element refs, `DIVINE_FEATURES` registry, feature guide, agent/pin action select population |
 | 14 | `viewer/divine-auth-sight.js` | Divine Console auth/fetch plumbing (`godApiFetch`), Sight intervene helpers/diff, bottom-bar effects/pips/pulse, sight overlay drawing, preview controller + irreversible-form helpers, favorites |
-| 14 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers |
+| 15 | `viewer/divine-modal.js` | Divine Console bottom bar/modal/tab wiring (`openDivineModal`/`showGodTab`), shared tooltip engine, generic preview→apply wiring (`wireDivineForm`), preview/outcome/error render helpers |
 | 16 | `viewer/divine-sight-voice.js` | Divine Console Sight tab render (`renderGodSight`) + checkpoint restore, Voice presets (load/save/apply) |
 | 17 | `viewer/divine-voice.js` | Divine Console Voice tab: proclamation/providence/private omen, whisper campaign, sampling/distortion, crowd compulsion, dream broadcast, veto resolve, bargain predicate, oracle hints, architect cells |
 | 18 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
 | 19 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`). Decision-audit polling starts in `decision-audit.js` itself. |
-| 19 | `viewer/world-wiki.js` | World Wiki modal: `openWorldWiki(kind, id)` global entry point, `fetchWiki()` / `renderWikiModal()` / `renderWikiIndex()` / `renderWikiPageContent()`, back-navigation stack, delegated `.wiki-link` click handler (capture phase, stops propagation). Gated on `WORLD_WIKI_ENABLED_FLAG` (set in `polling.js`). Polls `GET /wiki` every 3 s while modal is open; no polls when closed. Pure renderer — no world-state mutation. |
-| 20 | `viewer/divine-modal.js` | Divine Console Lineage tab render (`renderGodLineage`/`applyDynastyTreeLineageGate`) and modal-tab wiring; read-only family tree from `/state`. |
+| 20 | `viewer/world-wiki.js` | World Wiki modal: `openWorldWiki(kind, id)` global entry point, `fetchWiki()` / `renderWikiModal()` / `renderWikiIndex()` / `renderWikiPageContent()`, back-navigation stack, delegated `.wiki-link` click handler (capture phase, stops propagation). Gated on `WORLD_WIKI_ENABLED_FLAG` (set in `polling.js`). Polls `GET /wiki` every 3 s while modal is open; no polls when closed. Pure renderer — no world-state mutation. |
+| 21 | `viewer/divine-modal.js` | Divine Console Lineage tab render (`renderGodLineage`/`applyDynastyTreeLineageGate`) and modal-tab wiring; read-only family tree from `/state`. |
 
 ## Civ-1 physical props
 

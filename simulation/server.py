@@ -14,6 +14,7 @@ import json
 import os
 import re
 import signal
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -3083,6 +3084,7 @@ def predictions_resolve():
             body.get("id"),
             body.get("correct"),
             body.get("verdict"),
+            body.get("resolved_frame_tick"),
         )
         return jsonify({"ok": bool(ok)})
     except Exception:

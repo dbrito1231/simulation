@@ -82,11 +82,11 @@ async function postPredictionSubmit(kind, question, pick) {
   return data.ok && data.id ? data.id : null;
 }
 
-async function postPredictionResolve(id, correct, verdict) {
+async function postPredictionResolve(id, correct, verdict, resolvedFrameTick) {
   const res = await fetch("/predictions/resolve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id, correct, verdict }),
+    body: JSON.stringify({ id, correct, verdict, resolved_frame_tick: resolvedFrameTick }),
   });
   if (!res.ok) return false;
   const data = await res.json();
@@ -102,7 +102,12 @@ async function tryResolvePending(verdict) {
   resolveInFlight = true;
   try {
     const correct = pendingPrediction.pick === winner;
-    const ok = await postPredictionResolve(pendingPrediction.id, correct, winner);
+    const resolvedFrameTick = world && Number.isInteger(world.frameTick)
+      ? world.frameTick
+      : null;
+    const ok = await postPredictionResolve(
+      pendingPrediction.id, correct, winner, resolvedFrameTick,
+    );
     if (ok) {
       resolvedBallotKeys.add(pendingPrediction.ballotKey);
       pollPredictionsHistory();

@@ -416,7 +416,9 @@ save/restore. No `persistence.py` function opens it; `save_state()` /
 `restore_state()` never read or write prediction rows; predictions never reach
 `civilization` / `agents` or `_build_think_payload()`. Only the three
 `/predictions/*` route handlers (see [04-http-api.md](04-http-api.md#prediction-market-routes))
-touch this file.
+touch this file. Each row carries the ballot frame and, once resolved, the
+optional `resolved_frame_tick`; these fields remain prediction-store metadata
+and never enter the engine snapshot or agent prompts.
 
 ## Sovereign God mode (Phase 2 — secure kernel)
 
