@@ -252,9 +252,9 @@ mechanism the season tint already uses.
     **Anomaly radar** (`#anomalySection`), **Chronicle** (`#chronicleLog`,
     `#chronicleList`), **Village paper** (`#sagaLog`, `#sagaList`), and
     **Prediction market** (`#predictionMarketPanel`). Activity, Decision audit,
-    and Chronicle are three of the ten common collapsible panels; Anomaly radar,
-    Village paper, and Prediction market retain their upstream non-collapsible
-    markup. The common bounded `.panel-body` provides internal list scrolling
+    Chronicle, and Village paper are four of the eleven common collapsible
+    panels; Anomaly radar and Prediction market retain their upstream
+    non-collapsible markup. The common bounded `.panel-body` provides internal list scrolling
     for the collapsible panels, while the outer `#sidebarBody` scrolls the
     complete right-hand stack. The Civilization panel's **Village resources**
     row (`#civResources` headline + `#civResourceList` chips) shows
@@ -285,14 +285,14 @@ mechanism the season tint already uses.
 
 ### Collapsible sidebar-panel contract
 
-Exactly ten sidebar sections participate in the common collapsible contract:
+Exactly eleven sidebar sections participate in the common collapsible contract:
 
 - Left `#convPanel`: Agents (`#agentsPanel`), Conversations
   (`#conversationLog`), Settlements (`#settlementsSection`), and Council
   (`#councilSection`).
 - Right: Controls (`#mapControlsPanel`), Time (`#timePanel`), Civilization
-  (`#civPanel`), Activity (`#activityLog`), Chronicle (`#chronicleLog`), and
-  Decision audit (`#decisionAuditPanel`).
+  (`#civPanel`), Activity (`#activityLog`), Chronicle (`#chronicleLog`),
+  Village paper (`#sagaLog`), and Decision audit (`#decisionAuditPanel`).
 
 Each is a `section.panel-section` with a real `button.panel-head` toggle whose
 contents include a `.panel-arrow`, followed by a `.panel-body` wrapping the
@@ -308,8 +308,9 @@ without toggling Agents.
 in `localStorage` under `sim.panels.collapsed`. Missing or unusable stored state
 means every panel starts expanded. Collapse changes only the section class and
 body wrapper; it never writes the section's inline `display`, because feature
-visibility code independently owns Conversations, Settlements, Chronicle, and
-Council visibility and Decision audit's disabled empty state.
+visibility code independently owns Conversations, Settlements, Chronicle,
+Village paper, and Council visibility and Decision audit's disabled empty
+state.
 
 Both sidebar columns scroll through their bounded panel stack. Every expanded
 `.panel-body` has `min-height: 160px`, `max-height: min(46vh, 420px)`, and
@@ -321,9 +322,9 @@ renderer-managed scroll positions survive polling updates.
 Settlements and Council use this common section/button/body contract rather
 than native `<details>` elements. The nested
 `details#decisionAuditRecentWrap` remains a `<details>` because it is an audit
-sub-section, not one of the ten panels. Upstream-added Anomaly radar, Village
-paper, and Prediction market sections retain their own established markup and
-are outside this ten-panel contract. `#minimap` and `#worldClockHud` remain
+sub-section, not one of the eleven panels. Upstream-added Anomaly radar and
+Prediction market sections retain their own established markup and are
+outside this eleven-panel contract. `#minimap` and `#worldClockHud` remain
 fixed over the map.
 - **`ACTION_LABELS`** (`viewer/sidebar.js`) maps each `DECISION_ACTIONS`
   name to a short display gerund (e.g. `collect_resource` → "gathering");
@@ -361,8 +362,9 @@ outcome axis remain on the [Divine Audit tab](#divine-audit-tab) only.
 Chronicle. Exact order: Activity (`#activityLog`) → **Decision audit**
 (`#decisionAuditPanel`) → Anomaly radar (`#anomalySection`) → Chronicle
 (`#chronicleLog`) → Village paper (`#sagaLog`) → Prediction market
-(`#predictionMarketPanel`). Decision audit, Activity, and Chronicle are common
-collapsible panels; the other three retain upstream non-collapsible markup.
+(`#predictionMarketPanel`). Decision audit, Activity, Chronicle, and Village
+paper are common collapsible panels; the other two (Anomaly radar and
+Prediction market) retain upstream non-collapsible markup.
 `#sidebarLogsScroll` groups these sections inside the scrolling `#sidebarBody`;
 the audit's `.panel-body` uses the same bounded sizing and internal overflow as
 the other collapsible sections.

@@ -360,10 +360,7 @@
   #convList .msg { color: #bbb; }
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
-  #sagaLog {
-    padding-bottom: 12px;
-  }
-  #actList, #chronicleList, #decisionAuditAgentList, #decisionAuditRecent {
+  #actList, #chronicleList, #sagaList, #decisionAuditAgentList, #decisionAuditRecent {
     list-style: none;
     margin: 0;
     padding: 0;
