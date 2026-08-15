@@ -35,8 +35,8 @@
   #pauseBtn:hover, #resetBtn:hover,
   #zoomInBtn:hover, #zoomOutBtn:hover, #zoomFitBtn:hover { background: #444; }
   #worldClockHud {
-    /* Fixed like the map controls: the indicator remains legible while the
-       large world canvas scrolls below it. */
+    /* Fixed over the map so the indicator remains legible while the large
+       world canvas scrolls below it. */
     position: fixed; top: 18px; right: 380px;
     padding: 6px 10px;
     background: rgba(18, 21, 32, 0.86); color: #f5ead4;
@@ -46,9 +46,9 @@
     text-transform: capitalize;
   }
   #minimap {
-    /* Fixed like the pause/reset buttons -- with districts now able to be
-       founded mid-session into the open frontier, this is the only way to
-       notice new territory came online without scrolling to find it.
+    /* Fixed over the map: with districts now able to be founded mid-session
+       into the open frontier, this is the only way to notice new territory
+       came online without scrolling to find it.
        Clickable/draggable: click or drag anywhere on it to jump the main
        viewport there (see minimap mouse handlers below).
        Anchored to the bottom-right of the map pane specifically (right:

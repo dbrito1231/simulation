@@ -4,7 +4,8 @@ How the sim is observed and debugged in the absence of a test suite: JSONL
 session logs, `/log/*` ingestion, and the `scripts/` toolbox.
 
 **Canonical for:** `SessionLogger`'s file layout and record shapes, the
-never-raise logging contract, Ollama's own server log location, and what
+never-raise logging contract, `_ENGINE_DEPS` server→engine injection (including
+`read_conversation_window` for chronicle saga), Ollama's own server log location, and what
 each of the `scripts/*.py` tools does and whether it needs Ollama.
 **See also:** [04-http-api.md](04-http-api.md) for `/log/event` and
 `/log/benchmark` route shapes (not repeated here); [03-cognition.md](03-cognition.md)
@@ -106,85 +107,8 @@ as any server restart today).
   bloat, `simulation/_server/memory_store.py:384-388`). It's a per-session **inspection artifact
   only**, never read back by the running server (state.db carries the
   authoritative memory export across restarts).
-
-## Decision audit — log-reading pattern and scoring semantics
-
-Read-only observability over the **current session's** `llm.jsonl` (default slim
-shape — `decision.reasoning` is always present; full `request`/`response`
-bodies are never required) and `activity.jsonl`. The reader resolves the live
-session directory the same way other session-scoped routes do (the active
-`SessionLogger` path for this server run — not cross-run tailing of retained
-older directories unless explicitly extended later).
-
-**Join.** For each `llm.jsonl` record with a `decision` object carrying
-`_decision_id`, look up the `activity.jsonl` line whose top-level `decision_id`
-equals that value. At most one outcome line is expected per id (the
-`apply_decision()` tail push). Records with no `_decision_id`, or with an id
-that has no matching activity line, are **uncorrelated** — counted separately,
-not scored as match or mismatch.
-
-**Fallback exclusion (Answer 4).** Before any scoring, drop every `llm.jsonl`
-record whose `decision._fallback == True`. These are filtered out of scoring
-entirely (not merely hidden at display time) — deterministic fallback text is
-not model-stated intent.
-
-**Mismatch rule (Answer 3).** Action-category match only — **not** keyword
-overlap between `reasoning` and the confirming `activity.jsonl` `message`.
-Steps per correlated, non-fallback record:
-
-1. Classify `decision.reasoning` (lowercased) into at most one **implied
-   category** using the keyword lists in the table below (first matching
-   category in table order wins).
-2. If no category matches, the record is **unclassified** — excluded from
-   match/mismatch counts (same bucket as uncorrelated for aggregation
-   denominators: it does not increment `scored`).
-3. Otherwise compare the implied category against the actual
-   `decision.action`. **Match** when `action` belongs to that category's action
-   set; **mismatch** when it does not.
-
-**Action-category mapping** (grounded in `DECISION_ACTIONS`, server.py:351-387):
-
-| Implied category | Reasoning keyword triggers (substring, case-insensitive) | Matching `action` values |
-|---|---|---|
-| `gather` | `gather`, `collect`, `forage`, `harvest`, `hunt`, `fish`, `wood`, `stone`, `food`, `resource` | `collect_resource`, `hunt_wildlife` |
-| `build` | `build`, `construct`, `project`, `contribute`, `repair`, `upgrade`, `terraform`, `structure`, `place block`, `dig`, `plant` | `start_project`, `contribute_resources`, `build_structure`, `repair_structure`, `upgrade_structure`, `start_terraform`, `submit_structure_sprite`, `place_block`, `remove_block`, `dig_terrain`, `plant_terrain` |
-| `social` | `talk`, `speak`, `chat`, `help`, `trade`, `confront`, `deliver`, `caravan`, `nearby`, `message` | `talk_to_nearby`, `confront_agent`, `trade_resource`, `deliver_caravan`, `assign_task` |
-| `governance` | `rule`, `vote`, `treaty`, `council`, `repeal`, `law`, `assembly` | `propose_rule`, `vote_rule`, `repeal_rule`, `propose_treaty`, `vote_treaty`, `council_speak`, `council_propose`, `council_vote` |
-| `roles` | `role`, `switch role`, `become`, `elder`, `builder`, `healer`, `blacksmith` | `change_role`, `switch_role`, `propose_role`, `approve_role`, `reject_role` |
-| `invention` | `blueprint`, `recipe`, `design`, `sprite`, `craft`, `invent`, `propose` | `propose_blueprint`, `approve_blueprint`, `reject_blueprint`, `sage_review_blueprint`, `propose_recipe`, `approve_recipe`, `reject_recipe`, `craft_item` |
-| `belief` | `belief`, `faith`, `worship`, `found belief`, `religion` | `found_belief` |
-| `care` | `heal`, `bury`, `funeral`, `sick`, `wounded`, `cemetery` | `heal_agent`, `bury_agent` |
-| `movement` | `move`, `travel`, `district`, `rest`, `pause`, `go to` | `move_to_district`, `move_to_agent`, `rest` |
-| `contracts` | `contract`, `escrow`, `offer work`, `accept contract` | `offer_contract`, `accept_contract` |
-
-**Per-agent aggregation.** Over the current session's correlated, scored
-records (match + mismatch only): `{scored, matches, mismatches,
-mismatch_rate}` where `mismatch_rate = mismatches / scored` (0 when
-`scored == 0`). Also report `{excluded_fallback, uncorrelated, unclassified}`
-counts for transparency. Agents are ranked for display by `mismatch_rate`
-descending, then `mismatches` descending — surfacing agents whose stated
-reasoning categories systematically disagree with actions taken. No fixed
-minimum threshold beyond `scored >= 1` for inclusion in the ranked list.
-
-**Flag-off reader.** When `DECISION_AUDIT_ENABLED` is off, the route returns
-`enabled: false` with empty aggregates — it does not read or score logs.
-
-See [04-http-api.md](04-http-api.md#decision-audit-route) for the HTTP
-contract and [11-viewer.md](11-viewer.md#decision-audit-panel) for the viewer
-panel.
-
-### Record shapes
-
-Record shapes beyond the common `ts`/`session_id` envelope:
-
-  - `activity`: `{type, message, frame_tick}`; when
-    `DECISION_AUDIT_ENABLED` is on and the line comes from
-    `apply_decision()`'s tail `self._push_activity(summary)` call, an optional
-    `decision_id` field is also present — the same string value as
-    `llm.jsonl`'s matching record's `decision._decision_id`. Omitted on all
-    other activity lines (~100 non-decision `_push_activity` call sites) and
-    whenever the flag is off. Older records simply lack the field (no
-    migration).
+- **Record shapes** beyond the common `ts`/`session_id` envelope:
+  - `activity`: `{type, message, frame_tick}`.
   - `conversation`: `{type, kind, from, to, message, frame_tick, outcome?}`.
   - `llm`: built per decision call by closure `log_lm(...)`
     (server.py:2038-2078), stripped in `log_lm_exchange` unless full logging
@@ -194,11 +118,7 @@ Record shapes beyond the common `ts`/`session_id` envelope:
     nudges_total, nudges_dropped, response_preview?, http_status, decision,
     error, module?, timeout_s?}` — omits full `request`/`response` bodies;
     `response_preview` is a short excerpt of assistant text when present.
-    `decision` is the normalized/applied decision or fallback. When
-    `DECISION_AUDIT_ENABLED` is on, successful decision records may also
-    carry `decision._decision_id` (internal, non-schema — see
-    [03-cognition.md](03-cognition.md#decision-audit-correlation-id-decision_audit_enabled)).
-    Absent when the flag is off or on pre-ship records. PIANO module
+    `decision` is the normalized/applied decision or fallback. PIANO module
     timeout records omit bodies by default and may include `module` /
     `timeout_s`. **`SIM_LLM_LOG_FULL=1`** (env, parsed like other `SIM_*`
     truthy flags — `1`/`true`/`yes`/`on`, read once at import) restores the
@@ -325,6 +245,59 @@ Record shapes beyond the common `ts`/`session_id` envelope:
 - **Ollama's own server log** (not written by `SessionLogger`, and not
   under `simulation/logs/`) lives at `%LOCALAPPDATA%\Ollama\server.log` —
   token usage and per-request checkpoints, useful alongside `llm.jsonl`.
+
+## Engine dependency injection (`_ENGINE_DEPS`)
+
+`SimEngine` receives server-side callables through `_ENGINE_DEPS`
+(`simulation/server.py:2668-2697`), wired once at import when
+`engine = _sim_engine.SimEngine(_ENGINE_DEPS, ...)` is constructed. The engine
+invokes them as `self.d["..."]()` — e.g. every agent speech already calls
+`self.d["log_conversation"](...)` (`mixin_world_state.py:177`), and background
+cognition calls `self.d["lm_complete"](...)`.
+
+Existing entries include `log_activity` → `session_logger.log_activity`,
+`log_conversation` → `session_logger.log_conversation`, `lm_complete`,
+`log_benchmark`, `flush_benchmarks`, `run_piano_module`, `run_chronicle_saga`, and the other keys
+listed at `server.py:2668-2697`.
+
+### Chronicle saga: `read_conversation_window` (`CHRONICLE_SAGA_ENABLED`)
+
+The day-boundary saga trigger needs dialogue from `conversation.jsonl`, which
+the engine does not write directly — `SessionLogger` owns that stream (table
+above). The read side uses the same injection seam as the write side:
+
+- **Function.** `read_conversation_window(start_frame, end_frame, max_records=None)` — implemented
+  in `simulation/_server/logging_session.py` (`read_conversation_window(conversation_path,
+  start_frame, end_frame, max_records=None)`); `simulation/server.py` wraps it with
+  `session_logger.conversation_path` and injects the wrapper into `_ENGINE_DEPS`.
+  Opens the **current run's** `conversation.jsonl` only; **no cross-session
+  tailing** (same discipline as the anomaly-radar plan's benchmarks reader).
+  Returns `conversation`-typed records whose `frame_tick` falls in
+  `[start_frame, end_frame)`, matching the schema documented in the
+  `conversation.jsonl` row above (`{type, kind, from, to, message,
+  frame_tick, outcome?}`). Malformed lines and valid JSON values that are not
+  objects are ignored; neither can raise from the reader. Synthetic
+  `kind: "session_start"` lines are excluded by the frame filter. Saga passes
+  `SAGA_DIALOGUE_EXCERPT_CAP` as
+  `max_records`, so matching-record parsing stops at the prompt's bounded
+  excerpt size rather than materializing a full chatty-day window.
+- **Injection.** A new `"read_conversation_window": ...` entry in
+  `_ENGINE_DEPS` (`server.py:2668-2697`), alongside `log_conversation` and
+  `lm_complete`. The engine's day-boundary handler calls it synchronously
+  under `self.lock` (local file I/O, not network — [02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled)).
+
+### Chronicle saga: `llm.jsonl` tag
+
+The day-boundary saga `lm_complete` dispatch ([03](03-cognition.md)) logs a
+slim record via `session_logger.log_lm_exchange` inside
+`run_chronicle_saga(saga_context)` (`server.py`), injected as
+`"run_chronicle_saga"` in `_ENGINE_DEPS`. Tag: `"module": "chronicle_saga"`
+(same optional field PIANO module timeouts use — `server.py:1095-1101`), plus
+`frame_tick` at the day boundary, `latency_ms`, optional `response_preview`
+(truncated saga text), and `error` when the call fails or returns empty (the
+engine worker still writes `SAGA_FALLBACK_TEXT` to `civilization["saga"]` —
+see [02](02-engine-core.md)). Omit `agent_name` — this is a village-wide
+background dispatch, not an agent decision turn.
 
 ## Sovereign God mode — security contract
 
@@ -478,6 +451,64 @@ hands off into Story form fields plus the sticky preview strip so the
 operator can Apply without re-Previewing. Default remains **off**
 (`GOD_COMPILER_ENABLED` false at import unless the env var is set).
 
+## Anomaly radar log reading (`ANOMALY_RADAR_ENABLED`, idea-07)
+
+`GET /anomalies` (see [04-http-api.md](04-http-api.md#anomaly-radar-idea-07))
+is a server-side reader, not a new writer — it adds no new JSONL stream and
+no new `SessionLogger` method. It reads a single existing source:
+
+- **`benchmarks.jsonl`** — the current run's own file, found via the
+  in-process `session_logger.benchmark_path` / `session_logger.dir`
+  reference (`simulation/_server/logging_session.py`, constructed once at
+  server import — see "SessionLogger" above), the same reference
+  `/council-llm-log`'s "prefer the live session" path and
+  `scripts/soak_monitor.py` use to locate a session's logs, except this
+  route never falls back to scanning `simulation/logs/<timestamp>/` for
+  **older** sessions the way `/council-llm-log` does — `frame_tick` anomaly
+  detection is scoped to the current process's own run only, by design
+  (plan §2 Answer 1). A restart starts a fresh session directory and
+  therefore a fresh anomaly history; there is no cross-run tailing.
+
+All three detected anomaly kinds, including schism, come from this one
+source — no live-`SimEngine`/`civilization["chronicle"]` access, no
+`self.lock` acquisition. `_execute_schism`
+(`simulation/sim_engine/mixin_governance_culture.py:486-491`) already writes
+a `metric: "schism"` record to `benchmarks.jsonl` directly on every schism,
+independent of `_sample_benchmarks()`'s periodic sampling loop, gated by
+`SCHISM_ENABLED`/`BENCHMARKS_ENABLED` (plan §2 Answer 2 — corrected from an
+earlier draft of this plan that assumed schism was only in the chronicle).
+
+No new persisted `civilization` state, no `_sample_benchmarks()` change, no
+save/restore migration — the engine itself is not modified by this feature.
+
+**Expanded coverage (idea-07b, docs/plans/idea-07b-anomaly-console/plan.md
+§2 Answer 4).** `range_break` widens from the single
+`specialization_entropy` metric to the 12-metric `RANGE_BREAK_METRICS`
+allowlist (see [04-http-api.md](04-http-api.md#anomaly-radar-idea-07) for the
+exact list), with session-lifetime max/min tracking generalized to be
+per-metric rather than a single shared max/min. This is still a read of the
+same one existing source above — no new JSONL stream, no new writer, no
+change to what `_sample_benchmarks()` emits. Each entry additionally carries
+a `severity` field: `range_break` is magnitude-scaled against the prior
+session-lifetime bound it broke (still no new persisted state — only the
+per-metric running max/min the detection rule already tracks during the
+forward pass); `schism` and `new_rule_kind` use a fixed severity each, since
+neither has a magnitude to scale (see
+[04-http-api.md](04-http-api.md#anomaly-radar-idea-07) for the exact
+thresholds and degenerate-case handling).
+
+**Not a god intervention; no `divine.jsonl` entry (idea-07b §2 Answer 1).**
+The divine-bar Anomaly button and its `#divineTab-anomaly` view
+(see [11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)) call
+this same read-only `GET /anomalies` route via plain `fetch()` — never
+`godApiFetch()`, never any `/control/god/*` route. `divine.jsonl` (the
+Sovereign God mode intervention audit trail, see "Sovereign God mode" above)
+is written only by `/control/god/*` apply calls; viewing anomalies through
+the divine bar's chrome writes nothing to it. The Anomaly button is
+deliberately not `locked-dependent` and registers `gated: false` in
+`DIVINE_FEATURES` — it needs no god token and is not gated the way every
+other divine-bar tool is.
+
 ## Debugging workflow
 
 There is **no automated test suite or linter** in this repo. Verification is
@@ -494,29 +525,46 @@ rule adherence, meme adoption, memory-store size — see
 [09-systems-society.md](09-systems-society.md)). For full determinism
 without an Ollama dependency, use the smoke scripts below instead.
 
+## Decision audit — log reading and scoring
+
+`GET /decision-audit` reads only the active `SessionLogger`'s `llm.jsonl` and
+`activity.jsonl`. It joins `decision._decision_id` to `decision_id`, excludes
+`decision._fallback == true`, classifies the reasoning text into the first
+matching action category, and scores the recorded action as a match or
+mismatch against that category's allowed actions. Per-agent rows are ordered
+by mismatch rate then mismatch count; recent scored comparisons are newest
+first and bounded. The parsed pair is cached by each source's path, size, and
+mtime; a changed source invalidates the pair so subsequent polls read current
+records. This route and its cache never mutate world state or logs.
+
 ## Viewer static assets
 
-The thin viewer loads a few files from the Flask app beside `index.html`
+The thin viewer loads 21 fixed JavaScript files from the Flask app beside `index.html`
 (see [04-http-api.md](04-http-api.md)):
 
 | Path | File | Notes |
 |---|---|---|
-| `/viewer/setup.js` | `simulation/viewer/setup.js` | Required — viewer 1/16: boot/canvas setup, zoom, feature flags |
-| `/viewer/state.js` | `simulation/viewer/state.js` | Required — viewer 2/16: world snapshot (`MOCK_STATE`, `world`), delta merge, districts cache |
-| `/viewer/render.js` | `simulation/viewer/render.js` | Required — viewer 3/16: convenience accessors + drawing (terrain cache, weather/night overlays, agents, structures) |
-| `/viewer/sidebar.js` | `simulation/viewer/sidebar.js` | Required — viewer 4/16: sidebar render (Civilization/Agents panels, `ACTION_LABELS`, benchmarks, world clock HUD) |
-| `/viewer/council.js` | `simulation/viewer/council.js` | Required — viewer 5/16: Council panel, Council Assembly modal, settlements |
-| `/viewer/minimap.js` | `simulation/viewer/minimap.js` | Required — viewer 6/16: minimap render + navigation |
-| `/viewer/polling.js` | `simulation/viewer/polling.js` | Required — viewer 7/16: `/state` polling, flag sync, social ties/wildlife/shipment drawing |
-| `/viewer/controls.js` | `simulation/viewer/controls.js` | Required — viewer 8/16: Pause/Resume/Reset controls |
-| `/viewer/renderloop.js` | `simulation/viewer/renderloop.js` | Required — viewer 9/16: `tick`/`tickBody` render loop |
-| `/viewer/divine-bootstrap.js` | `simulation/viewer/divine-bootstrap.js` | Required — viewer 10/16: Divine Console state, DOM refs, feature registry/guide, agent/pin selects |
-| `/viewer/divine-auth-sight.js` | `simulation/viewer/divine-auth-sight.js` | Required — viewer 11/16: Divine Console auth/fetch plumbing, Sight overlays/diff, bar effects/pips, preview controller, favorites |
-| `/viewer/divine-modal.js` | `simulation/viewer/divine-modal.js` | Required — viewer 12/16: Divine Console bottom bar/modal/tabs, tooltip engine, preview→apply generic wiring |
-| `/viewer/divine-sight-voice.js` | `simulation/viewer/divine-sight-voice.js` | Required — viewer 13/16: Sight tab render + checkpoint restore, Voice presets |
-| `/viewer/divine-voice.js` | `simulation/viewer/divine-voice.js` | Required — viewer 14/16: Voice tab (proclamation/providence/private omen, whisper/crowd/dream, bargain/oracle/architect) |
-| `/viewer/divine-miracles-story.js` | `simulation/viewer/divine-miracles-story.js` | Required — viewer 15/16: Miracles tab, shared modifier editor, Story/Compile/Laws tabs |
-| `/viewer/divine-history.js` | `simulation/viewer/divine-history.js` | Required — viewer 16/16: History power tools, gate/passive refresh, public banner, `renderDivineConsole` entry point, poll/render loop kickoff |
+| `/viewer/predictions.js` | `simulation/viewer/predictions.js` | Required — prediction-market panel renderer and `/predictions/*` client; polls history only while the panel is visible |
+| `/viewer/setup.js` | `simulation/viewer/setup.js` | Required — boot/canvas setup, zoom, feature flags |
+| `/viewer/state.js` | `simulation/viewer/state.js` | Required — world snapshot (`MOCK_STATE`, `world`), delta merge, districts cache |
+| `/viewer/render.js` | `simulation/viewer/render.js` | Required — convenience accessors + drawing (terrain cache, weather/night overlays, agents, structures) |
+| `/viewer/panels.js` | `simulation/viewer/panels.js` | Required — collapsible sidebar header wiring and persisted viewer-only collapse state |
+| `/viewer/sidebar.js` | `simulation/viewer/sidebar.js` | Required — sidebar render (Civilization/Agents panels, `ACTION_LABELS`, benchmarks, world clock HUD) |
+| `/viewer/decision-audit.js` | `simulation/viewer/decision-audit.js` | Required — Decision Audit panel poll and render; read-only `/decision-audit` consumer |
+| `/viewer/council.js` | `simulation/viewer/council.js` | Required — Council panel, Council Assembly modal, settlements |
+| `/viewer/minimap.js` | `simulation/viewer/minimap.js` | Required — minimap render + navigation |
+| `/viewer/polling.js` | `simulation/viewer/polling.js` | Required — `/state` polling, flag sync, social ties/wildlife/shipment drawing |
+| `/viewer/anomaly.js` | `simulation/viewer/anomaly.js` | Required — anomaly radar and console read-only `/anomalies` consumer |
+| `/viewer/world-wiki.js` | `simulation/viewer/world-wiki.js` | Required — World Wiki modal read-only `/wiki` consumer |
+| `/viewer/controls.js` | `simulation/viewer/controls.js` | Required — Pause/Resume/Reset controls |
+| `/viewer/renderloop.js` | `simulation/viewer/renderloop.js` | Required — `tick`/`tickBody` render loop |
+| `/viewer/divine-bootstrap.js` | `simulation/viewer/divine-bootstrap.js` | Required — Divine Console state, DOM refs, feature registry/guide, agent/pin selects |
+| `/viewer/divine-auth-sight.js` | `simulation/viewer/divine-auth-sight.js` | Required — Divine Console auth/fetch plumbing, Sight overlays/diff, bar effects/pips, preview controller, favorites |
+| `/viewer/divine-modal.js` | `simulation/viewer/divine-modal.js` | Required — Divine Console bottom bar/modal/tabs, tooltip engine, preview→apply generic wiring |
+| `/viewer/divine-sight-voice.js` | `simulation/viewer/divine-sight-voice.js` | Required — Sight tab render + checkpoint restore, Voice presets |
+| `/viewer/divine-voice.js` | `simulation/viewer/divine-voice.js` | Required — Voice tab (proclamation/providence/private omen, whisper/crowd/dream, bargain/oracle/architect) |
+| `/viewer/divine-miracles-story.js` | `simulation/viewer/divine-miracles-story.js` | Required — Miracles tab, shared modifier editor, Story/Compile/Laws tabs |
+| `/viewer/divine-history.js` | `simulation/viewer/divine-history.js` | Required — History power tools, gate/passive refresh, public banner, `renderDivineConsole` entry point, poll/render loop kickoff |
 | `/css/base.css` | `simulation/css/base.css` | Required — stylesheet 1/6: reset, `#wrap`/`#canvasWrap`/`#world`, map controls, `#worldClockHud`, `#minimap` |
 | `/css/panels.css` | `simulation/css/panels.css` | Required — stylesheet 2/6: `#sidebar`/`#convPanel` shared chrome, `#civPanel` civilization stats |
 | `/css/agents.css` | `simulation/css/agents.css` | Required — stylesheet 3/6: `#agentList`/`#agentRollup`/`#agentDetail`, deceased-agents modal |
@@ -552,8 +600,11 @@ The thin viewer loads a few files from the Flask app beside `index.html`
 | `peer_model_smoke.py` | No | Emergence Breakthroughs F2 — deterministic Theory of Mind smoke: flag-off shape (no `peerModel`), `PEER_MODEL_*` caps + LRU eviction, module drop/timeout leaves prior model intact, `peer_prediction_accuracy` scoring, `peerModel` save/restore round-trip, nearby `[think: …]` prompt fold-in, piano stagger swap (`theory_of_mind` replaces social every 4th module-tick). Run: `uv run python scripts/peer_model_smoke.py`. |
 | `testament_smoke.py` | No | Emergence Breakthroughs F1 — deterministic Testament smoke: flag-off shape (no testament ring / no death merge), deathbed wiki fold + dedupe + `WIKI_SECTION_CHAR_CAP`, ring cap at `TESTAMENT_CAP`, newborn `memoryWiki` inheritance from parents + newest testament lines, bounded `format_testament_prompt_line` slice, testament save/restore round-trip. Run: `uv run python scripts/testament_smoke.py`. |
 | `contract_smoke.py` | No | Emergence Breakthroughs F3.2 — deterministic contracts/escrow smoke: flag-off apply no-op, coin conservation across offer/fulfill/default/expiry (`_total_tracked_coin`), open contracts + escrow save/restore round-trip. Run: `uv run python scripts/contract_smoke.py`. |
+| `raiders_contagion_smoke.py` | No | Idea-05 raiders/contagion — deterministic smoke for telegraphed raids (stockpile + districtStocks + structure + contact damage, guard/wall mitigation), contagion spread/recovery/duration (elder exclusion, healer/clinic recovery prob), quarantine governance and physical crossing enforcement (including preassigned travel, both-endpoint trade, repeal, and Sage-emergency bypass), kill-switch state/effect absence, `/state` flag echo, and `_agent_dies` never called on raid/contagion paths. Run: `uv run python scripts/raiders_contagion_smoke.py`. |
 | `soak_monitor.py` | No (tails a live session's existing logs) | Read-only Always-on-PIANO soak observer. At start selects the newest session directory, tails its `llm.jsonl` and `benchmarks.jsonl`, prints one progress line every 60 seconds (elapsed, decision count/p50, module failures), and writes `simulation/logs/soak-<label>.json`. The summary separates decision records from module records; reports decision p50/p90, error/fallback rates, literal `module_pulse_work`, note-age and pulse observations, plus three decision prompt module-report samples. It selects `module_refresh_failures` (always-on, rate against dispatched pulse work) or `piano_module_drops` (flag-off, rate against per-module latency counts when emitted, otherwise successful `module_total` plus drops), exposing metric name/count/attempts/rate. Usage: `uv run python scripts/soak_monitor.py --label attempt2 [--minutes 45]`. |
-| `idea10_decision_audit_smoke.py` | No | Deterministic smoke for the "Why did you do that?" decision audit (idea-10): reads a sample log directory (read-only-tail idiom of `soak_monitor.py`) and verifies join/scoring — matched pair, mismatched pair, `_fallback` record excluded before scoring, flag-off `{enabled: false}` response shape. Run: `uv run python scripts/idea10_decision_audit_smoke.py`. |
+| `idea07_anomaly_radar_smoke.py` | No | Deterministic smoke for the anomaly radar (`ANOMALY_RADAR_ENABLED`, docs/plans/idea-07-anomaly-radar/plan.md, expanded coverage per docs/plans/idea-07b-anomaly-console/plan.md): flag-off `GET /anomalies` no-op shape (`{ok: true, enabled: false, anomalies: []}`); flag-on detection of each resolved anomaly kind — `range_break` per-metric session max/min breaks across several of the 12 `RANGE_BREAK_METRICS` allowlist metrics (not `specialization_entropy` alone), confirming a non-allowlisted monotonic counter (e.g. `memory_store_size`) produces **no** `range_break`; `new_rule_kind` (a `rule_kind_diversity` record introducing a rule kind not seen earlier in the same run); and `schism` (a synthetic `metric: "schism"` benchmark record) — plus the `severity` field: magnitude-scaled tiers (`low`/`medium`/`high` by `break_amount / prior_range` thresholds, including the `prior_range == 0` degenerate case forced to `medium`) for `range_break`, and the fixed `high`/`low` values for `schism`/`new_rule_kind` respectively — via `server.app.test_client()` against a running `sim_engine`/`server` import, same pattern as `testament_smoke.py`/`contract_smoke.py`. No Ollama call. Run: `uv run python scripts/idea07_anomaly_radar_smoke.py`. |
+| `idea10_decision_audit_smoke.py` | No | Deterministic decision-audit join/scoring smoke, including matched and mismatched pairs, fallback exclusion, cache invalidation, and the disabled response shape. Run: `uv run python scripts/idea10_decision_audit_smoke.py`. |
+| `idea04_prediction_market_smoke.py` | No | Deterministic prediction-store validation, resolve persistence (including `resolved_frame_tick`), hit-rate, and startup reconstruction smoke. Run: `uv run python scripts/idea04_prediction_market_smoke.py`. |
 | `tom_contention_soak.py` | Yes (starts/stops native `simulation/server.py` twice; Ollama recommended) | F2 Theory of Mind contention gate orchestrator: refuses if Docker `gitserv-sim` is running, any native `simulation/server.py` or soak harness (`tom_contention_soak`/`soak_monitor`) is active, or port `SIM_PORT` (default 5001) is occupied/listening; runs matched native server soaks flag-off then `SIM_THEORY_OF_MIND=1`, each observed by `soak_monitor.py` (`--label tom-baseline` / `tom-flagon`). Starts the server with `sys.executable` (not `uv run`) and stops via process-tree kill (`taskkill /T /F` on Windows, process-group signals on Unix) plus a sweep of orphan `simulation/server.py` PIDs — terminating only the `uv` wrapper on Windows leaves a child `python.exe` serving stale `/state` (wrong `THEORY_OF_MIND_ENABLED` on the flag-on phase). Between phases waits until `/state` is unreachable (hard-fail on timeout); after each start hard-asserts `config.flags.THEORY_OF_MIND_ENABLED` via `/state` matches the phase (`False` baseline, `True` flag-on) and ties readiness to a new log session before `soak_monitor` runs. On exit/failure, `cleanup_all_native_sim_servers` kills native servers and port listeners. Writes per-phase `simulation/logs/soak-tom-baseline.json` and `soak-tom-flagon.json`, combined `simulation/logs/tom-contention-soak-result.json`, and progress to `simulation/logs/tom-contention-soak.log`. `--flagon-only` skips baseline (requires existing `soak-tom-baseline.json`), reruns flag-on only, and rewrites the combined result merging preserved baseline + new flagon. Does not flip `THEORY_OF_MIND_ENABLED` default in code. Usage: `uv run python scripts/tom_contention_soak.py [--minutes 45]` or `--flagon-only`. |
 
 `tom_contention_soak.py` process hygiene: always stop native soak servers with

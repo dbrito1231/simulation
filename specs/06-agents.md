@@ -120,12 +120,12 @@ an emergent role, so the single elder role remains a seed-only invariant.
 | Identity | `id`, `name`, `role`, `personality`, `color` |
 | Movement | `x`, `y`, `targetX`, `targetY`, `speed`, `waypoints`, `currentZone`, `currentDistrict` |
 | Social | `relationships`, `inbox`, `beliefs`, `votes`, `message`, `messageTimer`, `consecutiveTalks`, `lastSpokeFrame` |
-| Survival | `resources`, `hunger`, `health`, `incapacitated` |
+| Survival | `resources`, `hunger`, `health`, `incapacitated`, `infected` (bool, `RAIDERS_CONTAGION_ENABLED`), `infectionFrame` (int epoch tick when infection started, `RAIDERS_CONTAGION_ENABLED`) |
 | Cognition | `memory` (`{working, shortTerm, longTerm}`), `memoryWiki` (`{relationships, goals, lessons}`, each capped at `WIKI_SECTION_CHAR_CAP`=300 chars — see below), `thinkTimer`, `thinkInterval`, `isThinking`, `pendingThink`, `lastAction`, `lastReasoning`, `persona`, `idleFrames`, `moduleTick`, `modules` (`{perception, social, desire, reflection}` plus `theory_of_mind` when `THEORY_OF_MIND_ENABLED`), `moduleReports` (`{module: {tick, text}}` — persistence-only mirror of the engine's `_piano_module_cache` entry for this agent, written alongside `moduleTick` after every think; never read on the hot path, only rehydrated by `restore_state()`), `peerModel` (`THEORY_OF_MIND_ENABLED` only — `{peerIdStr: {wants, good_at, owes_me, trust, frame}}`, capped by `PEER_MODEL_MAX_PEERS` / `PEER_MODEL_FIELD_CHAR_CAP`, LRU eviction by `frame`), `goal` (kinds include `gather`, `deliver`, `build`, `craft_gather`, `plant_terrain`, `seek_shelter`, `dig_relocate`, `caravan`, `repair`, and **`hunt`** — forced starvation backstop; see [08-systems-economy.md](08-systems-economy.md#starvation-reflex-and-forced-hunt-precedence)), `commitment`, `actionCounts` |
 | Task/build | `assignedTask`, `idleCycles`, `lastTaskedFrame`, `lastContributedFrame`, `consecutiveIdleMoves`, `homeStructureId`, `reorgTask` |
 | Invention/sprite | `inventionTurn`, `inventionRetryUsed`, `inventionBuildContext`, `spriteDesignTurn` |
 | Rejection-note fields | `lastBlueprintRejection`, `lastGatherRejection`, `lastUpgradeRejection`, `lastSpriteRejection`, `lastProjectRejection`, `lastTerraformRejection`, `lastCraftRejection`, `lastRepairRejection`, `lastRecipeRejection`, `lastBurialRejection`, `lastTradeRejection`, `lastShelterNote`, `lastHomelessNudgeFrame` — each surfaces *why* the agent's last attempt at that action was rejected, back into its next prompt |
-| Lifecycle (`LIFECYCLE_ENABLED`) | `age` (float, `None` when disabled), `lastQuotaResetFrame`, `gatherCountThisPeriod`, `lastQuotaRejection`, `lastRationingRejection`, `parents`, `deathFrame`, `buried`, `restingPlaceId`, `restingDistrictId` |
+| Lifecycle (`LIFECYCLE_ENABLED`) | `age` (float, `None` when disabled), `lastQuotaResetFrame`, `gatherCountThisPeriod`, `lastQuotaRejection`, `lastRationingRejection`, `parents` (list of two parent names or `None` on cold-start agents with no birth record), `children` (list of descendant names, never null — cold-start/`restore_state` default `[]`), `inheritedTestament` (list of `{text, author, frame, generation}` snapshot copies — birth-time testament inheritance; see [09-systems-society.md](09-systems-society.md#testament_enabled)), `inheritedBeliefs` (list snapshot of the birth-time parent belief union when `MEMES_ENABLED`; empty list when memes are off or neither parent has beliefs — persist/restore like `inheritedTestament`; live bloodline-vs-conversation belief diff is out of scope), `deathFrame`, `buried`, `restingPlaceId`, `restingDistrictId` |
 | Culture (`CULTURE_ENABLED`) | `skills` (dict per `SKILL_KINDS`, starts at 0.0), `personalityTraits`, `lastTeachFrame` |
 | Divine Matrix | `divineHold` (bool — veto hold or architect limbo pauses think/move), `godKeys` (set of god-granted key tags for architect door zones; persisted as sorted list), `architectLimbo` (`null` or `{zoneId, priorX, priorY, priorTargetX, priorTargetY, priorDistrict}` — Sight shows active/zoneId only) |
 
@@ -133,7 +133,31 @@ Post-build setup (`core.py:374-381`) staggers `thinkInterval = 360 + i*60`
 (elder forced to `240`) and `thinkTimer = i*30` per roster index `i`, and sets each
 agent's initial movement target to its starting district.
 
-## `/state` agent snapshot (`SimEngine.snapshot()`, `mixin_snapshot.py:379-388`, per-agent row built by `_agent_snapshot_row`, `mixin_snapshot.py:119-138`)
+### Contagion infection fields (`RAIDERS_CONTAGION_ENABLED`)
+
+When the flag is on, every agent is created with `infected = False` and
+`infectionFrame = None`. On contagion spread or outbreak seeding,
+`agent["infected"] = True` and `agent["infectionFrame"] = self.frameTick` (epoch
+tick the infection started — same "epoch tick, not a countdown" style as
+`agent["deathFrame"]` in lifecycle, not a decremented timer).
+
+While infected and before recovery or duration expiry:
+- Each `GOODS_TICK_FRAMES` gate applies `CONTAGION_HEALTH_LOSS_PER_TICK_GATE = 1`
+  health via `agent["health"] = max(0, agent["health"] - 1)` — never
+  `_agent_dies`; incapacitation follows `_update_survival`'s existing collapse
+  floor if health reaches 0.
+- Recovery is probabilistic per goods-tick gate **only when healer or clinic
+  coverage is present** ([08-systems-economy.md](08-systems-economy.md#raiders_contagion_enabled));
+  with neither present the per-gate roll is `0` and unassisted recovery is the
+  `CONTAGION_DURATION_FRAMES` cap only (MILD — survivable without intervention).
+- On recovery, `infected` clears and `infectionFrame` resets; illness ends no
+  later than `CONTAGION_DURATION_FRAMES = 2700` (~90s) after `infectionFrame`.
+
+The elder (`role == "elder"`) is never eligible as a spread target
+([02-engine-core.md](02-engine-core.md#sage-emergency)). Spread radius and
+transmission probability: [10-path1.md](10-path1.md).
+
+## `/state` agent snapshot (`SimEngine.snapshot()`, `mixin_snapshot.py`, per-agent row built by `_agent_snapshot_row`)
 
 Not every internal field above is echoed to the viewer's `agents` array in
 `/state` (specs/04-http-api.md) — the snapshot is a filtered/derived view built
@@ -147,9 +171,29 @@ transformed, not passed through raw:
 - `lastReasoning` — the internal `lastReasoning` string (Cognition group,
   above), **capped to 160 characters**; empty/missing becomes `null` rather
   than `""`.
+- `infected` — when `RAIDERS_CONTAGION_ENABLED`, bool echo of
+  `agent["infected"]` for viewer contagion rendering (Phase 5).
 
-Both are unconditional (no feature flag gates them) since the underlying
-fields always exist on every agent.
+`relationships` and `lastReasoning` are always present in every agent row
+(no feature flag gates them), since the underlying fields exist on every
+agent. `infected` is included only when `RAIDERS_CONTAGION_ENABLED` —
+`_agent_snapshot_row` (`mixin_snapshot.py:122`) conditionally spreads
+`{"infected": bool(a.get("infected"))}` into the row; when the flag is off,
+the key is omitted from `/state`.
+
+Lineage fields (`LIFECYCLE_ENABLED`, always emitted on every agent row so the
+viewer can read them without existence checks):
+
+- `parents` — internal `parents` as-is (`null` on cold-start agents with no
+  birth record; two parent names after birth). When lifecycle is off: `null`.
+- `children` — `list(agent.children or [])` (never null when lifecycle is on).
+  When lifecycle is off: `[]`.
+- `inheritedTestament` — `list(agent.inheritedTestament or [])` (birth-time
+  testament snapshot copies; see Lifecycle table above). When lifecycle is off:
+  `[]`.
+- `inheritedBeliefs` — `list(agent.inheritedBeliefs or [])` (birth-time parent
+  belief union when `MEMES_ENABLED`; empty when memes off). When lifecycle is
+  off: `[]`.
 
 ## Speeds
 
@@ -183,7 +227,26 @@ by roster index `i` — so a fresh world already spans young/adult ages, not one
 generation.
 
 Births need housing headroom, the food surplus above, and two ally adults sharing
-a district; capped at one per `BIRTH_MIN_INTERVAL_FRAMES`. Newly-generated agents
+a district; capped at one per `BIRTH_MIN_INTERVAL_FRAMES`. At birth,
+`_spawn_newborn` (`mixin_lifecycle.py:1186-1253`) sets
+`newborn["parents"] = [parent_a["name"], parent_b["name"]]` and appends the
+newborn's name to both `parent_a["children"]` and `parent_b["children"]` at
+the same point — `children` is a list of names (mirroring `parents`), never
+null; cold-start agents get `children = []` via `_make_agents` (Phase 1,
+alongside `a["parents"] = None`). `_heirs_of()` (`mixin_lifecycle.py:144-153`)
+reads `agent.get("children") or []`, filtered to living agents, when
+`DYNASTY_TREE_ENABLED` is True; when that flag is False, `_heirs_of` falls
+back to the pre-change parents-scan (every living agent whose `parents`
+contains the deceased's name). Same heir set when `children` is consistent,
+load-bearing for succession/goods/home/belief inheritance via `_inherit_from()`.
+When `restore_state()` loads an older save whose child records have `parents`
+but whose parent records lack `children`, it rebuilds the inverse links once
+all agents are loaded and keeps existing names deduplicated. When `MEMES_ENABLED`,
+the newborn's belief set is unioned from both parents at birth
+(`mixin_lifecycle.py:1198`); `inheritedBeliefs` is a static list snapshot of
+that union (empty when memes are off or neither parent has beliefs). The full
+live bloodline-vs-conversation belief diff is **out of scope** (see
+`docs/plans/idea-02-dynasty-tree/plan.md` §2 Answer 4). Newly-generated agents
 beyond the hand-written `AGENT_DEFS` pool get synthetic ids starting at
 `nextGeneratedAgentId = 1000`
 (`core.py:503`, incremented in `mixin_lifecycle.py:1108-1111`). Natural death rolls apply once past
@@ -236,11 +299,19 @@ thing evicted by the char-budget's oldest-first trim.
 ### Testament inheritance (`TESTAMENT_ENABLED`, default True)
 
 See [09-systems-society.md](09-systems-society.md#testament_enabled) for the
-civilization ring and prompt line. Summary for the agent data-shape lens:
+civilization ring, `inheritedTestament` snapshot shape, and prompt line.
+Summary for the agent data-shape lens:
 when `TESTAMENT_ENABLED` and `WIKI_MEMORY` are both True, `_spawn_newborn`
 (`mixin_lifecycle.py`) seeds the newborn's `memoryWiki` from both parents'
 sections plus the newest `TESTAMENT_PROMPT_ENTRIES` testament lines (each
-section capped at `WIKI_SECTION_CHAR_CAP`). On death,
+section capped at `WIKI_SECTION_CHAR_CAP`). Inside
+`_seed_newborn_wiki_from_testament`
+(`mixin_governance_culture.py:1331-1366`), the same
+`testament[-TESTAMENT_PROMPT_ENTRIES:]` slice that feeds the wiki also sets
+`newborn["inheritedTestament"]` — a deterministic birth-time snapshot copy of
+those entry dicts (`{text, author, frame, generation}`) so lineage can trace
+which testament entries an heir inherited after the village-wide ring later
+caps or drops older entries. On death,
 `_merge_testament_on_death` (`mixin_governance_culture.py`) folds the
 deceased's `lessons` and optional `relationships` wiki text into
 `civilization["testament"]` deterministically — no new LLM call. With the
@@ -389,3 +460,57 @@ Bounded PvP pair cooldowns live on civilization, not on individual agents:
 expires. Populated only after a successful `confront_agent` resolution;
 `restore_state()` `setdefault`s an empty dict. Full combat contract:
 [07-actions.md](07-actions.md) and [09-systems-society.md](09-systems-society.md#bounded-agent-conflict-confront_agent).
+
+## World Wiki — agent page (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan `docs/plans/idea-09-world-wiki/plan.md` §2 Answers 1 and 2.
+
+One page per living or deceased agent. Each page is a read-only projection over
+`agents[]` from `/state`, assembled by the wiki route (`GET /wiki`,
+[specs/04-http-api.md](04-http-api.md)) in-process. Source: per-agent row produced by
+`_agent_snapshot_row()` (`mixin_snapshot.py:113-134`). Zero new world-state mutation.
+
+### Fields projected onto an agent page
+
+| Field | Notes |
+|---|---|
+| `id` | agent id |
+| `name` | display name |
+| `role` | current role slug |
+| `color` | CSS color string |
+| `position` | `{x, y}` current position |
+| `district` | current district id |
+| `homeDistrict` | home (starting) district id |
+| `resources` | held resource dict |
+| `hunger` | current hunger value |
+| `health` | current health value |
+| `incapacitated` | bool — currently collapsed |
+| `beliefs` | agent's belief list |
+| `lastAction` | last action kind string |
+| `assignedTask` | current task assignment, if any |
+| `age` | float age in years — **only when `LIFECYCLE_ENABLED`** |
+| `lifeStage` | `"young"` / `"adult"` / `"elder"` life-stage label — **only when `LIFECYCLE_ENABLED`** |
+| `skills` | skill dict (`SKILL_KINDS`) — **only when `CULTURE_ENABLED`** |
+| `personality` | personality trait list — **only when `CULTURE_ENABLED`** |
+| `deceased` | bool — `true` when `deathFrame` is set |
+| `buried` | bool — `true` when `buried` flag is set |
+| `relationships` | filtered non-neutral ties dict (`ally`/`rival` only, same filtering as `/state`) |
+| `lastReasoning` | last LLM reasoning string, capped to 160 chars; `null` when absent |
+
+### Structured links
+
+From the Answer 2 cross-link table ([specs/04-http-api.md](04-http-api.md#cross-link-table)):
+
+- `relationships` (name-keyed) → agent pages: each key is an agent name that resolves
+  to exactly one agent page.
+- `homeDistrict` / `district` → district page: each is a district id that resolves to
+  exactly one district page.
+
+### Social ties
+
+Social ties (`ally`/`rival` pairs) appear as labeled `links` entries on the two agent
+pages they connect — one entry per pair per page, rendered as a cross-link to the
+other agent's page. They are **not** a standalone page kind. See
+[specs/09-systems-society.md](09-systems-society.md) for the social-tie engine
+mechanics and the `_social_ties_snapshot()` canonicalization contract
+(`mixin_snapshot.py:79-103`). Social tie link data is **not** duplicated in this section.

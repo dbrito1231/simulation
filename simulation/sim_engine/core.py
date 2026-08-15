@@ -68,6 +68,7 @@ class SimEngine(
     _StructuresEconomyMixin,
     _DiplomacyMixin,
     _WildlifeMixin,
+    _PressureRaidersMixin,
     _ProjectHelpersMixin,
     _DivineMatrixMixin,
     _CraftingRulesMixin,
@@ -208,6 +209,7 @@ class SimEngine(
         # off.  Individual agent fields are only introduced under that gate,
         # retaining the old serialized/runtime shape by default.
         self._piano_refresh_inflight = set()
+        self._saga_inflight = None       # Future for in-flight day-boundary saga dispatch
         self._module_pulse_work = []
         self._module_refresh_failures = 0
         self._module_note_ages = []
@@ -363,6 +365,9 @@ class SimEngine(
                 a["lastQuotaRejection"] = None
                 a["lastRationingRejection"] = None
                 a["parents"] = None
+                a["children"] = []
+                a["inheritedTestament"] = []
+                a["inheritedBeliefs"] = []
                 a["deathFrame"] = None
                 # Cemetery/burial: unset until a permanent death is buried
                 # (see CEMETERY_ENABLED above); irrelevant while alive.
@@ -380,6 +385,9 @@ class SimEngine(
                 a["skills"] = {k: 0.0 for k in SKILL_KINDS}
                 a["personalityTraits"] = []
                 a["lastTeachFrame"] = 0
+            if RAIDERS_CONTAGION_ENABLED:
+                a["infected"] = False
+                a["infectionFrame"] = None
             agents.append(a)
         # post-build setup (index.html lines ~1037)
         for i, a in enumerate(agents):
@@ -518,9 +526,11 @@ class SimEngine(
             "lastSuccessionActivityFrame": 0,
             "harvestQuotas": {},            # rule id -> {"district": id|None, "resource": id|None, "value": n}
             "rationingActive": {},          # rule id -> {"value": n}
+            **({"quarantineActive": {}} if RAIDERS_CONTAGION_ENABLED else {}),
             "populationFloorHeld": False,   # last death-deferred-at-floor state, for the nudge
             # Phase G (CULTURE_ENABLED): knowledge, chronicle, meme mutation.
             "chronicle": [],                # capped ring: {"text": str, "frame": int, "kind": str}
+            "saga": [],                     # capped ring: {"text": str, "frame": int, "dayIndex": int}
             "libraryKnowledge": [],         # capped ring: {"agent": name, "skill": kind, "level": float, "frame": int}
             "memeTexts": {},                # belief id -> mutated text override (see _belief_text)
             "memeMutations": 0,             # session-lifetime count, enforces MEME_MUTATION_SESSION_CAP

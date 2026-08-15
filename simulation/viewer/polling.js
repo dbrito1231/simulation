@@ -14,6 +14,11 @@ let STRUCTURE_UPGRADES_ENABLED = true;
 let GOD_MODE_ENABLED_FLAG = false;
 // Mirrors config.flags.GOD_AUTH_REQUIRED (default false = open Divine Console).
 let GOD_AUTH_REQUIRED_FLAG = false;
+// Mirrors config.flags.WORLD_WIKI_ENABLED — gates all wiki polling and links.
+let WORLD_WIKI_ENABLED_FLAG = true;
+// Agent Interview is visible only when both this feature flag and God mode
+// are enabled; the underlying route remains independently callable.
+let AGENT_INTERVIEW_ENABLED_FLAG = false;
 
 function applyFlags(flags) {
   if (!flags) return;
@@ -32,6 +37,8 @@ function applyFlags(flags) {
   if ("ACTIVITY_CUES_ENABLED" in flags) ACTIVITY_CUES_ENABLED = !!flags.ACTIVITY_CUES_ENABLED;
   if ("SOCIAL_LAYER_ENABLED" in flags) SOCIAL_LAYER_ENABLED = !!flags.SOCIAL_LAYER_ENABLED;
   if ("CHRONICLE_ENABLED" in flags) CHRONICLE_ENABLED = !!flags.CHRONICLE_ENABLED;
+  if ("CHRONICLE_SAGA_ENABLED" in flags) CHRONICLE_SAGA_ENABLED = !!flags.CHRONICLE_SAGA_ENABLED;
+  if ("PREDICTION_MARKET_ENABLED" in flags) PREDICTION_MARKET_ENABLED = !!flags.PREDICTION_MARKET_ENABLED;
   if ("FOUNDING_EVENTS_ENABLED" in flags) FOUNDING_EVENTS_ENABLED = !!flags.FOUNDING_EVENTS_ENABLED;
   if ("ENV_EFFECTS_ENABLED" in flags) ENV_EFFECTS_ENABLED = !!flags.ENV_EFFECTS_ENABLED;
   if ("WORLD_CLOCK_HUD_ENABLED" in flags) WORLD_CLOCK_HUD_ENABLED = !!flags.WORLD_CLOCK_HUD_ENABLED;
@@ -40,9 +47,14 @@ function applyFlags(flags) {
   if ("WILDLIFE_ENABLED" in flags) WILDLIFE_ENABLED = !!flags.WILDLIFE_ENABLED;
   if ("CARAVAN_VISUALS_ENABLED" in flags) CARAVAN_VISUALS_ENABLED = !!flags.CARAVAN_VISUALS_ENABLED;
   if ("WEATHER_ENABLED" in flags) WEATHER_ENABLED = !!flags.WEATHER_ENABLED;
+  if ("RAIDERS_CONTAGION_ENABLED" in flags) RAIDERS_CONTAGION_ENABLED = !!flags.RAIDERS_CONTAGION_ENABLED;
   if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
   if ("GOD_AUTH_REQUIRED" in flags) GOD_AUTH_REQUIRED_FLAG = !!flags.GOD_AUTH_REQUIRED;
+  if ("WORLD_WIKI_ENABLED" in flags) WORLD_WIKI_ENABLED_FLAG = !!flags.WORLD_WIKI_ENABLED;
+  if ("DYNASTY_TREE_ENABLED" in flags) DYNASTY_TREE_ENABLED = !!flags.DYNASTY_TREE_ENABLED;
+  if ("AGENT_INTERVIEW_ENABLED" in flags) AGENT_INTERVIEW_ENABLED_FLAG = !!flags.AGENT_INTERVIEW_ENABLED;
   applyGodDejaVuAvailability();
+  applyDynastyTreeLineageGate();
 }
 
 function applyGodDejaVuAvailability() {
@@ -227,6 +239,7 @@ async function pollState() {
       }
     }
     renderDailyCouncil((snapshot.civilization || {}).dailyCouncil);
+    updatePredictionsPanel((snapshot.civilization || {}).dailyCouncil);
     syncPauseButton();
     if (terrainCanvas) hideWorldLoading();
   } catch (err) {

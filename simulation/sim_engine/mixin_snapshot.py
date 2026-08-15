@@ -110,6 +110,17 @@ class _SnapshotMixin:
             if (kind := entry.get("kind")) in CHRONICLE_MILESTONE_KINDS
         ][-CHRONICLE_CAP:]
 
+    def _saga_snapshot(self):
+        """Return the viewer projection of the persisted saga ring."""
+        return [
+            {
+                "text": str(entry.get("text") or ""),
+                "frame": entry.get("frame"),
+                "dayIndex": entry.get("dayIndex"),
+            }
+            for entry in self.civilization.get("saga") or []
+        ][-SAGA_CAP:]
+
     def _agent_snapshot_row(self, a):
         """One agent row for /state (lock held)."""
         return {
@@ -119,6 +130,7 @@ class _SnapshotMixin:
             "waypoints": len(a.get("waypoints") or []),
             "resources": dict(a["resources"]), "hunger": a["hunger"], "health": a["health"],
             "incapacitated": a["incapacitated"], "message": a["message"],
+            **({"infected": bool(a.get("infected"))} if RAIDERS_CONTAGION_ENABLED else {}),
             "isThinking": a["isThinking"],
             "beliefs": [self._belief_text(b) for b in a["beliefs"]],
             "beliefIds": sorted(a["beliefs"]) if MEMES_ENABLED else [],
@@ -129,6 +141,10 @@ class _SnapshotMixin:
             "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
             "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
             "buried": bool(CEMETERY_ENABLED and a.get("buried")),
+            "parents": a.get("parents") if LIFECYCLE_ENABLED else None,
+            "children": list(a.get("children") or []) if LIFECYCLE_ENABLED else [],
+            "inheritedTestament": list(a.get("inheritedTestament") or []) if LIFECYCLE_ENABLED else [],
+            "inheritedBeliefs": list(a.get("inheritedBeliefs") or []) if LIFECYCLE_ENABLED else [],
             "relationships": {k: v for k, v in (a.get("relationships") or {}).items() if v != "neutral"},
             "lastReasoning": (a.get("lastReasoning") or "")[:160] or None,
         }
@@ -259,6 +275,7 @@ class _SnapshotMixin:
                 "ECONOMY_ENABLED": ECONOMY_ENABLED,
                 "CONTRACTS_ENABLED": CONTRACTS_ENABLED,
                 "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
+                "DYNASTY_TREE_ENABLED": DYNASTY_TREE_ENABLED,
                 "CULTURE_ENABLED": CULTURE_ENABLED,
                 "CEMETERY_ENABLED": CEMETERY_ENABLED,
                 "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
@@ -266,6 +283,7 @@ class _SnapshotMixin:
                 "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
                 "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
                 "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
+                "CHRONICLE_SAGA_ENABLED": CHRONICLE_SAGA_ENABLED,
                 "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
                 "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
                 "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
@@ -277,6 +295,7 @@ class _SnapshotMixin:
                 "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
                 "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
                 "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
+                "RAIDERS_CONTAGION_ENABLED": RAIDERS_CONTAGION_ENABLED,
                 "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
                 "LIBRARY_SCALING_ENABLED": LIBRARY_SCALING_ENABLED,
                 "TRANSIT_ENABLED": TRANSIT_ENABLED,
@@ -293,6 +312,9 @@ class _SnapshotMixin:
                 "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
                 "GOD_AUTH_REQUIRED": GOD_AUTH_REQUIRED,
                 "GOD_DEJA_VU_REPLAY": GOD_DEJA_VU_REPLAY,
+                "WORLD_WIKI_ENABLED": WORLD_WIKI_ENABLED,
+                "PREDICTION_MARKET_ENABLED": PREDICTION_MARKET_ENABLED,
+                "AGENT_INTERVIEW_ENABLED": AGENT_INTERVIEW_ENABLED,
             },
         }
 
@@ -332,12 +354,18 @@ class _SnapshotMixin:
             snapshot["socialTies"] = self._social_ties_snapshot()
         if CHRONICLE_ENABLED and CULTURE_ENABLED:
             snapshot["chronicle"] = self._chronicle_snapshot()
+        if CHRONICLE_SAGA_ENABLED:
+            snapshot["saga"] = self._saga_snapshot()
         if CROP_GROWTH_ENABLED or WILDLIFE_ENABLED:
             snapshot["districtEcology"] = self._district_ecology_snapshot()
         if WILDLIFE_ENABLED:
             snapshot["wildlife"] = self._wildlife_snapshot()
         else:
             snapshot["wildlife"] = []
+        if RAIDERS_CONTAGION_ENABLED:
+            tele_snap = self._pressure_telegraph_snapshot()
+            if tele_snap:
+                snapshot["pressureTelegraph"] = tele_snap
         if CARAVAN_VISUALS_ENABLED:
             snapshot["shipments"] = self._shipment_snapshot()
         if WEATHER_ENABLED:
@@ -362,10 +390,14 @@ class _SnapshotMixin:
             return "shipments", self._shipment_snapshot()
         if key == "weather" and WEATHER_ENABLED:
             return "weather", self._weather_snapshot()
+        if key == "pressureTelegraph" and RAIDERS_CONTAGION_ENABLED:
+            return "pressureTelegraph", self._pressure_telegraph_snapshot()
         if key == "socialTies" and SOCIAL_LAYER_ENABLED:
             return "socialTies", self._social_ties_snapshot()
         if key == "chronicle" and CHRONICLE_ENABLED and CULTURE_ENABLED:
             return "chronicle", self._chronicle_snapshot()
+        if key == "saga" and CHRONICLE_SAGA_ENABLED:
+            return "saga", self._saga_snapshot()
         if key == "districtEcology" and (CROP_GROWTH_ENABLED or WILDLIFE_ENABLED):
             return "districtEcology", self._district_ecology_snapshot()
         if key == "god" and GOD_MODE_ENABLED:

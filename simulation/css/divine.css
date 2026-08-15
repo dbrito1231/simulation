@@ -129,6 +129,62 @@
   .divine-history-rerun:hover:not(:disabled) { background: #243848; }
   .divine-history-rerun:disabled { opacity: 0.45; cursor: not-allowed; color: #888; }
   .divine-history-rerun-note { font-size: 10px; color: #7a7a88; }
+  .divine-audit-toolbar {
+    margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid #2a2a34;
+  }
+  .divine-audit-filters { align-items: flex-end; }
+  .divine-audit-legend {
+    margin-bottom: 8px; padding: 8px 10px; border: 1px solid #3a3a48; border-radius: 4px;
+    background: rgba(30, 58, 42, 0.25); font-size: 11px; line-height: 1.45; color: #bbb;
+  }
+  .divine-audit-legend-body { display: block; margin-top: 4px; color: #9a9aa8; }
+  .divine-audit-legend code { font-family: ui-monospace, monospace; color: #c9d4ff; }
+  .divine-audit-summary {
+    margin-bottom: 10px; max-height: 160px; overflow: auto;
+    border: 1px solid #2a2a34; border-radius: 4px;
+  }
+  .divine-audit-summary-table {
+    width: 100%; border-collapse: collapse; font-size: 11px; color: #bbb;
+  }
+  .divine-audit-summary-table th,
+  .divine-audit-summary-table td {
+    padding: 4px 6px; border-bottom: 1px solid #22222c; text-align: left;
+  }
+  .divine-audit-summary-table th { color: #9a9aa8; font-weight: 600; position: sticky; top: 0; background: #16161e; }
+  .divine-audit-entries {
+    list-style: none; margin: 0; padding: 0; max-height: min(52vh, 420px); overflow: auto;
+    border: 1px solid #2a2a34; border-radius: 4px;
+  }
+  .divine-audit-entry {
+    padding: 8px 10px; border-bottom: 1px solid #22222c; font-size: 11px; line-height: 1.45; color: #bbb;
+  }
+  .divine-audit-entry:last-child { border-bottom: none; }
+  .divine-audit-entry-head { margin-bottom: 4px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .divine-audit-frame { color: #7a7a88; font-family: ui-monospace, monospace; }
+  .divine-audit-agent { color: #e3c87e; font-weight: 600; }
+  .divine-audit-action { color: #8ed2ed; }
+  .divine-audit-k { color: #7a7a88; margin-right: 4px; }
+  .divine-audit-entry-reasoning { margin-bottom: 2px; white-space: pre-wrap; word-break: break-word; }
+  .divine-audit-entry-meta { margin-bottom: 2px; color: #9a9aa8; }
+  .divine-audit-entry-activity { color: #ccc; white-space: pre-wrap; word-break: break-word; }
+  .divine-audit-empty { padding: 10px; color: #888; font-size: 11px; list-style: none; }
+  .divine-lineage-panel { font-size: 11px; color: #bbb; }
+  .divine-lineage-content { margin-top: 8px; }
+  .divine-lineage-section { margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #2a2a34; }
+  .divine-lineage-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .divine-lineage-heading { margin: 0 0 4px; font: 600 11px system-ui, sans-serif; color: #d9b96e; }
+  .divine-lineage-empty { color: #888; font-style: italic; }
+  .divine-lineage-names { line-height: 1.6; }
+  .divine-lineage-link {
+    padding: 0; margin: 0; border: none; background: none; cursor: pointer;
+    font: inherit; color: #8ed2ed; text-decoration: underline;
+  }
+  .divine-lineage-link:hover { color: #b8e8ff; }
+  .divine-lineage-list, .divine-lineage-beliefs {
+    margin: 0; padding-left: 18px; line-height: 1.5;
+  }
+  .divine-lineage-entry-text { color: #ddd; }
+  .divine-lineage-entry-meta { font-size: 10px; color: #7a7a88; margin-top: 2px; }
   .divine-row { margin-bottom: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .divine-row label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #9a9aa8; flex: 1 1 auto; }
   .divine-row input[type=text], .divine-row input[type=password], .divine-row input[type=number],
@@ -147,6 +203,21 @@
   .divine-result { margin-top: 6px; font-size: 11px; line-height: 1.5; color: #bbb; }
   .divine-result:empty { display: none; }
   .divine-error { color: #ef9a9a; font-weight: 600; }
+  /* Anomaly radar modal (idea-07b): per-kind collapsible groups inside
+     #divineTab-anomaly, native <details>/<summary>, same pattern as
+     .divine-preview-panel summary above and #anomalyPanel/#councilPanel
+     summary (css/council.css). */
+  .divine-anomaly-group { margin-bottom: 10px; }
+  .divine-anomaly-group summary {
+    cursor: pointer; font: 600 12px system-ui, sans-serif; color: #d9b96e; margin-bottom: 4px;
+  }
+  .divine-anomaly-group .anomaly-group-count { color: #ccc; font-weight: 400; }
+  .divine-anomaly-group ul { list-style: none; margin: 0; padding: 0; font-size: 12px; color: #bbb; }
+  .divine-anomaly-group ul li { padding: 4px 0; border-bottom: 1px solid #23232e; }
+  .divine-anomaly-group ul li:last-child { border-bottom: none; }
+  .anomaly-detail-row { margin-top: 2px; font-size: 10px; color: #999; }
+  .anomaly-detail-kv { margin-right: 8px; }
+  .anomaly-detail-key { color: #7a7a88; }
   .divine-applied-banner { color: #a5d6a7; font-weight: 600; margin-bottom: 3px; }
   .divine-warning { color: #ffcc80; font-weight: 600; }
   .divine-meta { color: #7a7a88; font-size: 10px; margin-top: 3px; }

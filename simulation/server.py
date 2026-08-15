@@ -14,17 +14,9 @@ import json
 import os
 import re
 import signal
-import sys
 import threading
-import uuid
+import time
 from datetime import datetime, timezone
-
-# run_agent_decision() is defined before the late sim_engine import below; pull
-# DECISION_AUDIT_ENABLED from constants directly so id minting can gate there.
-_sys_path = os.path.dirname(os.path.abspath(__file__))
-if _sys_path not in sys.path:
-    sys.path.insert(0, _sys_path)
-from sim_engine.constants import DECISION_AUDIT_ENABLED  # noqa: E402
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory
@@ -73,11 +65,13 @@ from _server.model_routing import (
     is_high_stakes_turn, resolve_high_stakes, model_for_decision,
 )
 from _server.decision_audit import build_decision_audit
-from _server.logging_session import SessionLogger
+from _server.agent_interview import run_agent_interview
+from _server.logging_session import SessionLogger, read_conversation_window as _read_conversation_window_from_path
 from _server.memory_store import (
     MemoryStore, embed_text, _cosine, _stable_hash, is_scaffold_text,
     extract_plain_answer,
 )
+from _server.predictions_store import PredictionsStore
 from _server.structured_output import (
     _ollama_error_parts, looks_like_model_not_found_error,
     looks_like_response_format_error,
@@ -100,6 +94,7 @@ from _server.decision_validation import (
     role_fallback_action, role_fallback_candidates, synthesize_divine_response,
     normalize_decision, _infer_terraform_decision,
 )
+from _server.anomaly_radar import compute_anomalies
 
 app = Flask(__name__)
 CORS(app)
@@ -335,6 +330,15 @@ session_logger.log_benchmark("memory_store_loaded", _load_count)
 # into that module's namespace now that it exists. See prompt_format.py's
 # module docstring for the full rationale.
 _prompt_format.memory_store = memory_store
+
+PREDICTIONS_STORE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "predictions.json")
+predictions_store = PredictionsStore(PREDICTIONS_STORE_PATH)
+_pred_load_status, _pred_load_count = getattr(
+    predictions_store, "_load_status", ("absent", 0))
+print(
+    f"[server] PredictionsStore {_pred_load_status} "
+    f"({_pred_load_count} predictions) from {PREDICTIONS_STORE_PATH}")
 
 # --- Blueprint validation constants (GATHER_ZONES etc.) now live in
 # _server/validation_constants.py (imported above).
@@ -849,11 +853,12 @@ for _css_filename in _CSS_FILES:
 # directory traversal.
 _VIEWER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
 _VIEWER_FILES = (
-    "setup.js", "state.js", "render.js", "panels.js", "sidebar.js",
-    "decision-audit.js", "council.js", "minimap.js",
-    "polling.js", "controls.js", "renderloop.js", "divine-bootstrap.js",
+    "setup.js", "state.js", "render.js", "panels.js", "sidebar.js", "decision-audit.js",
+    "council.js", "predictions.js", "minimap.js", "polling.js", "anomaly.js",
+    "controls.js", "renderloop.js", "divine-bootstrap.js",
     "divine-auth-sight.js", "divine-modal.js", "divine-sight-voice.js",
     "divine-voice.js", "divine-miracles-story.js", "divine-history.js",
+    "world-wiki.js",
 )
 
 
@@ -1115,6 +1120,108 @@ def run_piano_module(module, agent_name, context, frame_tick=None, timeout_s=Non
             eng._record_llm_orphan_timeout()
         return None
     except Exception:
+        return None
+
+
+SAGA_SYSTEM_PROMPT = (
+    "You write brief village chronicle dispatches for a pixel-art simulation. "
+    "Summarize only the facts provided — do not invent events, names, or lore. "
+    "Write about 150 words in plain prose, past tense, as a village newspaper dispatch."
+)
+SAGA_PROMPT_EXCERPT_LINE_CAP = 10
+# Bound each normalized conversation message before it is copied into the
+# saga prompt; line-count bounds alone do not protect against one huge message.
+SAGA_PROMPT_EXCERPT_CHAR_CAP = 300
+
+
+def _normalized_saga_dialogue_lines(dialogue):
+    """Return a bounded, one-line-per-excerpt dialogue prompt section."""
+    lines = []
+    for row in dialogue:
+        if not isinstance(row, dict):
+            continue
+        speaker = str(row.get("from") or "?")
+        target = str(row.get("to") or "?")
+        message = str(row.get("message") or "")
+        normalized = message.replace("\r\n", "\n").replace("\r", "\n")
+        for excerpt in normalized.split("\n"):
+            excerpt = " ".join(excerpt.split())
+            if not excerpt:
+                continue
+            excerpt = excerpt[:SAGA_PROMPT_EXCERPT_CHAR_CAP]
+            lines.append(f"- {speaker} to {target}: {excerpt}")
+            if len(lines) >= SAGA_PROMPT_EXCERPT_LINE_CAP:
+                return lines
+    return lines
+
+
+def _build_chronicle_saga_user_prompt(saga_context):
+    """Format snapshotted day facts into the saga user prompt."""
+    parts = [f"Day {saga_context.get('day_index', 0)} summary request."]
+    if saga_context.get("quiet_day"):
+        parts.append(
+            "Nothing notable was recorded in the chronicle or conversation logs for this day.")
+    counters = saga_context.get("counters") or {}
+    parts.append(
+        f"Village counters: {counters.get('births', 0)} births, "
+        f"{counters.get('deaths', 0)} deaths (lifetime totals).")
+    entries = saga_context.get("chronicle_entries") or []
+    if entries:
+        lines = []
+        for entry in entries:
+            kind = entry.get("kind") or "event"
+            text = entry.get("text") or ""
+            lines.append(f"- [{kind}] {text}")
+        parts.append("Chronicle entries this day:\n" + "\n".join(lines))
+    dialogue = saga_context.get("dialogue") or []
+    if dialogue:
+        lines = _normalized_saga_dialogue_lines(dialogue)
+        if lines:
+            parts.append("Conversation excerpts this day:\n" + "\n".join(lines))
+    daily_council = saga_context.get("daily_council")
+    if daily_council:
+        verdict = daily_council.get("verdict")
+        if verdict:
+            parts.append(
+                "Daily Council verdict: "
+                + json.dumps(verdict, default=str)[:300])
+    return "\n\n".join(parts)
+
+
+def run_chronicle_saga(saga_context):
+    """Background chronicle saga runner (MODEL_FAST). Returns text or None."""
+    if not isinstance(saga_context, dict):
+        return None
+    user_prompt = _build_chronicle_saga_user_prompt(saga_context)
+    frame_tick = saga_context.get("frame")
+    started = time.time()
+    try:
+        text = lm_complete(
+            SAGA_SYSTEM_PROMPT,
+            user_prompt,
+            max_tokens=220,
+            temperature=0.4,
+        )
+        latency_ms = (time.time() - started) * 1000.0
+        record = {
+            "frame_tick": frame_tick,
+            "module": "chronicle_saga",
+            "latency_ms": round(latency_ms, 1),
+        }
+        if text and str(text).strip():
+            record["response_preview"] = str(text).strip()[:200]
+        else:
+            record["error"] = "empty_response"
+        session_logger.log_lm_exchange(record)
+        return str(text).strip() if text and str(text).strip() else None
+    except Exception as exc:
+        latency_ms = (time.time() - started) * 1000.0
+        session_logger.log_lm_exchange({
+            "frame_tick": frame_tick,
+            "module": "chronicle_saga",
+            "latency_ms": round(latency_ms, 1),
+            "error": str(exc)[:200],
+        })
         return None
 
 
@@ -2601,9 +2708,6 @@ def run_agent_decision(data):
             agent_data,
         )
 
-        if DECISION_AUDIT_ENABLED:
-            decision["_decision_id"] = uuid.uuid4().hex
-
         log_lm(latency_ms, response=lm_body, http_status=http_status, decision=decision, error=error_kind,
                fallback_extra=fallback_extra)
         return decision
@@ -2629,9 +2733,10 @@ AVAILABLE_ACTIONS = list(DECISION_ACTIONS)
 
 # Import the engine module whether server.py is run as a script (cwd-relative)
 # or imported as simulation.server (package-relative).
-import sys as _sys  # noqa: E402
-_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import sim_engine as _sim_engine  # noqa: E402
+try:  # Script execution keeps simulation/ on sys.path.
+    import sim_engine as _sim_engine  # noqa: E402
+except ModuleNotFoundError:  # Package import uses the relative engine package.
+    from . import sim_engine as _sim_engine  # noqa: E402
 
 # Phase D (TECH_TREE_ENABLED) prompt/schema amendments, applied only when the
 # engine flag is on so that flag-off prompts and request payloads stay
@@ -2665,6 +2770,12 @@ def _llm_decide(payload):
     return run_agent_decision(payload)
 
 
+def read_conversation_window(start_frame, end_frame, max_records=None):
+    """Engine-injected reader for the current run's conversation.jsonl."""
+    return _read_conversation_window_from_path(
+        session_logger.conversation_path, start_frame, end_frame, max_records)
+
+
 _ENGINE_DEPS = {
     "ROLES": ROLES,
     "ROLE_PROJECT": ROLE_PROJECT,
@@ -2679,6 +2790,7 @@ _ENGINE_DEPS = {
     "memory_store": memory_store,
     "log_activity": session_logger.log_activity,
     "log_conversation": session_logger.log_conversation,
+    "read_conversation_window": read_conversation_window,
     "log_benchmark": session_logger.log_benchmark,
     "flush_benchmarks": session_logger.flush_benchmarks,
     "log_divine": session_logger.log_divine,
@@ -2690,6 +2802,7 @@ _ENGINE_DEPS = {
     "SPRITE_GRID_MAX": SPRITE_GRID_MAX,
     "canonical_effect_vector": canonical_effect_vector,
     "run_piano_module": run_piano_module,
+    "run_chronicle_saga": run_chronicle_saga,
     "run_meta_update": run_meta_update,
     "normalize_decision": normalize_decision,
     "synthesize_divine_response": synthesize_divine_response,
@@ -2703,6 +2816,12 @@ except ValueError:
     _roster_size = 8
 
 engine = _sim_engine.SimEngine(_ENGINE_DEPS, roster_size=_roster_size)
+
+# Agent interviews use a dedicated bounded slot so an HTTP request cannot
+# consume either the decision or PIANO worker pools.
+_interview_llm_semaphore = threading.BoundedSemaphore(
+    _sim_engine.INTERVIEW_CONCURRENT_LLM
+)
 
 # Full-state resume (Contract 3): if a valid state.db exists, rehydrate the
 # world (frameTick, civilization, agents, re-embedded memory) instead of using
@@ -2903,17 +3022,108 @@ def council_llm_log():
     return jsonify({"entries": entries})
 
 
+@app.route("/anomalies")
+def anomalies():
+    """Anomaly radar (idea-07, docs/plans/idea-07-anomaly-radar/plan.md):
+    read-only, server-side reader over the current run's benchmarks.jsonl,
+    located via the existing session_logger reference. No live-engine or
+    civilization["chronicle"] access, no self.lock -- see
+    specs/04-http-api.md's "Anomaly radar (idea-07)" section."""
+    if not _sim_engine.ANOMALY_RADAR_ENABLED:
+        return jsonify({"ok": True, "enabled": False, "anomalies": []})
+    found = compute_anomalies(session_logger.benchmark_path)
+    return jsonify({"ok": True, "enabled": True, "anomalies": found})
+
+
 @app.route("/decision-audit")
 def decision_audit():
-    """Read-only decision-intent audit (idea-10). Joins llm.jsonl to activity.jsonl."""
-    if not DECISION_AUDIT_ENABLED:
-        return jsonify({"enabled": False, "agents": [], "recent": []})
+    """Read-only decision-intent audit (idea-10)."""
+    view = request.args.get("view")
+    if not _sim_engine.DECISION_AUDIT_ENABLED:
+        result = {"enabled": False, "agents": [], "recent": []}
+        if view == "full":
+            result["entries"] = []
+        return jsonify(result)
     return jsonify(build_decision_audit(
         session_logger.llm_path,
         session_logger.activity_path,
         session_logger.session_id,
         enabled=True,
+        view=view,
     ))
+
+
+@app.route("/predictions/submit", methods=["POST"])
+def predictions_submit():
+    """Store a pending spectator prediction (idea-04)."""
+    if not _sim_engine.PREDICTION_MARKET_ENABLED:
+        return jsonify({"ok": False})
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        pred_id = predictions_store.submit(
+            body.get("kind"),
+            body.get("question"),
+            body.get("pick"),
+            body.get("ballot_frame_tick"),
+        )
+        if pred_id is None:
+            return jsonify({"ok": False})
+        return jsonify({"ok": True, "id": pred_id})
+    except Exception:
+        return jsonify({"ok": False})
+
+
+@app.route("/predictions/resolve", methods=["POST"])
+def predictions_resolve():
+    """Mark a pending prediction correct/incorrect (idea-04)."""
+    if not _sim_engine.PREDICTION_MARKET_ENABLED:
+        return jsonify({"ok": False})
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        ok = predictions_store.resolve(
+            body.get("id"),
+            body.get("correct"),
+            body.get("verdict"),
+            body.get("resolved_frame_tick"),
+        )
+        return jsonify({"ok": bool(ok)})
+    except Exception:
+        return jsonify({"ok": False})
+
+
+@app.route("/predictions/history")
+def predictions_history():
+    """Shared calibration history for the prediction panel (idea-04)."""
+    if not _sim_engine.PREDICTION_MARKET_ENABLED:
+        return jsonify({"enabled": False, "predictions": [], "hitRate": None})
+    try:
+        payload = predictions_store.history()
+        return jsonify({
+            "enabled": True,
+            "predictions": payload["predictions"],
+            "hitRate": payload["hitRate"],
+        })
+    except Exception:
+        return jsonify({"enabled": True, "predictions": [], "hitRate": None})
+
+
+@app.route("/agent/interview", methods=["POST"])
+def agent_interview_route():
+    """Read-only, out-of-world Q&A over one agent's own context."""
+    body = request.get_json(force=True, silent=True) or {}
+    result = run_agent_interview(
+        engine,
+        body.get("agentId"),
+        body.get("question"),
+        enabled=_sim_engine.AGENT_INTERVIEW_ENABLED,
+        memory_enabled=_sim_engine.MEMORY_ENABLED,
+        wiki_memory_enabled=_sim_engine.WIKI_MEMORY,
+        max_chars=_sim_engine.INTERVIEW_QUESTION_MAX_CHARS,
+        model=MODEL_SMART,
+        lm_complete_fn=lm_complete,
+        semaphore=_interview_llm_semaphore,
+    )
+    return jsonify(result)
 
 
 @app.route("/state")
@@ -2931,6 +3141,29 @@ def state():
     return jsonify(engine.snapshot_delta(since))
 
 
+def _districts_snapshot_payload(engine):
+    """Shared district/road shallow-copy; must be called under engine.lock.
+
+    Used by districts_js() and world_wiki() to avoid duplicating the inline
+    extraction logic (Phase 2b, idea-09 plan §2 Answer 3 — mechanical move,
+    no new logic). Returns a dict with "districts", "roadNodes", "roadEdges"
+    but WITHOUT the epoch key so callers can add their own context.
+    """
+    c = engine.civilization
+    districts = [
+        {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
+         "bounds": dict(d["bounds"]),
+         "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
+         "tiles": dict(d.get("tiles") or {}),
+         "terrain": dict(d.get("terrain") or {}),
+         "settlementId": d.get("settlementId")}
+        for did, d in c["districts"].items()
+    ]
+    road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
+    road_edges = [list(e) for e in c["roadEdges"]]
+    return {"districts": districts, "roadNodes": road_nodes, "roadEdges": road_edges}
+
+
 @app.route("/districts.js")
 def districts_js():
     """Live districts/roads for the viewer (world-expansion plan). Despite the
@@ -2939,7 +3172,8 @@ def districts_js():
 
     Under the engine lock, read districtsEpoch and either return a tiny
     unchanged body when ?since= matches, or shallow-copy district/road data
-    into plain dicts/lists. JSON assembly happens after the lock is released."""
+    into plain dicts/lists via _districts_snapshot_payload(). JSON assembly
+    happens after the lock is released."""
     since_raw = request.args.get("since")
     since = None
     if since_raw is not None:
@@ -2953,25 +3187,336 @@ def districts_js():
         if since is not None and since == epoch:
             payload = {"unchanged": True, "epoch": epoch}
         else:
-            c = engine.civilization
-            districts = [
-                {"id": did, "kind": d["kind"], "tile": d["tile"], "label": d.get("label"),
-                 "bounds": dict(d["bounds"]),
-                 "buildGrid": dict(d["build_grid"]) if d.get("build_grid") else None,
-                 "tiles": dict(d.get("tiles") or {}),
-                 "terrain": dict(d.get("terrain") or {}),
-                 "settlementId": d.get("settlementId")}
-                for did, d in c["districts"].items()
-            ]
-            road_nodes = {nid: dict(n) for nid, n in c["roadNodes"].items()}
-            road_edges = [list(e) for e in c["roadEdges"]]
-            payload = {
-                "districts": districts,
-                "roadNodes": road_nodes,
-                "roadEdges": road_edges,
-                "epoch": epoch,
-            }
+            snap = _districts_snapshot_payload(engine)
+            payload = {**snap, "epoch": epoch}
     return jsonify(payload)
+
+
+@app.route("/wiki")
+def world_wiki():
+    """Read-only cross-linked page model for all twelve entity kinds.
+
+    Gated by WORLD_WIKI_ENABLED. Reads the same engine state as /state and
+    /districts.js (via _districts_snapshot_payload) — no mutation, no LLM
+    calls. Entity kinds: agent, structure, belief, rule, chronicle (Phase 2a),
+    plus district, settlement, treaty, resource, project, recipe, and social
+    ties as agent cross-links (Phase 2b).
+
+    Cross-link rules follow the plan's §2 Answer 2 table exactly:
+    structured id-keyed fields only; type/category strings (recipe station,
+    resourceRegistry gatherZone, treaty→settlement) are NOT linked.
+    Settlements/treaties are gated on PATH1_DIPLOMACY_ENABLED.
+    Social ties are gated on SOCIAL_LAYER_ENABLED (surfaced as labeled links
+    on both agent pages they connect, not as standalone pages).
+    """
+    if not _sim_engine.WORLD_WIKI_ENABLED:
+        return jsonify({"ok": False, "reason": "disabled"})
+
+    with engine.lock:
+        c = engine.civilization
+        env_lit_types = engine._env_lit_types() if _sim_engine.ENV_EFFECTS_ENABLED else set()
+        agent_rows = [engine._agent_snapshot_row(a) for a in engine.agents]
+        struct_rows = [
+            engine._structure_snapshot_row(s, env_lit_types, include_sprite=False)
+            for s in c["structures"]
+        ]
+        rules_active = [dict(r) for r in c.get("rules") or []]
+        rules_pending = [dict(r) for r in c.get("pendingRules") or []]
+        constitution = [dict(p) for p in engine._ensure_constitution()]
+        belief_reg = {}
+        if _sim_engine.CULTURE_ENABLED:
+            raw_reg = engine._belief_registry()
+            belief_reg = {bid: dict(e) for bid, e in raw_reg.items()} if isinstance(raw_reg, dict) else {}
+        chronicle_raw = []
+        if _sim_engine.CHRONICLE_ENABLED and _sim_engine.CULTURE_ENABLED:
+            for entry in list((c.get("chronicle") or [])[-_sim_engine.CHRONICLE_CAP:]):
+                if entry.get("kind") in _sim_engine.CHRONICLE_MILESTONE_KINDS:
+                    chronicle_raw.append(dict(entry))
+        # Extended entities (Phase 2b).
+        dist_snap = _districts_snapshot_payload(engine)
+        resource_reg = {rid: dict(d) for rid, d in c["resourceRegistry"].items()}
+        project_reg = {pid: dict(p) for pid, p in c["projectRegistry"].items()}
+        recipe_reg = {}
+        if _sim_engine.CRAFTING_ENABLED:
+            recipe_reg = {
+                rid: {"name": r["name"], "inputs": dict(r["inputs"]), "station": r.get("station")}
+                for rid, r in engine.RECIPES.items()
+            }
+        settlement_rows = []
+        treaty_rows = []
+        if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+            settlement_rows = [dict(row) for row in (c.get("settlements") or [])]
+            treaty_rows = [dict(row) for row in (c.get("treaties") or [])]
+        social_ties = []
+        if _sim_engine.SOCIAL_LAYER_ENABLED:
+            social_ties = engine._social_ties_snapshot()
+
+    # Build name→id lookup for agent relationship cross-links (name-keyed).
+    name_to_id = {row["name"]: row["id"] for row in agent_rows}
+
+    # Agent pages.
+    agent_pages = []
+    for row in agent_rows:
+        aid = row["id"]
+        links = []
+        for tname, valence in (row.get("relationships") or {}).items():
+            tid = name_to_id.get(tname)
+            if tid is not None:
+                links.append({"targetKind": "agent", "targetId": tid, "relation": valence})
+        current_dist = row.get("currentDistrict")
+        if current_dist is not None:
+            links.append({"targetKind": "district", "targetId": current_dist, "relation": "district"})
+        home_dist = row.get("homeDistrict")
+        if home_dist is not None:
+            links.append({"targetKind": "district", "targetId": home_dist, "relation": "homeDistrict"})
+        fields = {
+            "id": aid,
+            "name": row["name"],
+            "role": row["role"],
+            "color": row["color"],
+            "position": {"x": row["x"], "y": row["y"]},
+            "district": current_dist,
+            "homeDistrict": home_dist,
+            "resources": row.get("resources") or {},
+            "hunger": row.get("hunger"),
+            "health": row.get("health"),
+            "incapacitated": row.get("incapacitated"),
+            "beliefs": row.get("beliefs") or [],
+            "lastAction": row.get("lastAction"),
+            "assignedTask": row.get("assignedTask"),
+            "relationships": row.get("relationships") or {},
+            "lastReasoning": row.get("lastReasoning"),
+            "deceased": row.get("deceased", False),
+            "buried": row.get("buried", False),
+        }
+        if row.get("age") is not None:
+            fields["age"] = row["age"]
+        if row.get("lifeStage") is not None:
+            fields["lifeStage"] = row["lifeStage"]
+        if row.get("skills") is not None:
+            fields["skills"] = row["skills"]
+        if _sim_engine.CULTURE_ENABLED and row.get("personalityTraits") is not None:
+            fields["personality"] = row["personalityTraits"]
+        agent_pages.append({"id": aid, "kind": "agent", "fields": fields, "links": links})
+
+    # Social tie cross-links on agent pages (SOCIAL_LAYER_ENABLED only).
+    # Each tie is a canonical pair (from, to, valence); the labeled link appears
+    # on both agent pages — no standalone social-tie page kind.
+    if _sim_engine.SOCIAL_LAYER_ENABLED and social_ties:
+        agent_pages_by_id = {p["id"]: p for p in agent_pages}
+        for tie in social_ties:
+            from_id = tie.get("from")
+            to_id = tie.get("to")
+            valence = tie.get("valence")
+            if not from_id or not to_id:
+                continue
+            if from_id in agent_pages_by_id:
+                agent_pages_by_id[from_id]["links"].append(
+                    {"targetKind": "agent", "targetId": to_id, "relation": f"socialTie:{valence}"}
+                )
+            if to_id in agent_pages_by_id:
+                agent_pages_by_id[to_id]["links"].append(
+                    {"targetKind": "agent", "targetId": from_id, "relation": f"socialTie:{valence}"}
+                )
+
+    # Structure pages.
+    structure_pages = []
+    for s in struct_rows:
+        links = []
+        owner_id = None
+        if s.get("homeOf") is not None:
+            # homeOf is stored as agent name; resolve to agent id for cross-link.
+            owner_id = name_to_id.get(s["homeOf"], s["homeOf"])
+            links.append({"targetKind": "agent", "targetId": owner_id, "relation": "homeOf"})
+        if s.get("districtId") is not None:
+            links.append({"targetKind": "district", "targetId": s["districtId"], "relation": "districtId"})
+        fields = {
+            "id": s["id"],
+            "type": s["type"],
+            "districtId": s.get("districtId"),
+            "homeOf": owner_id,
+            "condition": s.get("condition"),
+            "isRuin": s.get("isRuin", False),
+            "level": s.get("level", 1),
+            "visualTier": s.get("visualTier", 1),
+            "name": s.get("name"),
+        }
+        structure_pages.append({"id": s["id"], "kind": "structure", "fields": fields, "links": links})
+
+    # Belief pages (CULTURE_ENABLED only).
+    belief_pages = []
+    if _sim_engine.CULTURE_ENABLED:
+        for bid, entry in belief_reg.items():
+            fields = {
+                "id": bid,
+                "name": entry.get("name", bid),
+                "tenet": entry.get("tenet", ""),
+                "affinity": entry.get("affinity", []),
+                "authoredBy": entry.get("authoredBy"),
+            }
+            belief_pages.append({"id": bid, "kind": "belief", "fields": fields, "links": []})
+
+    # Rule pages (RULES_ENABLED only).
+    rule_pages = []
+    if _sim_engine.RULES_ENABLED:
+        seen_rule_ids = set()
+        for r, status in (
+            [(r, "enacted") for r in rules_active]
+            + [(r, "pending") for r in rules_pending]
+            + [(r, "constitution") for r in constitution]
+        ):
+            rid = r.get("id")
+            if not rid or rid in seen_rule_ids:
+                continue
+            seen_rule_ids.add(rid)
+            fields = {
+                "id": rid,
+                "text": r.get("text", ""),
+                "kind": r.get("kind", ""),
+                "proposedBy": r.get("proposedBy"),
+                "status": status,
+            }
+            if "value" in r:
+                fields["value"] = r["value"]
+            rule_pages.append({"id": rid, "kind": "rule", "fields": fields, "links": []})
+
+    # Chronicle pages (CHRONICLE_ENABLED and CULTURE_ENABLED only).
+    chronicle_pages = []
+    if _sim_engine.CHRONICLE_ENABLED and _sim_engine.CULTURE_ENABLED:
+        for entry in chronicle_raw:
+            frame = entry.get("frame")
+            kind = entry.get("kind", "")
+            cid = f"chronicle_{frame}_{kind}"
+            fields = {
+                "id": cid,
+                "text": entry.get("text", ""),
+                "frame": frame,
+                "kind": kind,
+            }
+            chronicle_pages.append({"id": cid, "kind": "chronicle", "fields": fields, "links": []})
+
+    # District pages (from _districts_snapshot_payload).
+    # Cross-links: settlementId → settlement (structured id field).
+    district_pages = []
+    for d in dist_snap["districts"]:
+        did = d["id"]
+        links = []
+        if d.get("settlementId") is not None:
+            links.append({"targetKind": "settlement", "targetId": d["settlementId"], "relation": "settlementId"})
+        fields = {
+            "id": did,
+            "kind": d["kind"],
+            "tile": d.get("tile"),
+            "label": d.get("label"),
+            "bounds": d.get("bounds"),
+            "settlementId": d.get("settlementId"),
+        }
+        district_pages.append({"id": did, "kind": "district", "fields": fields, "links": links})
+
+    # Settlement pages (PATH1_DIPLOMACY_ENABLED only).
+    # Cross-links: districts[] → district (list of district ids).
+    settlement_pages = []
+    if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+        for s in settlement_rows:
+            sid = s.get("id")
+            if not sid:
+                continue
+            links = [
+                {"targetKind": "district", "targetId": did, "relation": "districts"}
+                for did in (s.get("districts") or [])
+            ]
+            fields = {
+                "id": sid,
+                "name": s.get("name", sid),
+                "districts": list(s.get("districts") or []),
+            }
+            settlement_pages.append({"id": sid, "kind": "settlement", "fields": fields, "links": links})
+
+    # Treaty pages (PATH1_DIPLOMACY_ENABLED only).
+    # No structured settlement id in the enacted treaty shape (plan §2 Answer 2),
+    # so no treaty→settlement cross-link.
+    treaty_pages = []
+    if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+        for t in treaty_rows:
+            tid = t.get("id")
+            if not tid:
+                continue
+            fields = {
+                "id": tid,
+                "name": t.get("name", tid),
+                "value": t.get("value"),
+                "tariff": t.get("tariff", 0),
+                "frame": t.get("frame"),
+            }
+            treaty_pages.append({"id": tid, "kind": "treaty", "fields": fields, "links": []})
+
+    # Resource pages (resourceRegistry — always present).
+    # gatherZone names a district kind/type, not a specific district id —
+    # not linked per plan §2 Answer 2.
+    resource_pages = []
+    for rid, entry in resource_reg.items():
+        fields = {
+            "id": rid,
+            "name": entry.get("name", rid),
+            "gatherZone": entry.get("gatherZone"),
+            "color": entry.get("color"),
+            "crafted": entry.get("crafted", False),
+        }
+        resource_pages.append({"id": rid, "kind": "resource", "fields": fields, "links": []})
+
+    # Project pages (projectRegistry — always present).
+    # Cross-links: needs (keys) → resource.
+    project_pages = []
+    for pid, entry in project_reg.items():
+        links = [
+            {"targetKind": "resource", "targetId": rid, "relation": "needs"}
+            for rid in (entry.get("needs") or {}).keys()
+        ]
+        fields = {
+            "id": pid,
+            "name": entry.get("name", pid),
+            "needs": dict(entry.get("needs") or {}),
+            "visualStyle": entry.get("visualStyle"),
+            "tier": entry.get("tier"),
+        }
+        project_pages.append({"id": pid, "kind": "project", "fields": fields, "links": links})
+
+    # Recipe pages (CRAFTING_ENABLED only).
+    # Cross-links: inputs (keys) → resource; output (recipe id itself) → resource.
+    # station names a structure type, not a specific instance — not linked
+    # per plan §2 Answer 2.
+    recipe_pages = []
+    if _sim_engine.CRAFTING_ENABLED:
+        for rid, r in recipe_reg.items():
+            links = [
+                {"targetKind": "resource", "targetId": res_id, "relation": "inputs"}
+                for res_id in (r.get("inputs") or {}).keys()
+            ]
+            links.append({"targetKind": "resource", "targetId": rid, "relation": "output"})
+            fields = {
+                "id": rid,
+                "name": r.get("name", rid),
+                "inputs": dict(r.get("inputs") or {}),
+                "station": r.get("station"),
+            }
+            recipe_pages.append({"id": rid, "kind": "recipe", "fields": fields, "links": links})
+
+    return jsonify({
+        "ok": True,
+        "pages": {
+            "agent": agent_pages,
+            "structure": structure_pages,
+            "belief": belief_pages,
+            "rule": rule_pages,
+            "chronicle": chronicle_pages,
+            "district": district_pages,
+            "settlement": settlement_pages,
+            "treaty": treaty_pages,
+            "resource": resource_pages,
+            "project": project_pages,
+            "recipe": recipe_pages,
+        },
+    })
 
 
 @app.route("/control/pause", methods=["POST"])

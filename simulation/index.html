@@ -70,6 +70,7 @@
     <div id="councilBanner"></div>
     <div id="foundingBanner"></div>
     <div id="disasterBanner"></div>
+    <div id="pressureBanner"></div>
     <div id="godPublicBanner"></div>
   </div>
   <aside id="sidebar">
@@ -146,12 +147,34 @@
       </div>
       </div>
     </section>
+    <div id="sidebarLogsScroll">
     <section class="panel-section" id="activityLog">
       <button class="panel-head" type="button" aria-expanded="true">
         <span class="panel-arrow" aria-hidden="true">▼</span>
         <span>Activity</span>
       </button>
       <div class="panel-body"><ul id="actList"></ul></div>
+    </section>
+    <section class="panel-section" id="decisionAuditPanel">
+      <button class="panel-head" type="button" aria-expanded="true">
+        <span class="panel-arrow" aria-hidden="true">▼</span>
+        <span>Decision audit</span>
+      </button>
+      <div class="panel-body">
+        <ul id="decisionAuditAgentList">
+          <li class="decision-audit-empty">Loading audit data…</li>
+        </ul>
+        <details id="decisionAuditRecentWrap" open>
+          <summary>Recent comparisons</summary>
+          <ul id="decisionAuditRecent"></ul>
+        </details>
+      </div>
+    </section>
+    <section class="panel-section" id="anomalySection" style="display:none">
+      <details id="anomalyPanel" open>
+        <summary>Anomaly radar</summary>
+        <ul id="anomalyList"></ul>
+      </details>
     </section>
     <section class="panel-section" id="chronicleLog">
       <button class="panel-head" type="button" aria-expanded="true">
@@ -160,18 +183,23 @@
       </button>
       <div class="panel-body"><ul id="chronicleList"></ul></div>
     </section>
-    <section class="panel-section" id="decisionAuditPanel" style="display:none">
-      <button class="panel-head" type="button" aria-expanded="true">
-        <span class="panel-arrow" aria-hidden="true">▼</span>
-        <span>Decision audit</span>
-      </button>
-      <div class="panel-body">
-        <ul id="decisionAuditAgentList"></ul>
-        <details id="decisionAuditRecentWrap" open>
-          <summary>Recent comparisons</summary>
-          <ul id="decisionAuditRecent"></ul>
-        </details>
-      </div>
+    <section class="panel-section" id="sagaLog">
+      <h2>Village paper</h2>
+      <ul id="sagaList"></ul>
+    </section>
+    <section class="panel-section" id="predictionMarketPanel" style="display:none">
+      <details id="predictionMarketDetails" open>
+        <summary>
+          Prediction market
+          <span id="predictionMarketHitRate" class="prediction-hit-rate">Hit rate: —</span>
+        </summary>
+        <div class="prediction-market-body">
+          <div id="predictionMarketQuestion" class="prediction-question"></div>
+          <div id="predictionMarketChoices" class="prediction-choices"></div>
+          <div id="predictionMarketStatus" class="prediction-status"></div>
+          <ul id="predictionMarketHistory"></ul>
+        </div>
+      </details>
     </section>
     </div>
   </aside>
@@ -230,6 +258,23 @@
       <svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>
       <span class="lbl">History</span>
     </button>
+    <button type="button" class="gbtn audit locked-dependent" data-feature="audit" data-tab="audit"
+      id="godAuditTabBtn" disabled
+      data-tip='{"t":"Audit","d":"Full decision pairs with intent and outcome axes."}'>
+      <svg viewBox="0 0 24 24"><path d="M8 4h8v2H8z"/><path d="M6 6h12v14H6z"/><path d="M9 10h6M9 14h4"/></svg>
+      <span class="lbl">Audit</span>
+    </button>
+    <button type="button" class="gbtn anomaly" data-feature="anomaly" data-tab="anomaly" style="display:none"
+      data-tip='{"t":"Anomaly","d":"Statistical anomalies detected in village metrics."}'>
+      <svg viewBox="0 0 24 24"><path d="M12 2l9 18H3z"/><path d="M12 9v5"/></svg>
+      <span class="lbl">Anomaly</span>
+    </button>
+    <button type="button" class="gbtn lineage locked-dependent" data-feature="lineage" data-tab="lineage"
+      id="godLineageTabBtn" disabled
+      data-tip='{"t":"Lineage","d":"Parents, children, and birth-time inherited testament and beliefs."}'>
+      <svg viewBox="0 0 24 24"><path d="M12 2v6M8 8h8M6 14h4v8H6zM14 14h4v8h-4z"/><path d="M12 8v6"/></svg>
+      <span class="lbl">Lineage</span>
+    </button>
     <!-- Sovereign God mode Optional Phase 8: dual-gated (GOD_MODE_ENABLED
          AND GOD_COMPILER_ENABLED / SIM_GOD_COMPILER=1). Hidden by
          default; applyGodCapabilitiesToForms() reveals it only when
@@ -239,6 +284,20 @@
       data-tip='{"t":"Compile","d":"Turn a written story idea into a Story draft (optional advanced tool)."}'>
       <svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>
       <span class="lbl">Compile</span>
+    </button>
+    <!-- idea-03 Agent interview: dual-gated on AGENT_INTERVIEW_ENABLED AND
+         GOD_MODE_ENABLED (both plain config.flags booleans -- no capability
+         probe needed, unlike Compile). Hidden by default; updateGodModeGate()
+         (viewer/divine-history.js) reveals it once both flags are true. The
+         /agent/interview route itself requires no auth (specs/04-http-api.md),
+         but this button still respects the console's own unlock gate for a
+         consistent in-console experience (locked-dependent, like every other
+         feature tab). -->
+    <button type="button" class="gbtn interview locked-dependent" data-feature="interview" data-tab="interview"
+      id="godInterviewTabBtn" style="display:none" disabled
+      data-tip='{"t":"Interview","d":"Ask one villager a question, out-of-world. They never know; nothing changes."}'>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9a2.8 2.8 0 1 1 3.8 2.6c-.8.4-1 .9-1 1.7"/><circle cx="12" cy="16.6" r="0.1"/></svg>
+      <span class="lbl">Interview</span>
     </button>
   </div>
 </div>
@@ -274,7 +333,7 @@
     <div class="modal-body" id="divineModalBody"></div>
   </div>
 </div>
-<!-- Hidden holding container: all 8 #divineTab-* panels live here at load so getElementById + wireDivineForm still work -->
+<!-- Hidden holding container: all 13 #divineTab-* panels live here at load so getElementById + wireDivineForm still work -->
 <div id="divineTabHold" style="display:none" aria-hidden="true">
         <div class="divine-tab-panel" id="divineTab-unlock">
           <div class="divine-row">
@@ -1012,6 +1071,60 @@
           <ul id="godHistoryList" class="divine-result"></ul>
         </div>
 
+        <div class="divine-tab-panel" id="divineTab-audit" style="display:none">
+          <div id="godDecisionAuditToolbar" class="divine-audit-toolbar">
+            <div class="divine-row divine-audit-filters">
+              <label>Agent
+                <input type="search" id="godDecisionAuditAgentFilter" placeholder="name substring" autocomplete="off" />
+              </label>
+              <label>Intent
+                <select id="godDecisionAuditIntentFilter">
+                  <option value="all">All</option>
+                  <option value="match">match</option>
+                  <option value="mismatch">mismatch</option>
+                  <option value="unclassified">unclassified</option>
+                  <option value="uncorrelated">uncorrelated</option>
+                  <option value="fallback">fallback</option>
+                </select>
+              </label>
+              <label>Outcome
+                <select id="godDecisionAuditOutcomeFilter">
+                  <option value="all">All</option>
+                  <option value="ok">ok</option>
+                  <option value="fail">fail</option>
+                  <option value="unknown">unknown</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div id="godDecisionAuditLegend" class="divine-audit-legend">
+            <strong>Two axes (independent):</strong>
+            <span class="divine-audit-legend-body">
+              <strong>Intent</strong> compares reasoning category to the chosen action (match / mismatch / other buckets).
+              <strong>Outcome</strong> reads the activity summary —
+              <code>ok</code> means the engine wrote a summary, not that the action succeeded (e.g. “heads to gather…” is ok).
+            </span>
+          </div>
+          <div id="godDecisionAuditStatus" class="divine-meta"></div>
+          <div id="godDecisionAuditSummary" class="divine-audit-summary"></div>
+          <ul id="godDecisionAuditEntries" class="divine-audit-entries"></ul>
+        </div>
+        <div class="divine-tab-panel" id="divineTab-anomaly" style="display:none">
+          <p class="divine-help divine-help-intro">Statistical anomalies from this run's benchmark metrics.</p>
+          <div id="divineAnomalyGroups"></div>
+        </div>
+        <div class="divine-tab-panel" id="divineTab-lineage" style="display:none"
+          data-tip='{"t":"Lineage","d":"Read-only family tree from /state — parents, children, inherited testament and beliefs."}'>
+          <div class="divine-lineage-panel">
+            <div class="divine-row">
+              <label data-tip='{"t":"Villager","d":"Living and deceased agents; lineage fields come from /state."}'>Villager
+                <select id="godLineageAgentSelect"></select>
+              </label>
+            </div>
+            <div id="godLineageContent" class="divine-lineage-content"></div>
+          </div>
+        </div>
+
         <!-- Sovereign God mode Optional Phase 8 (docs/archive/plan-sovereign-god-
              mode-v2.md "Free-prose story compiler"): the compiler NEVER
              mutates and has no Apply button here on purpose -- a successful
@@ -1027,6 +1140,21 @@
             <div class="divine-result" id="godCompileResult"></div>
           </fieldset>
         </div>
+
+        <!-- idea-03 Agent interview (specs/11-viewer.md "Interview (out-of-
+             world debug Q&A)"): read-only, zero-mutation Q&A over one
+             agent's own memory/relationships/beliefs. Like Compile, there is
+             no Preview/Apply step -- this feature never mutates. -->
+        <div class="divine-tab-panel" id="divineTab-interview" style="display:none">
+          <fieldset class="divine-fieldset" id="godInterviewFieldset">
+            <legend data-tip='{"t":"Interview","d":"Ask one villager a question, out-of-world. Answered strictly from their own memory, relationships, and beliefs. Never seen by them; changes nothing."}'>Interview a villager (out-of-world, read-only)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Villager","d":"Living villager to interview."}'>Villager <select id="godInterviewAgentSelect"></select></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Question","d":"Free-text question, up to 500 characters. The server enforces the real limit; this is just a typing guide."}'>Question <textarea id="godInterviewQuestion" rows="3" maxlength="500"></textarea></label></div>
+            <div class="divine-actions"><button type="button" id="godInterviewAskBtn"
+              data-tip='{"t":"Ask","d":"Send the question to this villager. Read-only -- nothing in the village changes."}'>Ask</button></div>
+            <div class="divine-result" id="godInterviewResult"></div>
+          </fieldset>
+        </div>
 </div>
 <div id="tooltip"></div>
 <div id="deadAgentsModal" role="dialog" aria-labelledby="deadAgentsTitle" aria-modal="true">
@@ -1036,6 +1164,27 @@
       <button id="deadAgentsCloseBtn" type="button">Close</button>
     </header>
     <ul id="deadAgentsList"></ul>
+  </div>
+</div>
+<div id="worldWikiModal" role="dialog" aria-labelledby="wikiTitle" aria-modal="true">
+  <div id="worldWikiDialog">
+    <header>
+      <div class="wiki-title-wrap">
+        <h3 id="wikiTitle">World Wiki</h3>
+        <span id="wikiSubtitle"></span>
+      </div>
+      <button id="wikiBackBtn" type="button" disabled>&#8592; Back</button>
+      <button id="wikiCloseBtn" type="button">Close</button>
+    </header>
+    <div id="worldWikiBody">
+      <div id="wikiSidebar">
+        <input type="search" id="wikiSearch" placeholder="Filter entities…" autocomplete="off" />
+        <div id="wikiIndex"></div>
+      </div>
+      <div id="wikiContent">
+        <div id="wikiBody"></div>
+      </div>
+    </div>
   </div>
 </div>
 <div id="councilTranscriptModal" role="dialog" aria-labelledby="councilTranscriptTitle" aria-modal="true">
@@ -1083,8 +1232,10 @@
 <script src="viewer/sidebar.js"></script>
 <script src="viewer/decision-audit.js"></script>
 <script src="viewer/council.js"></script>
+<script src="viewer/predictions.js"></script>
 <script src="viewer/minimap.js"></script>
 <script src="viewer/polling.js"></script>
+<script src="viewer/anomaly.js"></script>
 <script src="viewer/controls.js"></script>
 <script src="viewer/renderloop.js"></script>
 <script src="viewer/divine-bootstrap.js"></script>
@@ -1094,5 +1245,6 @@
 <script src="viewer/divine-voice.js"></script>
 <script src="viewer/divine-miracles-story.js"></script>
 <script src="viewer/divine-history.js"></script>
+<script src="viewer/world-wiki.js"></script>
 </body>
 </html>

@@ -18,13 +18,18 @@ __all__ = [
     "ACTIVITY_CUES_ENABLED",
     "SOCIAL_LAYER_ENABLED",
     "CHRONICLE_ENABLED",
+    "CHRONICLE_SAGA_ENABLED",
     "FOUNDING_EVENTS_ENABLED",
     "WORLD_CLOCK_HUD_ENABLED",
     "SEASONAL_AGENTS_ENABLED",
     "MEMORY_ENABLED",
     "WIKI_MEMORY",
     "TESTAMENT_ENABLED",
+    "ANOMALY_RADAR_ENABLED",
     "DECISION_AUDIT_ENABLED",
+    "WORLD_WIKI_ENABLED",
+    "PREDICTION_MARKET_ENABLED",
+    "AGENT_INTERVIEW_ENABLED",
     "THEORY_OF_MIND_ENABLED",
     "PEER_MODEL_MAX_PEERS",
     "PEER_MODEL_FIELD_CHAR_CAP",
@@ -297,6 +302,8 @@ __all__ = [
     "CUSTOM_RULE_MODIFIER_MAX",
     "MAX_CONCURRENT_LLM",
     "PIANO_CONCURRENT_LLM",
+    "INTERVIEW_CONCURRENT_LLM",
+    "INTERVIEW_QUESTION_MAX_CHARS",
     "PIANO_MODULE_CACHE_TTL",
     "PIANO_CROSS_CONTEXT_TTL",
     "MODULE_PULSE_INTERVAL_S",
@@ -369,6 +376,7 @@ __all__ = [
     "RIVAL_PRICE_SURCHARGE",
     "MINT_RATE",
     "HOMELESS_NUDGE_FRAMES",
+    "DYNASTY_TREE_ENABLED",
     "LIFECYCLE_ENABLED",
     "LIFECYCLE_TICK_FRAMES",
     "AGE_YEARS_PER_TICK",
@@ -399,6 +407,9 @@ __all__ = [
     "LIBRARY_STUDY_GAIN",
     "LIBRARY_STUDY_WEIGHT_CAP",
     "CHRONICLE_CAP",
+    "SAGA_CAP",
+    "SAGA_DIALOGUE_EXCERPT_CAP",
+    "SAGA_FALLBACK_TEXT",
     "CHRONICLE_PROMPT_ENTRIES",
     "TESTAMENT_CAP",
     "TESTAMENT_PROMPT_ENTRIES",
@@ -457,6 +468,26 @@ __all__ = [
     "NIGHT_EXPOSURE_DAMAGE",
     "WILDLIFE_EVENT_PROB",
     "WILDLIFE_GUARD_RADIUS",
+    "RAIDERS_CONTAGION_ENABLED",
+    "RAID_EVENT_PROB",
+    "RAID_RESOURCE_LOSS_MIN",
+    "RAID_RESOURCE_LOSS_MAX",
+    "RAID_STRUCTURE_DAMAGE",
+    "RAID_CONTACT_DAMAGE",
+    "RAID_GUARD_RADIUS",
+    "RAID_GUARD_MITIGATION_PER_GUARD",
+    "RAID_GUARD_MITIGATION_CAP",
+    "RAID_WALL_MITIGATION",
+    "RAID_TELEGRAPH_LEAD_FRAMES",
+    "CONTAGION_EVENT_PROB",
+    "CONTAGION_SPREAD_RADIUS",
+    "CONTAGION_TRANSMISSION_PROB",
+    "CONTAGION_DURATION_FRAMES",
+    "CONTAGION_HEALTH_LOSS_PER_TICK_GATE",
+    "HEALER_RECOVERY_RADIUS",
+    "HEALER_RECOVERY_BONUS",
+    "CLINIC_RECOVERY_RADIUS",
+    "CLINIC_RECOVERY_BONUS",
     "SETTLEMENT_STRUCT_THRESHOLD",
     "SETTLEMENT_POP_THRESHOLD",
     "CARAVAN_CARRY_MIN",
@@ -480,6 +511,9 @@ ACTIVITY_CUES_ENABLED = True
 # chronicle. These never alter social/culture simulation state or prompts.
 SOCIAL_LAYER_ENABLED = True
 CHRONICLE_ENABLED = True
+# Daily village saga dispatch ring (viewer-only; never prompt-facing).
+# Phase 2: day-boundary sim-fast lm_complete dispatch via run_chronicle_saga.
+CHRONICLE_SAGA_ENABLED = True
 # Read-only viewer projection: announces a newly founded district as a
 # chronicle milestone + a brief banner (index.html). Gates only the
 # _found_district chronicle call and the banner trigger -- district founding
@@ -501,11 +535,27 @@ WIKI_MEMORY = True
 # memoryWiki (no new LLM call site). Meaningful only with WIKI_MEMORY on.
 # Default on; set False for byte-identical baseline revert.
 TESTAMENT_ENABLED = True
+# idea-07 (docs/plans/idea-07-anomaly-radar/plan.md): gates ONLY the
+# server-side GET /anomalies route/reader (simulation/server.py) that reads
+# the current run's benchmarks.jsonl -- no engine mechanic references this
+# flag, no new persisted civilization state, no /state key (Answer 1 in the
+# plan). Default on; set False to disable the route (it still responds with
+# {ok: true, enabled: false, anomalies: []}, never a 404/disabled error).
+ANOMALY_RADAR_ENABLED = True
 # Idea-10 "Why did you do that?" audit: mint a per-decision correlation id in
 # run_agent_decision (llm.jsonl decision._decision_id) and thread it through
-# apply_decision's tail activity push (activity.jsonl decision_id). Default on;
-# when off, neither log stream carries the field (see specs/03-cognition.md).
+# apply_decision's activity record (activity.jsonl decision_id). Default on;
+# when off, neither log stream carries the field.
 DECISION_AUDIT_ENABLED = True
+# World wiki (idea-09-world-wiki): read-only cross-linked page model served
+# at GET /wiki. Default on; when False the route returns the disabled shape.
+WORLD_WIKI_ENABLED = True
+# Idea-04 spectator prediction market: gates /predictions/* I/O and viewer;
+# no _tick_once reader. Default on.
+PREDICTION_MARKET_ENABLED = True
+# Read-only operator Q&A over one agent's private context. The route remains
+# independent of God-mode auth; the viewer button is separately God-mode gated.
+AGENT_INTERVIEW_ENABLED = True
 # Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
 # module inside the existing fan-out (not an extra call per turn). Advisory
 # prompt context only — no deterministic behavior acts on peerModel. Default
@@ -1362,6 +1412,11 @@ MAX_CONCURRENT_LLM = 3
 # running concurrently against their respective model (specs/03-cognition.md,
 # ollama_config.md).
 PIANO_CONCURRENT_LLM = 2
+# Separate capacity for operator-triggered interviews. Contention on this
+# slot never consumes the engine's decision or PIANO pools.
+INTERVIEW_CONCURRENT_LLM = 1
+# Questions above this server-side cap are rejected rather than truncated.
+INTERVIEW_QUESTION_MAX_CHARS = 500
 # Off-tick module reports (e.g. social/reflection on a tick they don't fire)
 # are served from the last real report instead of an empty slot, as long as
 # it is no more than this many module-ticks stale -- see _run_piano_modules.
@@ -1638,6 +1693,10 @@ SCHISM_COOLDOWN_FRAMES = RULE_PROPOSE_COOLDOWN * 6
 # RULE_KINDS stays {resource_tax, custom, priority} -- prompts/behavior for
 # lifecycle-only kinds are suppressed.
 LIFECYCLE_ENABLED = True
+# Idea-02 Dynasty tree: persisted children[] linkage and birth-time testament/
+# belief snapshots. Gates _heirs_of children-array read and the Divine Lineage
+# viewer (Phase 3); birth writes stay unconditional within LIFECYCLE_ENABLED.
+DYNASTY_TREE_ENABLED = True
 # Aging: 1 "year" per LIFECYCLE_TICK_FRAMES (~10s at 30 ticks/s) is far too
 # fast for a multi-day soak to show generational turnover in real time, so
 # ages advance in small fractional steps. 2026-07-10: 0.02 (~1y/8.3min) wiped
@@ -1715,6 +1774,12 @@ LIBRARY_STUDY_WEIGHT_CAP = 5         # study-gain upgrade-weight cap (knowledge-
 # prompt line ("Village history: ...") so a long-running village develops a
 # legible past without growing the prompt unboundedly.
 CHRONICLE_CAP = 100
+# Saga: capped ring of daily ~150-word dispatches (sibling to chronicle, not prompt-facing).
+SAGA_CAP = 100
+# Bounded conversation.jsonl lines included in the day-boundary saga prompt.
+SAGA_DIALOGUE_EXCERPT_CAP = 10
+# Deterministic fallback when lm_complete fails or returns empty (never blocks tick).
+SAGA_FALLBACK_TEXT = "A quiet day passed in the village; little was recorded."
 CHRONICLE_PROMPT_ENTRIES = 3         # how many recent entries to fold into the prompt line
 # Testament (TESTAMENT_ENABLED): capped ring of attributed lesson lines folded
 # into one prompt line ("Village testament: ...") the way the chronicle works.
@@ -1777,6 +1842,7 @@ TERRAIN_TILES_ENABLED = True
 PATH1_DIPLOMACY_ENABLED = True
 TIER3_CONTENT_ENABLED = True
 PRESSURE_LOOP_ENABLED = True
+RAIDERS_CONTAGION_ENABLED = True
 ENV_EFFECTS_ENABLED = True
 LIBRARY_SCALING_ENABLED = True
 TRANSIT_ENABLED = True
@@ -1801,6 +1867,8 @@ if LIFECYCLE_ENABLED:
     RULE_KINDS = RULE_KINDS | {"harvest_quota", "rationing", "succession"}
 if path1_on("PATH1_DIPLOMACY_ENABLED"):
     RULE_KINDS = RULE_KINDS | {"treaty"}
+if RAIDERS_CONTAGION_ENABLED:
+    RULE_KINDS = RULE_KINDS | {"quarantine"}
 
 # --- Registries (ported from index.html) ---
 PROJECT_TEMPLATES = {
@@ -1815,6 +1883,27 @@ if CRAFTING_ENABLED:
         "name": "Granary", "needs": {"planks": 2, "bricks": 2, "food": 1}, "visualStyle": "house"
     }
     PROJECT_ORDER.append("granary")
+
+# Raiders/contagion (idea-05) — raid tunables; flag is RAIDERS_CONTAGION_ENABLED above.
+RAID_EVENT_PROB = 0.01
+RAID_RESOURCE_LOSS_MIN = 2
+RAID_RESOURCE_LOSS_MAX = 8
+RAID_STRUCTURE_DAMAGE = 25
+RAID_CONTACT_DAMAGE = 10
+RAID_GUARD_RADIUS = 150
+RAID_GUARD_MITIGATION_PER_GUARD = 0.15
+RAID_GUARD_MITIGATION_CAP = 0.75
+RAID_WALL_MITIGATION = 0.20
+RAID_TELEGRAPH_LEAD_FRAMES = 300
+CONTAGION_EVENT_PROB = 0.015
+CONTAGION_SPREAD_RADIUS = 60
+CONTAGION_TRANSMISSION_PROB = 0.05
+CONTAGION_DURATION_FRAMES = 2700
+CONTAGION_HEALTH_LOSS_PER_TICK_GATE = 1
+HEALER_RECOVERY_RADIUS = 100
+HEALER_RECOVERY_BONUS = 0.05
+CLINIC_RECOVERY_RADIUS = 120
+CLINIC_RECOVERY_BONUS = 0.05
 
 # Seed structure functions (Phase A): every built type declares mechanical effects.
 # Custom blueprints must supply their own function block; these cover seed templates.
@@ -1850,6 +1939,12 @@ SEED_STRUCTURE_FUNCTIONS = {
         }],
     },
 }
+if RAIDERS_CONTAGION_ENABLED:
+    SEED_STRUCTURE_FUNCTIONS["wall"]["mitigates"] = [{
+        "kind": "raid",
+        "amount": RAID_WALL_MITIGATION,
+        "scope": "district",
+    }]
 if CRAFTING_ENABLED:
     SEED_STRUCTURE_FUNCTIONS["granary"] = {
         "produces": [{
@@ -1867,6 +1962,22 @@ if CRAFTING_ENABLED:
             {"resource": "food", "capacity": 40},
             {"resource": "fish", "capacity": 20},
         ]
+
+if RAIDERS_CONTAGION_ENABLED:
+    PROJECT_TEMPLATES["clinic"] = {
+        "name": "Clinic",
+        "needs": {"wood": 2, "stone": 2, "herbs": 1},
+        "visualStyle": "house",
+    }
+    PROJECT_ORDER.append("clinic")
+    SEED_STRUCTURE_FUNCTIONS["clinic"] = {
+        "heals": [{
+            "kind": "contagion_recovery",
+            "bonus": CLINIC_RECOVERY_BONUS,
+            "radius": CLINIC_RECOVERY_RADIUS,
+            "scope": "district",
+        }],
+    }
 
 # Terraform projects (Phase B): funded like builds but mutate terrain/stocks.
 TERRAFORM_TEMPLATES = {

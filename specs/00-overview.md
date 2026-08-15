@@ -50,7 +50,7 @@ index; [docs/REFERENCE.md](../docs/REFERENCE.md) for deep mechanics.
 
 | Path | Role |
 |---|---|
-| `simulation/sim_engine/*.py` | The engine package (`SimEngine` in `core.py`): all world state, tick loop, `apply_decision`, persistence; module-level `constants.py`/`persistence.py`/`helpers.py` plus 22 `mixin_*.py` topic files exec()'d into a shared namespace — see [01-architecture.md](01-architecture.md) |
+| `simulation/sim_engine/*.py` | The engine package (`SimEngine` in `core.py`): all world state, tick loop, `apply_decision`, persistence; module-level `constants.py`/`persistence.py`/`helpers.py` plus 23 `mixin_*.py` topic files exec()'d into a shared namespace — see [01-architecture.md](01-architecture.md) |
 | `simulation/server.py` | Flask app + cognition entry point: every route, `DECISION_ACTIONS`/`DECISION_SCHEMA`, prompt building, LLM calls, `if __name__ == "__main__"` |
 | `simulation/_server/*.py` | Non-route helper modules server.py imports from (validation, prompt formatting, memory store, session logging, model routing, structured-output error parsing, role data) — pure move split, no behavior change — see [01-architecture.md](01-architecture.md) |
 | `simulation/index.html` | Thin browser viewer shell — markup only |
@@ -97,7 +97,7 @@ uv sync && uv run python simulation/server.py   # http://127.0.0.1:5001
 | [07-actions.md](07-actions.md) | The action catalog (sole source for all actions) |
 | [08-systems-economy.md](08-systems-economy.md) | Survival, crafting, goals, structure effects, goods, economy |
 | [09-systems-society.md](09-systems-society.md) | Tech tree, Daily Council/governance and voting, memes, culture, benchmarks |
-| [10-path1.md](10-path1.md) | Path 1 bundle: industry, tools, terrain, diplomacy, pressure loop |
+| [10-path1.md](10-path1.md) | Path 1 bundle: industry, tools, terrain, diplomacy, pressure loop, raiders/contagion |
 | [11-viewer.md](11-viewer.md) | Thin-viewer contract, viewer/*.js/css/*.css, sprites/*.js rendering |
 | [12-ops.md](12-ops.md) | SessionLogger, log ingestion, scripts/ tools |
 

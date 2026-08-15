@@ -1,3 +1,234 @@
+  /* ================================================================
+     World Wiki modal — full-screen, two-column (index + page content).
+     Mirrors council assembly modal pattern; z-index 120 (above 110).
+     ================================================================ */
+  #worldWikiModal {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 120;
+    background: rgba(0, 0, 0, 0.65);
+    align-items: center;
+    justify-content: center;
+    padding: 18px;
+    box-sizing: border-box;
+  }
+  #worldWikiModal.open { display: flex; }
+  #worldWikiDialog {
+    width: min(1180px, 100%);
+    height: min(880px, calc(100vh - 36px));
+    background: #13131c;
+    border: 1px solid #2c2c3a;
+    border-radius: 10px;
+    box-shadow: 0 16px 52px rgba(0,0,0,.55);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    color: #ccc;
+  }
+  #worldWikiDialog header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid #2c2c3a;
+    flex-shrink: 0;
+  }
+  #worldWikiDialog header .wiki-title-wrap {
+    flex: 1;
+    min-width: 0;
+  }
+  #worldWikiDialog header h3 {
+    margin: 0;
+    color: #e8e3d8;
+    font-size: 16px;
+    line-height: 1.2;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  #wikiSubtitle {
+    display: block;
+    color: #7a7a8a;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-top: 1px;
+  }
+  #wikiBackBtn, #wikiCloseBtn {
+    padding: 5px 10px;
+    font: 12px sans-serif;
+    background: #2a2a35;
+    color: #ccc;
+    border: 1px solid #444;
+    border-radius: 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  #wikiBackBtn:disabled { opacity: 0.35; cursor: default; }
+  #wikiBackBtn:not(:disabled):hover, #wikiCloseBtn:hover { background: #383848; }
+  #worldWikiBody {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+  #wikiSidebar {
+    width: 220px;
+    flex-shrink: 0;
+    border-right: 1px solid #2c2c3a;
+    display: flex;
+    flex-direction: column;
+    background: #0f0f18;
+    overflow: hidden;
+  }
+  #wikiSearch {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px 10px;
+    font: 12px system-ui, sans-serif;
+    background: #1a1a24;
+    color: #ccc;
+    border: none;
+    border-bottom: 1px solid #2c2c3a;
+    outline: none;
+    flex-shrink: 0;
+  }
+  #wikiSearch::placeholder { color: #555; }
+  #wikiIndex {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+  .wiki-index-group { margin-bottom: 4px; }
+  .wiki-index-kind {
+    padding: 6px 10px 3px;
+    font-size: 10px;
+    font-weight: 700;
+    color: #5a5a6a;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .wiki-index-item {
+    padding: 5px 12px;
+    font-size: 12px;
+    color: #9a9aaa;
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .wiki-index-item:hover { background: #1e1e2a; color: #ddd; }
+  .wiki-index-item.active {
+    background: #1c1c30;
+    color: #7ec8e3;
+    font-weight: 600;
+  }
+  #wikiContent {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  #wikiBody {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 18px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  /* Fields table */
+  table.wiki-fields {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 16px;
+    font-size: 12px;
+  }
+  table.wiki-fields th {
+    text-align: left;
+    padding: 5px 10px 5px 0;
+    color: #6e6e80;
+    font-weight: 600;
+    white-space: nowrap;
+    vertical-align: top;
+    width: 140px;
+    text-transform: capitalize;
+  }
+  table.wiki-fields td {
+    padding: 5px 0;
+    color: #c5c5d0;
+    vertical-align: top;
+    word-break: break-word;
+  }
+  table.wiki-fields tr { border-bottom: 1px solid #1e1e2a; }
+  table.wiki-fields tr:last-child { border-bottom: 0; }
+  .wiki-kv {
+    display: inline-block;
+    margin-right: 6px;
+    background: #1e1e2c;
+    border-radius: 3px;
+    padding: 0 4px;
+    font-size: 11px;
+    color: #aaa;
+  }
+  /* Cross-links section */
+  .wiki-links-section { margin-top: 14px; }
+  .wiki-links-heading {
+    margin: 0 0 6px;
+    font-size: 11px;
+    color: #6e6e80;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 700;
+  }
+  .wiki-link-row {
+    padding: 4px 0;
+    font-size: 12px;
+    color: #9a9aaa;
+    border-bottom: 1px solid #1e1e2a;
+  }
+  .wiki-link-row:last-child { border-bottom: 0; }
+  .wiki-link-rel { color: #6e6e80; margin-right: 4px; }
+  .wiki-link-kind-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: #222230;
+    color: #7a7a8a;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-right: 4px;
+    vertical-align: baseline;
+  }
+  /* wiki-link: interactive link element used across the whole page */
+  .wiki-link {
+    color: #7ec8e3;
+    cursor: pointer;
+    text-decoration: underline dotted;
+    text-underline-offset: 2px;
+  }
+  .wiki-link:hover { color: #aee0f5; }
+  /* Small wiki button chip in the agent list row */
+  .agent-wiki-btn {
+    font-size: 10px;
+    text-decoration: none;
+    opacity: 0.6;
+    vertical-align: middle;
+    padding: 0 2px;
+  }
+  .agent-wiki-btn:hover { opacity: 1; }
+  .wiki-empty {
+    color: #5a5a6a;
+    font-style: italic;
+    font-size: 12px;
+    padding: 8px 0;
+  }
+  /* ================================================================
+     End World Wiki modal styles
+     ================================================================ */
   #councilTranscriptModal {
     display: none;
     position: fixed;
@@ -129,6 +360,9 @@
   #convList .msg { color: #bbb; }
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
+  #sagaLog {
+    padding-bottom: 12px;
+  }
   #actList, #chronicleList, #decisionAuditAgentList, #decisionAuditRecent {
     list-style: none;
     margin: 0;
@@ -140,15 +374,11 @@
     line-height: 1.5;
     color: #aaa;
   }
-  #actList li, #chronicleList li, #decisionAuditAgentList li, #decisionAuditRecent li { padding: 3px 0; }
+  #actList li, #chronicleList li, #sagaList li, #decisionAuditAgentList li, #decisionAuditRecent li { padding: 3px 0; }
   #chronicleList .chronicle-kind { color: #d9b96e; font-weight: 600; }
-  #chronicleList .chronicle-frame { color: #777; font-size: 10px; }
+  #chronicleList .chronicle-frame, #sagaList .chronicle-frame { color: #777; font-size: 10px; }
   #decisionAuditRecentWrap {
     margin-top: 6px;
-    flex: 1 1 0;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
   }
   #decisionAuditRecentWrap summary {
     cursor: pointer;
@@ -166,6 +396,18 @@
   #decisionAuditRecent .decision-audit-action { color: #ccc; }
   #decisionAuditRecent .decision-audit-category { color: #999; font-size: 11px; }
   #decisionAuditRecent .decision-audit-msg { color: #aaa; }
+  #anomalyPanel { flex-shrink: 0; }
+  #anomalyList { list-style: none; margin: 0; padding: 0; max-height: 160px; overflow-y: auto; font-size: 12px; line-height: 1.5; color: #aaa; }
+  #anomalyList li { padding: 3px 0; }
+  #anomalyList .anomaly-kind { color: #e37e7e; font-weight: 600; }
+  #anomalyPanel summary { cursor: pointer; font-size: 13px; font-weight: 600; color: #fff; margin-bottom: 6px; outline: none; }
+  .anomaly-metric { color: #999; }
+  .anomaly-value { color: #e3c87e; }
+  .anomaly-frame { color: #777; font-size: 10px; }
+  .anomaly-severity { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 1px 5px; border-radius: 3px; margin-left: 2px; }
+  .anomaly-severity-high { background: #4a1f1f; color: #f28b82; }
+  .anomaly-severity-medium { background: #4a3a1f; color: #f2c078; }
+  .anomaly-severity-low { background: #22303a; color: #8fc3e0; }
   .decision-audit-badge {
     display: inline-block;
     font-size: 9px;
@@ -179,6 +421,9 @@
   .decision-audit-badge-match { background: #1e3a2a; color: #b3ffcf; border: 1px solid #3a8a5a; }
   .decision-audit-badge-mismatch { background: #4a1e1e; color: #ffb3b3; border: 1px solid #a24545; }
   .decision-audit-badge-muted { background: #2a2a35; color: #888; border: 1px solid #3a3a45; }
+  .decision-audit-badge-outcome-ok { background: #1e3a2a; color: #b3ffcf; border: 1px solid #3a8a5a; }
+  .decision-audit-badge-outcome-fail { background: #4a1e1e; color: #ffb3b3; border: 1px solid #a24545; }
+  .decision-audit-badge-outcome-unknown { background: #2a2a35; color: #aaa; border: 1px solid #4a4a55; }
   /* --- Phase D: council banner + Council panel (lives in the left convPanel column) --- */
   #councilBanner {
     position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
@@ -200,6 +445,17 @@
     background: rgba(22, 48, 52, 0.92); color: #b8e8f0;
     border: 1px solid #3a9aaa; border-radius: 4px;
     z-index: 11; display: none; pointer-events: none;
+  }
+  #pressureBanner {
+    position: fixed; top: 108px; left: 50%; transform: translateX(-50%);
+    padding: 6px 18px; font: 600 13px system-ui, sans-serif;
+    background: rgba(72, 28, 18, 0.94); color: #ffd4c4;
+    border: 1px solid #c85a3a; border-radius: 4px;
+    z-index: 11; display: none; pointer-events: none;
+  }
+  #councilPanel summary {
+    cursor: pointer; font-size: 13px; font-weight: 600; color: #fff;
+    margin-bottom: 6px; outline: none;
   }
   #councilCards { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   .council-card {

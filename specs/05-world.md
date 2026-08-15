@@ -333,7 +333,9 @@ JSON blob — see [02-engine-core.md](02-engine-core.md#persistence).
 - `SEED_STRUCTURE_FUNCTIONS` (sim_engine/constants.py:1742-1791): each built type's mechanical
   effect vector — `houses` (population-cap contribution), `boosts` (gather/craft
   yield bonuses), `produces` (periodic resource generation), `unlocks` (craft
-  stations), `stores` (storage capacity, `GOODS_ENABLED` only). Custom blueprints
+  stations), `stores` (storage capacity, `GOODS_ENABLED` only), `mitigates`
+  (`RAIDERS_CONTAGION_ENABLED` — wall raid defense), `heals`
+  (`RAIDERS_CONTAGION_ENABLED` — clinic contagion recovery). Custom blueprints
   supply their own `function` block at proposal time (see
   [07-actions.md](07-actions.md#the-build-pipeline)).
 
@@ -341,15 +343,34 @@ JSON blob — see [02-engine-core.md](02-engine-core.md#persistence).
 `isRuin`, and `homeOf`/`homeStructureId` fields above) go through one shared
 helper, `_apply_structure_condition_delta(structure, delta)`, extracted
 specifically so the passive per-goods-tick decay (`_tick_structure_decay`,
-always a negative delta) and the Sovereign God mode `structure_condition`
-miracle (repair with a positive delta, damage with a negative one) fire
+always a negative delta), Sovereign God mode `structure_condition`
+miracle (repair with a positive delta, damage with a negative one), and
+**raid structure damage** (`RAIDERS_CONTAGION_ENABLED` —
+`-RAID_STRUCTURE_DAMAGE` toward the existing ruin threshold) fire
 identical `STRUCTURE_DISREPAIR_THRESHOLD`-crossing and ruin-transition
 narration — including clearing `homeOf`/`homeStructureId` and the
 "left homeless" line when a structure someone lives in collapses into a
-ruin — rather than the miracle taking a parallel shortcut. See
+ruin — rather than any parallel shortcut. See
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-4--bounded-immediate-miracles)
-and [08-systems-economy.md](08-systems-economy.md) (the "Structure decay"
-row) for the full decay-rate/threshold/repair-cost contract this reuses.
+and [08-systems-economy.md](08-systems-economy.md#raiders_contagion_enabled)
+for the full decay-rate/threshold/repair-cost contract this reuses.
+
+**Wall structure type (`type == "wall"`).** A village-scale structure built via
+`start_project`/`build_structure` (not the unrelated Path-1 composable tile
+`BLOCK_TYPES["wall"]` — individual grid blocks with `shelter: True` in
+[10-path1.md](10-path1.md)). Seed tables today:
+
+- `PROJECT_TEMPLATES["wall"]`: buildable project, needs `{"stone": 3, "gold": 1}`.
+- `PROJECT_ORDER` includes `"wall"`.
+- `SEED_STRUCTURE_FUNCTIONS["wall"]` (existing): `{"produces": [{"resource": "stone", "amount": 1, "every_ticks": 1800, "scope": "village"}]}` —
+  passive stone production, gated by `STRUCTURE_EFFECTS_ENABLED`.
+- **Raid defense (new, `RAIDERS_CONTAGION_ENABLED`):** the same function block
+  gains an additional `"mitigates"` effect kind (orthogonal to `"produces"`):
+  `"mitigates": [{"kind": "raid", "amount": RAID_WALL_MITIGATION, "scope": "district"}]`
+  with `RAID_WALL_MITIGATION = 0.20`. A standing, non-ruined (`condition >=
+  STRUCTURE_DISREPAIR_THRESHOLD`, not `isRuin`) `wall` in the raid's targeted
+  district contributes flat raid mitigation — see
+  [08-systems-economy.md](08-systems-economy.md#raiders_contagion_enabled).
 
 **Levels/upgrades:** gated by `STRUCTURE_UPGRADES_ENABLED` (default True).
 `MAX_STRUCTURE_LEVEL = 100` (sim_engine/constants.py:1070); `LEVEL_STEP = 1` per
@@ -570,3 +591,65 @@ assigns the next free slot to a corpse via the `bury_agent` action
 ([07-actions.md](07-actions.md)). A working cemetery structure (not disrepaired)
 is required before burial succeeds; a district with `kind == "cemetery"` bypasses
 the normal `PROJECT_KIND` build-district resolution.
+
+## World Wiki — district and structure pages (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan §2 Answers 1, 2, 3.
+
+This section documents the wiki page shapes for the two entity kinds owned by this spec:
+**district** and **structure**. Both are read-only projections over existing engine state;
+the wiki route (`GET /wiki`, [specs/04-http-api.md](04-http-api.md)) assembles them
+in-process.
+
+### District page
+
+Source: `civilization["districts"]` (live runtime dict, cold-started from
+`STARTER_DISTRICTS`) and district/road data from `_districts_snapshot_payload(engine)`
+(extracted from the `districts_js()` inline block; see
+[specs/04-http-api.md](04-http-api.md) — Districts merge mechanism).
+
+Fields projected onto a district page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | district key | |
+| `kind` | `district["kind"]` | e.g. `"farm"`, `"village"` |
+| `tile` | `district["tile"]` | ground tile id used by the renderer |
+| `label` | `district["label"]` | display name; `null` for ocean |
+| `bounds` | `district["bounds"]` | `{x1,y1,x2,y2}` |
+| `settlementId` | `district["settlementId"]` (when present) | links to settlement page |
+
+**Structured links** (from the Answer 2 cross-link table):
+
+- `settlementId` → settlement page (when present; district is a member of that settlement)
+
+**Not linked:** district `kind` is a category string, not an instance id — no
+auto-link is generated to other districts of the same kind.
+
+### Structure page
+
+Source: `civilization["structures"]` list (`_structure_snapshot_row()`,
+`mixin_snapshot.py:136-156`).
+
+Fields projected onto a structure page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | `structure["id"]` | |
+| `type` | `structure["type"]` | e.g. `"house"`, `"workshop"` |
+| `districtId` | `structure["districtId"]` | links to district page |
+| `homeOf` | `structure["homeOf"]` | agent id; links to agent page |
+| `condition` | `structure["condition"]` | 0–100 |
+| `isRuin` | `structure["isRuin"]` | bool |
+| `level` | `structure["level"]` | numeric level |
+| `visualTier` | `structure["visualTier"]` | 1–3 |
+| `name` | `structure["name"]` | custom blueprint name if present |
+
+**Structured links** (from the Answer 2 cross-link table):
+
+- `homeOf` → agent page (when set)
+- `districtId` → district page
+
+**Not linked:** structure `type` is a category string — a recipe's `station` field
+names this type string, not a specific built structure id, so that cross-reference
+is intentionally excluded from auto-linking (see Answer 2 table in specs/04).

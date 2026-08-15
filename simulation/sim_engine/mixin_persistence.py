@@ -356,6 +356,8 @@ class _PersistenceMixin:
                     civ.setdefault("lastSuccessionActivityFrame", 0)
                     civ.setdefault("harvestQuotas", {})
                     civ.setdefault("rationingActive", {})
+                    if RAIDERS_CONTAGION_ENABLED:
+                        civ.setdefault("quarantineActive", {})
                     civ.setdefault("populationFloorHeld", False)
                 # Huntable wildlife: additive setdefault for old saves; seed
                 # only when the list is still empty so a persisted population
@@ -370,6 +372,7 @@ class _PersistenceMixin:
                     if isinstance(civ.get("projectRegistry"), dict):
                         civ["projectRegistry"].setdefault("library", dict(PROJECT_TEMPLATES["library"]))
                     civ.setdefault("chronicle", [])
+                    civ.setdefault("saga", [])
                     civ.setdefault("libraryKnowledge", [])
                     civ.setdefault("memeTexts", {})
                     civ.setdefault("memeMutations", 0)
@@ -538,12 +541,18 @@ class _PersistenceMixin:
                         a.setdefault("lastQuotaRejection", None)
                         a.setdefault("lastRationingRejection", None)
                         a.setdefault("parents", None)
+                        a.setdefault("children", [])
+                        a.setdefault("inheritedTestament", [])
+                        a.setdefault("inheritedBeliefs", [])
                         a.setdefault("deathFrame", None)
                         a.setdefault("buried", False)
                         a.setdefault("restingPlaceId", None)
                         a.setdefault("restingDistrictId", None)
                     else:
                         a["age"] = None
+                    if RAIDERS_CONTAGION_ENABLED:
+                        a.setdefault("infected", False)
+                        a.setdefault("infectionFrame", None)
                     if CULTURE_ENABLED:
                         # Phase G: an agent restored from a pre-Phase-G save
                         # (or with the flag freshly turned on) starts with no
@@ -566,6 +575,29 @@ class _PersistenceMixin:
                     agents.append(a)
                 if not agents or not civ:
                     return False
+                if LIFECYCLE_ENABLED:
+                    # Older saves may retain child-to-parent links but lack
+                    # inverse parent-to-children arrays. Rebuild those links
+                    # after every agent has loaded, preserving persisted
+                    # children and avoiding duplicates.
+                    by_name = {a.get("name"): a for a in agents if a.get("name")}
+                    for child in agents:
+                        parents = child.get("parents")
+                        if not isinstance(parents, (list, tuple)):
+                            continue
+                        child_name = child.get("name")
+                        if not child_name:
+                            continue
+                        for parent_name in parents:
+                            parent = by_name.get(parent_name)
+                            if parent is None:
+                                continue
+                            children = parent.get("children")
+                            if not isinstance(children, list):
+                                children = []
+                                parent["children"] = children
+                            if child_name not in children:
+                                children.append(child_name)
                 self.civilization = civ
                 self._rebuild_role_maps()
                 if SCHISM_ENABLED:

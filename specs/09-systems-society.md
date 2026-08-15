@@ -6,7 +6,8 @@ memes, culture (skills/teaching/library/chronicle), messaging, benchmarks,
 and the governance-specific slice of lifecycle succession.
 
 **Canonical for:** `TECH_TREE_ENABLED`, `DAILY_COUNCIL_ENABLED`, `SAGE_REVIEW_ENABLED`,
-`RULES_ENABLED`, `MEMES_ENABLED`, `CULTURE_ENABLED`, `AGENT_MESSAGING`,
+`RULES_ENABLED`, `MEMES_ENABLED`, `CULTURE_ENABLED`, `CHRONICLE_SAGA_ENABLED`,
+`AGENT_MESSAGING`,
 `BENCHMARKS_ENABLED` semantics; the succession/harvest_quota/rationing rule
 kinds under `LIFECYCLE_ENABLED`.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index;
@@ -113,6 +114,14 @@ round/maxRounds, speaking order/next index, a full live `transcript`, optional
 and quorum. A succession ballot has kind `succession`, its election id,
 candidate list, and per-voter candidate-name/abstain choices. A verdict records
 winner, tally, elder ruling (null for the leaderless declaration), and outcome.
+Ballot resolution writes `council["verdict"]` with a `winner` field scored
+generically by the spectator prediction feature — see
+[11-viewer.md](11-viewer.md#prediction-market-panel) and
+[04-http-api.md](04-http-api.md#prediction-market-routes). That feature is a
+**passive consumer** of `verdict`: it reads `council.ballot` / `council.verdict`
+from the client's `/state` poll and never produces or mutates any state the
+ballot/tally logic reads (`mixin_council_growth.py` ballot writers and
+`_resolve_daily_council_ballot` are untouched).
 
 `_maybe_advance_daily_council()` makes every transition tick-gated and
 deterministic. `DAILY_COUNCIL_DISCUSSION_ROUNDS = 2` bounds round-robin speech;
@@ -212,9 +221,10 @@ checks.
 
 Rule kinds: `RULE_KINDS = {"resource_tax", "custom", "priority"}`
 (sim_engine/constants.py:1281), unioned with `{"harvest_quota", "rationing",
-"succession"}` when `LIFECYCLE_ENABLED`, and `{"treaty"}` when
+"succession"}` when `LIFECYCLE_ENABLED`, `{"treaty"}` when
 `PATH1_DIPLOMACY_ENABLED` (see [10-path1.md](10-path1.md) for treaty
-mechanics). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
+mechanics), and `{"quarantine"}` when `RAIDERS_CONTAGION_ENABLED` (see
+[Quarantine](#quarantine-kind-quarantine-raiders_contagion_enabled) below). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
 enacted at `MAX_ACTIVE_RULES = 8`.
 
 **Treaty proposals (`kind: "treaty"`).** Reuse the shared propose/vote
@@ -273,6 +283,58 @@ district per `HARVEST_QUOTA_PERIOD_FRAMES = STALL_THRESHOLD * 3` ≈5 min);
 `_rationing_gate`, and only actually restricts while village storage
 utilization is below `RATIONING_STORAGE_LOW_RATIO = 0.5` — it self-lifts
 once storage recovers).
+
+### Quarantine (`kind: "quarantine"`, `RAIDERS_CONTAGION_ENABLED`)
+
+Enacted only via the existing `propose_rule`/`vote_rule` flow — no shortcut path.
+Follows the exact `rationing` write/clear pattern in `_apply_governance_rule` /
+`_clear_governance_rule` (`mixin_crafting_rules.py:623-679`):
+
+- **Enact:** `_apply_governance_rule`'s `"quarantine"` branch writes
+  `civilization["quarantineActive"][rule["id"]] = {"district": "<quarantined district id>"}`.
+  The rule's `value` field names the quarantined district (`_validate_rule` requires
+  `value` to be a live key in `civilization["districts"]`, same pattern as
+  `priority`'s resource id). Under `SCHISM_ENABLED`, the write targets
+  `quarantineActiveBySettlement[settlementId]` via `_quarantine_for_settlement`
+  (flat `quarantineActive` aliases home, mirroring `rationingActive`).
+- **Repeal:** `_clear_governance_rule` pops the entry keyed by `rule["id"]`.
+
+**Mechanical effect (both movement and trading):** shared helpers on
+`mixin_crafting_rules.py` — `_quarantined_districts_for_agent`,
+`_district_is_quarantined`, `_quarantine_blocks_travel`, `_quarantine_blocks_trade`.
+When `RAIDERS_CONTAGION_ENABLED` is off or `quarantineActive` is empty, all helpers
+no-op (allow).
+
+1. **Inter-district movement** — `_quarantine_blocks_travel(agent, src, dest)` returns
+   true when `src != dest` and either district is listed in the agent's settlement
+   quarantine map. Enforced at two layers:
+   - **Write path (primary):** `_set_agent_target` in `mixin_world_state.py` gates
+     every district-routing mutation (`targetX`/`targetY`/`waypoints`), including the
+     `move_to_district` decision handler, `_set_agent_target_once`, scarcity-reflex
+     `move_to_district`, craft-station redirects, diplomacy caravan hops (via
+     `_set_caravan_target` → `_set_agent_target_once`), and idle wander/fallback
+     routing. Same-district routing inside a quarantined district is unchanged.
+   - **`_set_agent_target_to_agent`:** cross-district paths to another agent are
+     blocked the same way, **except** Sage-emergency `_rush_to_heal`, which passes
+     `bypass_quarantine=True` (sole bypass; no other callers may use it).
+   - **Physical crossing backstop:** `_move_agent` rechecks the district boundary
+     on every movement step, so a quarantine enacted after a route was assigned
+     also stops the crossing. The route is cancelled at the agent's current
+     position (no teleport); the Sage-emergency route marker is the sole bypass
+     and is cleared on arrival or when ordinary routing replaces it.
+   - **Goal step path:** the four `_step_goal` district-crossing sites in
+     `mixin_decisions.py`: `seek_shelter` (~1331), `dig_relocate` (~1338),
+     `caravan` (~1353), `repair` (~1387). Blocked goals are cleared (`goal = None`).
+2. **`trade_resource`** — `_quarantine_blocks_trade(agent, target)` returns true when
+   the two agents are in different districts and either party's
+   `currentDistrict` is quarantined (`mixin_decisions.py` trade handler ~739-754).
+   Sets `lastTradeRejection` with reason `"quarantine"` when `ECONOMY_ENABLED`.
+
+Intra-district movement within the quarantined district remains allowed; only
+cross-boundary movement into/out of the named district is blocked. Trading
+between two agents in the same quarantined district remains allowed; trading
+between different districts is blocked when either endpoint is quarantined,
+including when both endpoints are different quarantined districts.
 
 **Constitution.** `civilization["constitution"]` is a persisted, ordered
 ledger of enacted ongoing rules. A provision records its rule id, name, kind,
@@ -464,6 +526,17 @@ cancelled so a late ballot cannot create two elders. Expired but otherwise
 valid elections are not restarted: the Daily Council phase/session TTL owns
 completion while enabled, and only the flag-off legacy path uses the direct
 election-deadline tiebreak.
+When schism support delegates this repair per settlement, the same recovery
+pass must also project the resulting `pendingSuccession` into the visible
+emergency Daily Council; delegation must not leave a valid election waiting
+without its named-candidate assembly. Emergency detection, attendance, excused
+roster, headless seating, candidate eligibility, and voting are scoped to the
+pending election's normalized `settlementId` (missing means `home`); a living
+elder in another settlement does not suppress that assembly. If an ordinary
+Daily Council is active, it is transformed into the settlement's succession
+session and its ordinary ballot is replaced without manufacturing votes. A
+living formal elder in that settlement, including an incapacitated elder,
+cancels a stray election and its unresolved succession assembly.
 
 ## MEMES_ENABLED
 
@@ -540,7 +613,8 @@ also feeds the `meme_mutations` benchmark.
 
 Settlement-scoped domestic governance storage for Feature 4 (Schism).
 **When off:** `civilization["rules"]`, `pendingRules`, `constitution`,
-`customRuleModifiers`, `harvestQuotas`, `rationingActive`, `beliefRegistry`,
+`customRuleModifiers`, `harvestQuotas`, `rationingActive`, `quarantineActive`
+(when `RAIDERS_CONTAGION_ENABLED`), `beliefRegistry`,
 and `memeTexts` remain the only live shape — byte-identical to pre-F4 worlds.
 No schism trigger ships while the flag is off. F4.2 threads read paths and
 voting scope; F4.3 adds trigger/secession/elder when the flag is on.
@@ -551,7 +625,8 @@ When **`SCHISM_ENABLED`** is on:
 
 - `rulesBySettlement`, `pendingRulesBySettlement`, `constitutionBySettlement`
 - `customRuleModifiersBySettlement`, `harvestQuotasBySettlement`,
-  `rationingActiveBySettlement`
+  `rationingActiveBySettlement`, `quarantineActiveBySettlement`
+  (when `RAIDERS_CONTAGION_ENABLED`)
 - `beliefRegistryBySettlement`, `memeTextsBySettlement`
 
 For the primary **`"home"`** settlement (Path 1 `_init_settlements` convention),
@@ -718,6 +793,27 @@ at the old cap; 100 entries absorbs many more disasters before crowding out
 anything else, at a negligible cost (~80 extra short strings in `/state` and
 `state.db`).
 
+### Saga (`CHRONICLE_SAGA_ENABLED`, default True) {#saga-chronicle_saga_enabled}
+
+A sibling ring to `civilization["chronicle"]`, stored in
+`civilization["saga"]`: one ~150-word daily dispatch per sim day, appended at
+the day boundary when `CHRONICLE_SAGA_ENABLED` is on ([02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled),
+[03](03-cognition.md)). Entries are `{text, frame, dayIndex}`; the ring is
+capped at `SAGA_CAP = 100` (same magnitude as `CHRONICLE_CAP`).
+
+**Not prompt-facing.** Saga text is explicitly **not** part of the
+`CHRONICLE_ENABLED` `/state` chronicle projection, **not** folded into
+`_chronicle_prompt_line()` / the "Village history: ..." prompt line, and
+**never** injected into any agent think payload — a ~150-word saga paragraph
+landing there would crowd out the milestone entries (`death`/`election`/
+`belief_founded`/etc.) the chronicle projection's filter list documents above.
+Saga is viewer/read-only summary only (Phase 3 panel); cognition must never
+read it back.
+
+Kill switch: set `CHRONICLE_SAGA_ENABLED = False` in
+`simulation/sim_engine/constants.py` and restart; no env-var override. Echoed
+in `/state` `config.flags.CHRONICLE_SAGA_ENABLED` ([01](01-architecture.md)).
+
 ### Testament (`TESTAMENT_ENABLED`, default True) {#testament_enabled}
 
 Generational knowledge inheritance (Emergence Breakthroughs F1). Requires
@@ -736,7 +832,25 @@ is off. Zero new LLM call sites.
 
 **Inheritance:** `_spawn_newborn` seeds the newborn's `memoryWiki` from both
 parents' wiki sections plus the newest `TESTAMENT_PROMPT_ENTRIES` testament
-lines, subject to `WIKI_SECTION_CHAR_CAP` per section.
+lines, subject to `WIKI_SECTION_CHAR_CAP` per section. The wiki join
+(`_join_unique`, `mixin_governance_culture.py:1343`) concatenates raw text into
+a single capped string and does not retain which individual testament entries
+(with their `author`/`frame`/`generation`) fed into that string — so there is
+nothing on the newborn to trace back to "entry X, written by ancestor Y" after
+the fact unless a separate field captures it.
+
+**Per-heir testament snapshot (`inheritedTestament`):** additive agent field,
+not a rework of `_push_testament_entry`, `_merge_testament_on_death`, or the
+village-wide ring. Inside `_seed_newborn_wiki_from_testament`
+(`mixin_governance_culture.py:1331-1366`), at the same moment the newborn wiki
+is seeded, the engine sets `newborn["inheritedTestament"]` to a **copy** of
+the same `testament[-TESTAMENT_PROMPT_ENTRIES:]` entry dicts already sliced
+there (line 1359) — each entry `{text, author, frame, generation}` — a
+deterministic birth-time snapshot with no live link that could drift as the
+shared `civilization["testament"]` ring later caps or drops older entries.
+Persisted on the agent like other lifecycle fields; `restore_state()` back-fills
+`[]` when absent ([02-engine-core.md](02-engine-core.md)). See
+[06-agents.md](06-agents.md) for the agent-state table row.
 
 **Prompt:** one bounded `"Village testament: ..."` line alongside `"Village
 history: ..."`, sliced by `TESTAMENT_PROMPT_ENTRIES = 3` independently of
@@ -942,3 +1056,83 @@ When `TESTAMENT_ENABLED`, also samples `cultural_carryover` (oldest surviving
 testament entry's generation gap and `survival_ratio` in `detail`).
 Each metric is written to `SessionLogger`'s `benchmarks` stream via
 `_log_benchmark` — see [12-ops.md](12-ops.md) for the JSONL sink.
+
+## World Wiki — society entity pages (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan §2 Answers 1, 2, 3.
+
+This section documents the wiki page shapes for the four entity kinds owned by this
+spec: **belief**, **rule**, **chronicle event**, and **social tie** (which is not a
+standalone page — see below). All are read-only projections over existing engine state;
+the wiki route (`GET /wiki`, [specs/04-http-api.md](04-http-api.md)) assembles them
+in-process.
+
+### Belief page
+
+Source: `civilization["beliefRegistry"]` (only when `CULTURE_ENABLED`,
+`mixin_snapshot.py:204`). One page per entry (belief/meme).
+
+Fields projected onto a belief page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | belief id | |
+| `name` | `entry["name"]` | |
+| `tenet` | `entry["tenet"]` | text of the belief |
+| `affinity` | `entry["affinity"]` | list of rule *kind* strings (e.g. `["resource_tax"]`) — NOT linked |
+| `authoredBy` | `entry["authoredBy"]` | agent name of the originating agent |
+
+**Not linked:** `affinity` names a rule *kind* (category string), not a specific rule
+instance id. Multiple active, pending, and constitution rules may share the same kind;
+there is no single target page. Auto-linking is excluded per Answer 2's
+kind-vs-instance rule.
+
+### Rule page
+
+Source: `civilization["rules"]`, `civilization["pendingRules"]`, and
+`civilization["constitution"]` (`mixin_snapshot.py:191-193`). One page per entry across
+all three lists. Gated by `RULES_ENABLED`.
+
+Fields projected onto a rule page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | rule id | |
+| `text` | rule text | free prose — not scanned for links |
+| `kind` | rule kind string (e.g. `"resource_tax"`) | category string — NOT linked |
+| `proposedBy` | agent name | |
+| `status` | `"enacted"`, `"pending"`, or `"constitution"` | derived from which list the rule appears in |
+| `value` | numeric modifier | when present |
+
+**Not linked:** rule `kind` is a category string, not an instance id. Rule `text` is
+free prose and is excluded from auto-linking per Answer 2.
+
+### Chronicle event page
+
+Source: top-level `chronicle` (only when `CHRONICLE_ENABLED and CULTURE_ENABLED`,
+`_chronicle_snapshot()`, `mixin_snapshot.py:105-111`): bounded `{text, frame, kind}`
+rows filtered to `CHRONICLE_MILESTONE_KINDS`.
+
+Fields projected onto a chronicle page:
+
+| Field | Source | Notes |
+|---|---|---|
+| `id` | synthesized from `frame` + `kind` (e.g. `"chronicle_1234_district_founded"`) | no persistent chronicle id in engine state |
+| `text` | chronicle `text` | free prose — NOT scanned for links |
+| `frame` | `chronicle["frame"]` | tick frame of the event |
+| `kind` | `chronicle["kind"]` | milestone kind (e.g. `"district_founded"`) |
+
+**Not linked:** `text` is free prose. Auto-linking of chronicle text is excluded per
+Answer 2 ("No free-text scanning of chronicle/reasoning/rule-description strings").
+
+### Social tie — cross-link only, no standalone page
+
+Source: `socialTies` (`_social_ties_snapshot()`, `mixin_snapshot.py:79-103`). Gated by
+`SOCIAL_LAYER_ENABLED`.
+
+Social ties are **not** a thirteenth page kind. The engine server-canonicalizes each
+tie to one entry per pair (sorted `(source_id, target_id)`, valence conflicts resolved
+to `"rival"`). In the wiki, each tie is rendered as a labeled cross-link on **both**
+agent pages it connects — e.g., on agent A's page: `{targetKind: "agent", targetId: B_id, relation: "ally"}`.
+This matches the Answer 2 reconciliation: there is no single tie instance to navigate
+*to*, only a relationship between two agents, each of whom already has their own page.

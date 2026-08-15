@@ -872,6 +872,7 @@ class _ThinkJobMixin:
             "testament_line": self._testament_prompt_line() if TESTAMENT_ENABLED else None,
             "council_digest_line": self._council_digest_prompt_line(),
             "weather_line": self._weather_prompt_line(),
+            "pressure_warning_line": self._pressure_warning_prompt_line(),
             "library_lessons": (self._library_lessons(agent.get("currentDistrict"))
                                 if CULTURE_ENABLED and LIBRARY_SCALING_ENABLED else None),
             "path1_tool_line": tool_line,
@@ -1566,6 +1567,8 @@ class _ThinkJobMixin:
                     self._path1_industry_benchmark()
             if path1_on("PRESSURE_LOOP_ENABLED") and ft % GOODS_TICK_FRAMES == 0:
                 self._tick_wildlife()
+            if RAIDERS_CONTAGION_ENABLED:
+                self._tick_pressure_raiders()
             if path1_on("PRESSURE_LOOP_ENABLED") and ft % 30 == 0:
                 if self._is_night():
                     self._tick_night_pressure()
@@ -1584,6 +1587,8 @@ class _ThinkJobMixin:
                 if ft % DAY_FRAMES == 0:
                     self._maybe_convene_daily_council()
                 self._maybe_advance_daily_council()
+            if CHRONICLE_SAGA_ENABLED and ft % DAY_FRAMES == 0:
+                self._maybe_append_daily_saga()
             if MEMES_ENABLED and ft % MEME_TICK_FRAMES == 0:
                 self._spread_beliefs_by_proximity()
             if BENCHMARKS_ENABLED and (ft % BENCHMARK_TICK_FRAMES == 0 or ft == FIRST_BENCHMARK_FRAME):

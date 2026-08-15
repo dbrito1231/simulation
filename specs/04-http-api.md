@@ -3,7 +3,7 @@
 The Flask route surface: every endpoint the browser or external tools call,
 what it does, and its request/response shape.
 
-**Canonical for:** the full route table (56 routes), `/state` top-level
+**Canonical for:** the full route table (67 routes), `/state` top-level
 payload key inventory, server startup/shutdown behavior. **See also:**
 [specs/01-architecture.md](01-architecture.md) (data flow, thin-viewer
 contract), [specs/03-cognition.md](03-cognition.md) (what `run_agent_decision`
@@ -13,18 +13,18 @@ retention for the `/log/*` and `/council-llm-log` endpoints).
 
 ## Route table
 
-55 routes total in `simulation/server.py`: 25 from their own `@app.route`
-decorator, plus 30 more registered programmatically by three small
+67 routes total in `simulation/server.py`: 32 from their own `@app.route`
+decorator, plus 35 more registered programmatically by three small
 `add_url_rule` loops — `_register_sprite_route()` (called once per file in
 `_SPRITE_FILES`, 8 iterations, serving `/sprites/<name>.js`),
 `_register_css_route()` (called once per file in `_CSS_FILES`, 6 iterations,
 serving `/css/<name>.css`), and `_register_viewer_route()` (called once per
-file in `_VIEWER_FILES`, 16 iterations, serving `/viewer/<name>.js`) — added
+file in `_VIEWER_FILES`, 21 iterations, serving `/viewer/<name>.js`) — added
 by the Phase 2 (sprites), Phase 3 (CSS), and Phase 4 (viewer.js)
-file-modularization splits. Of the 56, 6 are the `/control/god/*` routes
+file-modularization splits. Of the 67, 6 are the `/control/god/*` routes
 added in Phase 2 of Sovereign God mode (all `@app.route`-decorated); the
-other 50 are always-registered non-god routes (26 decorated minus the 6 god
-ones = 20, plus the 30 `add_url_rule` routes = 50). The god routes are registered
+other 61 are always-registered non-god routes (32 decorated minus the 6 god
+ones = 26, plus the 35 `add_url_rule` routes = 61). The god routes are registered
 unconditionally but only ever *answer* requests when `GOD_MODE_ENABLED`
 (`constants.py:644`) is configured at startup and, when `GOD_AUTH_REQUIRED` is
 True (default False), a non-empty `SIM_GOD_TOKEN` (server.py) is also
@@ -39,7 +39,7 @@ per-file detail.
 |---|---|---|---|---|
 | `/` | GET | Serve the viewer shell | — | `index.html` |
 | `/css/<name>.css` | GET | Serve one of the 6 split viewer stylesheets (`base.css`, `panels.css`, `agents.css`, `council.css`, `divine.css`, `responsive.css`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.css` file |
-| `/viewer/<name>.js` | GET | Serve one of the 16 split viewer client script files (`setup.js`, `state.js`, `render.js`, `sidebar.js`, `council.js`, `minimap.js`, `polling.js`, `controls.js`, `renderloop.js`, `divine-bootstrap.js`, `divine-auth-sight.js`, `divine-modal.js`, `divine-sight-voice.js`, `divine-voice.js`, `divine-miracles-story.js`, `divine-history.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
+| `/viewer/<name>.js` | GET | Serve one of the 21 split viewer client script files (`setup.js`, `state.js`, `render.js`, `panels.js`, `sidebar.js`, `decision-audit.js`, `council.js`, `predictions.js`, `minimap.js`, `polling.js`, `anomaly.js`, `controls.js`, `renderloop.js`, `divine-bootstrap.js`, `divine-auth-sight.js`, `divine-modal.js`, `divine-sight-voice.js`, `divine-voice.js`, `divine-miracles-story.js`, `divine-history.js`, `world-wiki.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
 | `/sprites/<name>.js` | GET | Serve one of the 8 split pure Canvas renderer files (`core.js`, `tiles.js`, `props.js`, `structures.js`, `agents.js`, `world.js`, `wildlife.js`, `shipments.js`) — see [12-ops.md](12-ops.md#viewer-static-assets) | — | the named `.js` file |
 | `/wildlife.png` | GET | Serve the wildlife spritesheet PNG (variable-size atlas from user PNGs; 404 falls back to canvas helpers / procedural grids in `sprites/wildlife.js`) | — | `wildlife.png` |
 | `/wildlife_refsheet.html` | GET | Dev/debug — labeled 4×4 grid calling live `drawWildlifeCreature`; not part of the sim viewer loop | — | `wildlife_refsheet.html` |
@@ -53,10 +53,11 @@ per-file detail.
 | `/meta/update` | POST | Build an autobiography + persona directive (experimental, off by default) | `{agent, report, frame_tick?}` | `{ok, autobiography, persona}` |
 | `/memory/clean` | POST | Dedupe/trim the memory store | `{frame_tick?}` | `{ok, removed, size}` |
 | `/agent/think` | POST | **Legacy** — calls `run_agent_decision()` directly | full think-payload dict (see specs/03) | validated decision dict |
+| `/agent/interview` | POST | Read-only, out-of-world Q&A over one agent's own memory/relationships/beliefs (no auth, not a God-mode intervention) — see **Agent interview route** below | `{agentId, question}` (`question` capped at `INTERVIEW_QUESTION_MAX_CHARS = 500` chars) | `{ok: true, agentId, agentName, answer}` or `{ok: false, reason}` — see below |
 | `/council-llm-log` | GET | Slim decision records (`llm.jsonl`) for a council frame window (blueprint pitches/verdicts only). **Scans the live session's `llm.jsonl` first**; only reads older retained session directories when the requested `[start_frame, end_frame]` is not fully covered by the live file's frame range (`frame_tick` is monotonic across restarts, but each session only spans frames recorded while that server run was alive — a past council window may fall entirely in an older session). Out-of-range files are skipped using cached per-file `(min_frame, max_frame)` when possible. Matches from all scanned directories are merged and re-sorted by `frame_tick` | query params `start_frame`, `end_frame`, `agents` (comma-separated names) | `{entries: [{agent_name, frame_tick, ts, latency_ms, invention_only, decision, error}, ...]}` |
-| `/decision-audit` | GET | Read-only decision-intent audit: joins current session `llm.jsonl` decisions to matching `activity.jsonl` outcomes via `_decision_id`/`decision_id`, scores action-category match/mismatch, aggregates per agent. Gated by `DECISION_AUDIT_ENABLED` on both minting and this route — see **Decision audit route** below | — | See **Decision audit route** below |
 | `/state` | GET | World snapshot for the thin viewer (full or delta via `?since=`) | query param `since` (int, optional) — client's last applied `frameTick`; omit or `0` for full | See **/state delta protocol** below and key inventory |
 | `/districts.js` | GET | Live districts/roads (despite the `.js` name, plain JSON — fetch()-polled, not `<script>`-injected). Supports conditional polls via `districtsEpoch` | query param `since` (int, optional) — last seen `epoch` from a prior response | **First / gap:** `{districts: [...], roadNodes: {...}, roadEdges: [...], epoch: int}`. **Unchanged:** when `since == engine.districtsEpoch`, HTTP 200 with tiny body `{unchanged: true, epoch: int}` (no district/road payload). `districtsEpoch` bumps on district founding, tile place/remove, terrain dig/plant, road-graph change, architect paint/revert, restore, and reset |
+| `/wiki` | GET | World wiki - cross-linked page model for all twelve entity kinds. Gated by `WORLD_WIKI_ENABLED`; returns `{ok: false, reason: "disabled"}` when flag is off. No LLM calls (skeleton-only). Merges `/state`-side entities with district/road data from the internal `_districts_snapshot_payload(engine)` helper in-process - no HTTP round-trip to `/districts.js` | - | See *World wiki route* below |
 | `/control/pause` | POST | Pause the tick loop | — | `{ok: true, paused: true}` |
 | `/control/resume` | POST | Resume the tick loop | — | `{ok: true, paused: false}` |
 | `/control/reset` | POST | Reset the world, optionally with a new roster size (requires password) | `{password: string, agents?: int}` — `password` must match `SIM_RESET_PASSWORD` (server.py, read once at import; default `"reset"` when unset/blank); `agents` optional (omitted or invalid → keep current `roster_size`) | `{ok: true, agents: <new roster_size>}` on success; `{ok: false, error: "unauthorized"}` with HTTP 401 on wrong/missing password (no reset) |
@@ -66,6 +67,8 @@ per-file detail.
 | `/control/god/apply` | POST | Apply an exact previewed command (requires God auth when `GOD_AUTH_REQUIRED`) | `{previewId, requestId}` | `engine.god_apply(previewId, requestId)` |
 | `/control/god/cancel` | POST | Cancel an active omen/providence/timed event (requires God auth when `GOD_AUTH_REQUIRED`) | `{targetId}` | `engine.god_cancel(targetId)` |
 | `/control/god/compile` | POST | Optional Phase 8: compile free operator prose into a DRAFT `story_event` preview (requires God auth when `GOD_AUTH_REQUIRED`; also requires `GOD_MODE_ENABLED AND GOD_COMPILER_ENABLED`, otherwise a clean rejection) | `{prose}` (string, up to `GOD_COMPILER_PROSE_MAX_CHARS = 800` chars) | `engine.god_compile_prose(prose)` — `{compileOk, previewId, commandDigest, previewOutcome, normalizedCommand, reversibilityClass, expiresAt}` or `{compileOk: false, reason}` |
+| `/anomalies` | GET | Anomaly radar (idea-07, expanded idea-07b): read-side, server-side reader over the current run's `benchmarks.jsonl`, gated by `ANOMALY_RADAR_ENABLED` (see [01-architecture.md](01-architecture.md)) | — | see "Anomaly radar" below |
+| `/decision-audit` | GET | Read-only decision-intent audit over the current session's `llm.jsonl` and `activity.jsonl`, gated by `DECISION_AUDIT_ENABLED` | — | see "Decision audit route" below |
 
 `/agent/think` is legacy: the server-authoritative engine never calls it over
 HTTP. Instead, `_ENGINE_DEPS["llm_decide"]` (server.py:2604-2633) is wired
@@ -89,6 +92,12 @@ When the epoch differs (or `since` is omitted), the handler shallow-copies
 district/road data into plain dicts/lists under the lock, then `jsonify`s
 outside the lock. The viewer keeps its last full payload on `unchanged`
 responses.
+
+## Prediction-market routes
+
+| `/predictions/submit` | POST | Store a pending spectator prediction against an open Daily Council ballot. Gated by `PREDICTION_MARKET_ENABLED` | `{kind, question, pick, ballot_frame_tick}` | `{ok, id}` |
+| `/predictions/resolve` | POST | Mark a pending prediction correct/incorrect after the ballot verdict is known. Gated by `PREDICTION_MARKET_ENABLED` | `{id, correct, verdict, resolved_frame_tick?}` | `{ok}` |
+| `/predictions/history` | GET | Shared calibration history and hit-rate for the prediction panel. Gated by `PREDICTION_MARKET_ENABLED` | â€” | `{enabled, predictions, hitRate}` |
 
 ## `/state` delta protocol
 
@@ -171,6 +180,112 @@ mirroring the think-payload summary agents see when planning caravans and local
 spending ([08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
 Each settlement id matches `civilization.settlements[*].id`; missing keys
 migrate to `{}` on restore.
+
+## World wiki route (`WORLD_WIKI_ENABLED`)
+
+**Grounded in:** plan `docs/plans/idea-09-world-wiki/plan.md` §2 Answers 1–6.
+
+`GET /wiki` returns a read-only cross-linked page model assembled entirely in-process
+from two internal data sources under `engine.lock`: the engine's existing snapshot
+machinery (same functions `/state` already calls) and the extracted
+`_districts_snapshot_payload(engine)` district/road helper (see *Districts merge
+mechanism* below). No HTTP round-trip to `/districts.js`. No LLM calls — skeleton-only
+(Answer 4). Zero new world-state mutation.
+
+**Reuse contract (idea-03-agent-interview).** This route and its entity projection are
+explicitly designed as a reusable surface. `idea-03-agent-interview` (production order
+item 7) is expected to build on this same projection rather than reconstruct it.
+Implementers of idea-03 must not fork or duplicate the entity read logic; they extend
+the wiki route or compose with its output.
+
+### Gate
+
+`WORLD_WIKI_ENABLED` (`sim_engine/constants.py`, default `True`, env-backed name TBD
+by Phase 2a implementer if an env override is added). When `False`, `GET /wiki`
+returns `{"ok": false, "reason": "disabled"}` (HTTP 200). The flag is echoed to the viewer
+via `/state` `config.flags` (`_build_snapshot_config()`,
+`sim_engine/mixin_snapshot.py`), so the viewer can show or hide wiki UI without probing
+`/wiki` directly.
+
+### Response shape
+
+When enabled, `GET /wiki` returns:
+
+```json
+{
+  "ok": true,
+  "pages": {
+    "agent":      [ {<agent page>} ],
+    "structure":  [ {<structure page>} ],
+    "belief":     [ {<belief page>} ],
+    "rule":       [ {<rule page>} ],
+    "chronicle":  [ {<chronicle page>} ],
+    "district":   [ {<district page>} ],
+    "settlement": [ {<settlement page>} ],
+    "treaty":     [ {<treaty page>} ],
+    "resource":   [ {<resourceRegistry page>} ],
+    "project":    [ {<projectRegistry page>} ],
+    "recipe":     [ {<recipe page>} ]
+  }
+}
+```
+
+`settlement` and `treaty` are omitted (empty or absent) when
+`PATH1_DIPLOMACY_ENABLED` is off.
+
+**Phase 2a / 2b complete.** The route now returns all eleven page-kind arrays. Phase 2a
+implemented `agent`, `structure`, `belief`, `rule`, and `chronicle`. Phase 2b added
+`district`, `settlement`, `treaty`, `resource`, `project`, `recipe` and social-tie
+cross-links on agent pages.
+
+Social ties are **not** a standalone page kind — they appear as labeled `links` entries
+on the two agent pages they connect (ally/rival). Each page object carries at minimum:
+`{id, kind, fields: {...}, links: [{targetKind, targetId, relation}]}`. The exact
+per-field inventory is documented in the owning spec section for each entity kind
+(specs/05, 08, 09, 10).
+
+**Live cadence (Answer 5).** The route is polled fresh on every request — no dirty-
+tracking, no separate epoch. It piggybacks on the same underlying data that
+`/state`/`/districts.js` already read; the viewer polls it on the same cadence it
+already polls `/state` (~10 Hz or on demand when the wiki modal is open).
+
+### Districts merge mechanism (Answer 3)
+
+The district/road shallow-copy logic from `districts_js()` (`simulation/server.py`) has
+been extracted into a small internal helper, `_districts_snapshot_payload(engine)`, in
+`server.py` — a **mechanical move of existing lines, no new logic**.
+Both `districts_js()` and the wiki route call this helper under `engine.lock`.
+`/districts.js`'s own `districtsEpoch` conditional-poll protocol and its existing
+viewer consumer are untouched; the wiki route is an independent read-side consumer of
+the same underlying data.
+
+### Cross-link table (Answer 2 — structured fields only)
+
+Only real structured references get auto-linked. Free-text fields (chronicle `text`,
+agent `lastReasoning`, rule description prose) are never scanned.
+
+| Source field | Target kind | Linkable? | Reason |
+|---|---|---|---|
+| agent `relationships` (name-keyed) | agent | yes | resolves to exactly one agent by name |
+| agent `homeDistrict`/`district` | district | yes | district id |
+| structure `homeOf` | agent | yes | agent id |
+| structure `districtId` | district | yes | district id |
+| district `settlementId` | settlement | yes | settlement id |
+| settlement `districts[]` | district | yes | district ids (reverse of above) |
+| `socialTies` `from`/`to` | agent | yes | agent ids; rendered as one labeled link on each of the two agent pages, not a standalone page (server-canonicalized to one entry per pair with valence conflicts resolved to `"rival"` — `_social_ties_snapshot()`, `mixin_snapshot.py:79-103`) |
+| projectRegistry `needs` (keys) | resource | yes | resource ids |
+| recipe `output` | resource | yes | produced resource id |
+| recipe `inputs` (keys) | resource | yes | resource ids |
+| belief `affinity` | rule | **no** | names a rule *kind* (e.g. `resource_tax`), not a rule id; no single target instance |
+| recipe `station` | structure | **no** | names a structure *type* (e.g. `"workshop"`), not a specific built structure's id; zero, one, or many instances may exist |
+| resourceRegistry `gatherZone` | district | **no** | names a district *kind* (e.g. `"forest"`), not a specific district id; multiple instances may exist |
+| treaty (any field) | settlement | **no** | verified treaty shape carries no settlement id field (`mixin_diplomacy.py:802-844`) |
+| chronicle `text` | any | **no** | free prose; excluded per Answer 2 |
+
+The exclusion pattern: any field naming a **kind/category/type string** rather than a
+**specific instance id** does not get auto-linked — there is no guaranteed single target
+page to resolve to.
+
 
 ## Sovereign God mode
 
@@ -366,88 +481,367 @@ render or hide its Compile tab without probing `/control/god/compile`
 directly; `enabled` already folds both `GOD_MODE_ENABLED` and
 `GOD_COMPILER_ENABLED` together.
 
+## Anomaly radar (idea-07)
+
+Expanded metric coverage and payload fields per idea-07b — anchor kept
+stable as `#anomaly-radar-idea-07` for existing cross-references from
+[11-viewer.md](11-viewer.md) and [12-ops.md](12-ops.md).
+
+`GET /anomalies` is a **read-only** route (docs/plans/idea-07-anomaly-radar/plan.md
+§2; expanded coverage and payload fields per
+docs/plans/idea-07b-anomaly-console/plan.md §2). It adds no engine state and
+no `/state` key — `simulation/sim_engine/mixin_decisions.py` and
+`mixin_snapshot.py` are untouched (idea-07 Answers 1, 5; idea-07b confirms
+the same — see idea-07b §3 "Not owning"). The engine is not modified; the
+route is purely a server-side reader. No new flag: this route stays gated by
+the existing `ANOMALY_RADAR_ENABLED` (idea-07b §6 — see "Combined kill
+switch" below).
+
+**Gate:** `ANOMALY_RADAR_ENABLED` (`sim_engine/constants.py`, default `True` —
+see [01-architecture.md](01-architecture.md)'s flag index). Because the flag
+gates only this route/reader and no engine mechanic, and `mixin_snapshot.py`
+is out of scope for this feature, the flag's on/off state is **not** present
+in `/state` `config.flags`. Instead the route's own response carries it (per
+plan §6):
+
+- **Flag off:** `{ok: true, enabled: false, anomalies: []}` — a clean no-op
+  shape, not a 404/disabled error.
+- **Flag on:** `{ok: true, enabled: true, anomalies: [...]}`.
+
+**Combined kill switch (idea-07b §6).** `ANOMALY_RADAR_ENABLED = False` is
+the sole flag for this whole feature — idea-07b deliberately adds no second
+flag for the divine-bar button/modal it introduces. The route's `enabled`
+field above is the single signal both viewer surfaces read to hide
+themselves: the sidebar `#anomalySection` (wrapping the `#anomalyPanel`
+`<details>`) and the divine-bar Anomaly `.gbtn` both key off the most recent
+`GET /anomalies` response's `enabled` field, not
+off `config.flags` (which does not carry this flag — see "Gate" above). See
+[11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled) for exactly
+how each surface hides.
+
+**Detection source (Answers 1-2).** The handler reads a single thing,
+scoped to the *current* server process's own run — no cross-run tailing of
+older `simulation/logs/<timestamp>/` directories:
+
+1. The current run's `benchmarks.jsonl`, located via the existing
+   module-level `session_logger` reference (`session_logger.benchmark_path`
+   / `session_logger.dir`, `simulation/_server/logging_session.py`) — the
+   same in-process reference `server.py` already holds, not a fresh
+   directory discovery/glob. Records already flushed to disk are visible;
+   `log_benchmark`'s in-memory buffer (`BENCHMARK_BUFFER_MAX`, see
+   [12-ops.md](12-ops.md)) flushes on its existing schedule — this route adds
+   no new forced flush.
+
+All three detected anomaly kinds, including schism, come from this single
+source: no live-`SimEngine`/`civilization["chronicle"]` access and no
+`self.lock` acquisition is needed. Schism already writes a `metric: "schism"`
+record to `benchmarks.jsonl` on every occurrence, independent of
+`_sample_benchmarks()`'s periodic sampling — `_execute_schism`
+(`simulation/sim_engine/mixin_governance_culture.py:486-491`) calls
+`self._log_benchmark("schism", len(agents), {"parent": ..., "child": ...,
+"belief": ..., "rule": ...})` directly, gated by `SCHISM_ENABLED`/
+`BENCHMARKS_ENABLED` (both default True), not by `CULTURE_ENABLED` (which
+gates only the separate chronicle push a few lines earlier). This makes the
+schism source consistent with the other two kinds — a pure
+`benchmarks.jsonl` read.
+
+**Detected anomaly kinds (idea-07 Answers 2-4, idea-07b §2 Answer 4; no other
+kind is in scope — an "unusual death cluster" from the original idea text
+was never answered in either plan and is not implemented):**
+
+| `kind` | Source | Detection rule | Answer |
+|---|---|---|---|
+| `range_break` | `benchmarks.jsonl`, records whose `metric` is one of the **`RANGE_BREAK_METRICS` allowlist** (below) | Fires when a sampled value for an allowlisted metric exceeds every prior value seen so far **this run** for that same metric (a new session-lifetime max) or falls below every prior value seen so far this run for that same metric (a new session-lifetime min). Session-lifetime max/min tracking is per-metric (a separate running max/min per allowlisted metric name, not one shared max/min across all of them). No computed theoretical ceiling/floor; no bound recomputed as `EMERGENT_ROLES` adds roles. | idea-07 §2 Answer 3; idea-07b §2 Answer 4 |
+| `new_rule_kind` | `benchmarks.jsonl`, `metric: "rule_kind_diversity"` records, `detail.kinds` | Fires on the first time a rule kind appears in `detail.kinds` that has not appeared in any earlier `rule_kind_diversity` record this run (mirrors `civilization["ruleKindsEverEnacted"]`). No per-rule-id tracking; no proposer-origin (LLM vs. deterministic auto-proposed) distinction. | idea-07 §2 Answer 4 |
+| `schism` | `benchmarks.jsonl`, `metric: "schism"` records | Every `metric: "schism"` record is reported — written directly by `_execute_schism` on every schism, independent of `_sample_benchmarks()`. | idea-07 §2 Answer 2 |
+
+**`RANGE_BREAK_METRICS` allowlist (idea-07b §2 Answer 4, exhaustive — exactly
+these 12, no others, no monotonic-counter auto-detection).** Named
+module-level constant in `simulation/_server/anomaly_radar.py` so this list
+and the code cannot drift:
+
+```
+specialization_entropy, rule_adherence, meme_adoption,
+ecology_scarcity_index, wealth_gini, skill_spread, cultural_carryover,
+peer_prediction_accuracy, contract_default_rate, storage_utilization,
+structure_condition, population_median_age
+```
+
+All 12 are bounded/ratio metrics emitted by `_sample_benchmarks()`
+(`simulation/sim_engine/mixin_decisions.py`). Monotonic counters emitted by
+the same function — `memory_store_size`, `chronicle_size`,
+`god_interventions`, `contracts_opened`, `contracts_fulfilled` — are
+deliberately **excluded**: they set a new session max on nearly every sample
+and would bury real signal under constant `range_break` noise. This is a
+fixed curated list, not a computed "all numeric metrics minus detected
+counters" heuristic — that broader option was considered and explicitly not
+chosen (idea-07b §2 Answer 4).
+
+**Response shape.** Each entry in `anomalies` is:
+
+```
+{timestamp, metric, kind, value, detail?, severity}
+```
+
+- `timestamp` — the record's `frame_tick` field, from the `benchmarks.jsonl`
+  record, for all three kinds (including `schism`). This keeps `timestamp`
+  one consistent type (frame tick, not wall-clock `ts`) across all three
+  kinds, matching every other frame-tick-based field in `/state`. This same
+  field **is** the "jump-to frame" reference the original idea-07 idea text
+  asked for (idea-07b §2 Answer 2, "a jump-to frame reference — the original
+  idea-07 text's 'jump-to link', which was never implemented"): no separate
+  duplicate field is added, since `timestamp` already carries the frame
+  number for every kind. The viewer surfaces it as a clearly labeled frame
+  reference (see [11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled));
+  there is no click-to-navigate/scrub behavior implemented, because this
+  codebase has no timeline-scrub or replay UI to jump to — the reference is
+  for the operator to manually correlate against `benchmarks.jsonl` or other
+  log tooling, not an in-app navigation target.
+- `metric` — for `range_break`, one of the 12 `RANGE_BREAK_METRICS` allowlist
+  names above (was `"specialization_entropy"`-only before idea-07b); for
+  `new_rule_kind`, `"rule_kind_diversity"`; for `schism`, `"schism"`.
+- `value` — the triggering value: the allowlisted metric's float value
+  (`range_break`), the new rule kind string (`new_rule_kind`), or the
+  `schism` record's `value` field (agent count in the seceding cluster,
+  `schism`).
+- `detail` (optional) — kind-specific extra context, e.g. `{direction: "max"|"min"}`
+  for `range_break`, or the `schism` record's own `detail`
+  (`{parent, child, belief, rule}`) for `schism`.
+- `severity` (new, idea-07b §2 Answer 2) — one of `"high"` / `"medium"` /
+  `"low"`. `range_break` is **magnitude-scaled** against the prior
+  session-lifetime bound it broke; `schism` and `new_rule_kind` have no
+  magnitude to scale and use a fixed severity each (final decision,
+  superseding the earlier fixed-per-`kind` mapping design, which was flagged
+  during Phase 1 review as conveying no information beyond `kind` itself).
+  All three rules below are computable during the single forward pass
+  `compute_anomalies()` already makes over `benchmarks.jsonl` — no persisted
+  detection state, no engine access, no lock, per idea-07 Answer 1.
+
+  **`range_break` — magnitude-scaled.** For each allowlisted metric,
+  `compute_anomalies()` already tracks a running `(prior_max, prior_min)`
+  per metric name as it walks the file in order (needed to detect the break
+  itself — see the `range_break` detection rule above). At the moment a
+  record breaks the bound, the running `(prior_max, prior_min)` pair reflects
+  every value seen for that metric **before** this record (i.e. captured
+  prior to folding the current value into the running max/min). Compute:
+
+  ```
+  break_amount = value - prior_max   (max-break, direction == "max")
+  break_amount = prior_min - value   (min-break, direction == "min")
+  prior_range  = prior_max - prior_min
+  ```
+
+  `break_amount` is always `>= 0` by construction (the record only fires
+  `range_break` because it exceeded that specific bound). Normalization
+  basis is **`prior_range`** (the prior observed session-lifetime spread for
+  that metric), not the bound value itself: all 12 `RANGE_BREAK_METRICS` are
+  bounded/ratio metrics that can legitimately sit at or near 0 (e.g.
+  `wealth_gini`, `contract_default_rate`), so normalizing against the raw
+  bound (`value / prior_max`) would blow up or flip sign whenever a bound is
+  0 or negative-adjacent; normalizing against the metric's own observed
+  spread this run is well-defined for every metric in the allowlist and
+  expresses "how big is this break relative to how much this metric has
+  actually moved so far" — exactly the magnitude signal severity is meant to
+  carry.
+
+  ```
+  ratio = break_amount / prior_range   (only when prior_range > 0)
+
+  ratio <  0.25                -> "low"
+  0.25 <= ratio < 1.0           -> "medium"
+  ratio >= 1.0                  -> "high"
+  ```
+
+  Tier boundaries are exclusive-low/inclusive-high as written above: a break
+  smaller than a quarter of the metric's entire prior spread is `"low"`; a
+  break between a quarter and a full prior spread is `"medium"`; a break
+  that equals or exceeds the metric's entire prior spread (a swing bigger
+  than everything seen so far this run, combined) is `"high"`.
+
+  **Degenerate case — `prior_range == 0`.** This is guaranteed on a metric's
+  very first `range_break` this run (only one distinct value has been seen,
+  so `prior_max == prior_min`) and can also recur later for a metric that
+  was perfectly flat since the run started before this break. `ratio` is
+  undefined here (0/0), so `compute_anomalies()` MUST special-case
+  `prior_range == 0` and skip the division entirely — it never divides by
+  `prior_range` without first checking it is `> 0`. The fixed result for
+  this case is `"medium"`: there is no historical spread yet to judge
+  magnitude against, so the reader falls back to the same neutral tier the
+  old fixed-per-`kind` mapping used unconditionally for every `range_break`,
+  rather than overstating an unmeasurable jump as `"high"` or dismissing it
+  as `"low"`. (There is no separate "prior bound is 0" case to handle: 0 is
+  a normal value for these bounded/ratio metrics and is never itself a
+  denominator under range-based normalization — the only denominator is
+  `prior_range`, already covered above.)
+
+  **`schism` — fixed `"high"`.** Always `"high"`: a schism is a
+  civilization-splitting event structurally, not a continuous quantity —
+  there is nothing to scale a magnitude against (the `value` field is the
+  seceding cluster's agent count, not a bound the record broke).
+
+  **`new_rule_kind` — fixed `"low"`.** Always `"low"`: a "new rule kind" is
+  an inherently binary event (a kind either has appeared before this run or
+  it hasn't) with no continuous quantity to normalize — routine cultural
+  evolution, matching the original design's rationale.
+
+**No per-kind grouping field added to the response.** idea-07b §2 Answer 2's
+"grouping by kind, per-kind counts" is implemented entirely in the viewer,
+client-side, from the same flat `anomalies` array documented above (see
+[11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)) — grouping
+already-returned data by an existing field is not detection logic, so it
+does not need a server-side change or violate the "pure renderer" viewer
+contract. `GET /anomalies`'s shape is otherwise unchanged: `{ok, enabled,
+anomalies: [...]}` at the top level.
+
+No pagination/`since` cursor: the route recomputes the full anomaly list for
+the current run's `benchmarks.jsonl` on every request (stateless server-side
+reader, no new persisted detection state — idea-07 Answer 1).
+
+**Consumer:** the viewer's anomaly panel and the divine-bar Anomaly modal
+view (see
+[11-viewer.md](11-viewer.md#anomaly-panel-anomaly_radar_enabled)), both
+polling this route on their own cadence separate from `/state`.
+
 ## Decision audit route
 
-`GET /decision-audit` — dedicated reader for the idea-10 "Why did you do
-that?" self-model-quality audit. Read-only over the current session's
-`llm.jsonl` and `activity.jsonl`; never mutates engine state or logs. Uses
-the default slim `llm.jsonl` shape only (`decision.reasoning` +
-`decision.action`); never requires `SIM_LLM_LOG_FULL=1`.
+`GET /decision-audit` is a read-only current-session join of `llm.jsonl` and
+`activity.jsonl`. `DECISION_AUDIT_ENABLED` defaults to `True`; when disabled,
+the route returns HTTP 200 with `{enabled: false, agents: [], recent: []}`
+without reading either log. When enabled it returns `{enabled: true,
+session_id, agents, recent}`. `agents` contains per-agent scored/match/
+mismatch aggregates, and `recent` is a bounded newest-first list of scored
+comparisons. The reader caches parsed sources by path, byte size, and mtime so
+the viewer's three-second poll does not reparse unchanged logs. Correlation and
+scoring semantics are canonical in [03-cognition.md](03-cognition.md) and
+[12-ops.md](12-ops.md).
 
-**Flag gate.** Controlled by `DECISION_AUDIT_ENABLED`
-(`simulation/sim_engine/constants.py`, default `True`). When off, the route
-returns HTTP 200 with `{enabled: false, agents: [], recent: []}` and performs
-no log read or scoring — matching the write-path kill switch that stops
-minting `_decision_id`/`decision_id` entirely. The flag is **not** echoed in
-`/state` `config.flags`; the viewer reads `enabled` from this response
-(following the idea-07 dedicated-route viewer-echo pattern).
+## Agent interview route {#agent-interview-route}
 
-**Request.** No query parameters or body.
+`POST /agent/interview` — read-only, out-of-world debug Q&A over a single
+agent's own memory, relationships, and beliefs. "Click a villager, ask a
+question, get an answer generated strictly from *that agent's* memory store,
+relationships, and beliefs" (idea text). Distinct from
+`burning_bush_message` (God speaking as a voice inside the world): an
+interview answer is never authored *into* the world, is excluded from the
+emergence record, and mutates nothing.
 
-**Response (enabled).**
+**No auth.** Unlike the `/control/god/*` routes, this route requires no
+`X-God-Token`, regardless of `GOD_AUTH_REQUIRED`, and is reachable by direct
+HTTP call whenever `AGENT_INTERVIEW_ENABLED` is on — independent of whether
+`GOD_MODE_ENABLED` is on or off. This mirrors `/state`'s own no-auth
+contract: an interview answer is generated strictly from private per-agent
+state (memory tiers, `relationships`, `beliefs`) that is otherwise exposed,
+filtered, only through `/state`'s agent snapshot (non-neutral `relationships`
+only, no raw memory — [06-agents.md](06-agents.md)) or through the
+authenticated `GET /control/god/sight`. The Divine Console's own trigger
+button for this route is separately gated on `GOD_MODE_ENABLED` — see
+[11-viewer.md](11-viewer.md#divine-console-sovereign-god-mode-phase-7) — but
+that is a UI-visibility gate on the *button*, not on the route itself; a
+server administrator with `GOD_MODE_ENABLED=False` still has a live,
+unauthenticated `/agent/interview` route reachable by direct HTTP call (e.g.
+`curl`), with no viewer button to trigger it.
+
+**Not a God-mode intervention.** The route reads an agent's existing
+`_agent_snapshot_row()` projection plus `agent["memory"]`/`agent["memoryWiki"]`
+directly and returns an answer to the operator only. It writes nothing to
+`agent["memory"]`, `beliefs`, `relationships`, `civilization`, or any
+snapshot field; sets no `intervened` mark; and produces no `divine.jsonl`
+entry, `divine_response`, activity line, or chronicle line. It never calls
+`god_preview()`/`god_apply()` and is never listed in
+`/control/god/capabilities`'s `kinds`. See
+[01-architecture.md](01-architecture.md#control-plane-data-flow-sovereign-god-mode)
+for the general God-mode control-plane boundary this route sits outside of.
+
+**Flag gate.** `AGENT_INTERVIEW_ENABLED` (`simulation/sim_engine/constants.py`,
+default `True`). When off, the route returns HTTP 200 with the clean-error
+body shape below (`{"ok": false, "reason": "agent interview disabled"}`) and
+performs no context assembly or LLM call — same "true no-op on the write
+path, plain-200 body" shape `DECISION_AUDIT_ENABLED` uses above
+(`{"enabled": False, "agents": [], "recent": []}`), not a silently-degraded
+answer and not a distinct HTTP error status (Phase 2 implementer note:
+resolves this section's earlier "non-200" wording in favor of matching
+`DECISION_AUDIT_ENABLED`'s own actual precedent and the single unified
+`{"ok": false, "reason": ...}` shape documented for every clean-error case
+in the Response section above). Echoed in `/state` `config.flags` (see
+[01-architecture.md](01-architecture.md)).
+
+**Request.**
+
+```json
+{"agentId": 3, "question": "Who do you trust in the village, and why?"}
+```
+
+- `agentId` — required; must resolve to a living agent (an unknown or
+  deceased agent id is rejected, not silently substituted).
+- `question` — required, non-empty string, capped at
+  `INTERVIEW_QUESTION_MAX_CHARS = 500` chars
+  (`simulation/sim_engine/constants.py`) — see
+  [03-cognition.md](03-cognition.md#agent-interview-operator-qa-out-of-world-debug-surface).
+  A missing/non-string/empty/oversized `question` is rejected by the route
+  itself, before any engine read or LLM call — following the same
+  "clear error naming the offending field, reject rather than truncate"
+  contract `GOD_COMPILER_PROSE_MAX_CHARS`'s `prose` validation uses.
+
+**Response (success).**
 
 ```json
 {
-  "enabled": true,
-  "session_id": "<current SessionLogger session id>",
-  "agents": [
-    {
-      "agent_name": "Sage",
-      "scored": 5,
-      "matches": 4,
-      "mismatches": 1,
-      "mismatch_rate": 0.2,
-      "excluded_fallback": 2,
-      "uncorrelated": 0,
-      "unclassified": 1
-    }
-  ],
-  "recent": [
-    {
-      "decision_id": "<uuid>",
-      "agent_name": "Sage",
-      "frame_tick": 1234,
-      "action": "collect_resource",
-      "reasoning_category": "gather",
-      "score": "match",
-      "activity_message": "Sage gathered wood."
-    }
-  ]
+  "ok": true,
+  "agentId": 3,
+  "agentName": "Sage",
+  "answer": "<agent-voiced answer, generated from that agent's own memory/relationships/beliefs>"
 }
 ```
 
-Field semantics:
-
-- `agents[]` — per-agent aggregates over correlated, scored records in this
-  session, ranked by `mismatch_rate` descending then `mismatches` descending.
-  `mismatch_rate = mismatches / scored` (0 when `scored == 0`).
-- `recent[]` — bounded list of the most recent scored comparisons (newest
-  first), for drill-down in the viewer panel. `score` is `"match"`,
-  `"mismatch"`, or omitted/null for unclassified/uncorrelated entries if
-  surfaced for debugging.
-- `excluded_fallback` — count of `llm.jsonl` records dropped because
-  `decision._fallback == True` before scoring.
-- `uncorrelated` — records with no `_decision_id` or no matching
-  `activity.jsonl` line.
-- `unclassified` — correlated non-fallback records whose `reasoning` matched
-  no category keyword list.
-
-**Response (disabled).**
+**Response (clean error — flag off, unknown agent, oversized/missing
+question, occupied interview capacity, or `MEMORY_ENABLED`/`WIKI_MEMORY`
+unavailable).**
 
 ```json
-{
-  "enabled": false,
-  "agents": [],
-  "recent": []
-}
+{"ok": false, "reason": "<short, specific machine-readable reason string>"}
 ```
 
-**Scoring semantics** (action-category rule, fallback exclusion, category→action
-mapping table, join algorithm): [12-ops.md](12-ops.md#decision-audit--log-reading-pattern-and-scoring-semantics).
-Correlation-id minting/threading: [03-cognition.md](03-cognition.md#decision-audit-correlation-id-decision_audit_enabled).
+**`MEMORY_ENABLED`/`WIKI_MEMORY` degrade path (non-default choice — refuse,
+do not thin the answer).** The idea text promises an answer "generated
+strictly from that agent's memory store, relationships, and beliefs."
+`relationships` and `beliefs` are unconditional agent fields and always
+exist, but the memory-store half (`agent["memory"]`'s three tiers, and the
+`agent["memoryWiki"]` sections `WIKI_MEMORY` populates) exists only when
+`MEMORY_ENABLED` is True. `run_agent_interview()` checks both flags
+independently, in the same clean-error position (before agent lookup, before
+any LLM call): when `MEMORY_ENABLED` is off, or when `WIKI_MEMORY` is off,
+the route returns the clean-error shape above with a distinct `reason`
+string naming the off flag, and makes **no** LLM call — it must not silently
+answer from relationships/beliefs alone (or with an empty memoryWiki
+section), since a thinner, unflagged answer would look identical to a full
+one to the operator reading it. This is the opposite of
+`god_compile_prose`'s pattern (which has no comparable partial-context mode
+to begin with) and is a deliberate, non-default design choice for this route
+specifically.
 
-**Viewer.** [11-viewer.md](11-viewer.md#decision-audit-panel) — polls this route
-on its own cadence; no client-side scoring.
+**Prompt construction, model, and concurrency pool.** Fully specced in
+[03-cognition.md](03-cognition.md#agent-interview-operator-qa-out-of-world-debug-surface):
+`_agent_snapshot_row()` called in-process (no HTTP round-trip) plus direct
+`agent["memory"]`/`agent["memoryWiki"]` reads, `sim-smart` model, and the new
+`INTERVIEW_CONCURRENT_LLM = 1` pool — independent of `MAX_CONCURRENT_LLM` and
+`PIANO_CONCURRENT_LLM`.
+
+Acquiring the dedicated slot is timed for one second. If another interview
+still holds it, the route returns HTTP 200 with
+`{"ok": false, "reason": "agent interview capacity unavailable; try again shortly"}`
+and makes no LLM call; it never leaves a Flask worker blocked indefinitely.
+
+**Never in the action-sync set.** This route adds no agent-facing action; it
+never appears in `DECISION_ACTIONS`/`DECISION_SCHEMA`/`SYSTEM_PROMPT`/
+`apply_decision`/`available_actions`/`ACTION_LABELS` — see
+[01-architecture.md](01-architecture.md#action-sync-invariant). No agent ever
+sees or chooses an "interview" action.
+
+**Viewer.** [11-viewer.md](11-viewer.md#divine-console-sovereign-god-mode-phase-7)
+— a new `.gbtn interview` Divine Console button, dual-gated on
+`AGENT_INTERVIEW_ENABLED` and `GOD_MODE_ENABLED`, is this route's only
+current client; the route itself remains callable independent of that UI
+(see "No auth" above).
 
 ## Logging endpoints: fire-and-forget contract
 

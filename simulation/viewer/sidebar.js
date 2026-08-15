@@ -105,6 +105,8 @@ const convListEl = document.getElementById("convList");
 const actListEl = document.getElementById("actList");
 const chronicleLogEl = document.getElementById("chronicleLog");
 const chronicleListEl = document.getElementById("chronicleList");
+const sagaLogEl = document.getElementById("sagaLog");
+const sagaListEl = document.getElementById("sagaList");
 const timeNowEl = document.getElementById("timeNow");
 const timeUptimeEl = document.getElementById("timeUptime");
 const timeCalendarEl = document.getElementById("timeCalendar");
@@ -136,10 +138,39 @@ const civLevelLabelEl = document.getElementById("civLevelLabel");
 const councilBannerEl = document.getElementById("councilBanner");
 const foundingBannerEl = document.getElementById("foundingBanner");
 const disasterBannerEl = document.getElementById("disasterBanner");
+const pressureBannerEl = document.getElementById("pressureBanner");
 const councilSectionEl = document.getElementById("councilSection");
 const councilMetaEl = document.getElementById("councilMeta");
 const councilCardsEl = document.getElementById("councilCards");
 const councilHistoryEl = document.getElementById("councilHistory");
+
+function pressureTelegraphPending(tele) {
+  if (!tele) return false;
+  const impact = tele.impactFrame;
+  const tick = world.frameTick;
+  if (impact != null && tick != null) {
+    return impact > tick;
+  }
+  return tele.framesRemaining != null && tele.framesRemaining > 0;
+}
+
+function pressureTelegraphBannerText(tele) {
+  const kind = tele.kind === "contagion" ? "Contagion" : "Raid";
+  const district = tele.targetDistrictId;
+  const districtPart = district ? ` — ${district} district` : "";
+  const frames = tele.framesRemaining;
+  const framesPart = frames != null ? ` (${frames} ticks remaining)` : "";
+  return `${kind} incoming${districtPart} — impact imminent${framesPart}`;
+}
+
+function renderPressureBanner() {
+  if (!RAIDERS_CONTAGION_ENABLED || !pressureTelegraphPending(world.pressureTelegraph)) {
+    pressureBannerEl.style.display = "none";
+    return;
+  }
+  pressureBannerEl.textContent = pressureTelegraphBannerText(world.pressureTelegraph);
+  pressureBannerEl.style.display = "block";
+}
 
 function escapeHtml(text) {
   return String(text)
@@ -359,6 +390,7 @@ let lastAgentPanelKey = "";
 let lastAgentDetailKey = "";
 let lastLogKey = "";
 let lastChronicleKey = "";
+let lastSagaKey = "";
 let foundingFramesSeen = null; // null until first snapshot processed (see founding-banner logic)
 let foundingBannerTimer = null;
 let disasterFramesSeen = null;
@@ -547,7 +579,12 @@ function renderAgentDetail() {
     ? tieNames.map((name) => {
         const tie = relationships[name];
         const cls = tie === "ally" ? "ally" : tie === "rival" ? "rival" : "";
-        return `<span class="agent-tie-chip ${cls}">${escapeHtml(name)} (${escapeHtml(tie)})</span>`;
+        const targetAgent = WORLD_WIKI_ENABLED_FLAG
+          ? getAgents().find((a) => a.name === name)
+          : null;
+        return targetAgent
+          ? `<span class="agent-tie-chip wiki-link ${cls}" data-wiki-kind="agent" data-wiki-id="${targetAgent.id}">${escapeHtml(name)} (${escapeHtml(tie)})</span>`
+          : `<span class="agent-tie-chip ${cls}">${escapeHtml(name)} (${escapeHtml(tie)})</span>`;
       }).join("")
     : `<span class="civ-label">no notable ties</span>`;
 
@@ -666,9 +703,12 @@ function renderAgentPanel() {
     agentListEl.innerHTML = sortedLiving.map((a) => {
       const selected = selectedAgentId === a.id;
       const critical = isAgentCritical(a);
+      const wikiBtn = WORLD_WIKI_ENABLED_FLAG
+        ? ` <span class="wiki-link agent-wiki-btn" data-wiki-kind="agent" data-wiki-id="${a.id}" title="Open in World Wiki">&#128218;</span>`
+        : "";
       return `<li class="agent-row${selected ? " agent-selected" : ""}${critical ? " agent-critical" : ""}" data-agent-id="${a.id}">` +
         `<span class="dot" style="background:${a.color}"></span>` +
-        `<span><span class="agent-main">${escapeHtml(a.name)} — ${escapeHtml(a.role)}${escapeHtml(agentAgeLabel(a))}</span>` +
+        `<span><span class="agent-main">${escapeHtml(a.name)}${wikiBtn} — ${escapeHtml(a.role)}${escapeHtml(agentAgeLabel(a))}</span>` +
         `<span class="agent-status">${escapeHtml(humanizeAction(a))}${agentVitalsHtml(a)}</span>` +
         agentThoughtHtml(a) +
         `</span></li>`;
@@ -854,7 +894,10 @@ function renderSidebar() {
       civRecipeListEl.innerHTML = recipeIds.map((id) => {
         const r = recipes[id];
         const ins = Object.entries(r.inputs || {}).map(([k, v]) => `${k}×${v}`).join("+");
-        return `<span class="res-chip civ-value">${escapeHtml(r.name || id)} <span class="civ-label">(${escapeHtml(ins)})</span></span>`;
+        const nameEl = WORLD_WIKI_ENABLED_FLAG
+          ? `<span class="wiki-link" data-wiki-kind="recipe" data-wiki-id="${escapeHtml(id)}">${escapeHtml(r.name || id)}</span>`
+          : escapeHtml(r.name || id);
+        return `<span class="res-chip civ-value">${nameEl} <span class="civ-label">(${escapeHtml(ins)})</span></span>`;
       }).join("");
     } else {
       civRecipeRow.style.display = "none";
@@ -870,7 +913,10 @@ function renderSidebar() {
         const status = r.status ? ` <span class="civ-label">[${escapeHtml(r.status)}]</span>` : "";
         const amendment = r.supersedes
           ? ` <span class="civ-label">→ ${escapeHtml(r.supersedes)}</span>` : "";
-        return `<span class="res-chip civ-value">${escapeHtml(r.name || r.id)}${status}${amendment}</span>`;
+        const nameEl = WORLD_WIKI_ENABLED_FLAG && r.id
+          ? `<span class="wiki-link" data-wiki-kind="rule" data-wiki-id="${escapeHtml(String(r.id))}">${escapeHtml(r.name || r.id)}</span>`
+          : escapeHtml(r.name || r.id);
+        return `<span class="res-chip civ-value">${nameEl}${status}${amendment}</span>`;
       }
       ).join("");
       const pending = pendingRules.map((r) => {
@@ -958,6 +1004,28 @@ function renderSidebar() {
     }
   }
 
+  if (!CHRONICLE_SAGA_ENABLED) {
+    sagaLogEl.style.display = "none";
+  } else {
+    sagaLogEl.style.display = "";
+    const saga = world.saga || [];
+    const sagaKey = JSON.stringify(saga);
+    if (sagaKey !== lastSagaKey) {
+      lastSagaKey = sagaKey;
+      const scrollTop = sagaListEl.scrollTop;
+      sagaListEl.innerHTML = saga.slice().reverse().map((entry) => {
+        const metaParts = [];
+        if (entry.dayIndex != null) metaParts.push(`day ${entry.dayIndex}`);
+        if (entry.frame != null) metaParts.push(`frame ${entry.frame}`);
+        const meta = metaParts.join(" · ");
+        return `<li>${escapeHtml(entry.text || "")}` +
+          (meta ? ` <span class="chronicle-frame">${escapeHtml(meta)}</span>` : "") +
+          `</li>`;
+      }).join("") || `<li class="civ-label">No village paper yet</li>`;
+      sagaListEl.scrollTop = scrollTop;
+    }
+  }
+
   // Founding banner: derived by diffing newly-appeared "district_founded"
   // chronicle entries rather than a dedicated server field (foundedFrame).
   // The client already parses the full chronicle array every poll (see
@@ -1017,6 +1085,8 @@ function renderSidebar() {
   } else {
     disasterBannerEl.style.display = "none";
   }
+
+  renderPressureBanner();
 
   trackStructureConditionDeltas();
 

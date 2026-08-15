@@ -234,6 +234,8 @@ let STRUCTURE_WEAR_ENABLED = true;
 let ACTIVITY_CUES_ENABLED = true;
 let SOCIAL_LAYER_ENABLED = true;
 let CHRONICLE_ENABLED = true;
+let CHRONICLE_SAGA_ENABLED = true;
+let PREDICTION_MARKET_ENABLED = true;
 let FOUNDING_EVENTS_ENABLED = true;
 let ENV_EFFECTS_ENABLED = true;
 let WORLD_CLOCK_HUD_ENABLED = true;
@@ -242,6 +244,8 @@ let CROP_GROWTH_ENABLED = true;
 let WILDLIFE_ENABLED = true;
 let CARAVAN_VISUALS_ENABLED = true;
 let WEATHER_ENABLED = true;
+let DYNASTY_TREE_ENABLED = true;
+let RAIDERS_CONTAGION_ENABLED = true;
 
 // --- Viewer-only display toggles (client-side, not server flags). Flipping
 // either to true fully restores that section with no other edits. ---

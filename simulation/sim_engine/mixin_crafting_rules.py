@@ -515,6 +515,10 @@ class _CraftingRulesMixin:
                 return False
             if not (1 <= v <= RATIONING_WITHDRAW_CAP * 4):
                 return False
+        if RAIDERS_CONTAGION_ENABLED and kind == "quarantine":
+            value = rule.get("value")
+            if not isinstance(value, str) or value not in c["districts"]:
+                return False
         if kind == "custom" and rule.get("effect") is not None \
                 and self._normalize_custom_rule_effect(rule.get("effect")) is None:
             return False
@@ -628,10 +632,18 @@ class _CraftingRulesMixin:
             sid = settlement_id or self._ballot_settlement_id(rule)
             harvest_quotas = self._harvest_quotas_for_settlement(sid)
             rationing_active = self._rationing_for_settlement(sid)
+            quarantine_active = (
+                self._quarantine_for_settlement(sid)
+                if RAIDERS_CONTAGION_ENABLED else {}
+            )
             custom_modifiers = self._custom_modifiers_for_settlement(sid)
         else:
             harvest_quotas = c.setdefault("harvestQuotas", {})
             rationing_active = c.setdefault("rationingActive", {})
+            quarantine_active = (
+                c.setdefault("quarantineActive", {})
+                if RAIDERS_CONTAGION_ENABLED else {}
+            )
             custom_modifiers = c.setdefault("customRuleModifiers", {})
         if rule["kind"] == "harvest_quota":
             try:
@@ -649,6 +661,13 @@ class _CraftingRulesMixin:
             rationing_active[rule["id"]] = {"value": max(1, value)}
             self._push_activity(f'Rationing "{rule["name"]}" now caps stockpile withdrawals to '
                                 f'{max(1, value)} while storage is low')
+        elif RAIDERS_CONTAGION_ENABLED and rule["kind"] == "quarantine":
+            district_id = rule.get("value")
+            if isinstance(district_id, str) and district_id in c["districts"]:
+                quarantine_active[rule["id"]] = {"district": district_id}
+                self._push_activity(
+                    f'Quarantine "{rule["name"]}" now restricts movement and trading '
+                    f'into/out of {district_id}')
         elif rule["kind"] == "priority":
             rid = rule.get("value")
             self._push_activity(
@@ -671,12 +690,57 @@ class _CraftingRulesMixin:
             sid = settlement_id or self._ballot_settlement_id(rule)
             self._harvest_quotas_for_settlement(sid).pop(rid, None)
             self._rationing_for_settlement(sid).pop(rid, None)
+            self._quarantine_for_settlement(sid).pop(rid, None)
             self._custom_modifiers_for_settlement(sid).pop(rid, None)
         else:
             c = self.civilization
             c.get("harvestQuotas", {}).pop(rid, None)
             c.get("rationingActive", {}).pop(rid, None)
+            c.get("quarantineActive", {}).pop(rid, None)
             c.get("customRuleModifiers", {}).pop(rid, None)
+
+    def _quarantined_districts_for_agent(self, agent=None, settlement_id=None):
+        """Active quarantine district ids for one settlement scope."""
+        if not RAIDERS_CONTAGION_ENABLED:
+            return set()
+        if SCHISM_ENABLED:
+            sid = settlement_id or (
+                self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
+            active = self._quarantine_for_settlement(sid)
+        else:
+            active = self.civilization.get("quarantineActive") or {}
+        districts = set()
+        for entry in active.values():
+            did = entry.get("district") if isinstance(entry, dict) else None
+            if isinstance(did, str) and did:
+                districts.add(did)
+        return districts
+
+    def _district_is_quarantined(self, district_id, agent=None, settlement_id=None):
+        if not district_id:
+            return False
+        return district_id in self._quarantined_districts_for_agent(agent, settlement_id)
+
+    def _quarantine_blocks_travel(self, agent, src, dest):
+        """Block cross-district travel when either endpoint is quarantined."""
+        if not RAIDERS_CONTAGION_ENABLED or src == dest:
+            return False
+        quarantined = self._quarantined_districts_for_agent(agent)
+        if not quarantined:
+            return False
+        return src in quarantined or dest in quarantined
+
+    def _quarantine_blocks_trade(self, agent_a, agent_b):
+        """Block cross-district trade when either endpoint is quarantined."""
+        if not RAIDERS_CONTAGION_ENABLED or not agent_a or not agent_b:
+            return False
+        da = agent_a.get("currentDistrict")
+        db = agent_b.get("currentDistrict")
+        if not da or not db or da == db:
+            return False
+        qa = self._district_is_quarantined(da, agent_a)
+        qb = self._district_is_quarantined(db, agent_b)
+        return qa or qb
 
     def _enact_repeal(self, repeal_ballot, yes_count, settlement_id=None):
         """Remove the targeted enacted rule after a successful repeal vote."""

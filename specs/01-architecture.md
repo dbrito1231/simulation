@@ -33,7 +33,7 @@ for the action catalog.
   re-exports at module level, so `import server; server.<name>` still resolves
   every name external callers (scripts/) rely on — pure move split, no
   behavior change.
-- `simulation/index.html` (shell) + `simulation/viewer/*.js` (16 files) +
+- `simulation/index.html` (shell) + `simulation/viewer/*.js` (21 files) +
   `simulation/sprites/*.js` (8 files) + `simulation/css/*.css` (6 files) poll
   `GET /state` (~10 Hz, delta
   after the first full snapshot) and render;
@@ -139,7 +139,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 55 module-level flags, sim_engine.py)
+## Flag index (complete — 66 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -168,6 +168,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `ACTIVITY_CUES_ENABLED` | True | yes | [11](11-viewer.md) |
 | `SOCIAL_LAYER_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `CHRONICLE_ENABLED` | True | yes | [09](09-systems-society.md) |
+| `CHRONICLE_SAGA_ENABLED` | True | yes | [09](09-systems-society.md#saga-chronicle_saga_enabled), [02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled), [03](03-cognition.md), [12](12-ops.md) |
 | `FOUNDING_EVENTS_ENABLED` | True | yes | [05](05-world.md) |
 | `WORLD_CLOCK_HUD_ENABLED` | True | yes | [11](11-viewer.md) |
 | `SEASONAL_AGENTS_ENABLED` | True | yes | [11](11-viewer.md) |
@@ -178,6 +179,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `ECONOMY_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `CONTRACTS_ENABLED` | True | yes | [07](07-actions.md), [08](08-systems-economy.md) |
 | `LIFECYCLE_ENABLED` | True | yes | [06](06-agents.md) |
+| `DYNASTY_TREE_ENABLED` | True | yes | [06](06-agents.md) (Divine Lineage viewer — Phase 3) |
 | `CULTURE_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `CEMETERY_ENABLED` | True | yes | [05](05-world.md) |
 | `PATH1_ENABLED` | True | yes | [10](10-path1.md) |
@@ -188,6 +190,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `PATH1_DIPLOMACY_ENABLED` | True | yes (as `DIPLOMACY_ENABLED`) | [10](10-path1.md) |
 | `TIER3_CONTENT_ENABLED` | True | yes | [10](10-path1.md) |
 | `PRESSURE_LOOP_ENABLED` | True | yes | [10](10-path1.md) |
+| `RAIDERS_CONTAGION_ENABLED` | True | yes | [10](10-path1.md) |
 | `ENV_EFFECTS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `LIBRARY_SCALING_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `TRANSIT_ENABLED` | True | yes | [10](10-path1.md) |
@@ -205,7 +208,26 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `GOD_AUTH_REQUIRED` | False (env-backed, `SIM_GOD_AUTH`; enable via `1`/`true`/`yes`/`on`) | yes | [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_COMPILER_ENABLED` | False (env-backed, `SIM_GOD_COMPILER`) | no (advertised only via `/control/god/capabilities`'s `compiler.enabled`, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
 | `GOD_DEJA_VU_REPLAY` | False (env-backed, `SIM_GOD_DEJA_VU_REPLAY`) | yes | [02](02-engine-core.md), [04](04-http-api.md), [12](12-ops.md) |
-| `DECISION_AUDIT_ENABLED` | True | no | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
+| `ANOMALY_RADAR_ENABLED` | True | no (own state carried by `GET /anomalies`'s `enabled` field, not `config.flags` — the engine is not modified, so there is no `/state` key to echo it into) | [04](04-http-api.md), [12](12-ops.md) |
+| `DECISION_AUDIT_ENABLED` | True | no (own state carried by `GET /decision-audit`'s `enabled` field, not `config.flags`) | [03](03-cognition.md), [04](04-http-api.md), [12](12-ops.md) |
+| `WORLD_WIKI_ENABLED` | True | yes | [04](04-http-api.md), [11](11-viewer.md) |
+| `PREDICTION_MARKET_ENABLED` | True | yes | [04](04-http-api.md), [11](11-viewer.md) |
+| `AGENT_INTERVIEW_ENABLED` | True | yes | [03](03-cognition.md), [04](04-http-api.md), [11](11-viewer.md) |
+
+`DECISION_AUDIT_ENABLED` gates both engine-side correlation-id minting
+(`run_agent_decision` to `llm.jsonl` and `apply_decision` to `activity.jsonl`)
+and the dedicated `/decision-audit` reader. When off, neither log stream
+carries the field and the route returns `{enabled: false, ...}`. The viewer
+learns the state from that route's `enabled` field.
+**`DYNASTY_TREE_ENABLED` kill switch and scoping.** Plain module-level boolean
+(`simulation/sim_engine/constants.py`, Phase 1) — default **True**, echoed in
+`/state` `config.flags`. Kill switch: flip the constant to `False` and restart;
+no env override by default (consistent with most flags in this index). Because
+`parents`/`children` recording is folded into the existing
+`LIFECYCLE_ENABLED`-gated birth path, this flag gates the **viewer Divine
+Lineage panel** (Phase 3) and the `_heirs_of` children-array read — **not**
+whether `children` is written at birth (the write stays unconditional within
+`LIFECYCLE_ENABLED`, same as `parents` today).
 
 `DECISION_AUDIT_ENABLED` gates **both** engine-side correlation-id minting
 (`run_agent_decision` → `llm.jsonl` `decision._decision_id` and
@@ -217,6 +239,27 @@ read paths, not merely a disabled panel. The flag is **not** echoed in `/state`
 field (same pattern as idea-07's dedicated-route viewer echo). Whether an env
 override (e.g. `SIM_DECISION_AUDIT`) is wired is an implementer-phase choice,
 documented in [03-cognition.md](03-cognition.md) once made.
+
+`PREDICTION_MARKET_ENABLED` gates **server-side route behavior** on the three
+`/predictions/*` routes (`POST /predictions/submit`, `POST /predictions/resolve`,
+`GET /predictions/history`) — when off, they perform no `predictions.json`
+file I/O and return their disabled shapes (see [04-http-api.md](04-http-api.md#prediction-market-routes))
+— **and** viewer rendering of the prediction panel. It is distinct from
+engine-mechanic flags: no `_tick_once` system reads it; the only
+`sim_engine/` footprint is the `constants.py` definition plus the
+`config.flags` echo line in `_build_snapshot_config`
+(`mixin_snapshot.py:256-298`). Unlike `memory_store.json`, whose entries mirror
+into `state.db`'s `memory` table and can reach agent think-payloads,
+`predictions.json` is never read by `_build_think_payload()`, any
+`mixin_*.py`, or `save_state()` / `restore_state()` — see
+[02-engine-core.md](02-engine-core.md#persistence).
+
+`AGENT_INTERVIEW_ENABLED` gates the read-only `POST /agent/interview` route
+and is echoed in `/state` `config.flags`. The route is independent of God-mode
+auth and never mutates world state; its Divine Console button is separately
+visible only while both `AGENT_INTERVIEW_ENABLED` and `GOD_MODE_ENABLED` are
+true. Concurrency and prompt behavior are canonical in
+[03-cognition.md](03-cognition.md#agent-interview-operator-qa-out-of-world-debug-surface).
 
 `civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
 Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder

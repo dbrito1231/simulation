@@ -142,12 +142,19 @@ class _LifecycleMixin:
             self._start_succession_election()
 
     def _heirs_of(self, agent):
-        """Heirs are the deceased's children (parents[] linkage) if any exist
-        and are alive; otherwise every living adult shares equally (a village
-        this small has no formal family tree yet -- #Phase G territory)."""
-        children = [a for a in self.agents
-                    if a.get("deathFrame") is None and a.get("parents")
-                    and agent["name"] in a["parents"]]
+        """Heirs are the deceased's living children if any exist; otherwise
+        every living adult shares equally (a village this small has no formal
+        family tree beyond the persisted children[] linkage)."""
+        if DYNASTY_TREE_ENABLED:
+            by_name = {a["name"]: a for a in self.agents}
+            children = [
+                by_name[n] for n in (agent.get("children") or [])
+                if n in by_name and by_name[n].get("deathFrame") is None
+            ]
+        else:
+            children = [a for a in self.agents
+                        if a.get("deathFrame") is None and a.get("parents")
+                        and agent["name"] in a["parents"]]
         if children:
             return children
         return self._eligible_adults(exclude=agent) or [a for a in self.agents if a is not agent]
@@ -756,17 +763,33 @@ class _LifecycleMixin:
         pending = self.civilization.get("pendingSuccession")
         if not isinstance(pending, dict):
             return
+        pending_sid = (
+            pending.get("settlementId") or self._primary_settlement_id()
+            if SCHISM_ENABLED else None
+        )
         council = self.civilization.get("dailyCouncil")
         if council is None:
             self._maybe_convene_daily_council()
             return
         if council.get("trigger") != "succession":
-            return
+            # A settlement becoming leaderless takes precedence over an
+            # ordinary assembly already in progress. Transform that session
+            # in place so the election is immediately visible without
+            # creating a colliding same-frame meeting id.
+            council["trigger"] = "succession"
+            if SCHISM_ENABLED:
+                council["settlementId"] = pending_sid
+            self._refresh_daily_council_roster(council)
         ballot = council.get("ballot") or {}
         candidates = list(pending.get("candidates") or [])
         if ballot.get("id") == pending.get("electionId") \
-                and ballot.get("candidates") == candidates:
+                and ballot.get("candidates") == candidates \
+                and (not SCHISM_ENABLED
+                     or council.get("settlementId") == pending_sid):
             return
+        if SCHISM_ENABLED:
+            council["settlementId"] = pending_sid
+            self._refresh_daily_council_roster(council)
         council["agenda"] = self._daily_council_agenda()
         council["ballot"] = {
             "kind": "succession", "id": pending.get("electionId"),
@@ -792,12 +815,20 @@ class _LifecycleMixin:
         c = self.civilization
         self._init_settlements()
         pending = c.get("pendingSuccession")
-        pending_sid = (pending or {}).get("settlementId") if isinstance(pending, dict) else None
+        pending_sid = (
+            (pending.get("settlementId") or self._primary_settlement_id())
+            if isinstance(pending, dict) else None
+        )
         for entry in c.get("settlements") or []:
             sid = entry.get("id")
             if not sid:
                 continue
-            if self._elder_for_settlement(sid):
+            formal_elder = next((
+                agent for agent in self._living_agents()
+                if agent.get("role") == "elder"
+                and self._settlement_id_for_agent(agent) == sid
+            ), None)
+            if formal_elder:
                 if isinstance(pending, dict) and pending_sid == sid:
                     c["pendingRules"] = [
                         r for r in c.get("pendingRules") or []
@@ -805,6 +836,15 @@ class _LifecycleMixin:
                                 and (r.get("settlementId") or self._primary_settlement_id()) == sid)
                     ]
                     c["pendingSuccession"] = None
+                    council = c.get("dailyCouncil")
+                    council_sid = (
+                        council.get("settlementId") or self._primary_settlement_id()
+                        if isinstance(council, dict) else None
+                    )
+                    if council and council.get("trigger") == "succession" \
+                            and council_sid == sid and not council.get("verdict"):
+                        self._adjourn_daily_council(
+                            f"Elder {formal_elder['name']} retains office")
                 continue
             if isinstance(pending, dict) and pending_sid == sid:
                 eligible = {a["name"] for a in self._succession_candidates(sid)}
@@ -829,6 +869,7 @@ class _LifecycleMixin:
             return
         if SCHISM_ENABLED:
             self._ensure_settlement_succession_elections()
+            self._ensure_succession_daily_council()
             return
         c = self.civilization
         succession_rules = [
@@ -1189,13 +1230,19 @@ class _LifecycleMixin:
         newborn = self._make_agents([slot])[0]
         newborn["age"] = 0.0
         newborn["parents"] = [parent_a["name"], parent_b["name"]]
+        parent_a.setdefault("children", []).append(newborn["name"])
+        parent_b.setdefault("children", []).append(newborn["name"])
         # Low-skill start (#2): a newborn's specialty carries no structure/
         # role bonus differently from an adult -- it starts at the young
         # life stage, which _life_stage already surfaces in prompts, and
         # begins with empty resources rather than the usual starter stash.
         newborn["resources"] = {"food": 0, "wood": 0, "gold": 0, "coin": 0}
         if MEMES_ENABLED:
-            newborn["beliefs"] = set(parent_a.get("beliefs") or set()) | set(parent_b.get("beliefs") or set())
+            belief_union = set(parent_a.get("beliefs") or set()) | set(parent_b.get("beliefs") or set())
+            newborn["beliefs"] = belief_union
+            newborn["inheritedBeliefs"] = sorted(belief_union)
+        else:
+            newborn["inheritedBeliefs"] = []
         # Inherit a share of goods from both parents (#2). Integer amounts --
         # resource counts are integers everywhere else in the game.
         for parent in (parent_a, parent_b):

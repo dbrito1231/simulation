@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "simulation"))
 
+from _server import decision_audit  # noqa: E402
 from _server.decision_audit import build_decision_audit  # noqa: E402
 
 
@@ -153,6 +154,105 @@ def test_flag_off_shape(tmpdir: Path) -> None:
     print("  OK flag-off response shape")
 
 
+def test_flag_off_full_view(tmpdir: Path) -> None:
+    llm_path, activity_path, session_id = _sample_session(tmpdir)
+    result = build_decision_audit(
+        str(llm_path), str(activity_path), session_id, enabled=False, view="full")
+    assert_true(result == {
+        "enabled": False, "agents": [], "recent": [], "entries": [],
+    }, f"flag-off full shape {result}")
+    print("  OK flag-off full view shape")
+
+
+def test_default_no_full_keys(tmpdir: Path) -> None:
+    llm_path, activity_path, session_id = _sample_session(tmpdir)
+    did = "default001"
+    write_jsonl(llm_path, [
+        _llm_line("Sage", 100, "collect_resource", "I need to gather wood.", did),
+    ])
+    write_jsonl(activity_path, [
+        _activity_line("Sage gathered wood.", 100, did),
+    ])
+    result = build_decision_audit(
+        str(llm_path), str(activity_path), session_id, enabled=True)
+    assert_true("entries" not in result, "default must not include entries")
+    assert_true(len(result["agents"]) == 1, "expected one agent")
+    agent = result["agents"][0]
+    assert_true("outcome_ok" not in agent, "default agents must not have outcome_ok")
+    assert_true("outcome_fail" not in agent, "default agents must not have outcome_fail")
+    assert_true("outcome_unknown" not in agent, "default agents must not have outcome_unknown")
+    print("  OK default payload has no full-view keys")
+
+
+def test_full_view_fallback_entry(tmpdir: Path) -> None:
+    llm_path, activity_path, session_id = _sample_session(tmpdir)
+    did = "fallback-full"
+    write_jsonl(llm_path, [
+        _llm_line("Tom", 300, "rest", "Deterministic fallback rest.", did, fallback=True),
+    ])
+    write_jsonl(activity_path, [
+        _activity_line("Tom rested.", 300, did),
+    ])
+    result = build_decision_audit(
+        str(llm_path), str(activity_path), session_id, enabled=True, view="full")
+    assert_true("recent" not in result, "full view must omit recent")
+    assert_true("entries" in result, "full view must include entries")
+    assert_true(len(result["entries"]) == 1, f"expected one entry {result['entries']}")
+    entry = result["entries"][0]
+    assert_true(entry["intent"] == "fallback", f"intent {entry}")
+    assert_true(entry["outcome"] == "unknown", f"outcome {entry}")
+    assert_true(entry["activity_message"] is None,
+                "fallback must not expose activity_message")
+    print("  OK full view fallback entry")
+
+
+def test_outcome_fail_cannot(tmpdir: Path) -> None:
+    llm_path, activity_path, session_id = _sample_session(tmpdir)
+    did = "fail001"
+    write_jsonl(llm_path, [
+        _llm_line("Mira", 400, "collect_resource", "Need to gather stone.", did),
+    ])
+    write_jsonl(activity_path, [
+        _activity_line("Mira cannot gather stone here.", 400, did),
+    ])
+    result = build_decision_audit(
+        str(llm_path), str(activity_path), session_id, enabled=True, view="full")
+    entry = result["entries"][0]
+    assert_true(entry["outcome"] == "fail", f"expected fail outcome {entry}")
+    print("  OK outcome fail on cannot ")
+
+
+def test_outcome_ok_summary(tmpdir: Path) -> None:
+    llm_path, activity_path, session_id = _sample_session(tmpdir)
+    did = "ok001"
+    write_jsonl(llm_path, [
+        _llm_line("Sage", 500, "collect_resource", "Time to gather wood.", did),
+    ])
+    write_jsonl(activity_path, [
+        _activity_line("Sage heads to gather wood.", 500, did),
+    ])
+    result = build_decision_audit(
+        str(llm_path), str(activity_path), session_id, enabled=True, view="full")
+    entry = result["entries"][0]
+    assert_true(entry["outcome"] == "ok", f"expected ok outcome {entry}")
+    print("  OK outcome ok on successful summary")
+
+
+def test_outcome_unknown_missing_activity(tmpdir: Path) -> None:
+    llm_path, activity_path, session_id = _sample_session(tmpdir)
+    write_jsonl(llm_path, [
+        _llm_line("Ash", 600, "rest", "Need to gather berries.", "orphan-full"),
+    ])
+    write_jsonl(activity_path, [])
+    result = build_decision_audit(
+        str(llm_path), str(activity_path), session_id, enabled=True, view="full")
+    entry = result["entries"][0]
+    assert_true(entry["intent"] == "uncorrelated", f"intent {entry}")
+    assert_true(entry["outcome"] == "unknown", f"outcome {entry}")
+    assert_true(entry["activity_message"] is None, "missing activity → null message")
+    print("  OK outcome unknown and uncorrelated without activity")
+
+
 def test_uncorrelated_and_unclassified(tmpdir: Path) -> None:
     llm_path, activity_path, session_id = _sample_session(tmpdir)
     write_jsonl(llm_path, [
@@ -201,6 +301,38 @@ def test_uncorrelated_and_unclassified(tmpdir: Path) -> None:
     print("  OK uncorrelated and unclassified buckets")
 
 
+def test_file_identity_cache(tmpdir: Path) -> None:
+    llm_path, activity_path, session_id = _sample_session(tmpdir)
+    write_jsonl(llm_path, [
+        _llm_line("Sage", 100, "collect_resource", "gather wood", "cache-id"),
+    ])
+    write_jsonl(activity_path, [
+        _activity_line("Sage gathered wood.", 100, "cache-id"),
+    ])
+    decision_audit._PARSE_CACHE.clear()
+    original_read = decision_audit._read_jsonl
+    calls = 0
+
+    def counted_read(path: str):
+        nonlocal calls
+        calls += 1
+        return original_read(path)
+
+    decision_audit._read_jsonl = counted_read
+    try:
+        build_decision_audit(str(llm_path), str(activity_path), session_id)
+        build_decision_audit(str(llm_path), str(activity_path), session_id)
+        assert_true(calls == 2, f"unchanged sources reparsed ({calls} reads)")
+        with activity_path.open("a", encoding="utf-8") as fh:
+            fh.write("\n")
+        build_decision_audit(str(llm_path), str(activity_path), session_id)
+        assert_true(calls == 4, f"changed source did not invalidate cache ({calls} reads)")
+    finally:
+        decision_audit._read_jsonl = original_read
+        decision_audit._PARSE_CACHE.clear()
+    print("  OK file-identity parse cache")
+
+
 def main() -> None:
     print("idea10_decision_audit_smoke")
     with tempfile.TemporaryDirectory() as tmp:
@@ -209,7 +341,14 @@ def main() -> None:
         test_mismatched_pair(tmpdir)
         test_fallback_excluded(tmpdir)
         test_flag_off_shape(tmpdir)
+        test_flag_off_full_view(tmpdir)
+        test_default_no_full_keys(tmpdir)
+        test_full_view_fallback_entry(tmpdir)
+        test_outcome_fail_cannot(tmpdir)
+        test_outcome_ok_summary(tmpdir)
+        test_outcome_unknown_missing_activity(tmpdir)
         test_uncorrelated_and_unclassified(tmpdir)
+        test_file_identity_cache(tmpdir)
     print("PASS")
 
 

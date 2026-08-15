@@ -29,8 +29,8 @@ catalog — not repeated here).
 > `MODEL_FAST = "sim-fast"` (`llama3.2:3b`, `num_ctx=4096`) are distinct
 > models split **by workload kind, not by decision stakes**: ALL decision
 > turns route to `MODEL_SMART`; `MODEL_FAST` serves only background cognition
-> (PIANO modules, memory summarizer/wiki merge, meta system, belief pitch —
-> every direct `lm_complete()` caller). This supersedes an initial Phase 3
+> (PIANO modules, memory summarizer/wiki merge, meta system, belief pitch,
+> chronicle saga — every direct `lm_complete()` caller). This supersedes an initial Phase 3
 > attempt that routed routine decisions to `sim-fast`: a live soak measured
 > `piano_module_drops` at ~25-38% (vs. ~9% pre-migration) and rising module
 > latencies, because routine decisions and PIANO modules contended for
@@ -56,7 +56,8 @@ catalog — not repeated here).
 | Invention-only turn | `INVENTION_SYSTEM_PROMPT` | `MODEL_SMART` (sprite/invention always high-stakes) | `INVENTION_MAX_TOKENS`=1024 | `INVENTION_TEMPERATURE`=0.6 | 75s | as above |
 | Daily Council turn | slim council-turn prompt | `MODEL_SMART`; routine settings except an elder verdict uses the high-stakes settings | bounded routine output | routine temperature | routine timeout, or 75s for elder verdict | routine sampling, or high-stakes sampling for elder verdict |
 | Sprite-design turn | `SPRITE_UPGRADE_SYSTEM_PROMPT` | `MODEL_SMART` | 768 | 0.3 | 75s | as above |
-| Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/80/90/100/220 per call site; PIANO=`PIANO_MODULE_MAX_TOKENS`=90) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`); PIANO fan-out 15s (`PIANO_MODULE_TIMEOUT_S`), always-on refresh 60s (`MODULE_REFRESH_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
+| Background `lm_complete` (memory summarizer/wiki merge, PIANO modules, meta system/autobiography, belief-pitch scoring, chronicle saga) | caller-supplied one-off prompt | `MODEL_FAST` always (`sim-fast`, llama3.2:3b) | caller-set (8/40/80/90/100/220 per call site; PIANO=`PIANO_MODULE_MAX_TOKENS`=90; saga ≈150-word target at implementation) | caller-set (0.0-0.6) | 30s (hardcoded, not `DEFAULT_TIMEOUT_S`); PIANO fan-out 15s (`PIANO_MODULE_TIMEOUT_S`), always-on refresh 60s (`MODULE_REFRESH_TIMEOUT_S`) | `NON_THINKING_SAMPLING` + `think:false` |
+| Chronicle saga (day boundary, `CHRONICLE_SAGA_ENABLED`) | caller-built prompt: day's chronicle window + bounded `conversation.jsonl` excerpt + civ counters | `MODEL_FAST` (`sim-fast`) | caller-set (~150-word target) | caller-set (~0.4) | 30s (`lm_complete` default) | `NON_THINKING_SAMPLING` + `think:false` |
 
 Routine and high-stakes rows both use `MODEL_SMART`; separate rows because
 `is_high_stakes_turn` still determines timeout, max_tokens, and
@@ -99,7 +100,7 @@ route to `sim-fast`, regardless of `is_high_stakes_turn(data)`.
 sampling/thinking (`THINKING_SAMPLING` vs `NON_THINKING_SAMPLING`) — only
 model-id selection was removed. `MODEL_FAST` is for background cognition only
 (PIANO modules, memory summarizer/wiki merge, meta system, belief-pitch
-scoring — every direct `lm_complete()` caller); see Concurrency & context
+scoring, chronicle saga — every direct `lm_complete()` caller); see Concurrency & context
 sizing for contention rationale. Fallback: Ollama has no LM-Studio-style
 `"local-model"` alias — if `looks_like_model_not_found_error` fires, that is
 a **setup failure**: the server logs a `[server]` line pointing at
@@ -1113,6 +1114,52 @@ up to ~6,163 invention-only) must stay under `sim-smart`'s per-slot share at
 `OLLAMA_NUM_PARALLEL=3` against `num_ctx=20480`; `exceed_context_size_error`
 (see Retries) is the enforced backstop.
 
+### Chronicle saga LLM (`CHRONICLE_SAGA_ENABLED`)
+
+One `lm_complete` call per sim day at the day boundary
+(`frameTick % DAY_FRAMES == 0`, gated by `CHRONICLE_SAGA_ENABLED` — trigger
+details in [02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled)). This
+is a **background** call site: always `MODEL_FAST`/`sim-fast` via
+`self.d["run_chronicle_saga"](saga_context)` (server wrapper around
+`lm_complete` — `server.py:1312-1316`).
+
+**Lock discipline (contrast with `_spawn_newborn`).** All saga inputs are
+snapshotted under `self.lock` (chronicle-ring window, `births`/`deaths`
+counters, and a bounded dialogue excerpt returned by
+`self.d["read_conversation_window"](start_frame, end_frame)` — [12](12-ops.md)).
+The network call runs **fully outside** the lock, then the lock is re-acquired
+only to append into `civilization["saga"]`. Same snapshot → release → dispatch
+→ reacquire → write shape as `_build_think_payload` /
+`run_agent_decision` / `apply_decision` (`mixin_think_job.py:35,1417`,
+`server.py:2006`) — **not** the single synchronous in-lock `lm_complete` in
+`_spawn_newborn` (`mixin_lifecycle.py:1186-1253`).
+
+**Pool.** Dispatched onto `self.piano_workers` (`PIANO_CONCURRENT_LLM = 2`,
+`constants.py:1358`) — shared capacity with PIANO module calls, never
+`self._executor` / `MAX_CONCURRENT_LLM`.
+
+**Prompt composition.** The user prompt combines: (1) chronicle entries from
+the completed day's window in `civilization["chronicle"]`; (2) a **bounded**
+excerpt of the day's `conversation.jsonl` dialogue (via the injected read
+function — capped at `SAGA_DIALOGUE_EXCERPT_CAP = 10` lines in
+`constants.py`, a small multiple of `CHRONICLE_PROMPT_ENTRIES = 3`, not the
+full day's transcript). Prompt excerpts normalize CRLF/CR to LF, collapse
+each rendered excerpt to one line, cap each normalized message at
+`SAGA_PROMPT_EXCERPT_CHAR_CAP = 300` characters, and stop at 10 rendered lines
+before prompt construction; (3) civilization counters and daily-council verdict
+context when present. Saga text is **never** folded into `_chronicle_prompt_line()` or any
+agent think payload ([09](09-systems-society.md#saga-chronicle_saga_enabled)).
+
+**Always-fire / degradation.** The call fires every day boundary even when
+both chronicle and dialogue windows are empty (explicit quiet-day context in
+the user prompt via `quiet_day: true` on `saga_context`). On `lm_complete`
+failure/timeout/empty response, the worker writes the deterministic fallback
+`SAGA_FALLBACK_TEXT = "A quiet day passed in the village; little was recorded."`
+(`constants.py`) to `civilization["saga"]` instead of blocking the tick loop.
+Server-side dispatch: `run_chronicle_saga(saga_context)` in `server.py`, injected
+as `"run_chronicle_saga"` in `_ENGINE_DEPS`. Distinct `llm.jsonl` logging via
+`session_logger.log_lm_exchange` with `"module": "chronicle_saga"` ([12](12-ops.md)).
+
 `PIANO_MODULES` (`constants.py:483`, default `True` since Sid-parity Phase 1) —
 Perception/Social/Desire/Reflection module fan-out is the default cognition
 path. When `THEORY_OF_MIND_ENABLED` (default `False`, Emergence Breakthroughs
@@ -1293,3 +1340,114 @@ reasonable at roster 20 without touching concurrency constants;
 20 at default cadence dispatches more decision calls/minute in aggregate than
 roster 8, but no single agent is starved, and the worker-pool cap prevents
 aggregate demand from exceeding what the loaded Ollama config serves.
+
+## Agent interview (operator Q&A, out-of-world debug surface) {#agent-interview-operator-qa-out-of-world-debug-surface}
+
+`POST /agent/interview` (route/response shape:
+[04-http-api.md](04-http-api.md#agent-interview-route)) is a **third, distinct
+LLM call site** alongside agent decisions (`self._executor`,
+`MAX_CONCURRENT_LLM = 3`) and PIANO modules (`self.piano_workers`,
+`PIANO_CONCURRENT_LLM = 2`) — see "Concurrency & context sizing" above. It is
+operator-triggered (a human clicking the Divine Console's interview button, or
+a direct HTTP call — [04-http-api.md](04-http-api.md#agent-interview-route)),
+off the tick loop, never gated by `is_high_stakes_turn`, and never counted as
+a "decision" or "module" turn in any benchmark — the same non-cognition-path
+status the Optional Phase 8 free-prose compiler has (see "Sovereign God mode
+(Optional Phase 8)" above), though the interview call is not itself a God-mode
+command (it is gated only on its own flag, `AGENT_INTERVIEW_ENABLED` — see
+[01-architecture.md](01-architecture.md), not `GOD_MODE_ENABLED`).
+
+**Zero mutation, not an intervention.** The handler reads world state and
+returns an answer to the operator; it writes nothing to `agent["memory"]`,
+`agent["memoryWiki"]`, `agent["relationships"]`, `agent["beliefs"]`,
+`civilization`, or any other snapshot field. It sets no `intervened` flag and
+writes no `divine.jsonl` record — it is not part of any `/control/god/*`
+route or command and never touches `godState` (see
+[01-architecture.md](01-architecture.md#control-plane-data-flow-sovereign-god-mode)).
+
+**Model and concurrency pool.** Every interview call routes to `MODEL_SMART`
+(`sim-smart`) — the same model agent decisions use, chosen because a human
+operator reads the answer directly and coherence matters more here than for a
+background module call (`sim-fast` already serves PIANO; routing interviews
+there would risk the same contention the compiler avoids by not using
+`sim-fast` — see "Model routing — NOT `sim-fast`" above). Interview calls run
+on a **new, independently bounded** pool/semaphore,
+**`INTERVIEW_CONCURRENT_LLM = 1`**, in `simulation/sim_engine/constants.py`
+alongside `MAX_CONCURRENT_LLM` and `PIANO_CONCURRENT_LLM` — a third,
+dedicated concurrency budget so an interview call can never queue against, or
+be starved by, either existing pool. `1` (not a larger number) matches this
+being a low-frequency, single-human-operator-triggered feature — there is no
+structural reason for multiple interviews to be in flight simultaneously in
+normal operation, unlike per-tick decision/module fan-out across the roster.
+Raising the constant later, if a concrete need for concurrent interviews
+emerges, is a one-line change.
+
+Semaphore acquisition is itself bounded: `run_agent_interview()` waits at
+most one second for the dedicated slot. If it is occupied, the request returns
+`{ok: false, reason: "agent interview capacity unavailable; try again shortly"}`
+without calling the model. A Flask worker therefore never waits indefinitely
+behind another interview.
+
+**Question cap.** Free-text operator questions are validated against
+**`INTERVIEW_QUESTION_MAX_CHARS = 500`** (`simulation/sim_engine/constants.py`)
+before the LLM call — a question over the cap is **rejected**, never silently
+truncated, following the same cap-and-reject pattern
+`GOD_COMPILER_PROSE_MAX_CHARS = 800` (`constants.py:797`) established for the
+free-prose story compiler's `prose` field (see "Sovereign God mode (Optional
+Phase 8)" above) — a distinct constant, not a reuse of that one, because an
+interview question is a single question directed at one agent, not free
+prose describing a world event. The cap is enforced server-side (client-side
+`maxlength` on the Divine Console's textarea, if present, is UX only and never
+load-bearing — [11-viewer.md](11-viewer.md#divine-console-sovereign-god-mode-phase-7)).
+`500` is this spec's currently documented value; a Phase 2 implementer may
+adjust it for a concrete reason (e.g. matching a chosen UI input's
+`maxlength`), but must update this value and its reasoning here in the same
+change that changes it.
+
+**Prompt construction — reuse boundary with `idea-09-world-wiki`.** The
+context-fetch step calls `_agent_snapshot_row(a)`
+(`simulation/sim_engine/mixin_snapshot.py:113-134`) **server-side, in-process,
+under `self.lock`**, for the requested agent's structured fields — the same
+in-process-call pattern `idea-09-world-wiki`'s own wiki route uses to merge
+`/districts.js` data (its own §2 Answer 3 precedent), never an HTTP
+round-trip to another route. `_agent_snapshot_row()` is pre-existing repo
+code (not authored by, or owned by, this feature) that already returns, per
+agent: `id`, `name`, `role`, `color`, `x`/`y`, `currentZone`,
+`currentDistrict`, a `waypoints` **count** (not the path itself), `resources`,
+`hunger`, `health`, `incapacitated`, `message`, `isThinking`, `beliefs` (text,
+via `_belief_text`) and `beliefIds`, `lastAction`, `assignedTask`, `age` and
+`lifeStage` (when `LIFECYCLE_ENABLED`), `skills` and `personalityTraits`
+(when `CULTURE_ENABLED`), `deceased`, `buried`, `relationships` (non-neutral
+only), and `lastReasoning` (truncated to 160 chars). It does **not** include
+`memoryWiki` sections, raw `agent["memory"]` tiers, or any other private
+engine state — that is `_agent_snapshot_row()`'s existing, unmodified
+contract (it already serves the `/state` agent snapshot with exactly this
+field set; see [06-agents.md](06-agents.md)). Because the idea text promises
+an answer "generated strictly from that agent's memory store, relationships,
+and beliefs," and `_agent_snapshot_row()` deliberately omits the memory-store
+half, the interview context assembly **additionally reads directly**:
+`agent["memory"]` (the three-tier `working`/`shortTerm`/`longTerm` structure —
+[06-agents.md](06-agents.md#memory-system-memory_enabled-default-true)) and
+`agent["memoryWiki"]` (the `relationships`/`goals`/`lessons` sections —
+[06-agents.md](06-agents.md#wiki-style-compounding-memory-wiki_memory-default-true)).
+`agent["relationships"]` and `agent["beliefs"]` are already carried on the
+`_agent_snapshot_row()` projection, so no second direct read of those two
+fields is needed. This plan does not modify `_agent_snapshot_row()` itself,
+add a field to it, or duplicate its entity-resolution logic — it is called
+exactly as `idea-09-world-wiki` calls it, read-only, for one agent id
+resolved from the request body.
+
+**Clean-error degrade when memory is unavailable (non-default choice).** The
+idea text's promised context — memory store, relationships, beliefs — is only
+fully available when `MEMORY_ENABLED` is True (and, for the wiki-compounded
+sections, `WIKI_MEMORY` also True); `relationships` and `beliefs` are
+unconditional agent fields and always exist. `run_agent_interview()`
+(`_server/agent_interview.py`) gates on both flags independently: when
+`MEMORY_ENABLED` is off, or when `WIKI_MEMORY` is off, the route **refuses
+with a clean error and makes no LLM call** — it must NOT silently degrade to
+answering from relationships/beliefs alone (or with an empty memoryWiki
+section). This is the non-default choice: the alternative (answer from
+whatever remains) was considered and rejected, because a thinner, unflagged
+answer would look identical to a full one to the operator reading it. See
+[04-http-api.md](04-http-api.md#agent-interview-route) for the exact error
+response shape.

@@ -80,7 +80,11 @@ const DIVINE_FEATURE_ICONS = {
   story:   '<svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h6v18H6a2 2 0 0 1-2-2z"/><path d="M12 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-6"/></svg>',
   laws:    '<svg viewBox="0 0 24 24"><path d="M12 3v18M5 7h14M7 7l-3 6h6zM17 7l3 6h-6z"/></svg>',
   history: '<svg viewBox="0 0 24 24"><path d="M3 5h14v14H3z"/><path d="M7 9h6M7 13h6M7 5v14"/></svg>',
+  audit:   '<svg viewBox="0 0 24 24"><path d="M8 4h8v2H8z"/><path d="M6 6h12v14H6z"/><path d="M9 10h6M9 14h4"/></svg>',
+  lineage:'<svg viewBox="0 0 24 24"><path d="M12 2v6M8 8h8M6 14h4v8H6zM14 14h4v8h-4z"/><path d="M12 8v6"/></svg>',
   compile: '<svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>',
+  anomaly: '<svg viewBox="0 0 24 24"><path d="M12 2l9 18H3z"/><path d="M12 9v5"/><circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none"/></svg>',
+  interview: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9a2.8 2.8 0 1 1 3.8 2.6c-.8.4-1 .9-1 1.7"/><circle cx="12" cy="16.6" r="0.1"/></svg>',
 };
 const DIVINE_PREVIEW_TIP = {
   t: "Preview",
@@ -188,6 +192,28 @@ const DIVINE_FEATURES = {
     ],
     gated: true,
   },
+  audit: {
+    title: "Audit",
+    sub: "Full decision pairs with intent and outcome axes.",
+    guide: [
+      "Read-only — unlock required, same gate as History.",
+      "Intent and Outcome are independent axes; ok on Outcome does not mean success.",
+      "Filters apply client-side over the server entry list.",
+      "Sidebar Decision audit stays separate and uses the default route.",
+    ],
+    gated: true,
+  },
+  lineage: {
+    title: "Lineage",
+    sub: "Parents, children, and birth-time inherited testament and beliefs.",
+    guide: [
+      "Pick any villager — living or deceased — to inspect their family links.",
+      "Parents and children are name links; click to jump within this panel.",
+      "Inherited testament shows snapshot entries from birth; beliefs are the birth-time parent union.",
+      "Read-only — data comes from /state; nothing here changes the village.",
+    ],
+    gated: true,
+  },
   compile: {
     title: "Compile",
     sub: "Turn a written story idea into a Story draft (optional advanced tool).",
@@ -196,6 +222,30 @@ const DIVINE_FEATURES = {
       "Nothing changes until you review in Story and Apply yourself.",
       "Experimental — your server admin must enable the compiler.",
       "Compile never applies directly; it only fills the Story form for you.",
+    ],
+    gated: true,
+  },
+  // idea-07b §2 Answer 1: the second gated: false precedent alongside
+  // unlock -- clickable without a god token. Read-only observability that
+  // borrows the bar's chrome; never calls godApiFetch()/`/control/god/*`.
+  anomaly: {
+    title: "Anomaly",
+    sub: "Statistical anomalies detected in village metrics.",
+    guide: [
+      "Range breaks, new rule kinds, and schisms detected from this run's benchmark metrics.",
+      "Read-only — this view never changes the village and is not a divine intervention.",
+      "Available even without a god token; the sidebar's Anomaly radar panel shows the same data.",
+      "Hidden automatically if the server's ANOMALY_RADAR_ENABLED flag is off.",
+    ],
+    gated: false,
+  },
+  interview: {
+    title: "Interview",
+    sub: "Ask one villager a question, out-of-world.",
+    guide: [
+      "Pick a villager and type a free-text question, then Ask.",
+      "The answer uses only that villager's memory, relationships, and beliefs.",
+      "This is read-only and never changes the village.",
     ],
     gated: true,
   },
@@ -357,7 +407,8 @@ function populateGodAgentSelects() {
    document.getElementById("godIdentityCopyTargetSelect"),
    document.getElementById("godIdentityCopySourceSelect"),
    document.getElementById("godIdentityCancelAgentSelect"),
-   document.getElementById("godDejaVuAgentSelect")].forEach((el) => {
+   document.getElementById("godDejaVuAgentSelect"),
+   document.getElementById("godInterviewAgentSelect")].forEach((el) => {
     godFillAgentSelect(el, preferred);
   });
   const resourceSelect = document.getElementById("godGrantResourceSelect");

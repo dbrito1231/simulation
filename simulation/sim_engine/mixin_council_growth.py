@@ -23,15 +23,30 @@ class _CouncilGrowthMixin:
     and the rules backstop. See module docstring for exact scope."""
 
     # --- Daily Council Assembly (scheduled, whole-village council) ---
-    def _daily_council_living(self):
-        """Permanent death is deathFrame != None; collapse is excusable life."""
-        return [a for a in self.agents if a.get("deathFrame") is None]
+    def _daily_council_living(self, settlement_id=None):
+        """Living roster, optionally scoped to one normalized settlement id."""
+        living = [a for a in self.agents if a.get("deathFrame") is None]
+        if SCHISM_ENABLED and settlement_id:
+            living = [
+                agent for agent in living
+                if self._settlement_id_for_agent(agent) == settlement_id
+            ]
+        return living
 
     def _daily_council_agenda(self):
         c = self.civilization
+        succession = c.get("pendingSuccession")
+        succession_sid = (
+            (succession.get("settlementId") or self._primary_settlement_id())
+            if SCHISM_ENABLED and isinstance(succession, dict) else None
+        )
         elder = next((a for a in self.agents if a.get("role") == "elder"), None)
-        agenda_sid = (self._settlement_id_for_agent(elder) if elder and SCHISM_ENABLED
-                      else self._primary_settlement_id() if SCHISM_ENABLED else None)
+        agenda_sid = None
+        if SCHISM_ENABLED:
+            agenda_sid = succession_sid or (
+                self._settlement_id_for_agent(elder)
+                if elder else self._primary_settlement_id()
+            )
         active_projects = [
             f"{did}: {p.get('name') or p.get('type')}"
             for did, p in sorted((c.get("districtProjects") or {}).items())
@@ -87,7 +102,6 @@ class _CouncilGrowthMixin:
                 "topic": "invention_required",
                 "detail": "Known productive options are exhausted; a new blueprint is needed",
             })
-        succession = c.get("pendingSuccession")
         if LIFECYCLE_ENABLED and isinstance(succession, dict):
             candidates = [
                 str(name) for name in (succession.get("candidates") or [])
@@ -220,15 +234,22 @@ class _CouncilGrowthMixin:
         if (not DAILY_COUNCIL_ENABLED or self.civilization.get("dailyCouncil")
                 or self.civilization.get("councilActive")):
             return False
-        living = self._daily_council_living()
-        attendees = [a for a in living if not a.get("incapacitated")]
-        excused = sorted(a["name"] for a in living if a.get("incapacitated"))
         succession = self.civilization.get("pendingSuccession")
+        succession_sid = (
+            (succession.get("settlementId") or self._primary_settlement_id())
+            if SCHISM_ENABLED and isinstance(succession, dict) else None
+        )
+        living = self._daily_council_living(succession_sid)
         succession_emergency = bool(
             LIFECYCLE_ENABLED
             and isinstance(succession, dict)
             and not any(a.get("role") == "elder" for a in living)
         )
+        if not succession_emergency:
+            living = self._daily_council_living()
+            succession_sid = None
+        attendees = [a for a in living if not a.get("incapacitated")]
+        excused = sorted(a["name"] for a in living if a.get("incapacitated"))
         if len(living) < DAILY_COUNCIL_MIN_LIVING and not succession_emergency:
             return False
         if not attendees:
@@ -277,6 +298,8 @@ class _CouncilGrowthMixin:
             "ballot": succession_ballot,
             "verdict": None,
         }
+        if succession_emergency and SCHISM_ENABLED:
+            council["settlementId"] = succession_sid
         self.civilization["dailyCouncil"] = council
         for seat in seats:
             agent = self._find_agent(seat["name"])
@@ -315,7 +338,11 @@ class _CouncilGrowthMixin:
 
     def _refresh_daily_council_roster(self, council):
         """Remove deaths/collapses and seat any newly available living member."""
-        living = self._daily_council_living()
+        settlement_id = (
+            council.get("settlementId") or self._primary_settlement_id()
+            if SCHISM_ENABLED and council.get("trigger") == "succession" else None
+        )
+        living = self._daily_council_living(settlement_id)
         available = [a for a in living if not a.get("incapacitated")]
         excused = sorted(a["name"] for a in living if a.get("incapacitated"))
         allow_headless = (
@@ -567,6 +594,10 @@ class _CouncilGrowthMixin:
             return None
         tally = self._daily_council_tally(council)
         if ballot.get("kind") == "succession":
+            settlement_id = (
+                council.get("settlementId") or self._primary_settlement_id()
+                if SCHISM_ENABLED else None
+            )
             candidates = [
                 self._find_agent(name) for name in (ballot.get("candidates") or [])
             ]
@@ -574,6 +605,8 @@ class _CouncilGrowthMixin:
                 candidate for candidate in candidates
                 if candidate and candidate.get("deathFrame") is None
                 and not candidate.get("incapacitated")
+                and (not settlement_id
+                     or self._settlement_id_for_agent(candidate) == settlement_id)
             ]
             if not candidates:
                 return None
