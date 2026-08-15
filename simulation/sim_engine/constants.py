@@ -302,6 +302,8 @@ __all__ = [
     "CUSTOM_RULE_MODIFIER_MAX",
     "MAX_CONCURRENT_LLM",
     "PIANO_CONCURRENT_LLM",
+    "INTERVIEW_CONCURRENT_LLM",
+    "INTERVIEW_QUESTION_MAX_CHARS",
     "PIANO_MODULE_CACHE_TTL",
     "PIANO_CROSS_CONTEXT_TTL",
     "MODULE_PULSE_INTERVAL_S",
@@ -1390,6 +1392,11 @@ MAX_CONCURRENT_LLM = 3
 # running concurrently against their respective model (specs/03-cognition.md,
 # ollama_config.md).
 PIANO_CONCURRENT_LLM = 2
+# Separate capacity for operator-triggered interviews. Contention on this
+# slot never consumes the engine's decision or PIANO pools.
+INTERVIEW_CONCURRENT_LLM = 1
+# Questions above this server-side cap are rejected rather than truncated.
+INTERVIEW_QUESTION_MAX_CHARS = 500
 # Off-tick module reports (e.g. social/reflection on a tick they don't fire)
 # are served from the last real report instead of an empty slot, as long as
 # it is no more than this many module-ticks stale -- see _run_piano_modules.
