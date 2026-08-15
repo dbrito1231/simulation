@@ -1361,8 +1361,8 @@ command (it is gated only on its own flag, `AGENT_INTERVIEW_ENABLED` — see
 returns an answer to the operator; it writes nothing to `agent["memory"]`,
 `agent["memoryWiki"]`, `agent["relationships"]`, `agent["beliefs"]`,
 `civilization`, or any other snapshot field. It sets no `intervened` flag and
-writes no `divine.jsonl` record — it is not one of the five `/control/god/*`
-routes' applyable commands and never touches `godState` (see
+writes no `divine.jsonl` record — it is not part of any `/control/god/*`
+route or command and never touches `godState` (see
 [01-architecture.md](01-architecture.md#control-plane-data-flow-sovereign-god-mode)).
 
 **Model and concurrency pool.** Every interview call routes to `MODEL_SMART`
