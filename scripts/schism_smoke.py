@@ -285,6 +285,80 @@ def test_flag_on_scripted_schism():
     print("  OK flag-on scripted schism")
 
 
+def test_child_succession_replaces_normal_council_visibly():
+    old_schism = se.SCHISM_ENABLED
+    old_daily = se.DAILY_COUNCIL_ENABLED
+    se.SCHISM_ENABLED = True
+    se.DAILY_COUNCIL_ENABLED = True
+    try:
+        engine = make_engine(8)
+        c = engine.civilization
+        home = engine._primary_settlement_id()
+        home_elder = next(a for a in engine._living_agents() if a.get("role") == "elder")
+
+        engine.frameTick = se.DAY_FRAMES
+        assert_true(engine._maybe_convene_daily_council(),
+                    "normal Daily Council fixture did not convene")
+        normal = c["dailyCouncil"]
+        assert_true(normal.get("trigger") == "daily", normal)
+
+        child_sid = "child_succession_smoke"
+        child_did = next(did for did in c["districts"] if did != "village_core")
+        c["districts"][child_did]["settlementId"] = child_sid
+        c["settlements"].append({
+            "id": child_sid, "name": "Child Succession Smoke",
+            "districts": [child_did],
+        })
+        engine._init_schism_settlement_buckets(child_sid)
+        child_agents = [a for a in engine.agents if a is not home_elder][:3]
+        for agent in child_agents:
+            agent["currentDistrict"] = child_did
+
+        engine._start_succession_election(settlement_id=child_sid)
+        pending_rules = [
+            rule for rule in c["pendingRules"]
+            if rule.get("kind") == "succession"
+            and rule.get("settlementId") == child_sid
+        ]
+        assert_true(pending_rules and not any(rule.get("votes") for rule in pending_rules),
+                    "child election fixture started with manufactured votes")
+
+        engine._ensure_succession_election()
+        council = c.get("dailyCouncil")
+        child_names = {agent["name"] for agent in child_agents}
+        assert_true(council and council.get("trigger") == "succession"
+                    and council.get("settlementId") == child_sid,
+                    "normal assembly did not become child succession council")
+        assert_true(set(council.get("attendees") or []) == child_names,
+                    f"succession attendees leaked across settlements: {council.get('attendees')}")
+        assert_true(not any(seat.get("isHead") for seat in council.get("seats") or []),
+                    "home elder incorrectly headed the child succession council")
+        assert_true(council.get("ballot", {}).get("candidates")
+                    == c["pendingSuccession"]["candidates"],
+                    "child succession candidates are not visibly named")
+        assert_true(not council["ballot"].get("votes")
+                    and not any(rule.get("votes") for rule in pending_rules),
+                    "succession projection manufactured candidate support")
+        assert_true(engine._elder_for_settlement(home) is home_elder,
+                    "child succession displaced the home elder")
+
+        child_formal_elder = child_agents[0]
+        child_formal_elder["role"] = "elder"
+        child_formal_elder["incapacitated"] = True
+        engine._ensure_succession_election()
+        assert_true(c.get("pendingSuccession") is None
+                    and not any(rule.get("kind") == "succession"
+                                and rule.get("settlementId") == child_sid
+                                for rule in c["pendingRules"]),
+                    "incapacitated child elder did not cancel stray election")
+        assert_true(c.get("dailyCouncil") is None,
+                    "cancelled child election left an unresolved council active")
+    finally:
+        se.SCHISM_ENABLED = old_schism
+        se.DAILY_COUNCIL_ENABLED = old_daily
+    print("  OK child succession is visible, scoped, and vote-neutral")
+
+
 def main():
     print("schism_smoke.py")
     test_flag_off_no_keyed_maps()
@@ -293,6 +367,7 @@ def main():
     test_flag_on_propose_enact_home()
     test_flag_on_two_settlement_rules_independent()
     test_flag_on_scripted_schism()
+    test_child_succession_replaces_normal_council_visibly()
     print("ALL OK")
 
 

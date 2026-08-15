@@ -529,7 +529,14 @@ election-deadline tiebreak.
 When schism support delegates this repair per settlement, the same recovery
 pass must also project the resulting `pendingSuccession` into the visible
 emergency Daily Council; delegation must not leave a valid election waiting
-without its named-candidate assembly.
+without its named-candidate assembly. Emergency detection, attendance, excused
+roster, headless seating, candidate eligibility, and voting are scoped to the
+pending election's normalized `settlementId` (missing means `home`); a living
+elder in another settlement does not suppress that assembly. If an ordinary
+Daily Council is active, it is transformed into the settlement's succession
+session and its ordinary ballot is replaced without manufacturing votes. A
+living formal elder in that settlement, including an incapacitated elder,
+cancels a stray election and its unresolved succession assembly.
 
 ## MEMES_ENABLED
 
