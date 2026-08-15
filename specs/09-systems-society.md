@@ -526,6 +526,10 @@ cancelled so a late ballot cannot create two elders. Expired but otherwise
 valid elections are not restarted: the Daily Council phase/session TTL owns
 completion while enabled, and only the flag-off legacy path uses the direct
 election-deadline tiebreak.
+When schism support delegates this repair per settlement, the same recovery
+pass must also project the resulting `pendingSuccession` into the visible
+emergency Daily Council; delegation must not leave a valid election waiting
+without its named-candidate assembly.
 
 ## MEMES_ENABLED
 

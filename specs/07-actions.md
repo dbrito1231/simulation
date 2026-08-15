@@ -23,6 +23,9 @@ structure id / wildlife creature id / grid `"gx,gy"` depending on action),
 `target_district`, `message`, `new_role`, `blueprint` (object), `recipe`
 (object), `contract` (object), `rule` (object), `belief` (object), `belief_pitch` (object), `vote`
 (`yes`/`no`), `sage_decision` (`approve`/`deny`), `sprite` (grid block).
+Feature smokes parse this canonical list and verify their required entries plus
+catalog uniqueness; they must not embed an older total as a second source of
+truth.
 
 ## Action table
 

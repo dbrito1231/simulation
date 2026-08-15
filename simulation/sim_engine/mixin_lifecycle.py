@@ -799,12 +799,20 @@ class _LifecycleMixin:
         c = self.civilization
         self._init_settlements()
         pending = c.get("pendingSuccession")
-        pending_sid = (pending or {}).get("settlementId") if isinstance(pending, dict) else None
+        pending_sid = (
+            (pending.get("settlementId") or self._primary_settlement_id())
+            if isinstance(pending, dict) else None
+        )
         for entry in c.get("settlements") or []:
             sid = entry.get("id")
             if not sid:
                 continue
-            if self._elder_for_settlement(sid):
+            formal_elder = next((
+                agent for agent in self._living_agents()
+                if agent.get("role") == "elder"
+                and self._settlement_id_for_agent(agent) == sid
+            ), None)
+            if formal_elder:
                 if isinstance(pending, dict) and pending_sid == sid:
                     c["pendingRules"] = [
                         r for r in c.get("pendingRules") or []
@@ -836,6 +844,7 @@ class _LifecycleMixin:
             return
         if SCHISM_ENABLED:
             self._ensure_settlement_succession_elections()
+            self._ensure_succession_daily_council()
             return
         c = self.civilization
         succession_rules = [
