@@ -14,17 +14,10 @@ import json
 import os
 import re
 import signal
-import sys
 import threading
 import time
 from datetime import datetime, timezone
 
-# run_agent_decision() is defined before the late sim_engine import below; pull
-# DECISION_AUDIT_ENABLED from constants directly so id minting can gate there.
-_sys_path = os.path.dirname(os.path.abspath(__file__))
-if _sys_path not in sys.path:
-    sys.path.insert(0, _sys_path)
-from sim_engine.constants import DECISION_AUDIT_ENABLED, PREDICTION_MARKET_ENABLED  # noqa: E402
 import requests
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -3056,7 +3049,7 @@ def decision_audit():
 @app.route("/predictions/submit", methods=["POST"])
 def predictions_submit():
     """Store a pending spectator prediction (idea-04)."""
-    if not PREDICTION_MARKET_ENABLED:
+    if not _sim_engine.PREDICTION_MARKET_ENABLED:
         return jsonify({"ok": False})
     try:
         body = request.get_json(force=True, silent=True) or {}
@@ -3076,7 +3069,7 @@ def predictions_submit():
 @app.route("/predictions/resolve", methods=["POST"])
 def predictions_resolve():
     """Mark a pending prediction correct/incorrect (idea-04)."""
-    if not PREDICTION_MARKET_ENABLED:
+    if not _sim_engine.PREDICTION_MARKET_ENABLED:
         return jsonify({"ok": False})
     try:
         body = request.get_json(force=True, silent=True) or {}
@@ -3094,7 +3087,7 @@ def predictions_resolve():
 @app.route("/predictions/history")
 def predictions_history():
     """Shared calibration history for the prediction panel (idea-04)."""
-    if not PREDICTION_MARKET_ENABLED:
+    if not _sim_engine.PREDICTION_MARKET_ENABLED:
         return jsonify({"enabled": False, "predictions": [], "hitRate": None})
     try:
         payload = predictions_store.history()
