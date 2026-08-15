@@ -114,6 +114,14 @@ round/maxRounds, speaking order/next index, a full live `transcript`, optional
 and quorum. A succession ballot has kind `succession`, its election id,
 candidate list, and per-voter candidate-name/abstain choices. A verdict records
 winner, tally, elder ruling (null for the leaderless declaration), and outcome.
+Ballot resolution writes `council["verdict"]` with a `winner` field scored
+generically by the spectator prediction feature — see
+[11-viewer.md](11-viewer.md#prediction-market-panel) and
+[04-http-api.md](04-http-api.md#prediction-market-routes). That feature is a
+**passive consumer** of `verdict`: it reads `council.ballot` / `council.verdict`
+from the client's `/state` poll and never produces or mutates any state the
+ballot/tally logic reads (`mixin_council_growth.py` ballot writers and
+`_resolve_daily_council_ballot` are untouched).
 
 `_maybe_advance_daily_council()` makes every transition tick-gated and
 deterministic. `DAILY_COUNCIL_DISCUSSION_ROUNDS = 2` bounds round-robin speech;

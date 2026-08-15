@@ -28,6 +28,7 @@ __all__ = [
     "ANOMALY_RADAR_ENABLED",
     "DECISION_AUDIT_ENABLED",
     "WORLD_WIKI_ENABLED",
+    "PREDICTION_MARKET_ENABLED",
     "THEORY_OF_MIND_ENABLED",
     "PEER_MODEL_MAX_PEERS",
     "PEER_MODEL_FIELD_CHAR_CAP",
@@ -526,6 +527,9 @@ DECISION_AUDIT_ENABLED = True
 # World wiki (idea-09-world-wiki): read-only cross-linked page model served
 # at GET /wiki. Default on; when False the route returns the disabled shape.
 WORLD_WIKI_ENABLED = True
+# Idea-04 spectator prediction market: gates /predictions/* I/O and viewer;
+# no _tick_once reader. Default on.
+PREDICTION_MARKET_ENABLED = True
 # Emergence Breakthroughs F2: bounded peer mental models maintained by a PIANO
 # module inside the existing fan-out (not an extra call per turn). Advisory
 # prompt context only — no deterministic behavior acts on peerModel. Default

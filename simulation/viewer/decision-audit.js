@@ -12,6 +12,7 @@ const decisionAuditRecentWrapEl = document.getElementById("decisionAuditRecentWr
 
 let lastDecisionAuditKey = "";
 let decisionAuditPollTimer = null;
+let decisionAuditPollingDisabled = false;
 
 function stopDecisionAuditPoll() {
   if (decisionAuditPollTimer != null) {
@@ -43,6 +44,7 @@ function decisionAuditScoreBadge(score) {
 function renderDecisionAuditPanel(data) {
   if (!decisionAuditPanelEl) return;
   if (!data || !data.enabled) {
+    decisionAuditPollingDisabled = true;
     stopDecisionAuditPoll();
     decisionAuditPanelEl.style.display = "";
     decisionAuditAgentListEl.innerHTML =
@@ -52,6 +54,7 @@ function renderDecisionAuditPanel(data) {
     return;
   }
 
+  decisionAuditPollingDisabled = false;
   decisionAuditPanelEl.style.display = "";
 
   const agents = (data.agents || []).filter((a) => (a.scored || 0) >= 1);
@@ -128,8 +131,18 @@ async function pollDecisionAudit() {
   }
 }
 
-pollDecisionAudit();
-decisionAuditPollTimer = setInterval(pollDecisionAudit, DECISION_AUDIT_POLL_MS);
+function startDecisionAuditPoll() {
+  if (decisionAuditPollingDisabled || decisionAuditPollTimer != null) return;
+  pollDecisionAudit().finally(() => {
+    // The disabled response stops polling permanently for this page; network
+    // failures remain retryable so a transient outage does not hide the panel.
+    if (!decisionAuditPollingDisabled && decisionAuditPollTimer == null) {
+      decisionAuditPollTimer = setInterval(pollDecisionAudit, DECISION_AUDIT_POLL_MS);
+    }
+  });
+}
+
+startDecisionAuditPoll();
 
 // --- Divine Audit tab (idea-10 full view) --------------------------------
 const GOD_DECISION_AUDIT_POLL_MS = DECISION_AUDIT_POLL_MS;
