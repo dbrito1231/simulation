@@ -107,18 +107,13 @@
     opacity: 0;
     visibility: hidden;
   }
-  #conversationLog {
-    flex: 1 1 0;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-  }
   #convList {
     list-style: none;
     margin: 0;
     padding: 0;
     overflow-y: auto;
     flex: 1;
+    min-height: 0;
     font-family: ui-monospace, monospace;
     font-size: 15px;
     line-height: 1.65;
@@ -134,29 +129,13 @@
   #convList .msg { color: #bbb; }
   #convList .msg.muted { color: #666; font-style: italic; }
   #convList .kind { color: #9a7ec8; font-weight: 600; }
-  #activityLog, #chronicleLog, #decisionAuditPanel {
-    flex: 1 1 0;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    padding-bottom: 12px;
-  }
-  /* Activity moved into #sidebarBody, which now splits space between
-     Civilization and Activity -- see #sidebarBody rules above. */
-  /* Agents is now the primary (and only unbounded) content left in
-     #convPanel, so it needs its own scroll region rather than relying on
-     unconstrained natural height (the old cause of Activity being squeezed). */
-  #agentsPanel {
-    flex: 1 1 0;
-    min-height: 0;
-    overflow-y: auto;
-  }
   #actList, #chronicleList, #decisionAuditAgentList, #decisionAuditRecent {
     list-style: none;
     margin: 0;
     padding: 0;
     overflow-y: auto;
     flex: 1;
+    min-height: 0;
     font-size: 12px;
     line-height: 1.5;
     color: #aaa;
@@ -221,10 +200,6 @@
     background: rgba(22, 48, 52, 0.92); color: #b8e8f0;
     border: 1px solid #3a9aaa; border-radius: 4px;
     z-index: 11; display: none; pointer-events: none;
-  }
-  #councilPanel summary {
-    cursor: pointer; font-size: 13px; font-weight: 600; color: #fff;
-    margin-bottom: 6px; outline: none;
   }
   #councilCards { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
   .council-card {

@@ -17,7 +17,7 @@
     color: #ddd;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow-y: auto;
     border-right: 1px solid #2a2a35;
   }
   #convPanel h1 {
@@ -26,6 +26,7 @@
     font-size: 16px;
     color: #fff;
     border-bottom: 1px solid #2a2a35;
+    flex-shrink: 0;
   }
   #sidebar h1 {
     margin: 0;
@@ -51,26 +52,62 @@
   #sidebarBody {
     flex: 1 1 0;
     min-height: 0;
-    overflow: hidden;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
   }
-  /* Time keeps its compact natural height; Civilization and Activity split
-     the remaining space evenly, each scrolling independently. */
-  #sidebarBody #timePanel { flex-shrink: 0; }
-  #sidebarBody #civPanel {
-    flex: 1 1 0;
-    min-height: 0;
-    overflow-y: auto;
-  }
   .panel-section {
-    padding: 10px 16px;
+    flex: 0 0 auto;
     border-bottom: 1px solid #2a2a35;
   }
-  .panel-section h2 {
-    margin: 0 0 8px;
+  .panel-head {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    margin: 0;
+    border: 0;
+    background: transparent;
     font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    text-align: left;
     color: #fff;
+    cursor: pointer;
+  }
+  .panel-head:hover { background: rgba(255, 255, 255, 0.04); }
+  .panel-head:focus-visible {
+    outline: 2px solid #7ec8e3;
+    outline-offset: -2px;
+  }
+  .panel-arrow {
+    width: 1em;
+    flex: 0 0 1em;
+    color: #999;
+    text-align: center;
+  }
+  .panel-body {
+    min-height: 160px;
+    max-height: min(46vh, 420px);
+    padding: 0 16px 10px;
+    box-sizing: border-box;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .panel-collapsed > .panel-body { display: none; }
+  .map-controls {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: start;
+    gap: 8px;
+  }
+  .map-controls button { width: 100%; }
+  #mapControlsPanel #zoomFitBtn { grid-column: 1 / -1; }
+  #civPanel .panel-body {
+    font-size: 12px;
+    line-height: 1.5;
   }
   #civPanel { font-size: 12px; line-height: 1.5; }
   #civPanel .civ-row { margin-bottom: 4px; }
