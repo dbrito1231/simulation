@@ -632,12 +632,18 @@ class _CraftingRulesMixin:
             sid = settlement_id or self._ballot_settlement_id(rule)
             harvest_quotas = self._harvest_quotas_for_settlement(sid)
             rationing_active = self._rationing_for_settlement(sid)
-            quarantine_active = self._quarantine_for_settlement(sid)
+            quarantine_active = (
+                self._quarantine_for_settlement(sid)
+                if RAIDERS_CONTAGION_ENABLED else {}
+            )
             custom_modifiers = self._custom_modifiers_for_settlement(sid)
         else:
             harvest_quotas = c.setdefault("harvestQuotas", {})
             rationing_active = c.setdefault("rationingActive", {})
-            quarantine_active = c.setdefault("quarantineActive", {})
+            quarantine_active = (
+                c.setdefault("quarantineActive", {})
+                if RAIDERS_CONTAGION_ENABLED else {}
+            )
             custom_modifiers = c.setdefault("customRuleModifiers", {})
         if rule["kind"] == "harvest_quota":
             try:

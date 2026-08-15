@@ -509,21 +509,36 @@ def test_kill_switch_and_flag_echo():
     flags = engine.snapshot()["config"]["flags"]
     assert_true(flags.get("RAIDERS_CONTAGION_ENABLED") is True, flags)
 
-    old = se.RAIDERS_CONTAGION_ENABLED
+    old_raiders = se.RAIDERS_CONTAGION_ENABLED
+    old_schism = se.SCHISM_ENABLED
     try:
         se.RAIDERS_CONTAGION_ENABLED = False
+        se.SCHISM_ENABLED = False
         off_engine = make_engine(8)
         assert_true("quarantineActive" not in off_engine.civilization,
                     "flag-off fresh world seeded quarantineActive")
         assert_true("quarantineActiveBySettlement" not in off_engine.civilization,
                     "flag-off fresh world seeded quarantineActiveBySettlement")
+        off_engine._apply_governance_rule({
+            "id": "smoke_flag_off_rationing",
+            "kind": "rationing",
+            "name": "Flag-off rationing",
+            "value": 2,
+        })
+        assert_true("smoke_flag_off_rationing" in off_engine.civilization["rationingActive"],
+                    "ordinary governance rule failed while feature flags were off")
+        assert_true("quarantineActive" not in off_engine.civilization,
+                    "ordinary rule introduced flat quarantine storage while flags were off")
+        assert_true("quarantineActiveBySettlement" not in off_engine.civilization,
+                    "ordinary rule introduced keyed quarantine storage while flags were off")
         assert_true("mitigates" not in off_engine._get_structure_function("wall"),
                     "flag-off wall registered raid mitigation")
         assert_true(off_engine._begin_raid_telegraph() is None, "raid telegraph when off")
         assert_true(off_engine._begin_contagion_telegraph() is None, "contagion telegraph when off")
         assert_true(off_engine._pressure_telegraph() is None, "pressure telegraph when off")
     finally:
-        se.RAIDERS_CONTAGION_ENABLED = old
+        se.RAIDERS_CONTAGION_ENABLED = old_raiders
+        se.SCHISM_ENABLED = old_schism
     print("  OK kill switch + flag echo when enabled")
 
 
