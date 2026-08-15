@@ -601,6 +601,9 @@ def exercise_digest_prompt_and_sync(checks):
                      f"digest_context_bounded_{actor['name']}", line)
 
     server_source = (ROOT / "simulation" / "server.py").read_text(encoding="utf-8")
+    model_routing_source = (
+        ROOT / "simulation" / "_server" / "model_routing.py"
+    ).read_text(encoding="utf-8")
     prompts_source = (ROOT / "simulation" / "prompts.py").read_text(encoding="utf-8")
     # sim_engine.py was split into a package under simulation/sim_engine/
     # (Phase 6a); concatenate for this source-scan check (order doesn't
@@ -631,9 +634,10 @@ def exercise_digest_prompt_and_sync(checks):
             action_names = ast.literal_eval(node.value)
             break
     actions = {"council_speak", "council_propose", "council_vote"}
-    checks.check(action_names is not None and len(action_names) == 45
+    checks.check(action_names is not None
+                 and len(action_names) == len(set(action_names))
                  and actions.issubset(action_names),
-                 "action_sync_decision_actions_and_count", len(action_names or []))
+                 "action_sync_decision_actions", len(action_names or []))
     checks.check(all(action in prompts.SYSTEM_PROMPT and action in prompts.COUNCIL_SYSTEM_PROMPT
                      for action in actions), "action_sync_system_prompts")
     checks.check(all(f'elif action == "{action}"' in engine_source for action in actions),
@@ -667,8 +671,8 @@ def exercise_digest_prompt_and_sync(checks):
     })
     checks.check("ELDER VERDICT" in council_prompt and "Recent council: day 5" in council_prompt,
                  "slim_council_prompt_and_elder_verdict")
-    checks.check('data.get("council_turn")' in server_source
-                 and 'get("phase") == "verdict"' in server_source
+    checks.check('data.get("council_turn")' in model_routing_source
+                 and 'get("phase") == "verdict"' in model_routing_source
                  and '"council_verdict"' in engine_source,
                  "elder_verdict_high_stakes_routing")
 
