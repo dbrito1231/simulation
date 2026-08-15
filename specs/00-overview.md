@@ -55,7 +55,7 @@ index; [docs/REFERENCE.md](../docs/REFERENCE.md) for deep mechanics.
 | `simulation/_server/*.py` | Non-route helper modules server.py imports from (validation, prompt formatting, memory store, session logging, model routing, structured-output error parsing, role data) — pure move split, no behavior change — see [01-architecture.md](01-architecture.md) |
 | `simulation/index.html` | Thin browser viewer shell — markup only |
 | `simulation/css/*.css` | Viewer stylesheet, split into 6 ordered files (layout, panels, agents, council/chronicle, Divine Console chrome, responsive breakpoints) — see [specs/11-viewer.md](11-viewer.md) |
-| `simulation/viewer/*.js` | Viewer client — polls `/state`, render loop, sidebar, holds no sim state; split into 21 ordered files (setup, state, render, sidebar, council, minimap, polling, controls, renderloop, Divine Console × 7) — see [specs/11-viewer.md](11-viewer.md) |
+| `simulation/viewer/*.js` | Viewer client — polls `/state`, render loop, sidebar, holds no sim state; split into 21 ordered files (setup, state, render, panels, sidebar, decision-audit, council, predictions, minimap, polling, anomaly, controls, renderloop, divine-bootstrap, divine-auth-sight, divine-modal, divine-sight-voice, divine-voice, divine-miracles-story, divine-history, world-wiki) — see [specs/11-viewer.md](11-viewer.md) |
 | `simulation/sprites/*.js` | Pure stateless Canvas drawing helpers, split into 8 ordered files (core primitives, tiles, props, structures, agents, world, wildlife, shipments) — see [specs/11-viewer.md](11-viewer.md) |
 | `simulation/roles.json` | Single source of truth for role definitions |
 | `simulation/logs/<timestamp>/` | Per-run JSONL logs (gitignored) |
