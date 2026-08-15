@@ -84,6 +84,7 @@ const DIVINE_FEATURE_ICONS = {
   lineage:'<svg viewBox="0 0 24 24"><path d="M12 2v6M8 8h8M6 14h4v8H6zM14 14h4v8h-4z"/><path d="M12 8v6"/></svg>',
   compile: '<svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>',
   anomaly: '<svg viewBox="0 0 24 24"><path d="M12 2l9 18H3z"/><path d="M12 9v5"/><circle cx="12" cy="17" r="0.6" fill="currentColor" stroke="none"/></svg>',
+  interview: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9a2.8 2.8 0 1 1 3.8 2.6c-.8.4-1 .9-1 1.7"/><circle cx="12" cy="16.6" r="0.1"/></svg>',
 };
 const DIVINE_PREVIEW_TIP = {
   t: "Preview",
@@ -237,6 +238,16 @@ const DIVINE_FEATURES = {
       "Hidden automatically if the server's ANOMALY_RADAR_ENABLED flag is off.",
     ],
     gated: false,
+  },
+  interview: {
+    title: "Interview",
+    sub: "Ask one villager a question, out-of-world.",
+    guide: [
+      "Pick a villager and type a free-text question, then Ask.",
+      "The answer uses only that villager's memory, relationships, and beliefs.",
+      "This is read-only and never changes the village.",
+    ],
+    gated: true,
   },
 };
 
@@ -396,7 +407,8 @@ function populateGodAgentSelects() {
    document.getElementById("godIdentityCopyTargetSelect"),
    document.getElementById("godIdentityCopySourceSelect"),
    document.getElementById("godIdentityCancelAgentSelect"),
-   document.getElementById("godDejaVuAgentSelect")].forEach((el) => {
+   document.getElementById("godDejaVuAgentSelect"),
+   document.getElementById("godInterviewAgentSelect")].forEach((el) => {
     godFillAgentSelect(el, preferred);
   });
   const resourceSelect = document.getElementById("godGrantResourceSelect");

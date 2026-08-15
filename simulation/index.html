@@ -241,6 +241,20 @@
       <svg viewBox="0 0 24 24"><path d="M6 20l9-14M15 6l3 1-1 3M9 20l-3-1 1-3"/></svg>
       <span class="lbl">Compile</span>
     </button>
+    <!-- idea-03 Agent interview: dual-gated on AGENT_INTERVIEW_ENABLED AND
+         GOD_MODE_ENABLED (both plain config.flags booleans -- no capability
+         probe needed, unlike Compile). Hidden by default; updateGodModeGate()
+         (viewer/divine-history.js) reveals it once both flags are true. The
+         /agent/interview route itself requires no auth (specs/04-http-api.md),
+         but this button still respects the console's own unlock gate for a
+         consistent in-console experience (locked-dependent, like every other
+         feature tab). -->
+    <button type="button" class="gbtn interview locked-dependent" data-feature="interview" data-tab="interview"
+      id="godInterviewTabBtn" style="display:none" disabled
+      data-tip='{"t":"Interview","d":"Ask one villager a question, out-of-world. They never know; nothing changes."}'>
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9a2.8 2.8 0 1 1 3.8 2.6c-.8.4-1 .9-1 1.7"/><circle cx="12" cy="16.6" r="0.1"/></svg>
+      <span class="lbl">Interview</span>
+    </button>
   </div>
 </div>
 <div id="divineModalScrim" class="modal-scrim">
@@ -275,7 +289,7 @@
     <div class="modal-body" id="divineModalBody"></div>
   </div>
 </div>
-<!-- Hidden holding container: all 9 #divineTab-* panels live here at load so getElementById + wireDivineForm still work -->
+<!-- Hidden holding container: all 13 #divineTab-* panels live here at load so getElementById + wireDivineForm still work -->
 <div id="divineTabHold" style="display:none" aria-hidden="true">
         <div class="divine-tab-panel" id="divineTab-unlock">
           <div class="divine-row">
@@ -1080,6 +1094,21 @@
             <div class="divine-actions"><button type="button" id="godCompileBtn"
               data-tip='{"t":"Compile","d":"Ask the compiler for a draft, then open Story for review."}'>Compile</button></div>
             <div class="divine-result" id="godCompileResult"></div>
+          </fieldset>
+        </div>
+
+        <!-- idea-03 Agent interview (specs/11-viewer.md "Interview (out-of-
+             world debug Q&A)"): read-only, zero-mutation Q&A over one
+             agent's own memory/relationships/beliefs. Like Compile, there is
+             no Preview/Apply step -- this feature never mutates. -->
+        <div class="divine-tab-panel" id="divineTab-interview" style="display:none">
+          <fieldset class="divine-fieldset" id="godInterviewFieldset">
+            <legend data-tip='{"t":"Interview","d":"Ask one villager a question, out-of-world. Answered strictly from their own memory, relationships, and beliefs. Never seen by them; changes nothing."}'>Interview a villager (out-of-world, read-only)</legend>
+            <div class="divine-row"><label data-tip='{"t":"Villager","d":"Living villager to interview."}'>Villager <select id="godInterviewAgentSelect"></select></label></div>
+            <div class="divine-row"><label data-tip='{"t":"Question","d":"Free-text question, up to 500 characters. The server enforces the real limit; this is just a typing guide."}'>Question <textarea id="godInterviewQuestion" rows="3" maxlength="500"></textarea></label></div>
+            <div class="divine-actions"><button type="button" id="godInterviewAskBtn"
+              data-tip='{"t":"Ask","d":"Send the question to this villager. Read-only -- nothing in the village changes."}'>Ask</button></div>
+            <div class="divine-result" id="godInterviewResult"></div>
           </fieldset>
         </div>
 </div>

@@ -65,6 +65,7 @@ from _server.model_routing import (
     is_high_stakes_turn, resolve_high_stakes, model_for_decision,
 )
 from _server.decision_audit import build_decision_audit
+from _server.agent_interview import run_agent_interview
 from _server.logging_session import SessionLogger, read_conversation_window as _read_conversation_window_from_path
 from _server.memory_store import (
     MemoryStore, embed_text, _cosine, _stable_hash, is_scaffold_text,
@@ -2816,6 +2817,12 @@ except ValueError:
 
 engine = _sim_engine.SimEngine(_ENGINE_DEPS, roster_size=_roster_size)
 
+# Agent interviews use a dedicated bounded slot so an HTTP request cannot
+# consume either the decision or PIANO worker pools.
+_interview_llm_semaphore = threading.BoundedSemaphore(
+    _sim_engine.INTERVIEW_CONCURRENT_LLM
+)
+
 # Full-state resume (Contract 3): if a valid state.db exists, rehydrate the
 # world (frameTick, civilization, agents, re-embedded memory) instead of using
 # the cold-start roster the constructor just built. Otherwise keep cold start.
@@ -3098,6 +3105,25 @@ def predictions_history():
         })
     except Exception:
         return jsonify({"enabled": True, "predictions": [], "hitRate": None})
+
+
+@app.route("/agent/interview", methods=["POST"])
+def agent_interview_route():
+    """Read-only, out-of-world Q&A over one agent's own context."""
+    body = request.get_json(force=True, silent=True) or {}
+    result = run_agent_interview(
+        engine,
+        body.get("agentId"),
+        body.get("question"),
+        enabled=_sim_engine.AGENT_INTERVIEW_ENABLED,
+        memory_enabled=_sim_engine.MEMORY_ENABLED,
+        wiki_memory_enabled=_sim_engine.WIKI_MEMORY,
+        max_chars=_sim_engine.INTERVIEW_QUESTION_MAX_CHARS,
+        model=MODEL_SMART,
+        lm_complete_fn=lm_complete,
+        semaphore=_interview_llm_semaphore,
+    )
+    return jsonify(result)
 
 
 @app.route("/state")

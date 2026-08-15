@@ -16,6 +16,9 @@ let GOD_MODE_ENABLED_FLAG = false;
 let GOD_AUTH_REQUIRED_FLAG = false;
 // Mirrors config.flags.WORLD_WIKI_ENABLED — gates all wiki polling and links.
 let WORLD_WIKI_ENABLED_FLAG = true;
+// Agent Interview is visible only when both this feature flag and God mode
+// are enabled; the underlying route remains independently callable.
+let AGENT_INTERVIEW_ENABLED_FLAG = false;
 
 function applyFlags(flags) {
   if (!flags) return;
@@ -48,6 +51,7 @@ function applyFlags(flags) {
   if ("GOD_AUTH_REQUIRED" in flags) GOD_AUTH_REQUIRED_FLAG = !!flags.GOD_AUTH_REQUIRED;
   if ("WORLD_WIKI_ENABLED" in flags) WORLD_WIKI_ENABLED_FLAG = !!flags.WORLD_WIKI_ENABLED;
   if ("DYNASTY_TREE_ENABLED" in flags) DYNASTY_TREE_ENABLED = !!flags.DYNASTY_TREE_ENABLED;
+  if ("AGENT_INTERVIEW_ENABLED" in flags) AGENT_INTERVIEW_ENABLED_FLAG = !!flags.AGENT_INTERVIEW_ENABLED;
   applyGodDejaVuAvailability();
   applyDynastyTreeLineageGate();
 }

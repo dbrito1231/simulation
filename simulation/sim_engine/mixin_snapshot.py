@@ -312,6 +312,7 @@ class _SnapshotMixin:
                 "GOD_DEJA_VU_REPLAY": GOD_DEJA_VU_REPLAY,
                 "WORLD_WIKI_ENABLED": WORLD_WIKI_ENABLED,
                 "PREDICTION_MARKET_ENABLED": PREDICTION_MARKET_ENABLED,
+                "AGENT_INTERVIEW_ENABLED": AGENT_INTERVIEW_ENABLED,
             },
         }
 

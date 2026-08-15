@@ -479,6 +479,16 @@ function updateGodModeGate() {
   if (authFlagChanged) GOD_AUTH_REQUIRED_FLAG = authRequired;
   if (divineBarEl) divineBarEl.style.display = GOD_MODE_ENABLED_FLAG ? "" : "none";
   document.body.classList.toggle("divine-bar-visible", !!GOD_MODE_ENABLED_FLAG);
+  // idea-03 Agent interview: dual-gated on AGENT_INTERVIEW_ENABLED_FLAG AND
+  // GOD_MODE_ENABLED_FLAG (specs/11-viewer.md "Interview") -- unlike Compile,
+  // no /control/god/capabilities probe is needed since the route itself
+  // requires no auth; both flags are plain config.flags booleans.
+  const interviewTabBtn = document.getElementById("godInterviewTabBtn");
+  if (interviewTabBtn) {
+    const interviewVisible = AGENT_INTERVIEW_ENABLED_FLAG && GOD_MODE_ENABLED_FLAG;
+    interviewTabBtn.style.display = interviewVisible ? "" : "none";
+    if (!interviewVisible && godActiveTab === "interview") showGodTab("sight");
+  }
   if (!GOD_MODE_ENABLED_FLAG) {
     closeDivineModal();
     godPublicBannerEl.style.display = "none";

@@ -28,7 +28,7 @@ if (GOD_AUTH_REQUIRED_FLAG) {
 }
 
 // --- Bottom bar + modal (relocated from sidebar tabs) --------------------
-const GOD_TABS = ["unlock", "sight", "voice", "matrix", "miracles", "story", "laws", "history", "audit", "anomaly", "lineage", "compile"];
+const GOD_TABS = ["unlock", "sight", "voice", "matrix", "miracles", "story", "laws", "history", "audit", "anomaly", "lineage", "compile", "interview"];
 const DIVINE_WIDE_MODAL_FEATURES = new Set(["matrix", "story", "laws", "audit", "compile"]);
 const godBarButtons = Array.from(document.querySelectorAll("#divineBar .gbtn"));
 let divineModalOpenFeature = null;
@@ -405,6 +405,41 @@ function wireDivineForm(formSelector, opts) {
   });
 
   godBindIrreversibleApply(applyBtn, formEl, doApply, resultEl);
+}
+
+// Read-only interview: the route does not use God auth, but reusing
+// godApiFetch keeps response parsing consistent with the rest of the modal.
+const godInterviewAskBtnEl = document.getElementById("godInterviewAskBtn");
+const godInterviewResultEl = document.getElementById("godInterviewResult");
+if (godInterviewAskBtnEl && godInterviewResultEl) {
+  godInterviewAskBtnEl.addEventListener("click", async () => {
+    const agentSelectEl = document.getElementById("godInterviewAgentSelect");
+    const questionEl = document.getElementById("godInterviewQuestion");
+    const agentId = agentSelectEl && agentSelectEl.value ? Number(agentSelectEl.value) : null;
+    const question = questionEl ? questionEl.value : "";
+    if (agentId == null || Number.isNaN(agentId)) {
+      godInterviewResultEl.textContent = "Pick a villager first.";
+      return;
+    }
+    if (!question.trim()) {
+      godInterviewResultEl.textContent = "Enter a question first.";
+      return;
+    }
+    godInterviewAskBtnEl.disabled = true;
+    godInterviewResultEl.textContent = "Asking...";
+    try {
+      const resp = await godApiFetch("/agent/interview", {
+        method: "POST",
+        body: { agentId, question },
+      });
+      const data = resp.data || {};
+      godInterviewResultEl.textContent = data.ok
+        ? `${data.agentName}: ${data.answer}`
+        : (data.reason || "interview failed");
+    } finally {
+      godInterviewAskBtnEl.disabled = false;
+    }
+  });
 }
 
 function refreshGodSightIfOpen() {
