@@ -333,7 +333,9 @@ JSON blob — see [02-engine-core.md](02-engine-core.md#persistence).
 - `SEED_STRUCTURE_FUNCTIONS` (sim_engine/constants.py:1742-1791): each built type's mechanical
   effect vector — `houses` (population-cap contribution), `boosts` (gather/craft
   yield bonuses), `produces` (periodic resource generation), `unlocks` (craft
-  stations), `stores` (storage capacity, `GOODS_ENABLED` only). Custom blueprints
+  stations), `stores` (storage capacity, `GOODS_ENABLED` only), `mitigates`
+  (`RAIDERS_CONTAGION_ENABLED` — wall raid defense), `heals`
+  (`RAIDERS_CONTAGION_ENABLED` — clinic contagion recovery). Custom blueprints
   supply their own `function` block at proposal time (see
   [07-actions.md](07-actions.md#the-build-pipeline)).
 
@@ -341,15 +343,34 @@ JSON blob — see [02-engine-core.md](02-engine-core.md#persistence).
 `isRuin`, and `homeOf`/`homeStructureId` fields above) go through one shared
 helper, `_apply_structure_condition_delta(structure, delta)`, extracted
 specifically so the passive per-goods-tick decay (`_tick_structure_decay`,
-always a negative delta) and the Sovereign God mode `structure_condition`
-miracle (repair with a positive delta, damage with a negative one) fire
+always a negative delta), Sovereign God mode `structure_condition`
+miracle (repair with a positive delta, damage with a negative one), and
+**raid structure damage** (`RAIDERS_CONTAGION_ENABLED` —
+`-RAID_STRUCTURE_DAMAGE` toward the existing ruin threshold) fire
 identical `STRUCTURE_DISREPAIR_THRESHOLD`-crossing and ruin-transition
 narration — including clearing `homeOf`/`homeStructureId` and the
 "left homeless" line when a structure someone lives in collapses into a
-ruin — rather than the miracle taking a parallel shortcut. See
+ruin — rather than any parallel shortcut. See
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-4--bounded-immediate-miracles)
-and [08-systems-economy.md](08-systems-economy.md) (the "Structure decay"
-row) for the full decay-rate/threshold/repair-cost contract this reuses.
+and [08-systems-economy.md](08-systems-economy.md#raiders_contagion_enabled)
+for the full decay-rate/threshold/repair-cost contract this reuses.
+
+**Wall structure type (`type == "wall"`).** A village-scale structure built via
+`start_project`/`build_structure` (not the unrelated Path-1 composable tile
+`BLOCK_TYPES["wall"]` — individual grid blocks with `shelter: True` in
+[10-path1.md](10-path1.md)). Seed tables today:
+
+- `PROJECT_TEMPLATES["wall"]`: buildable project, needs `{"stone": 3, "gold": 1}`.
+- `PROJECT_ORDER` includes `"wall"`.
+- `SEED_STRUCTURE_FUNCTIONS["wall"]` (existing): `{"produces": [{"resource": "stone", "amount": 1, "every_ticks": 1800, "scope": "village"}]}` —
+  passive stone production, gated by `STRUCTURE_EFFECTS_ENABLED`.
+- **Raid defense (new, `RAIDERS_CONTAGION_ENABLED`):** the same function block
+  gains an additional `"mitigates"` effect kind (orthogonal to `"produces"`):
+  `"mitigates": [{"kind": "raid", "amount": RAID_WALL_MITIGATION, "scope": "district"}]`
+  with `RAID_WALL_MITIGATION = 0.20`. A standing, non-ruined (`condition >=
+  STRUCTURE_DISREPAIR_THRESHOLD`, not `isRuin`) `wall` in the raid's targeted
+  district contributes flat raid mitigation — see
+  [08-systems-economy.md](08-systems-economy.md#raiders_contagion_enabled).
 
 **Levels/upgrades:** gated by `STRUCTURE_UPGRADES_ENABLED` (default True).
 `MAX_STRUCTURE_LEVEL = 100` (sim_engine/constants.py:1070); `LEVEL_STEP = 1` per

@@ -356,6 +356,7 @@ class _PersistenceMixin:
                     civ.setdefault("lastSuccessionActivityFrame", 0)
                     civ.setdefault("harvestQuotas", {})
                     civ.setdefault("rationingActive", {})
+                    civ.setdefault("quarantineActive", {})
                     civ.setdefault("populationFloorHeld", False)
                 # Huntable wildlife: additive setdefault for old saves; seed
                 # only when the list is still empty so a persisted population
@@ -548,6 +549,9 @@ class _PersistenceMixin:
                         a.setdefault("restingDistrictId", None)
                     else:
                         a["age"] = None
+                    if RAIDERS_CONTAGION_ENABLED:
+                        a.setdefault("infected", False)
+                        a.setdefault("infectionFrame", None)
                     if CULTURE_ENABLED:
                         # Phase G: an agent restored from a pre-Phase-G save
                         # (or with the flag freshly turned on) starts with no

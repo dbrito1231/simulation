@@ -68,6 +68,7 @@ class SimEngine(
     _StructuresEconomyMixin,
     _DiplomacyMixin,
     _WildlifeMixin,
+    _PressureRaidersMixin,
     _ProjectHelpersMixin,
     _DivineMatrixMixin,
     _CraftingRulesMixin,
@@ -384,6 +385,9 @@ class SimEngine(
                 a["skills"] = {k: 0.0 for k in SKILL_KINDS}
                 a["personalityTraits"] = []
                 a["lastTeachFrame"] = 0
+            if RAIDERS_CONTAGION_ENABLED:
+                a["infected"] = False
+                a["infectionFrame"] = None
             agents.append(a)
         # post-build setup (index.html lines ~1037)
         for i, a in enumerate(agents):
@@ -522,6 +526,7 @@ class SimEngine(
             "lastSuccessionActivityFrame": 0,
             "harvestQuotas": {},            # rule id -> {"district": id|None, "resource": id|None, "value": n}
             "rationingActive": {},          # rule id -> {"value": n}
+            "quarantineActive": {},         # rule id -> {"district": id} (RAIDERS_CONTAGION_ENABLED)
             "populationFloorHeld": False,   # last death-deferred-at-floor state, for the nudge
             # Phase G (CULTURE_ENABLED): knowledge, chronicle, meme mutation.
             "chronicle": [],                # capped ring: {"text": str, "frame": int, "kind": str}

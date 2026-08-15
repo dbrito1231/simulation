@@ -743,6 +743,8 @@ class _WorldStateMixin:
         district_id = self._resolve_target_district(target, agent)
         if not district_id:
             return
+        if self._quarantine_blocks_travel(agent, agent.get("currentDistrict"), district_id):
+            return
         bounds = self.civilization["districts"][district_id]["bounds"]
         dest_x = bounds["x1"] + random.random() * (bounds["x2"] - bounds["x1"])
         dest_y = bounds["y1"] + random.random() * (bounds["y2"] - bounds["y1"])
@@ -759,9 +761,12 @@ class _WorldStateMixin:
         agent["targetX"] = first["x"]
         agent["targetY"] = first["y"]
 
-    def _set_agent_target_to_agent(self, agent, target_name):
+    def _set_agent_target_to_agent(self, agent, target_name, bypass_quarantine=False):
         target = self._find_agent(target_name)
         if not target:
+            return
+        if not bypass_quarantine and self._quarantine_blocks_travel(
+                agent, agent.get("currentDistrict"), target.get("currentDistrict")):
             return
         agent["targetX"] = target["x"] + (random.random() - 0.5) * 60
         agent["targetY"] = target["y"] + (random.random() - 0.5) * 60
@@ -793,14 +798,15 @@ class _WorldStateMixin:
             return
         self._set_agent_target(agent, target)
 
-    def _auto_move_toward_target(self, agent, target_name):
+    def _auto_move_toward_target(self, agent, target_name, bypass_quarantine=False):
         if not target_name or target_name not in self.agent_names:
             return
         other = self._find_agent(target_name)
         if not other:
             return
         if self._distance_to(agent, other) > 80:
-            self._set_agent_target_to_agent(agent, target_name)
+            self._set_agent_target_to_agent(
+                agent, target_name, bypass_quarantine=bypass_quarantine)
 
     def _move_agent(self, agent, scale=1.0):
         prior_x, prior_y = agent["x"], agent["y"]
@@ -984,7 +990,7 @@ class _WorldStateMixin:
         """Sage-priority emergency heal — bypasses decision gates (survival > story)."""
         agent["goal"] = None
         if self._distance_to(agent, target) > 80:
-            self._auto_move_toward_target(agent, target["name"])
+            self._auto_move_toward_target(agent, target["name"], bypass_quarantine=True)
             self._push_activity(f"{agent['name']} rushes to save {target['name']}")
             return
         self.apply_decision(agent, {"action": "heal_agent", "target": target["name"],

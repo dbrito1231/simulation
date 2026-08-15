@@ -138,10 +138,39 @@ const civLevelLabelEl = document.getElementById("civLevelLabel");
 const councilBannerEl = document.getElementById("councilBanner");
 const foundingBannerEl = document.getElementById("foundingBanner");
 const disasterBannerEl = document.getElementById("disasterBanner");
+const pressureBannerEl = document.getElementById("pressureBanner");
 const councilSectionEl = document.getElementById("councilSection");
 const councilMetaEl = document.getElementById("councilMeta");
 const councilCardsEl = document.getElementById("councilCards");
 const councilHistoryEl = document.getElementById("councilHistory");
+
+function pressureTelegraphPending(tele) {
+  if (!tele) return false;
+  const impact = tele.impactFrame;
+  const tick = world.frameTick;
+  if (impact != null && tick != null) {
+    return impact > tick;
+  }
+  return tele.framesRemaining != null && tele.framesRemaining > 0;
+}
+
+function pressureTelegraphBannerText(tele) {
+  const kind = tele.kind === "contagion" ? "Contagion" : "Raid";
+  const district = tele.targetDistrictId;
+  const districtPart = district ? ` — ${district} district` : "";
+  const frames = tele.framesRemaining;
+  const framesPart = frames != null ? ` (${frames} ticks remaining)` : "";
+  return `${kind} incoming${districtPart} — impact imminent${framesPart}`;
+}
+
+function renderPressureBanner() {
+  if (!RAIDERS_CONTAGION_ENABLED || !pressureTelegraphPending(world.pressureTelegraph)) {
+    pressureBannerEl.style.display = "none";
+    return;
+  }
+  pressureBannerEl.textContent = pressureTelegraphBannerText(world.pressureTelegraph);
+  pressureBannerEl.style.display = "block";
+}
 
 function escapeHtml(text) {
   return String(text)
@@ -1056,6 +1085,8 @@ function renderSidebar() {
   } else {
     disasterBannerEl.style.display = "none";
   }
+
+  renderPressureBanner();
 
   trackStructureConditionDeltas();
 

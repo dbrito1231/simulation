@@ -5,7 +5,9 @@ health, crafting, deterministic goal-stepping, structure effects, physical
 goods (spoilage/decay/disasters/shelter/vehicles), and the priced market.
 
 **Canonical for:** `SURVIVAL_ENABLED`, `CRAFTING_ENABLED`, `USE_GOALS`,
-`STRUCTURE_EFFECTS_ENABLED`, `GOODS_ENABLED`, `ECONOMY_ENABLED` semantics.
+`STRUCTURE_EFFECTS_ENABLED`, `GOODS_ENABLED`, `ECONOMY_ENABLED`,
+`RAIDERS_CONTAGION_ENABLED` raid/contagion economy effects (stockpile loss,
+structure damage, `"mitigates"`/`"heals"` seed structure functions).
 **See also:** [01-architecture.md](01-architecture.md) for the complete flag
 index; [07-actions.md](07-actions.md) for action params/preconditions;
 [05-world.md](05-world.md) for district stocks/ecology feeding scarcity;
@@ -268,7 +270,8 @@ think that turn) so agents stay responsive to being talked to.
 
 Every built structure type carries a **function block** (`produces`,
 `boosts`, `unlocks`, `stores`, `houses`, `modifies`, and — when
-`ENV_EFFECTS_ENABLED` — `shelter`, `light`, `upkeep`) from
+`ENV_EFFECTS_ENABLED` — `shelter`, `light`, `upkeep`; and — when
+`RAIDERS_CONTAGION_ENABLED` — `mitigates`, `heals`) from
 `SEED_STRUCTURE_FUNCTIONS`/`PROJECT_TEMPLATES` or a custom blueprint's own
 declaration; `_get_structure_function(type_)` (sim_engine/mixin_structures_economy.py:75) resolves
 it (empty dict, i.e. no effect, when the flag is off).
@@ -330,6 +333,38 @@ present and lacking a light effect. If an older save retains a built or ruined
 Hearth/Lighthouse instance but lost its registry entry, restore reconstructs a
 minimal registry entry from that instance, so `repair_structure` restores both
 the structure and its light behavior.
+
+**Raid mitigation (`mitigates`, `RAIDERS_CONTAGION_ENABLED`).** Query-time at
+raid resolution (not ticked). `_resolve_raid_mitigation` (in
+`mixin_pressure_raiders.py`) reads wall mitigation via
+`_district_raid_wall_mitigation` in `mixin_structures_economy.py` (new
+`"mitigates"` effect-kind branch on seed/custom function blocks, following the
+same dispatch pattern as `"boosts"`/`"produces"`/`"stores"`).
+Seed extension on the existing `wall` type:
+
+```json
+"mitigates": [{"kind": "raid", "amount": 0.20, "scope": "district"}]
+```
+
+(`RAID_WALL_MITIGATION = 0.20`.) Applies when the targeted district has at
+least one standing, non-ruined `wall` structure. Stacks **additively** with
+guard-count mitigation; combined cap below.
+
+**Contagion recovery (`heals`, `RAIDERS_CONTAGION_ENABLED`).** Query-time at
+contagion recovery rolls via `_district_clinic_recovery_bonus(district_id)` and
+`_district_has_standing_clinic(district_id)` in `mixin_structures_economy.py`
+(new `"heals"` effect-kind branch on seed/custom function blocks, following the
+same dispatch pattern as `"boosts"`/`"produces"`/`"stores"`/`"mitigates"`).
+New structure type `clinic` (does not exist in the repo before this plan):
+
+- `PROJECT_TEMPLATES["clinic"] = {"name": "Clinic", "needs": {"wood": 2, "stone": 2, "herbs": 1}, "visualStyle": "house"}`
+- `SEED_STRUCTURE_FUNCTIONS["clinic"] = {"heals": [{"kind": "contagion_recovery", "bonus": 0.05, "radius": 120, "scope": "district"}]}`
+
+(`CLINIC_RECOVERY_BONUS = +0.05`, `CLINIC_RECOVERY_RADIUS = 120`.) A standing,
+non-ruined `clinic` in the infected agent's district adds the structure-based
+recovery bonus. Gated behind `RAIDERS_CONTAGION_ENABLED` so flag-off worlds
+unchanged. Full recovery math: [RAIDERS_CONTAGION_ENABLED](#raiders_contagion_enabled)
+below.
 
 **Saturation:** `_type_saturated(type_)` (sim_engine/mixin_structures_economy.py:1628) flags a
 structure type as not worth building more of once its effect is maxed —
@@ -1033,3 +1068,103 @@ Fields projected onto a recipe page:
 `"workshop"` or `"forge"`), not a specific built structure instance. Zero, one, or
 many structures of that type may exist at any time, so there is no guaranteed single
 target page. Auto-linking is excluded per Answer 2's kind-vs-instance rule.
+
+## RAIDERS_CONTAGION_ENABLED {#raiders_contagion_enabled}
+
+Deterministic external pressure: telegraphed raids against stockpiles/structures
+and mild contagion spread/recovery. Implemented in
+`simulation/sim_engine/mixin_pressure_raiders.py` (third pressure mechanism —
+see [10-path1.md](10-path1.md) for disambiguation from `PRESSURE_LOOP_ENABLED`
+and `WILDLIFE_ENABLED`). Tick gate, probabilities, and telegraph lead time:
+[10-path1.md](10-path1.md#raiders_contagion_enabled). Elder exclusion:
+[02-engine-core.md](02-engine-core.md#sage-emergency). Quarantine counter:
+[09-systems-society.md](09-systems-society.md). No new agent actions:
+[07-actions.md](07-actions.md#raiders-and-contagion-no-new-actions).
+
+### Constants (sim_engine/constants.py)
+
+| Constant | Value | Role |
+|---|---|---|
+| `RAIDERS_CONTAGION_ENABLED` | `True` | Module-level kill switch; early-return both tick functions when off |
+| `RAID_EVENT_PROB` | `0.01` | Raid scheduling probability per `GOODS_TICK_FRAMES` gate |
+| `CONTAGION_EVENT_PROB` | `0.015` | Contagion outbreak probability per same gate |
+| `RAID_RESOURCE_LOSS_MIN` / `RAID_RESOURCE_LOSS_MAX` | `2` / `8` | Bounded removal per affected resource from `stockpile`/`districtStocks` |
+| `RAID_STRUCTURE_DAMAGE` | `25` | Condition points removed from a targeted structure via `_apply_structure_condition_delta` |
+| `RAID_CONTACT_DAMAGE` | `10` | Health points removed from each raid-contact agent via health clamp |
+| `RAID_GUARD_RADIUS` | `150` | Radius around raid target for guard-count mitigation |
+| `RAID_GUARD_MITIGATION_PER_GUARD` | `0.15` | Each qualifying guard reduces raid severity 15% |
+| `RAID_GUARD_MITIGATION_CAP` | `0.75` | Cap on **combined** guard + wall mitigation (5 guards alone reach the cap) |
+| `RAID_WALL_MITIGATION` | `0.20` | Flat additional reduction when a standing non-ruined `wall` exists in the targeted district |
+| `CONTAGION_SPREAD_RADIUS` | `60` | Proximity radius for spread attempts |
+| `CONTAGION_TRANSMISSION_PROB` | `0.05` | Per-gate transmission probability to a nearby non-infected agent |
+| `CONTAGION_DURATION_FRAMES` | `2700` (~90s) | Maximum illness duration from `infectionFrame` |
+| `CONTAGION_HEALTH_LOSS_PER_TICK_GATE` | `1` | Health lost per `GOODS_TICK_FRAMES` gate while infected |
+| `HEALER_RECOVERY_RADIUS` | `100` | Proximity radius for agent-based healer recovery bonus |
+| `HEALER_RECOVERY_BONUS` | `+0.05` | Additive recovery-chance bonus from a nearby non-incapacitated `role == "healer"` |
+| `CLINIC_RECOVERY_RADIUS` | `120` | District-scoped radius for clinic structure bonus (`scope: "district"`) |
+| `CLINIC_RECOVERY_BONUS` | `+0.05` | Additive recovery-chance bonus from a standing non-ruined in-district `clinic` |
+| `RAID_TELEGRAPH_LEAD_FRAMES` | `300` (~10s) | Warning lead before raid/contagion impact |
+
+Tick gate reuses `GOODS_TICK_FRAMES = 900` — no separate `RAID_CONTAGION_TICK_GATE`.
+
+### Raid resolution
+
+On telegraph expiry, `_resolve_raid` (names illustrative) picks a target district
+and/or structure (stockpile-adjacent framing). Three simultaneous effect halves:
+
+1. **Resource removal** — for each affected resource id, draw a base loss
+   `L` uniformly in `[RAID_RESOURCE_LOSS_MIN, RAID_RESOURCE_LOSS_MAX]` and
+   debit from `civilization["stockpile"]` and/or the targeted district's
+   `districtStocks` entry (same read/write surfaces harvest quotas, rationing,
+   and spoilage use).
+2. **Structure damage** — pick a structure in the targeted district and call
+   `_apply_structure_condition_delta(structure, -RAID_STRUCTURE_DAMAGE)` —
+   same ruin/disrepair path as decay and disasters ([05-world.md](05-world.md)).
+3. **Contact health damage** — each living, non-incapacitated agent present at
+   the contact site (excluding `role == "elder"`) takes
+   `agent["health"] = max(0, agent["health"] - RAID_CONTACT_DAMAGE)`. Never
+   `_agent_dies`; incapacitation follows `_update_survival` if health reaches 0.
+
+**Guard-count mitigation (new mechanic — not wildlife's single-guard boolean):**
+
+```
+guard_count = count of agents where role == "guard" and not incapacitated
+              and distance to raid target <= RAID_GUARD_RADIUS
+guard_mitigation = min(RAID_GUARD_MITIGATION_CAP, guard_count * RAID_GUARD_MITIGATION_PER_GUARD)
+wall_mitigation = RAID_WALL_MITIGATION if targeted district has a standing non-ruined wall else 0
+total_mitigation = min(RAID_GUARD_MITIGATION_CAP, guard_mitigation + wall_mitigation)
+actual_loss = base_loss * (1 - total_mitigation)
+```
+
+Apply `actual_loss` to resource removal, structure damage (`RAID_STRUCTURE_DAMAGE *
+(1 - total_mitigation)`), and contact damage (`RAID_CONTACT_DAMAGE *
+(1 - total_mitigation)`). `total_mitigation` never reaches `1.0` — raids are
+never fully preventable by guards or walls alone.
+
+### Contagion spread and recovery
+
+**Outbreak seeding:** after telegraph, patient zero receives `infected = True`,
+`infectionFrame = frameTick` (elder never selected as patient zero).
+
+**Spread (each `GOODS_TICK_FRAMES` gate while outbreak active):** for each
+infected agent, each non-infected living agent within `CONTAGION_SPREAD_RADIUS`
+(excluding `role == "elder"`) has an independent `CONTAGION_TRANSMISSION_PROB`
+chance to become infected (`infectionFrame = frameTick` on success).
+
+**Health loss:** while infected, each goods-tick gate applies
+`CONTAGION_HEALTH_LOSS_PER_TICK_GATE` via the health clamp — never `_agent_dies`.
+
+**Recovery (each goods-tick gate while infected):** there is **no** unassisted
+per-gate recovery roll — without healer or clinic coverage the per-gate
+probability is `0`. Early recovery rolls only when `recovery_prob > 0`:
+`recovery_prob = (HEALER_RECOVERY_BONUS` if a non-incapacitated
+`role == "healer"` agent is within `HEALER_RECOVERY_RADIUS`, else `0`) +
+(`CLINIC_RECOVERY_BONUS` if the agent's district has a standing non-ruined
+`clinic`, else `0`). Bonuses stack additively. On a successful roll, clear
+`infected`/`infectionFrame`. **Unassisted recovery** is the duration cap only:
+when `frameTick - infectionFrame >= CONTAGION_DURATION_FRAMES`, forcibly
+clear both fields even if no roll succeeded.
+
+Agent field definitions: [06-agents.md](06-agents.md). Agent-based recovery
+mirrors `_rush_to_heal`'s proximity-responder pattern; structure-based recovery
+uses the `"heals"` effect kind on `clinic` ([STRUCTURE_EFFECTS_ENABLED](#structure_effects_enabled)).

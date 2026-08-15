@@ -110,6 +110,46 @@ class _StructuresEconomyMixin:
                    and (district_id is None or s.get("districtId") == district_id)
                    and s.get("condition", 100) >= STRUCTURE_DISREPAIR_THRESHOLD)
 
+    def _district_raid_wall_mitigation(self, district_id):
+        """Passive wall raid mitigation for a district (query-time, not ticked)."""
+        if not RAIDERS_CONTAGION_ENABLED or not STRUCTURE_EFFECTS_ENABLED:
+            return 0.0
+        if self._working_structure_count("wall", district_id) <= 0:
+            return 0.0
+        fn = self._get_structure_function("wall")
+        for mit in fn.get("mitigates") or []:
+            if mit.get("kind") != "raid":
+                continue
+            if mit.get("scope", "district") not in ("district", "village"):
+                continue
+            try:
+                return float(mit.get("amount", RAID_WALL_MITIGATION))
+            except (TypeError, ValueError):
+                return RAID_WALL_MITIGATION
+        return RAID_WALL_MITIGATION
+
+    def _district_has_standing_clinic(self, district_id):
+        """True when a non-ruined clinic stands in the district."""
+        if not RAIDERS_CONTAGION_ENABLED or not STRUCTURE_EFFECTS_ENABLED:
+            return False
+        return self._working_structure_count("clinic", district_id) > 0
+
+    def _district_clinic_recovery_bonus(self, district_id):
+        """Passive in-district clinic recovery bonus (query-time, not ticked)."""
+        if not self._district_has_standing_clinic(district_id):
+            return 0.0
+        fn = self._get_structure_function("clinic")
+        for heal in fn.get("heals") or []:
+            if heal.get("kind") != "contagion_recovery":
+                continue
+            if heal.get("scope", "district") not in ("district", "village"):
+                continue
+            try:
+                return float(heal.get("bonus", CLINIC_RECOVERY_BONUS))
+            except (TypeError, ValueError):
+                return CLINIC_RECOVERY_BONUS
+        return CLINIC_RECOVERY_BONUS
+
     def _carry_cap(self, agent):
         """Per-agent carry cap: COLLECT_CAP, +CART_CARRY_BONUS while holding a
         cart (query-time vehicle effect, like _gather_yield_bonus). Phase D:
@@ -189,6 +229,10 @@ class _StructuresEconomyMixin:
             parts.append(f"unlocks {u.get('station')}" + (f" (tier {t})" if t else ""))
         for s in (fn or {}).get("stores") or []:
             parts.append(f"stores {s.get('capacity')} {s.get('resource')}")
+        for m in (fn or {}).get("mitigates") or []:
+            parts.append(f"mitigates {m.get('kind')} {m.get('amount')}")
+        for h in (fn or {}).get("heals") or []:
+            parts.append(f"heals {h.get('kind')} {h.get('bonus')}")
         if (fn or {}).get("houses"):
             parts.append("houses villagers")
         return "; ".join(parts) or "no effect"

@@ -161,7 +161,8 @@ function mergeStateDelta(prev, delta) {
     next.civilization = civ;
   }
   for (const key of ["benchmarks", "activity", "conversation", "config", "god",
-    "socialTies", "chronicle", "saga", "districtEcology", "wildlife", "shipments", "weather"]) {
+    "socialTies", "chronicle", "saga", "districtEcology", "wildlife", "shipments", "weather",
+    "pressureTelegraph"]) {
     if (delta[key] !== undefined) next[key] = delta[key];
   }
   return next;

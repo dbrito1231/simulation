@@ -7,7 +7,7 @@ content, and a day/night pressure loop.
 **Canonical for:** `PATH1_ENABLED`/`path1_on()` semantics,
 `INDUSTRY_ENABLED`, `TOOL_TIERS_ENABLED`, `COMPOSABLE_BUILD_ENABLED`,
 `TERRAIN_TILES_ENABLED`, `PATH1_DIPLOMACY_ENABLED`, `TIER3_CONTENT_ENABLED`,
-`PRESSURE_LOOP_ENABLED` semantics.
+`PRESSURE_LOOP_ENABLED`, `RAIDERS_CONTAGION_ENABLED` semantics.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index;
 [05-world.md](05-world.md) for district/terrain geometry (`TILE_CELL`
 cross-link); [02-engine-core.md](02-engine-core.md) for day/night/season
@@ -294,6 +294,59 @@ Fields projected onto a treaty page:
 **No settlement link (Answer 2 — verified).** The enacted treaty shape carries no
 settlement id field. Treaties do not structurally link to settlement pages in v1.
 
+## RAIDERS_CONTAGION_ENABLED
+
+**Third pressure mechanism — three-way disambiguation.** This flag gates a
+deterministic external-pressure subsystem (raids + contagion) implemented in
+`simulation/sim_engine/mixin_pressure_raiders.py`. It is **not** part of
+`PRESSURE_LOOP_ENABLED` above (night exposure + the `_tick_wildlife` pressure
+event in `mixin_wildlife.py`) and **not** part of `WILDLIFE_ENABLED`'s huntable
+fauna (`_move_wildlife` / `_tick_huntable_wildlife`). Do not fold raid/contagion
+logic into `mixin_wildlife.py` or conflate it with either existing system.
+
+**Kill switch:** when `RAIDERS_CONTAGION_ENABLED = False`, both raid and
+contagion tick functions early-return before any RNG or mutation (same pattern
+as `_tick_wildlife`'s `if not SURVIVAL_ENABLED: return`). The flag is echoed in
+`/state` `config.flags` ([01-architecture.md](01-architecture.md)).
+
+**Shared tick gate:** both mechanics roll on the `GOODS_TICK_FRAMES = 900`
+(~30s) gate — reuse `GOODS_TICK_FRAMES`; no separate `RAID_CONTAGION_TICK_GATE`
+constant. Matches wildlife's cadence pattern ([08-systems-economy.md](08-systems-economy.md)).
+
+| Constant | Value | Role |
+|---|---|---|
+| `RAID_EVENT_PROB` | `0.01` | Per-gate probability of scheduling a raid (half of `WILDLIFE_EVENT_PROB = 0.02`; raids are more consequential per instance) |
+| `CONTAGION_EVENT_PROB` | `0.015` | Per-gate probability of scheduling a contagion outbreak (milder per instance than a raid, but sustained spread makes it proportionately rarer than wildlife's 0.02) |
+
+**Telegraph (both events):** when a roll succeeds, the engine enters a warning
+state `RAID_TELEGRAPH_LEAD_FRAMES = 300` (~10s at 30 ticks/s) **before** impact.
+During the lead window the viewer and/or agent think payloads surface the pending
+event so agents can organize (guards, healing, quarantine prep). Engine hooks
+(Phase 2): `_begin_raid_telegraph` schedules `civilization["pressureTelegraph"]`;
+`_tick_pressure_raiders` resolves every tick when `frameTick >= impactFrame`;
+think payloads expose `pressure_warning_line`; `/state` exposes `pressureTelegraph`
+when active. See
+[11-viewer.md](11-viewer.md) for the viewer contract; think-payload injection
+follows the existing emergency-context pattern in `mixin_think_job.py`.
+
+**Raid resolution (summary):** on impact, a raid removes bounded resources from
+`civilization["stockpile"]` and/or `districtStocks`, applies structure-condition
+damage via `_apply_structure_condition_delta`, and applies contact health damage
+to eligible agents present — all scaled by guard-count + wall mitigation. Full
+effect shapes, counters, and formulas: [08-systems-economy.md](08-systems-economy.md)
+(raid stockpile/structure/contact + `"mitigates"`/`"heals"` effect kinds),
+[05-world.md](05-world.md) (structure damage/ruin reuse), [06-agents.md](06-agents.md)
+(contact health routing), [02-engine-core.md](02-engine-core.md) (elder exclusion).
+
+**Contagion resolution (summary):** on impact, seeds `agent["infected"]` /
+`agent["infectionFrame"]` on patient zero; each subsequent goods-tick gate runs
+proximity spread, per-gate health loss, duration/recovery math, and healer/clinic
+coverage bonuses. Constants and recovery math: [08-systems-economy.md](08-systems-economy.md),
+agent fields: [06-agents.md](06-agents.md).
+
+**Governance counter:** `"quarantine"` rule kind (movement + trading restriction)
+— [09-systems-society.md](09-systems-society.md). Agents respond via existing
+actions only — [07-actions.md](07-actions.md#raiders-and-contagion-no-new-actions).
 
 ## Historical rationale and verification
 

@@ -120,7 +120,7 @@ an emergent role, so the single elder role remains a seed-only invariant.
 | Identity | `id`, `name`, `role`, `personality`, `color` |
 | Movement | `x`, `y`, `targetX`, `targetY`, `speed`, `waypoints`, `currentZone`, `currentDistrict` |
 | Social | `relationships`, `inbox`, `beliefs`, `votes`, `message`, `messageTimer`, `consecutiveTalks`, `lastSpokeFrame` |
-| Survival | `resources`, `hunger`, `health`, `incapacitated` |
+| Survival | `resources`, `hunger`, `health`, `incapacitated`, `infected` (bool, `RAIDERS_CONTAGION_ENABLED`), `infectionFrame` (int epoch tick when infection started, `RAIDERS_CONTAGION_ENABLED`) |
 | Cognition | `memory` (`{working, shortTerm, longTerm}`), `memoryWiki` (`{relationships, goals, lessons}`, each capped at `WIKI_SECTION_CHAR_CAP`=300 chars — see below), `thinkTimer`, `thinkInterval`, `isThinking`, `pendingThink`, `lastAction`, `lastReasoning`, `persona`, `idleFrames`, `moduleTick`, `modules` (`{perception, social, desire, reflection}` plus `theory_of_mind` when `THEORY_OF_MIND_ENABLED`), `moduleReports` (`{module: {tick, text}}` — persistence-only mirror of the engine's `_piano_module_cache` entry for this agent, written alongside `moduleTick` after every think; never read on the hot path, only rehydrated by `restore_state()`), `peerModel` (`THEORY_OF_MIND_ENABLED` only — `{peerIdStr: {wants, good_at, owes_me, trust, frame}}`, capped by `PEER_MODEL_MAX_PEERS` / `PEER_MODEL_FIELD_CHAR_CAP`, LRU eviction by `frame`), `goal` (kinds include `gather`, `deliver`, `build`, `craft_gather`, `plant_terrain`, `seek_shelter`, `dig_relocate`, `caravan`, `repair`, and **`hunt`** — forced starvation backstop; see [08-systems-economy.md](08-systems-economy.md#starvation-reflex-and-forced-hunt-precedence)), `commitment`, `actionCounts` |
 | Task/build | `assignedTask`, `idleCycles`, `lastTaskedFrame`, `lastContributedFrame`, `consecutiveIdleMoves`, `homeStructureId`, `reorgTask` |
 | Invention/sprite | `inventionTurn`, `inventionRetryUsed`, `inventionBuildContext`, `spriteDesignTurn` |
@@ -133,7 +133,31 @@ Post-build setup (`core.py:374-381`) staggers `thinkInterval = 360 + i*60`
 (elder forced to `240`) and `thinkTimer = i*30` per roster index `i`, and sets each
 agent's initial movement target to its starting district.
 
-## `/state` agent snapshot (`SimEngine.snapshot()`, `mixin_snapshot.py:382-390`, per-agent row built by `_agent_snapshot_row`, `mixin_snapshot.py:113-138`)
+### Contagion infection fields (`RAIDERS_CONTAGION_ENABLED`)
+
+When the flag is on, every agent is created with `infected = False` and
+`infectionFrame = None`. On contagion spread or outbreak seeding,
+`agent["infected"] = True` and `agent["infectionFrame"] = self.frameTick` (epoch
+tick the infection started — same "epoch tick, not a countdown" style as
+`agent["deathFrame"]` in lifecycle, not a decremented timer).
+
+While infected and before recovery or duration expiry:
+- Each `GOODS_TICK_FRAMES` gate applies `CONTAGION_HEALTH_LOSS_PER_TICK_GATE = 1`
+  health via `agent["health"] = max(0, agent["health"] - 1)` — never
+  `_agent_dies`; incapacitation follows `_update_survival`'s existing collapse
+  floor if health reaches 0.
+- Recovery is probabilistic per goods-tick gate **only when healer or clinic
+  coverage is present** ([08-systems-economy.md](08-systems-economy.md#raiders_contagion_enabled));
+  with neither present the per-gate roll is `0` and unassisted recovery is the
+  `CONTAGION_DURATION_FRAMES` cap only (MILD — survivable without intervention).
+- On recovery, `infected` clears and `infectionFrame` resets; illness ends no
+  later than `CONTAGION_DURATION_FRAMES = 2700` (~90s) after `infectionFrame`.
+
+The elder (`role == "elder"`) is never eligible as a spread target
+([02-engine-core.md](02-engine-core.md#sage-emergency)). Spread radius and
+transmission probability: [10-path1.md](10-path1.md).
+
+## `/state` agent snapshot (`SimEngine.snapshot()`, `mixin_snapshot.py`, per-agent row built by `_agent_snapshot_row`)
 
 Not every internal field above is echoed to the viewer's `agents` array in
 `/state` (specs/04-http-api.md) — the snapshot is a filtered/derived view built
@@ -147,9 +171,15 @@ transformed, not passed through raw:
 - `lastReasoning` — the internal `lastReasoning` string (Cognition group,
   above), **capped to 160 characters**; empty/missing becomes `null` rather
   than `""`.
+- `infected` — when `RAIDERS_CONTAGION_ENABLED`, bool echo of
+  `agent["infected"]` for viewer contagion rendering (Phase 5).
 
-Both are unconditional (no feature flag gates them) since the underlying
-fields always exist on every agent.
+`relationships` and `lastReasoning` are always present in every agent row
+(no feature flag gates them), since the underlying fields exist on every
+agent. `infected` is included only when `RAIDERS_CONTAGION_ENABLED` —
+`_agent_snapshot_row` (`mixin_snapshot.py:122`) conditionally spreads
+`{"infected": bool(a.get("infected"))}` into the row; when the flag is off,
+the key is omitted from `/state`.
 
 Lineage fields (`LIFECYCLE_ENABLED`, always emitted on every agent row so the
 viewer can read them without existence checks):
