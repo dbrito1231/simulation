@@ -544,7 +544,6 @@ The thin viewer loads 21 fixed JavaScript files from the Flask app beside `index
 
 | Path | File | Notes |
 |---|---|---|
-| `/viewer/predictions.js` | `simulation/viewer/predictions.js` | Required — prediction-market panel renderer and `/predictions/*` client; polls history only while the panel is visible |
 | `/viewer/setup.js` | `simulation/viewer/setup.js` | Required — boot/canvas setup, zoom, feature flags |
 | `/viewer/state.js` | `simulation/viewer/state.js` | Required — world snapshot (`MOCK_STATE`, `world`), delta merge, districts cache |
 | `/viewer/render.js` | `simulation/viewer/render.js` | Required — convenience accessors + drawing (terrain cache, weather/night overlays, agents, structures) |
@@ -552,10 +551,10 @@ The thin viewer loads 21 fixed JavaScript files from the Flask app beside `index
 | `/viewer/sidebar.js` | `simulation/viewer/sidebar.js` | Required — sidebar render (Civilization/Agents panels, `ACTION_LABELS`, benchmarks, world clock HUD) |
 | `/viewer/decision-audit.js` | `simulation/viewer/decision-audit.js` | Required — Decision Audit panel poll and render; read-only `/decision-audit` consumer |
 | `/viewer/council.js` | `simulation/viewer/council.js` | Required — Council panel, Council Assembly modal, settlements |
+| `/viewer/predictions.js` | `simulation/viewer/predictions.js` | Required — prediction-market panel renderer and `/predictions/*` client; polls history only while the panel is visible |
 | `/viewer/minimap.js` | `simulation/viewer/minimap.js` | Required — minimap render + navigation |
 | `/viewer/polling.js` | `simulation/viewer/polling.js` | Required — `/state` polling, flag sync, social ties/wildlife/shipment drawing |
 | `/viewer/anomaly.js` | `simulation/viewer/anomaly.js` | Required — anomaly radar and console read-only `/anomalies` consumer |
-| `/viewer/world-wiki.js` | `simulation/viewer/world-wiki.js` | Required — World Wiki modal read-only `/wiki` consumer |
 | `/viewer/controls.js` | `simulation/viewer/controls.js` | Required — Pause/Resume/Reset controls |
 | `/viewer/renderloop.js` | `simulation/viewer/renderloop.js` | Required — `tick`/`tickBody` render loop |
 | `/viewer/divine-bootstrap.js` | `simulation/viewer/divine-bootstrap.js` | Required — Divine Console state, DOM refs, feature registry/guide, agent/pin selects |
@@ -565,6 +564,7 @@ The thin viewer loads 21 fixed JavaScript files from the Flask app beside `index
 | `/viewer/divine-voice.js` | `simulation/viewer/divine-voice.js` | Required — Voice tab (proclamation/providence/private omen, whisper/crowd/dream, bargain/oracle/architect) |
 | `/viewer/divine-miracles-story.js` | `simulation/viewer/divine-miracles-story.js` | Required — Miracles tab, shared modifier editor, Story/Compile/Laws tabs |
 | `/viewer/divine-history.js` | `simulation/viewer/divine-history.js` | Required — History power tools, gate/passive refresh, public banner, `renderDivineConsole` entry point, poll/render loop kickoff |
+| `/viewer/world-wiki.js` | `simulation/viewer/world-wiki.js` | Required — World Wiki modal read-only `/wiki` consumer |
 | `/css/base.css` | `simulation/css/base.css` | Required — stylesheet 1/6: reset, `#wrap`/`#canvasWrap`/`#world`, map controls, `#worldClockHud`, `#minimap` |
 | `/css/panels.css` | `simulation/css/panels.css` | Required — stylesheet 2/6: `#sidebar`/`#convPanel` shared chrome, `#civPanel` civilization stats |
 | `/css/agents.css` | `simulation/css/agents.css` | Required — stylesheet 3/6: `#agentList`/`#agentRollup`/`#agentDetail`, deceased-agents modal |

@@ -246,13 +246,17 @@ mechanism the season tint already uses.
     trap. Controls contains the existing Pause, Reset, zoom out, zoom in, and
     Fit buttons (`#pauseBtn`, `#resetBtn`, `#zoomOutBtn`, `#zoomInBtn`,
     `#zoomFitBtn`); these controls are no longer a fixed cluster over the map.
-    Inside `#sidebarLogsScroll`, in upstream order: **Activity**
-    (`#activityLog`, world-event feed,
-    `#actList`), **Decision audit** (`#decisionAuditPanel` — see
-    [Decision audit panel](#decision-audit-panel)), **Chronicle**
-    (`#chronicleLog`, `#chronicleList`). The common bounded `.panel-body`
-    provides internal list scrolling, while the outer `#sidebarBody` scrolls
-    the complete right-hand stack. The Civilization panel's **Village resources**
+    Inside `#sidebarLogsScroll`, in exact DOM order: **Activity**
+    (`#activityLog`, world-event feed, `#actList`), **Decision audit**
+    (`#decisionAuditPanel` — see [Decision audit panel](#decision-audit-panel)),
+    **Anomaly radar** (`#anomalySection`), **Chronicle** (`#chronicleLog`,
+    `#chronicleList`), **Village paper** (`#sagaLog`, `#sagaList`), and
+    **Prediction market** (`#predictionMarketPanel`). Activity, Decision audit,
+    and Chronicle are three of the ten common collapsible panels; Anomaly radar,
+    Village paper, and Prediction market retain their upstream non-collapsible
+    markup. The common bounded `.panel-body` provides internal list scrolling
+    for the collapsible panels, while the outer `#sidebarBody` scrolls the
+    complete right-hand stack. The Civilization panel's **Village resources**
     row (`#civResources` headline + `#civResourceList` chips) shows
     `civ.stockpile` **plus** every agent inventory, keyed through
     `resourceRegistry`, filtered to `n > 0` (retired or zero holdings never
@@ -353,11 +357,15 @@ black space). The recent `<details>` wrap is hidden and polling stops. When
 outcome axis remain on the [Divine Audit tab](#divine-audit-tab) only.
 
 **Placement.** Right sidebar (`#sidebar` / `#sidebarBody`), inside
-`#sidebarLogsScroll` with Activity and Chronicle — **not** below Chronicle.
-Order: Activity (`#activityLog`) → **Decision audit** (`#decisionAuditPanel`)
-→ Chronicle (`#chronicleLog`). `#sidebarLogsScroll` groups these sections
-inside the scrolling `#sidebarBody`; the audit's `.panel-body` uses the same
-bounded sizing and internal overflow as the other collapsible sections.
+`#sidebarLogsScroll` after Activity and before Anomaly radar — **not** below
+Chronicle. Exact order: Activity (`#activityLog`) → **Decision audit**
+(`#decisionAuditPanel`) → Anomaly radar (`#anomalySection`) → Chronicle
+(`#chronicleLog`) → Village paper (`#sagaLog`) → Prediction market
+(`#predictionMarketPanel`). Decision audit, Activity, and Chronicle are common
+collapsible panels; the other three retain upstream non-collapsible markup.
+`#sidebarLogsScroll` groups these sections inside the scrolling `#sidebarBody`;
+the audit's `.panel-body` uses the same bounded sizing and internal overflow as
+the other collapsible sections.
 Element ids: `#decisionAuditPanel` container,
 `#decisionAuditAgentList` for per-agent rows, `#decisionAuditRecent` for the
 bounded `recent[]` drill-down list (wrapped in `#decisionAuditRecentWrap`
@@ -1779,7 +1787,7 @@ server via `_build_snapshot_config()`), stored as `WORLD_WIKI_ENABLED_FLAG` in
 are sent.
 
 **Viewer files (Phase 3 implementation).** The wiki modal lives in:
-- `simulation/viewer/world-wiki.js` — all modal logic (file 19 in the viewer split
+- `simulation/viewer/world-wiki.js` — all modal logic (file 21 in the viewer split
   table above). Entry point: global `openWorldWiki(kind, id)`.
 - `simulation/css/council.css` — wiki modal CSS appended to the existing council CSS
   file (same file that owns `#councilTranscriptModal` and `#councilAssemblyModal`
