@@ -140,6 +140,10 @@ class _SnapshotMixin:
             "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
             "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
             "buried": bool(CEMETERY_ENABLED and a.get("buried")),
+            "parents": a.get("parents") if LIFECYCLE_ENABLED else None,
+            "children": list(a.get("children") or []) if LIFECYCLE_ENABLED else [],
+            "inheritedTestament": list(a.get("inheritedTestament") or []) if LIFECYCLE_ENABLED else [],
+            "inheritedBeliefs": list(a.get("inheritedBeliefs") or []) if LIFECYCLE_ENABLED else [],
             "relationships": {k: v for k, v in (a.get("relationships") or {}).items() if v != "neutral"},
             "lastReasoning": (a.get("lastReasoning") or "")[:160] or None,
         }
@@ -270,6 +274,7 @@ class _SnapshotMixin:
                 "ECONOMY_ENABLED": ECONOMY_ENABLED,
                 "CONTRACTS_ENABLED": CONTRACTS_ENABLED,
                 "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
+                "DYNASTY_TREE_ENABLED": DYNASTY_TREE_ENABLED,
                 "CULTURE_ENABLED": CULTURE_ENABLED,
                 "CEMETERY_ENABLED": CEMETERY_ENABLED,
                 "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,

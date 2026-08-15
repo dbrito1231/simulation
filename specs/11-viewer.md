@@ -821,7 +821,7 @@ move, no logic changed.
 
 | Order | File | Contents |
 |---|---|---|
-| 1 | `viewer/setup.js` | Thin-viewer contract banner, canvas/DPR setup, offscreen-terrain-cache scaffolding, zoom (`zoomLevel`/`applyZoom`/`zoomFit`), all feature flags (`SURVIVAL_ENABLED` etc.), viewer-only display toggles (`SHOW_CONVERSATIONS`/`SHOW_SETTLEMENTS`) |
+| 1 | `viewer/setup.js` | Thin-viewer contract banner, canvas/DPR setup, offscreen-terrain-cache scaffolding, zoom (`zoomLevel`/`applyZoom`/`zoomFit`), all feature flags (`SURVIVAL_ENABLED`, `DYNASTY_TREE_ENABLED`, etc.), viewer-only display toggles (`SHOW_CONVERSATIONS`/`SHOW_SETTLEMENTS`) |
 | 2 | `viewer/state.js` | World snapshot: `MOCK_STATE`, module-level `world`, `mergeStateDelta()`, districts cache (`districtsData`/`districtsKey`/`districtsEpoch`), `getDistricts`/`findDistrictBounds`/`getDistrictBounds` |
 | 3 | `viewer/render.js` | Convenience accessors (`getAgents`/`getCiv`/etc.) plus drawing: terrain cache build (`buildTerrainCache`), season/night/golden-hour/weather overlays, `drawWorld`, per-agent/structure drawing (`drawAgent`, `drawStructureWithShadow`, hit-flash) |
 | 4 | `viewer/sidebar.js` | Sidebar render: `renderSidebar()`, `ACTION_LABELS`/`humanizeAction`, benchmarks, agent detail/rollup/panel, deceased-agents modal, founding/disaster banners, `renderWorldClockHud` |
@@ -840,6 +840,7 @@ move, no logic changed.
 | 17 | `viewer/divine-miracles-story.js` | Divine Console Miracles tab (`agent_vitals`/`grant_resource`/`structure_condition`), shared Story/Laws modifier editor, story primitives editor, Story/Compile/Laws tabs |
 | 18 | `viewer/divine-history.js` | Divine Console History power tools, gate + passive per-poll refresh, public banner, `renderDivineConsole()` entry point, and the page's bootstrap kickoff (`requestAnimationFrame(tick)`, `pollState()`, `pollDistricts()`). Decision-audit polling starts in `decision-audit.js` itself. |
 | 19 | `viewer/world-wiki.js` | World Wiki modal: `openWorldWiki(kind, id)` global entry point, `fetchWiki()` / `renderWikiModal()` / `renderWikiIndex()` / `renderWikiPageContent()`, back-navigation stack, delegated `.wiki-link` click handler (capture phase, stops propagation). Gated on `WORLD_WIKI_ENABLED_FLAG` (set in `polling.js`). Polls `GET /wiki` every 3 s while modal is open; no polls when closed. Pure renderer — no world-state mutation. |
+| 20 | `viewer/divine-modal.js` | Divine Console Lineage tab render (`renderGodLineage`/`applyDynastyTreeLineageGate`) and modal-tab wiring; read-only family tree from `/state`. |
 
 ## Civ-1 physical props
 
@@ -1071,13 +1072,13 @@ via `drawShipments(ctx, world.frameTick)`, called right after
 ## Divine Console (Sovereign God mode, Phase 7)
 
 The Divine Console is a fixed bottom action bar plus a large modal dialog —
-not a sidebar panel. Nine feature buttons (**Unlock**, **Sight**, **Voice**,
-**Miracles**, **Story**, **Laws**, **History**, **Audit**, plus **Compile** when the
-server reports the Optional Phase 8 compiler enabled — see below) live in
+not a sidebar panel. Twelve feature buttons (**Unlock**, **Sight**, **Voice**,
+**Matrix**, **Miracles**, **Story**, **Laws**, **History**, **Audit**, **Anomaly**,
+**Lineage**, plus **Compile** when the server reports the Optional Phase 8 compiler enabled — see below) live in
 `#divineBar` (`position: fixed; bottom: 0; left: 0; right: 0`). Clicking a
 button opens `#divineModalScrim` / `#divineModal` (`role="dialog"`,
 `aria-modal="true"`), whose body is `#divineModalBody`. At load time the nine
-`#divineTab-<name>` panel nodes (including `#divineTab-audit`) sit in a hidden holding container
+`#divineTab-<name>` panel nodes (including `#divineTab-audit` and `#divineTab-lineage`) sit in a hidden holding container
 `#divineTabHold` so `wireDivineForm()` and other `getElementById` bindings
 still resolve at startup; **opening a feature reparents** (moves, never clones)
 the matching `#divineTab-<name>` into `#divineModalBody`, and **closing**
@@ -1148,7 +1149,8 @@ button, a backdrop click on `#divineModalScrim`, or Escape reparents the panel
 back to `#divineTabHold` and hides the scrim. Side effects that previously
 fired on tab switch now fire on open: Sight → `refreshGodSight()` when
 effectively authorized (`godEffectivelyAuthorized()`); Laws →
-`renderGodLawsActive()`; History → `renderGodHistory()`.
+`renderGodLawsActive()`; History → `renderGodHistory()`; Lineage →
+`renderGodLineage()`.
 The Compile bar button `#godCompileTabBtn` stays dual-gated via
 `capabilities.compiler.enabled` (see Compile below).
 
@@ -1534,6 +1536,39 @@ Apply ≈ “make it real”. Irreversible fieldsets retain crimson styling and 
   gated like History (`gated: true`, `.locked-dependent`). Filters, agent
   summary table, two-axis legend, and scrollable entry list — see
   [Divine Audit tab](#divine-audit-tab). No Preview/Apply.
+- **Lineage** (`DYNASTY_TREE_ENABLED`) — read-only family tree panel in the
+  Divine Console (idea-02 dynasty tree, Phase 3). `#godLineageTabBtn`
+  (`.gbtn.lineage`, `data-feature="lineage"`) sits in `#divineBar` after
+  **History** / before **Compile**; opens `#divineTab-lineage` via the same
+  reparent-on-open / reparent-back-on-close modal-tab pattern as History.
+  Registry: `DIVINE_FEATURES.lineage` in `viewer/divine-bootstrap.js`, `"lineage"`
+  in `GOD_TABS` (`viewer/divine-modal.js`). Same unlock gate as other
+  `.locked-dependent` tabs (`godEffectivelyAuthorized()`). No Preview/Apply —
+  pure renderer from `/state` agent fields only.
+  - **Kill switch.** `DYNASTY_TREE_ENABLED` mirrors
+    `config.flags.DYNASTY_TREE_ENABLED` (default `true` in
+    `viewer/setup.js`; applied in `applyFlags()`). When false,
+    `#godLineageTabBtn` is `display:none` (same pattern as the Compile tab
+    hide in `applyGodCapabilitiesToForms()` / `applyDynastyTreeLineageGate()`);
+    if Lineage is open, the modal switches to History.
+  - **Agent picker.** `#godLineageAgentSelect` lists **all** agents from
+    `getAgents()` / `world.agents`, including deceased (`"Name (deceased)"`).
+    Does not use `populateGodAgentSelects()` (living-only).
+  - **Panel fields** for the selected agent: **Parents** (`agent.parents` —
+    empty/`null` → "Founding generation — no parents"; each name is a button
+    that selects that agent in the same panel); **Children** (`agent.children` —
+    empty → "No children"; same link navigation); **Inherited testament**
+    (`agent.inheritedTestament` entries `{text, author, frame, generation}` —
+    empty → "None"); **Inherited beliefs** (`agent.inheritedBeliefs` list —
+    empty → "None"). All dynamic strings via `escapeHtml()`; no client-side
+    simulation, no extra fetches.
+  - **Refresh.** `renderGodLineage()` runs on open (`openDivineModal("lineage")`
+    in `viewer/divine-modal.js`) and on every poll while Lineage is the active
+    tab: `renderDivineConsole()` in `viewer/divine-history.js` calls it **before**
+    the `world.god` `godLastStateKey` early return, because lineage fields live on
+    `world.agents`, not `world.god`. Safe every poll — internal `contentKey`
+    change detection skips DOM work when parents/children/testament/beliefs are
+    unchanged. Select value is preserved across poll refreshes.
 - **Miracles / Story / Laws QoL (Phase 7).**
   - **Law conflict warnings.** Successful previews of modifier-bearing
     `story_event` commands (Story tab and Laws tab) may return additive

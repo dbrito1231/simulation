@@ -139,7 +139,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 55 module-level flags, sim_engine.py)
+## Flag index (complete — 56 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -179,6 +179,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `ECONOMY_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `CONTRACTS_ENABLED` | True | yes | [07](07-actions.md), [08](08-systems-economy.md) |
 | `LIFECYCLE_ENABLED` | True | yes | [06](06-agents.md) |
+| `DYNASTY_TREE_ENABLED` | True | yes | [06](06-agents.md) (Divine Lineage viewer — Phase 3) |
 | `CULTURE_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `CEMETERY_ENABLED` | True | yes | [05](05-world.md) |
 | `PATH1_ENABLED` | True | yes | [10](10-path1.md) |
@@ -215,6 +216,26 @@ complete list and default state. "Echoed" = present in `/state`'s
 and the dedicated `/decision-audit` reader. When off, neither log stream
 carries the field and the route returns `{enabled: false, ...}`. The viewer
 learns the state from that route's `enabled` field.
+**`DYNASTY_TREE_ENABLED` kill switch and scoping.** Plain module-level boolean
+(`simulation/sim_engine/constants.py`, Phase 1) — default **True**, echoed in
+`/state` `config.flags`. Kill switch: flip the constant to `False` and restart;
+no env override by default (consistent with most flags in this index). Because
+`parents`/`children` recording is folded into the existing
+`LIFECYCLE_ENABLED`-gated birth path, this flag gates the **viewer Divine
+Lineage panel** (Phase 3) and the `_heirs_of` children-array read — **not**
+whether `children` is written at birth (the write stays unconditional within
+`LIFECYCLE_ENABLED`, same as `parents` today).
+
+`DECISION_AUDIT_ENABLED` gates **both** engine-side correlation-id minting
+(`run_agent_decision` → `llm.jsonl` `decision._decision_id` and
+`apply_decision` → `activity.jsonl` `decision_id`) **and** the dedicated
+`/decision-audit` reader route. When off, neither log stream carries the field
+and the route returns `{enabled: false, …}` — a true no-op on both write and
+read paths, not merely a disabled panel. The flag is **not** echoed in `/state`
+`config.flags`; the viewer learns on/off state from the route's own `enabled`
+field (same pattern as idea-07's dedicated-route viewer echo). Whether an env
+override (e.g. `SIM_DECISION_AUDIT`) is wired is an implementer-phase choice,
+documented in [03-cognition.md](03-cognition.md) once made.
 
 `civilization["godState"]["version"]` is `GOD_STATE_VERSION` (`3` after Divine
 Console Phase 8 — `decisionDigests`, `dejaVuReplays`, and Phase 9 placeholder

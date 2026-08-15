@@ -243,6 +243,7 @@ let CROP_GROWTH_ENABLED = true;
 let WILDLIFE_ENABLED = true;
 let CARAVAN_VISUALS_ENABLED = true;
 let WEATHER_ENABLED = true;
+let DYNASTY_TREE_ENABLED = true;
 
 // --- Viewer-only display toggles (client-side, not server flags). Flipping
 // either to true fully restores that section with no other edits. ---

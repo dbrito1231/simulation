@@ -359,6 +359,21 @@ shutdown.
 `structure_sprites` as v3). v1→v2 migration removed. `setdefault`/flag-gated
 backfill for post-v2 fields still runs on every restore (forward-compat).
 
+**Lifecycle lineage back-compat (`LIFECYCLE_ENABLED`):** inside the existing
+`if LIFECYCLE_ENABLED:` restore block that already runs
+`a.setdefault("parents", None)` and `a.setdefault("deathFrame", None)`
+(`mixin_persistence.py:540-544`), Phase 1 adds `setdefault`-only back-compat for
+`children`, `inheritedTestament`, and `inheritedBeliefs` — same discipline as
+`parents`/`deathFrame`, no schema bump. A restored save with `parents` set but
+no `children` key must not raise and must back-fill `children == []`.
+After all agents load, restore also reconstructs each known parent's inverse
+`children` link from the child's persisted `parents` names, without
+duplicating existing entries;
+likewise `inheritedTestament` and `inheritedBeliefs` default to `[]` when
+absent. Every reader (`_heirs_of()`, viewer projection) must use
+`agent.get("children") or []` defensively even after back-compat lands, matching
+this codebase's existing `.get(... ) or []` / `.get(..., {})` read style.
+
 **Inland-founded beach migration (coastal pairs):** after agents/civilization
 rehydrate, `_revert_inland_founded_beaches()` removes founded `beach_N` /
 orphan `ocean_N` districts that lack an edge-adjacent coastal pair (starter

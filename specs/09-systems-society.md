@@ -752,7 +752,25 @@ is off. Zero new LLM call sites.
 
 **Inheritance:** `_spawn_newborn` seeds the newborn's `memoryWiki` from both
 parents' wiki sections plus the newest `TESTAMENT_PROMPT_ENTRIES` testament
-lines, subject to `WIKI_SECTION_CHAR_CAP` per section.
+lines, subject to `WIKI_SECTION_CHAR_CAP` per section. The wiki join
+(`_join_unique`, `mixin_governance_culture.py:1343`) concatenates raw text into
+a single capped string and does not retain which individual testament entries
+(with their `author`/`frame`/`generation`) fed into that string — so there is
+nothing on the newborn to trace back to "entry X, written by ancestor Y" after
+the fact unless a separate field captures it.
+
+**Per-heir testament snapshot (`inheritedTestament`):** additive agent field,
+not a rework of `_push_testament_entry`, `_merge_testament_on_death`, or the
+village-wide ring. Inside `_seed_newborn_wiki_from_testament`
+(`mixin_governance_culture.py:1331-1366`), at the same moment the newborn wiki
+is seeded, the engine sets `newborn["inheritedTestament"]` to a **copy** of
+the same `testament[-TESTAMENT_PROMPT_ENTRIES:]` entry dicts already sliced
+there (line 1359) — each entry `{text, author, frame, generation}` — a
+deterministic birth-time snapshot with no live link that could drift as the
+shared `civilization["testament"]` ring later caps or drops older entries.
+Persisted on the agent like other lifecycle fields; `restore_state()` back-fills
+`[]` when absent ([02-engine-core.md](02-engine-core.md)). See
+[06-agents.md](06-agents.md) for the agent-state table row.
 
 **Prompt:** one bounded `"Village testament: ..."` line alongside `"Village
 history: ..."`, sliced by `TESTAMENT_PROMPT_ENTRIES = 3` independently of

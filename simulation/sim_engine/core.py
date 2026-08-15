@@ -364,6 +364,9 @@ class SimEngine(
                 a["lastQuotaRejection"] = None
                 a["lastRationingRejection"] = None
                 a["parents"] = None
+                a["children"] = []
+                a["inheritedTestament"] = []
+                a["inheritedBeliefs"] = []
                 a["deathFrame"] = None
                 # Cemetery/burial: unset until a permanent death is buried
                 # (see CEMETERY_ENABLED above); irrelevant while alive.

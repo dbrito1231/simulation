@@ -543,6 +543,7 @@ function renderGodPublicBanner() {
 function renderDivineConsole() {
   updateGodModeGate();
   if (!GOD_MODE_ENABLED_FLAG) return;
+  if (godActiveTab === "lineage") renderGodLineage();
   const key = JSON.stringify(world.god || null);
   if (key === godLastStateKey) return;
   godLastStateKey = key;

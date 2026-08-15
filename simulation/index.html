@@ -212,6 +212,12 @@
       <svg viewBox="0 0 24 24"><path d="M12 2l9 18H3z"/><path d="M12 9v5"/></svg>
       <span class="lbl">Anomaly</span>
     </button>
+    <button type="button" class="gbtn lineage locked-dependent" data-feature="lineage" data-tab="lineage"
+      id="godLineageTabBtn" disabled
+      data-tip='{"t":"Lineage","d":"Parents, children, and birth-time inherited testament and beliefs."}'>
+      <svg viewBox="0 0 24 24"><path d="M12 2v6M8 8h8M6 14h4v8H6zM14 14h4v8h-4z"/><path d="M12 8v6"/></svg>
+      <span class="lbl">Lineage</span>
+    </button>
     <!-- Sovereign God mode Optional Phase 8: dual-gated (GOD_MODE_ENABLED
          AND GOD_COMPILER_ENABLED / SIM_GOD_COMPILER=1). Hidden by
          default; applyGodCapabilitiesToForms() reveals it only when
@@ -1035,6 +1041,17 @@
         <div class="divine-tab-panel" id="divineTab-anomaly" style="display:none">
           <p class="divine-help divine-help-intro">Statistical anomalies from this run's benchmark metrics.</p>
           <div id="divineAnomalyGroups"></div>
+        </div>
+        <div class="divine-tab-panel" id="divineTab-lineage" style="display:none"
+          data-tip='{"t":"Lineage","d":"Read-only family tree from /state — parents, children, inherited testament and beliefs."}'>
+          <div class="divine-lineage-panel">
+            <div class="divine-row">
+              <label data-tip='{"t":"Villager","d":"Living and deceased agents; lineage fields come from /state."}'>Villager
+                <select id="godLineageAgentSelect"></select>
+              </label>
+            </div>
+            <div id="godLineageContent" class="divine-lineage-content"></div>
+          </div>
         </div>
 
         <!-- Sovereign God mode Optional Phase 8 (docs/archive/plan-sovereign-god-
