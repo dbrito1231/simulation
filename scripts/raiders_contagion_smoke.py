@@ -273,6 +273,8 @@ def test_telegraph_and_state_echo():
     pt = snap.get("pressureTelegraph")
     assert_true(pt is not None, "snapshot pressureTelegraph")
     assert_true(pt.get("impactFrame") == tele["impactFrame"], pt)
+    assert_true(isinstance(pt.get("targetStructureId"), int), pt)
+    assert_true("targetAgentId" in pt and pt["targetAgentId"] is None, pt)
     payload = engine._build_think_payload(engine.agents[0])
     line = payload.get("pressure_warning_line")
     assert_true(line and "RAID WARNING" in line, line)
@@ -425,6 +427,22 @@ def test_quarantine_governance():
     )
     assert_true("quarantine" in summary_block.lower(), summary_block)
 
+    # Different quarantined districts are still different endpoints: either
+    # active endpoint blocks cross-district trade, even when both are active.
+    second_rule = {
+        "id": "smoke_quarantine_core",
+        "kind": "quarantine",
+        "name": "Smoke core quarantine",
+        "value": "village_core",
+    }
+    engine._apply_governance_rule(second_rule)
+    summary_both = engine.apply_decision(
+        outside,
+        {"action": "trade_resource", "target": inside["name"]},
+    )
+    assert_true("quarantine" in summary_both.lower(), summary_both)
+    engine._clear_governance_rule(second_rule)
+
     # Same-district trade allowed
     partner = _find_non_elder(engine)[2]
     partner["currentDistrict"] = district
@@ -451,7 +469,39 @@ def test_quarantine_governance():
     engine._tally_and_maybe_enact(repeal)
     assert_true(not engine._quarantine_blocks_travel(outside, "village_core", district),
                 "repeal should lift travel block")
-    print("  OK proposed/passed quarantine blocks move/trade; passed repeal lifts it")
+    assert_true(not engine._quarantine_blocks_trade(outside, inside),
+                "repeal should lift cross-district trade block")
+    print("  OK quarantine blocks either cross-district trade endpoint; repeal lifts it")
+
+
+def test_quarantine_stops_preassigned_crossing():
+    engine = make_engine(8)
+    mover = _find_non_elder(engine)[0]
+    mover["currentDistrict"] = "farm_north"
+    mover["x"], mover["y"] = 700.0, 809.0
+    mover["targetX"], mover["targetY"] = 700.0, 900.0
+    mover["waypoints"] = []
+    mover["speed"] = 20.0
+    rule = {
+        "id": "smoke_q_inflight",
+        "kind": "quarantine",
+        "name": "In-flight quarantine",
+        "value": "farm_north",
+    }
+
+    # The route exists before enactment; the physical crossing guard must
+    # cancel it at the boundary without moving or teleporting the agent.
+    engine._apply_governance_rule(rule)
+    engine._move_agent(mover)
+    assert_true((mover["x"], mover["y"]) == (700.0, 809.0), mover)
+    assert_true((mover["targetX"], mover["targetY"]) == (700.0, 809.0), mover)
+    assert_true(mover.get("currentDistrict") == "farm_north", mover)
+
+    engine._clear_governance_rule(rule)
+    mover["targetX"], mover["targetY"] = 700.0, 900.0
+    engine._move_agent(mover)
+    assert_true(mover["y"] > 809.0, "repeal should restore physical crossing")
+    print("  OK enacted-after-assignment quarantine stops crossing; repeal restores it")
 
 
 def test_kill_switch_and_flag_echo():
@@ -463,6 +513,12 @@ def test_kill_switch_and_flag_echo():
     try:
         se.RAIDERS_CONTAGION_ENABLED = False
         off_engine = make_engine(8)
+        assert_true("quarantineActive" not in off_engine.civilization,
+                    "flag-off fresh world seeded quarantineActive")
+        assert_true("quarantineActiveBySettlement" not in off_engine.civilization,
+                    "flag-off fresh world seeded quarantineActiveBySettlement")
+        assert_true("mitigates" not in off_engine._get_structure_function("wall"),
+                    "flag-off wall registered raid mitigation")
         assert_true(off_engine._begin_raid_telegraph() is None, "raid telegraph when off")
         assert_true(off_engine._begin_contagion_telegraph() is None, "contagion telegraph when off")
         assert_true(off_engine._pressure_telegraph() is None, "pressure telegraph when off")
@@ -485,8 +541,10 @@ def test_sage_emergency_bypasses_quarantine():
     engine._apply_governance_rule(rule)
     elder["currentDistrict"] = district
     elder["x"], elder["y"] = 600.0, 400.0
-    healer["currentDistrict"] = "village_core"
-    healer["x"], healer["y"] = 700.0, 1500.0
+    # Start immediately outside the quarantined farm so the first movement
+    # step exercises the physical boundary guard, not only route assignment.
+    healer["currentDistrict"] = None
+    healer["x"], healer["y"] = 600.0, 811.0
     assert_true(engine._quarantine_blocks_travel(healer, healer["currentDistrict"], district),
                 "quarantine would block normal travel")
     prior_goal = healer.get("goal")
@@ -497,6 +555,13 @@ def test_sage_emergency_bypasses_quarantine():
         < 200,
         "healer routed toward elder despite quarantine",
     )
+    healer["speed"] = 30.0
+    before = (healer["x"], healer["y"])
+    engine._move_agent(healer)
+    assert_true((healer["x"], healer["y"]) != before,
+                "Sage-emergency physical crossing was blocked")
+    assert_true(healer.get("_quarantineTravelBypass") is True,
+                "Sage-emergency crossing marker missing in flight")
     healer["goal"] = prior_goal
     engine._clear_governance_rule(rule)
     print("  OK Sage-emergency _rush_to_heal bypasses quarantine routing")
@@ -508,6 +573,10 @@ def test_contagion_telegraph_think_line():
     engine.frameTick = 500
     tele = engine._begin_contagion_telegraph(patient_zero_id=patient["id"])
     assert_true(tele is not None, tele)
+    projected = engine._pressure_telegraph_snapshot()
+    assert_true(isinstance(projected.get("targetAgentId"), int), projected)
+    assert_true("targetStructureId" in projected and projected["targetStructureId"] is None,
+                projected)
     payload = engine._build_think_payload(patient)
     line = payload.get("pressure_warning_line")
     assert_true(line and "CONTAGION WARNING" in line, line)
@@ -524,6 +593,7 @@ def main():
         test_contagion_health_loss_and_duration,
         test_contagion_recovery_probabilities,
         test_quarantine_governance,
+        test_quarantine_stops_preassigned_crossing,
         test_kill_switch_and_flag_echo,
         test_sage_emergency_bypasses_quarantine,
         test_contagion_telegraph_think_line,

@@ -526,7 +526,7 @@ class SimEngine(
             "lastSuccessionActivityFrame": 0,
             "harvestQuotas": {},            # rule id -> {"district": id|None, "resource": id|None, "value": n}
             "rationingActive": {},          # rule id -> {"value": n}
-            "quarantineActive": {},         # rule id -> {"district": id} (RAIDERS_CONTAGION_ENABLED)
+            **({"quarantineActive": {}} if RAIDERS_CONTAGION_ENABLED else {}),
             "populationFloorHeld": False,   # last death-deferred-at-floor state, for the nudge
             # Phase G (CULTURE_ENABLED): knowledge, chronicle, meme mutation.
             "chronicle": [],                # capped ring: {"text": str, "frame": int, "kind": str}

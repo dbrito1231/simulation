@@ -356,7 +356,8 @@ class _PersistenceMixin:
                     civ.setdefault("lastSuccessionActivityFrame", 0)
                     civ.setdefault("harvestQuotas", {})
                     civ.setdefault("rationingActive", {})
-                    civ.setdefault("quarantineActive", {})
+                    if RAIDERS_CONTAGION_ENABLED:
+                        civ.setdefault("quarantineActive", {})
                     civ.setdefault("populationFloorHeld", False)
                 # Huntable wildlife: additive setdefault for old saves; seed
                 # only when the list is still empty so a persisted population

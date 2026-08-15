@@ -317,18 +317,24 @@ no-op (allow).
    - **`_set_agent_target_to_agent`:** cross-district paths to another agent are
      blocked the same way, **except** Sage-emergency `_rush_to_heal`, which passes
      `bypass_quarantine=True` (sole bypass; no other callers may use it).
+   - **Physical crossing backstop:** `_move_agent` rechecks the district boundary
+     on every movement step, so a quarantine enacted after a route was assigned
+     also stops the crossing. The route is cancelled at the agent's current
+     position (no teleport); the Sage-emergency route marker is the sole bypass
+     and is cleared on arrival or when ordinary routing replaces it.
    - **Goal step path:** the four `_step_goal` district-crossing sites in
      `mixin_decisions.py`: `seek_shelter` (~1331), `dig_relocate` (~1338),
      `caravan` (~1353), `repair` (~1387). Blocked goals are cleared (`goal = None`).
 2. **`trade_resource`** — `_quarantine_blocks_trade(agent, target)` returns true when
-   the two agents are in different districts and exactly one party's
+   the two agents are in different districts and either party's
    `currentDistrict` is quarantined (`mixin_decisions.py` trade handler ~739-754).
    Sets `lastTradeRejection` with reason `"quarantine"` when `ECONOMY_ENABLED`.
 
 Intra-district movement within the quarantined district remains allowed; only
 cross-boundary movement into/out of the named district is blocked. Trading
-between two agents both inside the quarantined district remains allowed; trading
-across the quarantine boundary in either direction is blocked.
+between two agents in the same quarantined district remains allowed; trading
+between different districts is blocked when either endpoint is quarantined,
+including when both endpoints are different quarantined districts.
 
 **Constitution.** `civilization["constitution"]` is a persisted, ordered
 ledger of enacted ongoing rules. A provision records its rule id, name, kind,

@@ -717,7 +717,7 @@ class _CraftingRulesMixin:
 
     def _quarantine_blocks_travel(self, agent, src, dest):
         """Block cross-district travel when either endpoint is quarantined."""
-        if not RAIDERS_CONTAGION_ENABLED or not src or not dest or src == dest:
+        if not RAIDERS_CONTAGION_ENABLED or src == dest:
             return False
         quarantined = self._quarantined_districts_for_agent(agent)
         if not quarantined:
@@ -725,7 +725,7 @@ class _CraftingRulesMixin:
         return src in quarantined or dest in quarantined
 
     def _quarantine_blocks_trade(self, agent_a, agent_b):
-        """Block trade across a quarantine boundary (one party inside, one outside)."""
+        """Block cross-district trade when either endpoint is quarantined."""
         if not RAIDERS_CONTAGION_ENABLED or not agent_a or not agent_b:
             return False
         da = agent_a.get("currentDistrict")
@@ -734,7 +734,7 @@ class _CraftingRulesMixin:
             return False
         qa = self._district_is_quarantined(da, agent_a)
         qb = self._district_is_quarantined(db, agent_b)
-        return qa != qb
+        return qa or qb
 
     def _enact_repeal(self, repeal_ballot, yes_count, settlement_id=None):
         """Remove the targeted enacted rule after a successful repeal vote."""

@@ -170,6 +170,8 @@ class _GovernanceCultureMixin:
     def _wrap_schism_storage(self, civ, home):
         """Install settlement-keyed maps sharing refs with flat home fields."""
         for flat_key, keyed_key, default in self._SCHISM_FLAT_KEYED_PAIRS:
+            if flat_key == "quarantineActive" and not RAIDERS_CONTAGION_ENABLED:
+                continue
             obj = civ.get(flat_key)
             if obj is None:
                 obj = dict(default) if isinstance(default, dict) else list(default)
@@ -407,7 +409,8 @@ class _GovernanceCultureMixin:
         c.setdefault("customRuleModifiersBySettlement", {}).setdefault(settlement_id, {})
         c.setdefault("harvestQuotasBySettlement", {}).setdefault(settlement_id, {})
         c.setdefault("rationingActiveBySettlement", {}).setdefault(settlement_id, {})
-        c.setdefault("quarantineActiveBySettlement", {}).setdefault(settlement_id, {})
+        if RAIDERS_CONTAGION_ENABLED:
+            c.setdefault("quarantineActiveBySettlement", {}).setdefault(settlement_id, {})
         c.setdefault("beliefRegistryBySettlement", {}).setdefault(settlement_id, {})
         c.setdefault("memeTextsBySettlement", {}).setdefault(settlement_id, {})
 

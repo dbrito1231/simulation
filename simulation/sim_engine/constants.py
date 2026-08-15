@@ -1937,13 +1937,14 @@ SEED_STRUCTURE_FUNCTIONS = {
             "every_ticks": 1800,
             "scope": "village",
         }],
-        "mitigates": [{
-            "kind": "raid",
-            "amount": RAID_WALL_MITIGATION,
-            "scope": "district",
-        }],
     },
 }
+if RAIDERS_CONTAGION_ENABLED:
+    SEED_STRUCTURE_FUNCTIONS["wall"]["mitigates"] = [{
+        "kind": "raid",
+        "amount": RAID_WALL_MITIGATION,
+        "scope": "district",
+    }]
 if CRAFTING_ENABLED:
     SEED_STRUCTURE_FUNCTIONS["granary"] = {
         "produces": [{

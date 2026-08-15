@@ -745,6 +745,7 @@ class _WorldStateMixin:
             return
         if self._quarantine_blocks_travel(agent, agent.get("currentDistrict"), district_id):
             return
+        agent.pop("_quarantineTravelBypass", None)
         bounds = self.civilization["districts"][district_id]["bounds"]
         dest_x = bounds["x1"] + random.random() * (bounds["x2"] - bounds["x1"])
         dest_y = bounds["y1"] + random.random() * (bounds["y2"] - bounds["y1"])
@@ -768,6 +769,10 @@ class _WorldStateMixin:
         if not bypass_quarantine and self._quarantine_blocks_travel(
                 agent, agent.get("currentDistrict"), target.get("currentDistrict")):
             return
+        if bypass_quarantine:
+            agent["_quarantineTravelBypass"] = True
+        else:
+            agent.pop("_quarantineTravelBypass", None)
         agent["targetX"] = target["x"] + (random.random() - 0.5) * 60
         agent["targetY"] = target["y"] + (random.random() - 0.5) * 60
         agent["waypoints"] = []
@@ -822,11 +827,30 @@ class _WorldStateMixin:
             new_x = agent["x"] + (dx / dist) * step
             new_y = agent["y"] + (dy / dist) * step
             arrived = False
-        if self._architect_door_blocks_move(agent, prior_x, prior_y, new_x, new_y):
+        physical_prior_district = (
+            get_district(self.civilization["districts"], prior_x, prior_y)
+            or agent.get("currentDistrict")
+        )
+        next_district = get_district(
+            self.civilization["districts"], new_x, new_y)
+        quarantine_blocks = (
+            not agent.get("_quarantineTravelBypass")
+            and physical_prior_district != next_district
+            and self._quarantine_blocks_travel(
+                agent, physical_prior_district, next_district)
+        )
+        if quarantine_blocks:
+            # A rule may be enacted after this route was assigned. Cancel at
+            # the boundary without snapping the agent to another position.
+            agent["targetX"], agent["targetY"] = prior_x, prior_y
+            agent["waypoints"] = []
+            agent["idleFrames"] = 0
+        elif self._architect_door_blocks_move(agent, prior_x, prior_y, new_x, new_y):
             agent["idleFrames"] = 0
         else:
             agent["x"], agent["y"] = new_x, new_y
             if arrived:
+                agent.pop("_quarantineTravelBypass", None)
                 waypoints = agent.get("waypoints") or []
                 if waypoints:
                     nxt = waypoints.pop(0)

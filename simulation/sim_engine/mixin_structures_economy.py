@@ -35,7 +35,10 @@ class _StructuresEconomyMixin:
         if fn:
             return fn
         if type_ in SEED_STRUCTURE_FUNCTIONS:
-            return SEED_STRUCTURE_FUNCTIONS[type_]
+            seed_fn = SEED_STRUCTURE_FUNCTIONS[type_]
+            if type_ == "wall" and not RAIDERS_CONTAGION_ENABLED and "mitigates" in seed_fn:
+                return {key: value for key, value in seed_fn.items() if key != "mitigates"}
+            return seed_fn
         if tmpl.get("custom"):
             return {"produces": [dict(LEGACY_CUSTOM_PRODUCE)]}
         return {}
@@ -73,7 +76,8 @@ class _StructuresEconomyMixin:
         the thing it duplicates instead of just being rejected outright."""
         c = self.civilization
         owners = {}
-        for tid, fn in SEED_STRUCTURE_FUNCTIONS.items():
+        for tid in SEED_STRUCTURE_FUNCTIONS:
+            fn = self._get_structure_function(tid)
             vec = self._canonical_effect_vector(fn)
             if vec:
                 owners.setdefault(vec, tid)

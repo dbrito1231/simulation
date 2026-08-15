@@ -954,8 +954,8 @@ and a pending event exists):
 |---|---|---|
 | `kind` | `"raid"` \| `"contagion"` | Event type |
 | `targetDistrictId` | string \| omitted | District when known |
-| `targetStructureId` | string \| omitted | Raid structure target |
-| `targetAgentId` | string \| omitted | Contagion patient-zero id |
+| `targetStructureId` | int \| null | Raid structure target; key is always emitted |
+| `targetAgentId` | int \| null | Contagion patient-zero id; key is always emitted |
 | `impactFrame` | int | Epoch tick when impact resolves |
 | `framesRemaining` | int | `max(0, impactFrame - frameTick)` — display only; no client countdown |
 | `leadFrames` | int | `RAID_TELEGRAPH_LEAD_FRAMES` constant echo |

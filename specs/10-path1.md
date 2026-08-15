@@ -306,8 +306,11 @@ logic into `mixin_wildlife.py` or conflate it with either existing system.
 
 **Kill switch:** when `RAIDERS_CONTAGION_ENABLED = False`, both raid and
 contagion tick functions early-return before any RNG or mutation (same pattern
-as `_tick_wildlife`'s `if not SURVIVAL_ENABLED: return`). The flag is echoed in
-`/state` `config.flags` ([01-architecture.md](01-architecture.md)).
+as `_tick_wildlife`'s `if not SURVIVAL_ENABLED: return`). Fresh worlds do not
+seed `quarantineActive` / `quarantineActiveBySettlement`, and the wall seed
+function exposes no `mitigates` effect; restore introduces quarantine storage
+only while the flag is enabled. The flag is echoed in `/state` `config.flags`
+([01-architecture.md](01-architecture.md)).
 
 **Shared tick gate:** both mechanics roll on the `GOODS_TICK_FRAMES = 900`
 (~30s) gate — reuse `GOODS_TICK_FRAMES`; no separate `RAID_CONTAGION_TICK_GATE`
