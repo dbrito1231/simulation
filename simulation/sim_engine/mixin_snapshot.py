@@ -130,6 +130,7 @@ class _SnapshotMixin:
             "waypoints": len(a.get("waypoints") or []),
             "resources": dict(a["resources"]), "hunger": a["hunger"], "health": a["health"],
             "incapacitated": a["incapacitated"], "message": a["message"],
+            **({"infected": bool(a.get("infected"))} if RAIDERS_CONTAGION_ENABLED else {}),
             "isThinking": a["isThinking"],
             "beliefs": [self._belief_text(b) for b in a["beliefs"]],
             "beliefIds": sorted(a["beliefs"]) if MEMES_ENABLED else [],
@@ -294,6 +295,7 @@ class _SnapshotMixin:
                 "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
                 "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
                 "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
+                "RAIDERS_CONTAGION_ENABLED": RAIDERS_CONTAGION_ENABLED,
                 "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
                 "LIBRARY_SCALING_ENABLED": LIBRARY_SCALING_ENABLED,
                 "TRANSIT_ENABLED": TRANSIT_ENABLED,
@@ -360,6 +362,10 @@ class _SnapshotMixin:
             snapshot["wildlife"] = self._wildlife_snapshot()
         else:
             snapshot["wildlife"] = []
+        if RAIDERS_CONTAGION_ENABLED:
+            tele_snap = self._pressure_telegraph_snapshot()
+            if tele_snap:
+                snapshot["pressureTelegraph"] = tele_snap
         if CARAVAN_VISUALS_ENABLED:
             snapshot["shipments"] = self._shipment_snapshot()
         if WEATHER_ENABLED:
@@ -384,6 +390,8 @@ class _SnapshotMixin:
             return "shipments", self._shipment_snapshot()
         if key == "weather" and WEATHER_ENABLED:
             return "weather", self._weather_snapshot()
+        if key == "pressureTelegraph" and RAIDERS_CONTAGION_ENABLED:
+            return "pressureTelegraph", self._pressure_telegraph_snapshot()
         if key == "socialTies" and SOCIAL_LAYER_ENABLED:
             return "socialTies", self._social_ties_snapshot()
         if key == "chronicle" and CHRONICLE_ENABLED and CULTURE_ENABLED:

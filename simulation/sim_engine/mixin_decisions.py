@@ -742,7 +742,12 @@ class _DecisionsMixin:
                 self._auto_move_toward_target(agent, target["name"])
             nearby = target and self._distance_to(agent, target) <= 80
             give = self._most_abundant_resource(agent)
-            if nearby and give and ECONOMY_ENABLED and self._market_active():
+            if nearby and give and target and self._quarantine_blocks_trade(agent, target):
+                summary = (f"{agent['name']} cannot trade with {target['name']} "
+                           f"— quarantine restricts cross-district exchange")
+                if ECONOMY_ENABLED:
+                    agent["lastTradeRejection"] = {"reason": "quarantine", "frame": self.frameTick}
+            elif nearby and give and ECONOMY_ENABLED and self._market_active():
                 summary = self._priced_trade(agent, target, give)
                 resource_acted = give if "refused" not in summary else None
             elif nearby and give:
@@ -1329,6 +1334,9 @@ class _DecisionsMixin:
         if g["kind"] == "seek_shelter":
             dest = g.get("target_district")
             if dest and agent.get("currentDistrict") != dest:
+                if self._quarantine_blocks_travel(agent, agent.get("currentDistrict"), dest):
+                    agent["goal"] = None
+                    return False
                 self._set_agent_target_once(agent, dest)
                 return True
             agent["goal"] = None
@@ -1336,6 +1344,9 @@ class _DecisionsMixin:
         if g["kind"] == "dig_relocate":
             dest = g.get("target_district")
             if dest and agent.get("currentDistrict") != dest:
+                if self._quarantine_blocks_travel(agent, agent.get("currentDistrict"), dest):
+                    agent["goal"] = None
+                    return False
                 self._set_agent_target_once(agent, dest)
                 return True
             summary = self._dig_terrain(agent) or ""
@@ -1351,6 +1362,9 @@ class _DecisionsMixin:
         if g["kind"] == "caravan":
             dest = g.get("target_district")
             if dest and agent.get("currentDistrict") != dest:
+                if self._quarantine_blocks_travel(agent, agent.get("currentDistrict"), dest):
+                    agent["goal"] = None
+                    return False
                 self._set_caravan_target(agent, dest)
                 return True
             self._maybe_caravan_goal(agent)
@@ -1385,6 +1399,9 @@ class _DecisionsMixin:
                 return False
             did = structure.get("districtId")
             if did and agent.get("currentDistrict") != did:
+                if self._quarantine_blocks_travel(agent, agent.get("currentDistrict"), did):
+                    agent["goal"] = None
+                    return False
                 self._set_agent_target_once(agent, did)
                 return True
             summary = self.apply_decision(agent, {

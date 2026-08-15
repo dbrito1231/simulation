@@ -38,6 +38,9 @@ modules by concern:
                        for the exact method range and rationale.
   - mixin_wildlife.py -- Phase 6d: `_WildlifeMixin` (Path 1 pressure loop --
                        night/upkeep -- and the huntable wildlife system).
+  - mixin_pressure_raiders.py -- idea-05: `_PressureRaidersMixin` (raiders/
+                       contagion external pressure; third mechanism distinct
+                       from Path-1 wildlife pressure and huntable fauna).
   - mixin_project_helpers.py -- Phase 6d: `_ProjectHelpersMixin` (Path 1
                        benchmarks, project/invention helpers,
                        `_start_project_for`).
@@ -163,6 +166,7 @@ _mixin_files = (
     "mixin_structures_economy.py",
     "mixin_diplomacy.py",
     "mixin_wildlife.py",
+    "mixin_pressure_raiders.py",
     "mixin_project_helpers.py",
     "mixin_divine_matrix.py",
     "mixin_crafting_rules.py",
@@ -656,6 +660,26 @@ __all__ = [
     "NIGHT_EXPOSURE_DAMAGE",
     "WILDLIFE_EVENT_PROB",
     "WILDLIFE_GUARD_RADIUS",
+    "RAIDERS_CONTAGION_ENABLED",
+    "RAID_EVENT_PROB",
+    "RAID_RESOURCE_LOSS_MIN",
+    "RAID_RESOURCE_LOSS_MAX",
+    "RAID_STRUCTURE_DAMAGE",
+    "RAID_CONTACT_DAMAGE",
+    "RAID_GUARD_RADIUS",
+    "RAID_GUARD_MITIGATION_PER_GUARD",
+    "RAID_GUARD_MITIGATION_CAP",
+    "RAID_WALL_MITIGATION",
+    "RAID_TELEGRAPH_LEAD_FRAMES",
+    "CONTAGION_EVENT_PROB",
+    "CONTAGION_SPREAD_RADIUS",
+    "CONTAGION_TRANSMISSION_PROB",
+    "CONTAGION_DURATION_FRAMES",
+    "CONTAGION_HEALTH_LOSS_PER_TICK_GATE",
+    "HEALER_RECOVERY_RADIUS",
+    "HEALER_RECOVERY_BONUS",
+    "CLINIC_RECOVERY_RADIUS",
+    "CLINIC_RECOVERY_BONUS",
     "SETTLEMENT_STRUCT_THRESHOLD",
     "SETTLEMENT_POP_THRESHOLD",
     "CARAVAN_CARRY_MIN",

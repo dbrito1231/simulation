@@ -221,9 +221,10 @@ checks.
 
 Rule kinds: `RULE_KINDS = {"resource_tax", "custom", "priority"}`
 (sim_engine/constants.py:1281), unioned with `{"harvest_quota", "rationing",
-"succession"}` when `LIFECYCLE_ENABLED`, and `{"treaty"}` when
+"succession"}` when `LIFECYCLE_ENABLED`, `{"treaty"}` when
 `PATH1_DIPLOMACY_ENABLED` (see [10-path1.md](10-path1.md) for treaty
-mechanics). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
+mechanics), and `{"quarantine"}` when `RAIDERS_CONTAGION_ENABLED` (see
+[Quarantine](#quarantine-kind-quarantine-raiders_contagion_enabled) below). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
 enacted at `MAX_ACTIVE_RULES = 8`.
 
 **Treaty proposals (`kind: "treaty"`).** Reuse the shared propose/vote
@@ -282,6 +283,58 @@ district per `HARVEST_QUOTA_PERIOD_FRAMES = STALL_THRESHOLD * 3` ≈5 min);
 `_rationing_gate`, and only actually restricts while village storage
 utilization is below `RATIONING_STORAGE_LOW_RATIO = 0.5` — it self-lifts
 once storage recovers).
+
+### Quarantine (`kind: "quarantine"`, `RAIDERS_CONTAGION_ENABLED`)
+
+Enacted only via the existing `propose_rule`/`vote_rule` flow — no shortcut path.
+Follows the exact `rationing` write/clear pattern in `_apply_governance_rule` /
+`_clear_governance_rule` (`mixin_crafting_rules.py:623-679`):
+
+- **Enact:** `_apply_governance_rule`'s `"quarantine"` branch writes
+  `civilization["quarantineActive"][rule["id"]] = {"district": "<quarantined district id>"}`.
+  The rule's `value` field names the quarantined district (`_validate_rule` requires
+  `value` to be a live key in `civilization["districts"]`, same pattern as
+  `priority`'s resource id). Under `SCHISM_ENABLED`, the write targets
+  `quarantineActiveBySettlement[settlementId]` via `_quarantine_for_settlement`
+  (flat `quarantineActive` aliases home, mirroring `rationingActive`).
+- **Repeal:** `_clear_governance_rule` pops the entry keyed by `rule["id"]`.
+
+**Mechanical effect (both movement and trading):** shared helpers on
+`mixin_crafting_rules.py` — `_quarantined_districts_for_agent`,
+`_district_is_quarantined`, `_quarantine_blocks_travel`, `_quarantine_blocks_trade`.
+When `RAIDERS_CONTAGION_ENABLED` is off or `quarantineActive` is empty, all helpers
+no-op (allow).
+
+1. **Inter-district movement** — `_quarantine_blocks_travel(agent, src, dest)` returns
+   true when `src != dest` and either district is listed in the agent's settlement
+   quarantine map. Enforced at two layers:
+   - **Write path (primary):** `_set_agent_target` in `mixin_world_state.py` gates
+     every district-routing mutation (`targetX`/`targetY`/`waypoints`), including the
+     `move_to_district` decision handler, `_set_agent_target_once`, scarcity-reflex
+     `move_to_district`, craft-station redirects, diplomacy caravan hops (via
+     `_set_caravan_target` → `_set_agent_target_once`), and idle wander/fallback
+     routing. Same-district routing inside a quarantined district is unchanged.
+   - **`_set_agent_target_to_agent`:** cross-district paths to another agent are
+     blocked the same way, **except** Sage-emergency `_rush_to_heal`, which passes
+     `bypass_quarantine=True` (sole bypass; no other callers may use it).
+   - **Physical crossing backstop:** `_move_agent` rechecks the district boundary
+     on every movement step, so a quarantine enacted after a route was assigned
+     also stops the crossing. The route is cancelled at the agent's current
+     position (no teleport); the Sage-emergency route marker is the sole bypass
+     and is cleared on arrival or when ordinary routing replaces it.
+   - **Goal step path:** the four `_step_goal` district-crossing sites in
+     `mixin_decisions.py`: `seek_shelter` (~1331), `dig_relocate` (~1338),
+     `caravan` (~1353), `repair` (~1387). Blocked goals are cleared (`goal = None`).
+2. **`trade_resource`** — `_quarantine_blocks_trade(agent, target)` returns true when
+   the two agents are in different districts and either party's
+   `currentDistrict` is quarantined (`mixin_decisions.py` trade handler ~739-754).
+   Sets `lastTradeRejection` with reason `"quarantine"` when `ECONOMY_ENABLED`.
+
+Intra-district movement within the quarantined district remains allowed; only
+cross-boundary movement into/out of the named district is blocked. Trading
+between two agents in the same quarantined district remains allowed; trading
+between different districts is blocked when either endpoint is quarantined,
+including when both endpoints are different quarantined districts.
 
 **Constitution.** `civilization["constitution"]` is a persisted, ordered
 ledger of enacted ongoing rules. A provision records its rule id, name, kind,
@@ -549,7 +602,8 @@ also feeds the `meme_mutations` benchmark.
 
 Settlement-scoped domestic governance storage for Feature 4 (Schism).
 **When off:** `civilization["rules"]`, `pendingRules`, `constitution`,
-`customRuleModifiers`, `harvestQuotas`, `rationingActive`, `beliefRegistry`,
+`customRuleModifiers`, `harvestQuotas`, `rationingActive`, `quarantineActive`
+(when `RAIDERS_CONTAGION_ENABLED`), `beliefRegistry`,
 and `memeTexts` remain the only live shape — byte-identical to pre-F4 worlds.
 No schism trigger ships while the flag is off. F4.2 threads read paths and
 voting scope; F4.3 adds trigger/secession/elder when the flag is on.
@@ -560,7 +614,8 @@ When **`SCHISM_ENABLED`** is on:
 
 - `rulesBySettlement`, `pendingRulesBySettlement`, `constitutionBySettlement`
 - `customRuleModifiersBySettlement`, `harvestQuotasBySettlement`,
-  `rationingActiveBySettlement`
+  `rationingActiveBySettlement`, `quarantineActiveBySettlement`
+  (when `RAIDERS_CONTAGION_ENABLED`)
 - `beliefRegistryBySettlement`, `memeTextsBySettlement`
 
 For the primary **`"home"`** settlement (Path 1 `_init_settlements` convention),

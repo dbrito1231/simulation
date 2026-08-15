@@ -28,6 +28,7 @@ class _GovernanceCultureMixin:
         ("customRuleModifiers", "customRuleModifiersBySettlement", {}),
         ("harvestQuotas", "harvestQuotasBySettlement", {}),
         ("rationingActive", "rationingActiveBySettlement", {}),
+        ("quarantineActive", "quarantineActiveBySettlement", {}),
         ("beliefRegistry", "beliefRegistryBySettlement", {}),
         ("memeTexts", "memeTextsBySettlement", {}),
     )
@@ -154,9 +155,23 @@ class _GovernanceCultureMixin:
             return bucket[home]
         return c.get("rationingActive") or {}
 
+    def _quarantine_for_settlement(self, sid):
+        c = self.civilization
+        if not SCHISM_ENABLED:
+            return c.get("quarantineActive") or {}
+        bucket = c.get("quarantineActiveBySettlement") or {}
+        if sid in bucket:
+            return bucket[sid]
+        home = self._primary_settlement_id()
+        if home in bucket:
+            return bucket[home]
+        return c.get("quarantineActive") or {}
+
     def _wrap_schism_storage(self, civ, home):
         """Install settlement-keyed maps sharing refs with flat home fields."""
         for flat_key, keyed_key, default in self._SCHISM_FLAT_KEYED_PAIRS:
+            if flat_key == "quarantineActive" and not RAIDERS_CONTAGION_ENABLED:
+                continue
             obj = civ.get(flat_key)
             if obj is None:
                 obj = dict(default) if isinstance(default, dict) else list(default)
@@ -394,6 +409,8 @@ class _GovernanceCultureMixin:
         c.setdefault("customRuleModifiersBySettlement", {}).setdefault(settlement_id, {})
         c.setdefault("harvestQuotasBySettlement", {}).setdefault(settlement_id, {})
         c.setdefault("rationingActiveBySettlement", {}).setdefault(settlement_id, {})
+        if RAIDERS_CONTAGION_ENABLED:
+            c.setdefault("quarantineActiveBySettlement", {}).setdefault(settlement_id, {})
         c.setdefault("beliefRegistryBySettlement", {}).setdefault(settlement_id, {})
         c.setdefault("memeTextsBySettlement", {}).setdefault(settlement_id, {})
 

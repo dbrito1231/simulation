@@ -306,6 +306,30 @@ every `GOAL_STEP_FRAMES` — moving toward the target, then issuing a hardcoded
 emergency responder, the decision is discarded and `_rush_to_heal` runs —
 emergency wins over stale in-flight decisions.
 
+**Raiders/contagion interaction (`RAIDERS_CONTAGION_ENABLED`).** The elder
+(`role == "elder"`) is **never** a valid raid-contact victim or contagion-spread
+target — the same outright exclusion `confront_agent` already applies
+(`mixin_decisions.py:675-676` rejects `target["role"] == "elder"`). Raid
+target-selection for contact health damage and contagion proximity-spread
+candidate pools must skip any agent with `role == "elder"` before any RNG or
+proximity math runs. This is **stricter** than `_sage_emergency()`'s reactive
+health-threshold rescue (`SAGE_CRITICAL_HEALTH = 30`): the elder cannot even be
+the mechanism's initial victim, so a raid/contagion event and `_rush_to_heal`
+never race each other on elder selection. Guards, healers, and all other
+non-elder roles remain fully eligible. Structure damage from a raid is
+unaffected — if a structure the elder is inside or near is targeted, its
+`condition` still degrades; only the agent-targeting half excludes the elder.
+
+`_sage_emergency()` / `_rush_to_heal` are **unchanged** for all other health
+events (starvation collapse, wildlife pressure, `confront_agent` incapacitation,
+etc.): they still trigger when the elder or healer crosses the existing
+critical-health thresholds. Raid contact damage and contagion per-gate health
+loss apply via `agent["health"] = max(0, agent["health"] - X)` — the same clamp
+`_update_survival` and `confront_agent` use — and may lead to incapacitation
+through `_update_survival`'s existing collapse floor; they **never** call
+`_agent_dies` under this plan's default design ([10-path1.md](10-path1.md),
+[06-agents.md](06-agents.md)).
+
 ## Persistence
 
 World state is persisted to a SQLite database at `DB_PATH` (`<module dir>/

@@ -177,6 +177,23 @@ Full invention-council mechanics (tier gates, duplicate-effect-vector detection,
 Sage-emergency interaction, safeguards against runaway proposal spam):
 [09-systems-society.md](09-systems-society.md).
 
+## Raiders and contagion (no new actions)
+
+`RAIDERS_CONTAGION_ENABLED` adds **no** entries to `DECISION_ACTIONS`,
+`DECISION_SCHEMA`, `SYSTEM_PROMPT`, `apply_decision`, `available_actions`, or
+`ACTION_LABELS`. Raids and contagion are purely deterministic tick-driven events;
+agents respond through **existing** actions:
+
+| Existing action | Counter role |
+|---|---|
+| `heal_agent` | Healer-role recovery assist during contagion |
+| `build_structure` | Build/repair `wall` (raid mitigation) and `clinic` (contagion recovery) |
+| `propose_rule` / `vote_rule` | Enact/repeal `"quarantine"` movement+trading restriction |
+| `gather` / `talk_to_nearby` | Organize a village response during the telegraph window |
+
+Mechanics and constants: [10-path1.md](10-path1.md#raiders_contagion_enabled),
+[08-systems-economy.md](08-systems-economy.md#raiders_contagion_enabled).
+
 ## Action-sync reminder
 
 See [01-architecture.md](01-architecture.md#action-sync-invariant).

@@ -468,6 +468,26 @@ __all__ = [
     "NIGHT_EXPOSURE_DAMAGE",
     "WILDLIFE_EVENT_PROB",
     "WILDLIFE_GUARD_RADIUS",
+    "RAIDERS_CONTAGION_ENABLED",
+    "RAID_EVENT_PROB",
+    "RAID_RESOURCE_LOSS_MIN",
+    "RAID_RESOURCE_LOSS_MAX",
+    "RAID_STRUCTURE_DAMAGE",
+    "RAID_CONTACT_DAMAGE",
+    "RAID_GUARD_RADIUS",
+    "RAID_GUARD_MITIGATION_PER_GUARD",
+    "RAID_GUARD_MITIGATION_CAP",
+    "RAID_WALL_MITIGATION",
+    "RAID_TELEGRAPH_LEAD_FRAMES",
+    "CONTAGION_EVENT_PROB",
+    "CONTAGION_SPREAD_RADIUS",
+    "CONTAGION_TRANSMISSION_PROB",
+    "CONTAGION_DURATION_FRAMES",
+    "CONTAGION_HEALTH_LOSS_PER_TICK_GATE",
+    "HEALER_RECOVERY_RADIUS",
+    "HEALER_RECOVERY_BONUS",
+    "CLINIC_RECOVERY_RADIUS",
+    "CLINIC_RECOVERY_BONUS",
     "SETTLEMENT_STRUCT_THRESHOLD",
     "SETTLEMENT_POP_THRESHOLD",
     "CARAVAN_CARRY_MIN",
@@ -1822,6 +1842,7 @@ TERRAIN_TILES_ENABLED = True
 PATH1_DIPLOMACY_ENABLED = True
 TIER3_CONTENT_ENABLED = True
 PRESSURE_LOOP_ENABLED = True
+RAIDERS_CONTAGION_ENABLED = True
 ENV_EFFECTS_ENABLED = True
 LIBRARY_SCALING_ENABLED = True
 TRANSIT_ENABLED = True
@@ -1846,6 +1867,8 @@ if LIFECYCLE_ENABLED:
     RULE_KINDS = RULE_KINDS | {"harvest_quota", "rationing", "succession"}
 if path1_on("PATH1_DIPLOMACY_ENABLED"):
     RULE_KINDS = RULE_KINDS | {"treaty"}
+if RAIDERS_CONTAGION_ENABLED:
+    RULE_KINDS = RULE_KINDS | {"quarantine"}
 
 # --- Registries (ported from index.html) ---
 PROJECT_TEMPLATES = {
@@ -1860,6 +1883,27 @@ if CRAFTING_ENABLED:
         "name": "Granary", "needs": {"planks": 2, "bricks": 2, "food": 1}, "visualStyle": "house"
     }
     PROJECT_ORDER.append("granary")
+
+# Raiders/contagion (idea-05) — raid tunables; flag is RAIDERS_CONTAGION_ENABLED above.
+RAID_EVENT_PROB = 0.01
+RAID_RESOURCE_LOSS_MIN = 2
+RAID_RESOURCE_LOSS_MAX = 8
+RAID_STRUCTURE_DAMAGE = 25
+RAID_CONTACT_DAMAGE = 10
+RAID_GUARD_RADIUS = 150
+RAID_GUARD_MITIGATION_PER_GUARD = 0.15
+RAID_GUARD_MITIGATION_CAP = 0.75
+RAID_WALL_MITIGATION = 0.20
+RAID_TELEGRAPH_LEAD_FRAMES = 300
+CONTAGION_EVENT_PROB = 0.015
+CONTAGION_SPREAD_RADIUS = 60
+CONTAGION_TRANSMISSION_PROB = 0.05
+CONTAGION_DURATION_FRAMES = 2700
+CONTAGION_HEALTH_LOSS_PER_TICK_GATE = 1
+HEALER_RECOVERY_RADIUS = 100
+HEALER_RECOVERY_BONUS = 0.05
+CLINIC_RECOVERY_RADIUS = 120
+CLINIC_RECOVERY_BONUS = 0.05
 
 # Seed structure functions (Phase A): every built type declares mechanical effects.
 # Custom blueprints must supply their own function block; these cover seed templates.
@@ -1895,6 +1939,12 @@ SEED_STRUCTURE_FUNCTIONS = {
         }],
     },
 }
+if RAIDERS_CONTAGION_ENABLED:
+    SEED_STRUCTURE_FUNCTIONS["wall"]["mitigates"] = [{
+        "kind": "raid",
+        "amount": RAID_WALL_MITIGATION,
+        "scope": "district",
+    }]
 if CRAFTING_ENABLED:
     SEED_STRUCTURE_FUNCTIONS["granary"] = {
         "produces": [{
@@ -1912,6 +1962,22 @@ if CRAFTING_ENABLED:
             {"resource": "food", "capacity": 40},
             {"resource": "fish", "capacity": 20},
         ]
+
+if RAIDERS_CONTAGION_ENABLED:
+    PROJECT_TEMPLATES["clinic"] = {
+        "name": "Clinic",
+        "needs": {"wood": 2, "stone": 2, "herbs": 1},
+        "visualStyle": "house",
+    }
+    PROJECT_ORDER.append("clinic")
+    SEED_STRUCTURE_FUNCTIONS["clinic"] = {
+        "heals": [{
+            "kind": "contagion_recovery",
+            "bonus": CLINIC_RECOVERY_BONUS,
+            "radius": CLINIC_RECOVERY_RADIUS,
+            "scope": "district",
+        }],
+    }
 
 # Terraform projects (Phase B): funded like builds but mutate terrain/stocks.
 TERRAFORM_TEMPLATES = {

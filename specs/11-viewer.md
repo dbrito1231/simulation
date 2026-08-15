@@ -938,6 +938,62 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   change), lightning/veil/particles all no-op, and the World Clock HUD omits
   the weather chip, regardless of `world.weather`'s presence/content.
 
+## Raiders/contagion telegraph (`RAIDERS_CONTAGION_ENABLED`)
+
+Pure renderer contract for the raid/contagion warning window
+(`RAID_TELEGRAPH_LEAD_FRAMES = 300`, ~10s before impact). The viewer holds no
+simulation state — it reads engine-authored telegraph fields from `/state` and
+renders a visible warning; it does not roll RNG, schedule events, or mutate world
+data.
+
+**Engine exposure:** when a raid or contagion event is telegraphing, `/state`
+exposes a top-level `pressureTelegraph` object (when `RAIDERS_CONTAGION_ENABLED`
+and a pending event exists):
+
+| Field | Type | Notes |
+|---|---|---|
+| `kind` | `"raid"` \| `"contagion"` | Event type |
+| `targetDistrictId` | string \| omitted | District when known |
+| `targetStructureId` | int \| null | Raid structure target; key is always emitted |
+| `targetAgentId` | int \| null | Contagion patient-zero id; key is always emitted |
+| `impactFrame` | int | Epoch tick when impact resolves |
+| `framesRemaining` | int | `max(0, impactFrame - frameTick)` — display only; no client countdown |
+| `leadFrames` | int | `RAID_TELEGRAPH_LEAD_FRAMES` constant echo |
+
+Delta polls (`/state?since=`) include `pressureTelegraph` when the key is dirty
+(`_mark_top_dirty("pressureTelegraph")` on telegraph begin and clear). Value is
+the object above while pending, or `null` when cleared so `mergeStateDelta` can
+drop the banner. Agent think payloads may also carry `pressure_warning_line`
+(`mixin_think_job.py`) — orthogonal to viewer rendering.
+
+**UI (`#pressureBanner`, `viewer/sidebar.js`):** fixed centered banner below
+`#disasterBanner` (same stacking pattern as founding/disaster banners — **not**
+a new panel). `renderPressureBanner()` runs each sidebar refresh:
+
+- **Gate:** `RAIDERS_CONTAGION_ENABLED === false` (mirrored from
+  `config.flags` in `viewer/setup.js` + `viewer/polling.js` `applyFlags`) —
+  hide banner regardless of payload.
+- **Show** when `world.pressureTelegraph` is present and pending: when both
+  `impactFrame` and `world.frameTick` are available, `impactFrame > frameTick`
+  is authoritative; fall back to `framesRemaining > 0` only when tick/impact
+  are unavailable (delta polls advance `frameTick` without re-sending
+  `pressureTelegraph` until begin/clear).
+- **Hide** when the key is missing, `null`, flag off, or (when tick/impact are
+  available) `impactFrame <= frameTick`.
+- **Copy:** kind label (`Raid` / `Contagion`), target district when known,
+  “impact imminent”, and optional `framesRemaining` text from the snapshot
+  (no client-side timer).
+
+**Delta merge (`viewer/state.js`):** `pressureTelegraph` is in the top-level
+key list merged by `mergeStateDelta` (same treatment as `weather`).
+
+**CSS (`simulation/css/council.css`):** `#pressureBanner` — amber/red alert
+styling distinct from `#disasterBanner`.
+
+**Acceptance shape:** a telegraphed event must be visible in the browser
+**before** resource/structure/health impact lands — not simultaneously with it.
+Constants and tick semantics: [10-path1.md](10-path1.md#raiders_contagion_enabled).
+
 ## Atmosphere rendering (permanent defaults)
 
 The Phase 4 atmosphere pack (lighting, seasonal terrain grading, weather
