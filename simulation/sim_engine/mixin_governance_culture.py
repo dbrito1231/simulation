@@ -513,6 +513,8 @@ class _GovernanceCultureMixin:
         c = self.civilization
         if not SCHISM_ENABLED or sid == self._primary_settlement_id():
             c["constitution"] = constitution
+            if SCHISM_ENABLED:
+                c.setdefault("constitutionBySettlement", {})[sid] = constitution
         else:
             c.setdefault("constitutionBySettlement", {})[sid] = constitution
 
