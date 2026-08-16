@@ -3,8 +3,12 @@
 GitServ is a real-time, browser-viewed, server-authoritative simulation of an AI
 village: a local LLM (Ollama) acts as the decision-making "brain" for 8–12
 autonomous pixel-art agents who move, talk, trade, gather, build, and govern
-themselves. It is a proof-of-concept of the LLM-as-brain loop, inspired by
-Project Sid, not a game or a research-grade sim.
+themselves. It started as a proof-of-concept of the LLM-as-brain loop, inspired
+by Project Sid, not a game or a research-grade sim — and has grown well past
+"proof-of-concept" in scale: ~37,700 lines of Python, ~13,800 lines of viewer
+JS/CSS/sprites, 66 feature flags, 47 agent actions, 67 HTTP routes, 13 spec
+files. It still holds to a minimal-and-observable design bar (see Non-goals),
+just not a small implementation.
 
 **Canonical for:** what/why, non-goals, repo layout, spec index, SDD contract.
 **See also:** [AGENTS.md](../AGENTS.md) for AI workflow; [CLAUDE.md](../CLAUDE.md) for
@@ -61,9 +65,12 @@ index; [docs/REFERENCE.md](../docs/REFERENCE.md) for deep mechanics.
 | `simulation/logs/<timestamp>/` | Per-run JSONL logs (gitignored) |
 | `specs/` | This spec set — canonical, rebuild-from-scratch documentation |
 | `scripts/` | Deterministic smoke/soak tools (no Ollama needed for most) |
-| `docs/` | Companion docs: REFERENCE.md, HANDOFF.md, active plans, archive |
+| `docs/` | Companion docs, indexed by [docs/README.md](../docs/README.md): live (REFERENCE.md, HANDOFF.md, active `plans/`, current review notes) plus a frozen `archive/` |
 
 ## Running it
+
+**Windows only** — the run recipes below (PowerShell/`cmd`) are the sole supported
+path; this is a deliberate scope decision, not an oversight.
 
 **Supported primary path — Docker** (foreground container, host-native Ollama via
 `SIM_OLLAMA_HOST=host.docker.internal:11434`; bind mounts for `state.db`,
