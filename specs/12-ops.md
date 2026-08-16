@@ -1,16 +1,18 @@
 # SPEC 12 — Operations: Logging & Scripts
 
-How the sim is observed and debugged in the absence of a test suite: JSONL
-session logs, `/log/*` ingestion, and the `scripts/` toolbox.
+How the sim is observed and debugged: JSONL session logs, `/log/*`
+ingestion, the `scripts/` toolbox, and the thin `tests/` unit layer that
+sits alongside them.
 
 **Canonical for:** `SessionLogger`'s file layout and record shapes, the
 never-raise logging contract, `_ENGINE_DEPS` server→engine injection (including
-`read_conversation_window` for chronicle saga), Ollama's own server log location, and what
-each of the `scripts/*.py` tools does and whether it needs Ollama.
+`read_conversation_window` for chronicle saga), Ollama's own server log location, what
+each of the `scripts/*.py` tools does and whether it needs Ollama, and what
+`tests/*.py` covers.
 **See also:** [04-http-api.md](04-http-api.md) for `/log/event` and
 `/log/benchmark` route shapes (not repeated here); [03-cognition.md](03-cognition.md)
 for what's inside an LLM request/response payload; [CLAUDE.md](../CLAUDE.md)
-for the no-test-suite verification workflow this spec elaborates.
+for the overall verification workflow this spec elaborates.
 
 ## SessionLogger
 
@@ -511,10 +513,12 @@ other divine-bar tool is.
 
 ## Debugging workflow
 
-There is **no automated test suite or linter** in this repo. Verification is
-by observation: run the server (Docker foreground container or native — own
-titled window per [CLAUDE.md](../CLAUDE.md#commands)), watch the browser
-render, and read the JSONL logs for the current session on the host under
+There is **no linter or build step** in this repo, and `tests/` (below) only
+covers a few of the most expensive silent-regression surfaces — most
+verification is still by observation: run the server (Docker foreground
+container or native — own titled window per
+[CLAUDE.md](../CLAUDE.md#commands)), watch the browser render, and read the
+JSONL logs for the current session on the host under
 `simulation/logs/<session_id>/`. `llm.jsonl` is the **primary
 debugging surface** — every record carries the exact `request` payload, the
 raw `response`, and the resulting `decision`, answering "what did the model
@@ -523,7 +527,31 @@ Cross-check `activity.jsonl`/`conversation.jsonl` for the world-visible
 effect and `benchmarks.jsonl` for aggregate metrics (specialization index,
 rule adherence, meme adoption, memory-store size — see
 [09-systems-society.md](09-systems-society.md)). For full determinism
-without an Ollama dependency, use the smoke scripts below instead.
+without an Ollama dependency, use `tests/` or the smoke scripts below.
+
+## Unit tests (`tests/`, repo root)
+
+A minimal `pytest` layer (`uv run pytest` from the repo root; runs in under
+2s, no Ollama, no running server, no network) covering the three most
+expensive silent-regression surfaces:
+
+| File | Covers |
+|---|---|
+| `tests/test_action_sync.py` | The action-sync invariant ([01-architecture.md](01-architecture.md#action-sync-invariant), [07-actions.md](07-actions.md)): `DECISION_ACTIONS` has no duplicates; `DECISION_SCHEMA`'s action enum equals `DECISION_ACTIONS`; `SYSTEM_PROMPT` names every routine action (three deliberate exceptions documented in-file: `submit_structure_sprite` and `offer_contract`/`accept_contract` each have their own dedicated prompt path instead of a base-prompt rule line); `apply_decision()` (`sim_engine/mixin_decisions.py`) has a dispatch branch for every action; `available_actions` (`sim_engine/mixin_think_job.py`, read from a real `_build_think_payload()` call against a minimal engine) is a subset of `DECISION_ACTIONS`, never a superset; `ACTION_LABELS` (`viewer/sidebar.js`, parsed as text — no JS runtime in this Python layer) is a subset too, since missing keys fall back to `actionLabel()`'s generic label instead of erroring. One `xfail(strict=True)`: `move_to_agent` is a real `DECISION_ACTIONS` member `SYSTEM_PROMPT` never names in prose — a real, tracked gap, not fixed by this test layer. |
+| `tests/test_normalize_decision.py` | The fallback ladder in `normalize_decision()`/`role_fallback_action()` (`simulation/_server/decision_validation.py`, imported by server.py): unknown action name, malformed/missing required field, an action disallowed by current flag/context state, an empty dict, and `None` must all return a `DECISION_ACTIONS` member and never raise. One `xfail(strict=True)`: `normalize_decision()` never validates `decision["action"]` against `DECISION_ACTIONS` at all — in production this is masked because Ollama's structured-output schema already constrains the model's JSON before `normalize_decision` sees it, but called directly (or if that upstream guarantee is ever bypassed) an unrecognized action name passes straight through unchanged. Tracked, not fixed by this test layer. |
+| `tests/test_state_roundtrip.py` | `save_state()` → `restore_state()` (`sim_engine/mixin_persistence.py`, `persistence.py`) on a cold-start engine against a **temp `DB_PATH`** (never `simulation/state.db`): agents, civilization keys, and wildlife survive a round-trip; a cold start with no file at `DB_PATH` returns `False` rather than raising; an old-shape save missing a newer civ key (e.g. `godState`) still restores via `restore_state()`'s setdefault-only migrations. |
+
+`tests/conftest.py` provides two fixtures/helpers shared across files:
+`server_module` imports `simulation/server.py` exactly once per session,
+monkeypatching `SessionLogger`'s base dir just for that one import so the
+module's documented import-time side effect (a new `logs/<timestamp>/`
+directory) lands in a pytest tmp dir instead of `simulation/logs/`; and
+`make_minimal_engine()`, the same minimal-`SimEngine`-deps idiom
+`scripts/_sid_parity_smoke/helpers.py`'s `make_engine()` already uses (no
+LLM, no logging side effects, no `state.db`).
+
+This layer is deliberately thin — three files, one regression class each —
+not a replacement for the smoke scripts below, which stay as-is.
 
 ## Decision audit — log reading and scoring
 
