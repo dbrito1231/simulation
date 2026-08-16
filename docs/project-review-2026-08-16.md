@@ -22,7 +22,7 @@ Scale of the thing:
 | Feature flags | 66 module-level toggles |
 | Agent actions | 47 `DECISION_ACTIONS` |
 | HTTP routes | 67 |
-| God-mode command kinds | ~45 validated command types |
+| God-mode command kinds | 43 kinds advertised by `/control/god/capabilities` |
 | Smoke/soak scripts | 35 |
 
 ---
@@ -93,7 +93,7 @@ Thinking mode is **off** (`think: false`) — the specs record a measured 1288�
 
 **Observability** — benchmarks (specialization index, rule adherence, meme adoption, peer-prediction accuracy), an **anomaly radar**, a **decision-audit** panel correlating `llm.jsonl` intent to `activity.jsonl` outcome via a minted `_decision_id`, a **world wiki** with cross-linked pages for twelve entity kinds, a chronicle plus an LLM-written daily saga, and a spectator **prediction market** on council ballots.
 
-**Sovereign God mode** (on by default; auth optional) — a 13-tab Divine Console with ~45 validated command kinds: proclamations, providence, private omens, whisper campaigns, per-agent temperature dials, memory insertion/deletion, belief planting, context masks (blue pill / red pill / dream / forged conversations), decision compulsion / veto / possession, burning-bush dialogue with bargains, anointing with oracle hints, identity forging, checkpoints and déjà-vu replay, architect zones, wildlife spawn/despawn, weather override, timed lawgiver modifiers, and mass repair/ruin clearance. Every command goes through **preview → apply** with a digest, a reversibility class, an audit line in `divine.jsonl`, and a permanent `intervened` mark on the run.
+**Sovereign God mode** (on by default; auth optional) — a 13-tab Divine Console with 43 command kinds advertised by `/control/god/capabilities`: proclamations, providence, private omens, whisper campaigns, per-agent temperature dials, memory insertion/deletion, belief planting, context masks (blue pill / red pill / dream / forged conversations), decision compulsion / veto / possession, burning-bush dialogue with bargains, anointing with oracle hints, identity forging, checkpoints and déjà-vu replay, architect zones, wildlife spawn/despawn, weather override, timed lawgiver modifiers, and mass repair/ruin clearance. Every command goes through **preview → apply** with a digest, a reversibility class, an audit line in `divine.jsonl`, and a permanent `intervened` mark on the run.
 
 The design integrity here is notable: divine guidance is **binding** — agents must return a `divine_response` `{stance, reason}` while guidance is active, non-compliance is counted rather than hidden, and the specs explicitly forbid citing an intervened run as evidence of emergent behavior.
 
@@ -103,7 +103,7 @@ The design integrity here is notable: divine guidance is **binding** — agents 
 
 ### How hard is it to play/use — **4/10 difficulty (easy to watch, hard to master)**
 
-Two very different answers. As a **spectator**: trivial. Open `http://127.0.0.1:5001`, the world renders itself, sidebar panels narrate what's happening, Pause/Resume/Reset are three buttons. As an **operator**: steep. The Divine Console has 13 tabs and ~45 command kinds with typed payloads, frame-window durations, reversibility classes, and preview/apply semantics; the anomaly radar, decision audit, and benchmark streams assume you know what `piano_module_drops` or a `role_fallback` means. There is no tutorial or in-app explanation of the systems — the 9,000 lines of specs *are* the manual.
+Two very different answers. As a **spectator**: trivial. Open `http://127.0.0.1:5001`, the world renders itself, sidebar panels narrate what's happening, Pause/Resume/Reset are three buttons. As an **operator**: steep. The Divine Console has 13 tabs and 43 command kinds with typed payloads, frame-window durations, reversibility classes, and preview/apply semantics; the anomaly radar, decision audit, and benchmark streams assume you know what `piano_module_drops` or a `role_fallback` means. There is no tutorial or in-app explanation of the systems — the 9,000 lines of specs *are* the manual.
 
 ### How hard is it to set up — **9/10 difficulty (the weakest part of the project)**
 
@@ -142,7 +142,7 @@ But there's no goal, no scoring, no progression to *you*, and events unfold at L
 ### What I don't like
 
 1. **The hardcoded GGUF path.** `Modelfile.smart` points at one machine's disk. This single line makes the project effectively un-runnable for anyone else, and it undercuts everything else the setup tooling does well. Highest-value fix in the repo by a wide margin.
-2. **Complexity has outrun the "kept intentionally minimal" claim.** 66 flags, 47 actions, 45 god kinds, 67 routes, ~52k lines. The README still says "intentionally minimal." It isn't, and pretending otherwise makes the system harder to approach than it needs to be.
+2. **Complexity has outrun the "kept intentionally minimal" claim.** 66 flags, 47 actions, 43 god kinds, 67 routes, ~52k lines. The README still says "intentionally minimal." It isn't, and pretending otherwise makes the system harder to approach than it needs to be.
 3. **No test suite.** Zero unit tests, no linter, no build step — verification is 35 hand-run smoke scripts plus watching logs. For a codebase this size with this much cross-cutting state, that's the largest structural risk. The action-sync invariant alone (six places that must agree for every action) is exactly the kind of thing a test should enforce, not a spec paragraph and reviewer vigilance.
 4. **Documentation sprawl outside `specs/`.** The working tree has ~50 untracked plan/archive files, `.mhtml` page saves, PDFs, and parallel `.claude/plans/` + `.cursor/plans/` trees. `docs/archive/` is explicitly flagged "do not read." The canonical set is excellent; everything around it is noise.
 5. **God mode defaults to on.** For a project whose central claim is observing *emergent* LLM behavior, shipping the intervention control plane enabled by default — with auth off — is the wrong default. It's well-audited, so it's safe, but it makes "was this run clean?" a question you have to check rather than assume.
