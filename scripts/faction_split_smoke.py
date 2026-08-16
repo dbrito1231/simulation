@@ -1,10 +1,10 @@
-"""Deterministic smoke for Emergence Breakthroughs F4.1–F4.2 (Schism storage + scope).
+"""Deterministic smoke for Emergence Breakthroughs F4.1–F4.2 (Faction Split storage + scope).
 
 Covers flag-off shape, flag-on cold-start keyed maps, legacy restore wrap,
 home-settlement propose/enact, and manual two-settlement rule independence.
 Ollama-free.
 
-Run: uv run python scripts/schism_smoke.py
+Run: uv run python scripts/faction_split_smoke.py
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ from _sid_parity_smoke.helpers import assert_true, make_engine  # noqa: E402
 
 
 def test_flag_off_no_keyed_maps():
-    old = se.SCHISM_ENABLED
-    se.SCHISM_ENABLED = False
+    old = se.FACTION_SPLIT_ENABLED
+    se.FACTION_SPLIT_ENABLED = False
     try:
         engine = make_engine(4)
         c = engine.civilization
@@ -32,13 +32,13 @@ def test_flag_off_no_keyed_maps():
         assert_true("beliefRegistryBySettlement" not in c,
                     "flag off must not install beliefRegistryBySettlement")
     finally:
-        se.SCHISM_ENABLED = old
+        se.FACTION_SPLIT_ENABLED = old
     print("  OK flag-off shape")
 
 
 def test_flag_on_cold_start_aliases_home():
-    old = se.SCHISM_ENABLED
-    se.SCHISM_ENABLED = True
+    old = se.FACTION_SPLIT_ENABLED
+    se.FACTION_SPLIT_ENABLED = True
     try:
         engine = make_engine(4)
         c = engine.civilization
@@ -53,13 +53,13 @@ def test_flag_on_cold_start_aliases_home():
         assert_true(engine._rules_for_settlement(home) is c["rules"],
                     "_rules_for_settlement must return home bucket")
     finally:
-        se.SCHISM_ENABLED = old
+        se.FACTION_SPLIT_ENABLED = old
     print("  OK flag-on cold-start aliases")
 
 
 def test_flag_on_restore_wraps_legacy_flat():
-    old = se.SCHISM_ENABLED
-    se.SCHISM_ENABLED = False
+    old = se.FACTION_SPLIT_ENABLED
+    se.FACTION_SPLIT_ENABLED = False
     old_db_path = se.DB_PATH
     try:
         engine = make_engine(4)
@@ -73,10 +73,10 @@ def test_flag_on_restore_wraps_legacy_flat():
              "value": 0.1, "votes": {}},
         ]
         tmpdir = tempfile.mkdtemp()
-        se.DB_PATH = str(Path(tmpdir) / "state_schism.db")
+        se.DB_PATH = str(Path(tmpdir) / "state_faction_split.db")
         engine.save_state()
 
-        se.SCHISM_ENABLED = True
+        se.FACTION_SPLIT_ENABLED = True
         restored_engine = make_engine(4)
         assert_true(restored_engine.restore_state(), "restore should succeed")
         c = restored_engine.civilization
@@ -90,13 +90,13 @@ def test_flag_on_restore_wraps_legacy_flat():
         restored_engine._rebuild_settlement_governance(home)
     finally:
         se.DB_PATH = old_db_path
-        se.SCHISM_ENABLED = old
+        se.FACTION_SPLIT_ENABLED = old
     print("  OK flag-on legacy restore wrap")
 
 
 def test_flag_on_propose_enact_home():
-    old = se.SCHISM_ENABLED
-    se.SCHISM_ENABLED = True
+    old = se.FACTION_SPLIT_ENABLED
+    se.FACTION_SPLIT_ENABLED = True
     try:
         engine = make_engine(4)
         home = engine._primary_settlement_id()
@@ -121,13 +121,13 @@ def test_flag_on_propose_enact_home():
         assert_true(any(r.get("id") == "tax_smoke_home" for r in rules),
                     "rule must enact in home settlement bucket")
     finally:
-        se.SCHISM_ENABLED = old
+        se.FACTION_SPLIT_ENABLED = old
     print("  OK flag-on propose/enact home")
 
 
 def test_flag_on_two_settlement_rules_independent():
-    old = se.SCHISM_ENABLED
-    se.SCHISM_ENABLED = True
+    old = se.FACTION_SPLIT_ENABLED
+    se.FACTION_SPLIT_ENABLED = True
     try:
         engine = make_engine(4)
         c = engine.civilization
@@ -163,13 +163,13 @@ def test_flag_on_two_settlement_rules_independent():
         assert_true("priority_out_only" not in active_ids,
                     "home agent think payload must not list outpost-only rule")
     finally:
-        se.SCHISM_ENABLED = old
+        se.FACTION_SPLIT_ENABLED = old
     print("  OK flag-on two-settlement independence")
 
 
-def test_flag_on_scripted_schism():
-    old = se.SCHISM_ENABLED
-    se.SCHISM_ENABLED = True
+def test_flag_on_scripted_faction_split():
+    old = se.FACTION_SPLIT_ENABLED
+    se.FACTION_SPLIT_ENABLED = True
     try:
         engine = make_engine(8)
         c = engine.civilization
@@ -178,7 +178,7 @@ def test_flag_on_scripted_schism():
         assert_true(elder is not None, "home settlement must have an elder")
 
         fish_rule = {
-            "id": "priority_fish_schism",
+            "id": "priority_fish_faction_split",
             "name": "Fish Priority",
             "kind": "priority",
             "value": "fish",
@@ -189,7 +189,7 @@ def test_flag_on_scripted_schism():
         engine._rebuild_settlement_governance(home)
 
         rebels = [a for a in engine.agents if a.get("role") != "elder"][:3]
-        assert_true(len(rebels) >= se.SCHISM_MIN_CLUSTER, "need schism cluster size")
+        assert_true(len(rebels) >= se.FACTION_SPLIT_MIN_CLUSTER, "need faction split cluster size")
         for agent in rebels:
             agent["beliefs"] = {se.MEME_SEED_ID}
             for other in rebels:
@@ -198,10 +198,10 @@ def test_flag_on_scripted_schism():
                     other.setdefault("relationships", {})[agent["name"]] = "ally"
             agent.setdefault("relationships", {})[elder["name"]] = "rival"
 
-        cluster = engine._find_schism_cluster(home)
-        assert_true(cluster is not None, "schism cluster must be detected")
+        cluster = engine._find_faction_split_cluster(home)
+        assert_true(cluster is not None, "faction split cluster must be detected")
 
-        outpost = "outpost_schism_smoke"
+        outpost = "outpost_faction_split_smoke"
         rebel_dids = {a.get("currentDistrict") for a in rebels}
         outpost_did = next(
             (did for did in c["districts"] if did not in rebel_dids),
@@ -210,20 +210,20 @@ def test_flag_on_scripted_schism():
         c["districts"][outpost_did]["settlementId"] = outpost
         c["settlements"].append({
             "id": outpost,
-            "name": "Schism Outpost",
+            "name": "Faction Split Outpost",
             "districts": [outpost_did],
         })
-        engine._init_schism_settlement_buckets(outpost)
+        engine._init_faction_split_settlement_buckets(outpost)
         engine._ensure_settlement_stores()
 
-        assert_true(engine._execute_schism(cluster), "schism secession must succeed")
+        assert_true(engine._execute_faction_split(cluster), "faction split secession must succeed")
 
         raw_chronicle = c.get("chronicle") or []
-        assert_true(any(e.get("kind") == "schism" for e in raw_chronicle),
-                    "schism must be recorded in civilization chronicle ring")
+        assert_true(any(e.get("kind") == "faction_split" for e in raw_chronicle),
+                    "faction split must be recorded in civilization chronicle ring")
         projected = engine._chronicle_snapshot()
-        assert_true(any(e.get("kind") == "schism" for e in projected),
-                    "schism must appear in /state chronicle projection")
+        assert_true(any(e.get("kind") == "faction_split" for e in projected),
+                    "faction split must appear in /state chronicle projection")
 
         child_sid = next(s["id"] for s in c["settlements"] if s["id"] != home)
         for agent in rebels:
@@ -231,7 +231,7 @@ def test_flag_on_scripted_schism():
                         f"{agent['name']} must migrate to child settlement")
 
         child_only = {
-            "id": "priority_child_schism",
+            "id": "priority_child_faction_split",
             "name": "Child Only",
             "kind": "priority",
             "value": "wood",
@@ -242,9 +242,9 @@ def test_flag_on_scripted_schism():
         engine._rebuild_settlement_governance(child_sid)
         home_ids = [r["id"] for r in engine._rules_for_settlement(home)]
         child_ids = [r["id"] for r in engine._rules_for_settlement(child_sid)]
-        assert_true("priority_child_schism" not in home_ids,
+        assert_true("priority_child_faction_split" not in home_ids,
                     "home must not see child-only rule")
-        assert_true("priority_child_schism" in child_ids,
+        assert_true("priority_child_faction_split" in child_ids,
                     "child must retain its own enacted rule")
 
         pending = c.get("pendingSuccession")
@@ -259,13 +259,13 @@ def test_flag_on_scripted_schism():
         child_elder = engine._elder_for_settlement(child_sid)
         assert_true(child_elder is not None, "child settlement must elect an elder")
         assert_true(engine._elder_for_settlement(home) is not None,
-                    "home elder must remain after schism")
+                    "home elder must remain after faction split")
 
         proposer = child_elder or rebels[0]
         engine._propose_treaty(proposer, {
             "rule": {
-                "id": "treaty_schism_smoke",
-                "name": "Schism Trade Pact",
+                "id": "treaty_faction_split_smoke",
+                "name": "Faction Split Trade Pact",
                 "tariff": 0.1,
             },
         })
@@ -276,19 +276,19 @@ def test_flag_on_scripted_schism():
             if voter.get("deathFrame") or voter["name"] in treaty_ballot["votes"]:
                 continue
             engine._vote_treaty(voter, {"target": treaty_ballot["id"], "vote": "yes"})
-        assert_true(any(t.get("id") == "treaty_schism_smoke" for t in c.get("treaties") or []),
-                    "treaty must enact across settlements after schism")
+        assert_true(any(t.get("id") == "treaty_faction_split_smoke" for t in c.get("treaties") or []),
+                    "treaty must enact across settlements after faction split")
         assert_true(engine._enacted_treaty_tariff() >= 0.1,
-                    "treaty tariff must apply after schism")
+                    "treaty tariff must apply after faction split")
     finally:
-        se.SCHISM_ENABLED = old
-    print("  OK flag-on scripted schism")
+        se.FACTION_SPLIT_ENABLED = old
+    print("  OK flag-on scripted faction split")
 
 
 def test_child_succession_replaces_normal_council_visibly():
-    old_schism = se.SCHISM_ENABLED
+    old_faction_split = se.FACTION_SPLIT_ENABLED
     old_daily = se.DAILY_COUNCIL_ENABLED
-    se.SCHISM_ENABLED = True
+    se.FACTION_SPLIT_ENABLED = True
     se.DAILY_COUNCIL_ENABLED = True
     try:
         engine = make_engine(8)
@@ -309,7 +309,7 @@ def test_child_succession_replaces_normal_council_visibly():
             "id": child_sid, "name": "Child Succession Smoke",
             "districts": [child_did],
         })
-        engine._init_schism_settlement_buckets(child_sid)
+        engine._init_faction_split_settlement_buckets(child_sid)
         child_agents = [a for a in engine.agents if a is not home_elder][:3]
         for agent in child_agents:
             agent["currentDistrict"] = child_did
@@ -354,19 +354,19 @@ def test_child_succession_replaces_normal_council_visibly():
         assert_true(c.get("dailyCouncil") is None,
                     "cancelled child election left an unresolved council active")
     finally:
-        se.SCHISM_ENABLED = old_schism
+        se.FACTION_SPLIT_ENABLED = old_faction_split
         se.DAILY_COUNCIL_ENABLED = old_daily
     print("  OK child succession is visible, scoped, and vote-neutral")
 
 
 def main():
-    print("schism_smoke.py")
+    print("faction_split_smoke.py")
     test_flag_off_no_keyed_maps()
     test_flag_on_cold_start_aliases_home()
     test_flag_on_restore_wraps_legacy_flat()
     test_flag_on_propose_enact_home()
     test_flag_on_two_settlement_rules_independent()
-    test_flag_on_scripted_schism()
+    test_flag_on_scripted_faction_split()
     test_child_succession_replaces_normal_council_visibly()
     print("ALL OK")
 

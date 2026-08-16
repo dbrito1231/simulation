@@ -739,7 +739,7 @@ class _LifecycleMixin:
     def _succession_candidates(self, settlement_id=None):
         """Deterministic pool of agents who can safely take office now."""
         candidates = self._eligible_adults()
-        if SCHISM_ENABLED and settlement_id:
+        if FACTION_SPLIT_ENABLED and settlement_id:
             candidates = [
                 a for a in candidates
                 if self._settlement_id_for_agent(a) == settlement_id
@@ -749,7 +749,7 @@ class _LifecycleMixin:
         # A village made entirely of young survivors still needs leadership,
         # but an incapacitated survivor cannot safely win or exercise it.
         living = [a for a in self._living_agents() if not a["incapacitated"]]
-        if SCHISM_ENABLED and settlement_id:
+        if FACTION_SPLIT_ENABLED and settlement_id:
             living = [
                 a for a in living
                 if self._settlement_id_for_agent(a) == settlement_id
@@ -765,7 +765,7 @@ class _LifecycleMixin:
             return
         pending_sid = (
             pending.get("settlementId") or self._primary_settlement_id()
-            if SCHISM_ENABLED else None
+            if FACTION_SPLIT_ENABLED else None
         )
         council = self.civilization.get("dailyCouncil")
         if council is None:
@@ -777,17 +777,17 @@ class _LifecycleMixin:
             # in place so the election is immediately visible without
             # creating a colliding same-frame meeting id.
             council["trigger"] = "succession"
-            if SCHISM_ENABLED:
+            if FACTION_SPLIT_ENABLED:
                 council["settlementId"] = pending_sid
             self._refresh_daily_council_roster(council)
         ballot = council.get("ballot") or {}
         candidates = list(pending.get("candidates") or [])
         if ballot.get("id") == pending.get("electionId") \
                 and ballot.get("candidates") == candidates \
-                and (not SCHISM_ENABLED
+                and (not FACTION_SPLIT_ENABLED
                      or council.get("settlementId") == pending_sid):
             return
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             council["settlementId"] = pending_sid
             self._refresh_daily_council_roster(council)
         council["agenda"] = self._daily_council_agenda()
@@ -850,7 +850,7 @@ class _LifecycleMixin:
         return survivor
 
     def _ensure_settlement_succession_elections(self):
-        """Per-settlement elder repair when SCHISM_ENABLED (multiple elders allowed)."""
+        """Per-settlement elder repair when FACTION_SPLIT_ENABLED (multiple elders allowed)."""
         c = self.civilization
         self._init_settlements()
         pending = c.get("pendingSuccession")
@@ -920,7 +920,7 @@ class _LifecycleMixin:
         """
         if not LIFECYCLE_ENABLED:
             return
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             self._ensure_settlement_succession_elections()
             self._ensure_succession_daily_council()
             return
@@ -1032,14 +1032,14 @@ class _LifecycleMixin:
         off, legacy vote_rule exclusivity still applies."""
         c = self.civilization
         sid = settlement_id or self._primary_settlement_id()
-        candidates = self._succession_candidates(sid if SCHISM_ENABLED else None)
+        candidates = self._succession_candidates(sid if FACTION_SPLIT_ENABLED else None)
         if not candidates:
             return  # extinction/all-incapacitated edge: no safe winner yet
         candidates = candidates[:max(2, MAX_PENDING_RULES)]
         election_id = (
-            f"succession_{sid}_{self.frameTick}" if SCHISM_ENABLED
+            f"succession_{sid}_{self.frameTick}" if FACTION_SPLIT_ENABLED
             else f"succession_{self.frameTick}")
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             c["pendingRules"] = [
                 r for r in c["pendingRules"]
                 if not (r.get("kind") == "succession"
@@ -1056,7 +1056,7 @@ class _LifecycleMixin:
                 "proposedBy": "the village", "enacted": False, "votes": {},
                 "electionId": election_id, "candidateName": cand["name"],
             }
-            if SCHISM_ENABLED:
+            if FACTION_SPLIT_ENABLED:
                 entry["settlementId"] = sid
             entries.append(entry)
             c["pendingRules"].append(entry)
@@ -1066,12 +1066,12 @@ class _LifecycleMixin:
             "startFrame": self.frameTick,
             "deadline": self.frameTick + SUCCESSION_ELECTION_TTL_FRAMES,
         }
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             pending_payload["settlementId"] = sid
         c["pendingSuccession"] = pending_payload
         c["lastSuccessionActivityFrame"] = self.frameTick
         c["lastRuleActivityFrame"] = self.frameTick
-        scope = f" ({sid})" if SCHISM_ENABLED and sid != self._primary_settlement_id() else ""
+        scope = f" ({sid})" if FACTION_SPLIT_ENABLED and sid != self._primary_settlement_id() else ""
         self._push_activity(
             f"The village{scope} must choose a new elder. "
             f"Candidates: {', '.join(c['pendingSuccession']['candidates'])}.")
@@ -1091,7 +1091,7 @@ class _LifecycleMixin:
         election_id = rule.get("electionId")
         winner_sid = (
             rule.get("settlementId") or self._primary_settlement_id()
-            if SCHISM_ENABLED else None)
+            if FACTION_SPLIT_ENABLED else None)
         other_candidates = [r.get("candidateName") for r in c["pendingRules"]
                             if r["kind"] == "succession" and r.get("electionId") == election_id
                             and r.get("candidateName") != winner_name]
@@ -1102,7 +1102,7 @@ class _LifecycleMixin:
         incumbent = next((
             a for a in self._living_agents()
             if a.get("role") == "elder" and a is not winner
-            and (not SCHISM_ENABLED or self._settlement_id_for_agent(a) == winner_sid)
+            and (not FACTION_SPLIT_ENABLED or self._settlement_id_for_agent(a) == winner_sid)
         ), None)
         if incumbent:
             self._push_activity(
@@ -1121,7 +1121,7 @@ class _LifecycleMixin:
                 f"{winner_name or 'The chosen candidate'} could not take up the elder's mantle -- "
                 f"the village must choose again.")
             self._start_succession_election(
-                settlement_id=winner_sid if SCHISM_ENABLED else None)
+                settlement_id=winner_sid if FACTION_SPLIT_ENABLED else None)
             return
         if winner:
             old_role = winner["role"]

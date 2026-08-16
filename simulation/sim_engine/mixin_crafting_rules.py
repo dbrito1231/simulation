@@ -234,7 +234,7 @@ class _CraftingRulesMixin:
         return len([a for a in self.agents if not a["incapacitated"]])
 
     def _vote_quorum(self, rule=None):
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return (self._active_agent_count() // 2) + 1
         if rule and self._is_global_governance_ballot(rule):
             return (self._active_agent_count() // 2) + 1
@@ -302,7 +302,7 @@ class _CraftingRulesMixin:
             return 0
         total = 0
         district = district or agent.get("currentDistrict")
-        if SCHISM_ENABLED and agent:
+        if FACTION_SPLIT_ENABLED and agent:
             modifiers = self._custom_modifiers_for_settlement(self._settlement_id_for_agent(agent))
         else:
             modifiers = self.civilization.get("customRuleModifiers") or {}
@@ -349,7 +349,7 @@ class _CraftingRulesMixin:
     def _ensure_constitution(self, settlement_id=None):
         """Backfill missing active provisions without duplicating history."""
         c = self.civilization
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or self._primary_settlement_id()
             active_rules = self._rules_for_settlement(sid)
             constitution = self._constitution_for_settlement(sid)
@@ -400,7 +400,7 @@ class _CraftingRulesMixin:
                     continue
                 trimmed.append(provision)
             cleaned = trimmed
-        if SCHISM_ENABLED and sid:
+        if FACTION_SPLIT_ENABLED and sid:
             self._set_constitution_for_settlement(sid, cleaned)
         else:
             c["constitution"] = cleaned
@@ -408,7 +408,7 @@ class _CraftingRulesMixin:
 
     def _set_constitution_status(self, rule_id, status, settlement_id=None, **extra):
         sid = settlement_id
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or self._primary_settlement_id()
             constitution = self._ensure_constitution(sid)
         else:
@@ -421,7 +421,7 @@ class _CraftingRulesMixin:
 
     def _rebuild_custom_rule_modifiers(self, settlement_id=None):
         """Restore-safe compilation of only currently enacted custom laws."""
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or self._primary_settlement_id()
             rules = self._rules_for_settlement(sid)
             compiled = {}
@@ -448,7 +448,7 @@ class _CraftingRulesMixin:
         c = self.civilization
         if not RULES_ENABLED or not isinstance(rule, dict):
             return False
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id()
             pending_rules = self._pending_for_settlement(sid)
             active_rules = self._rules_for_settlement(sid)
@@ -597,7 +597,7 @@ class _CraftingRulesMixin:
                 rules_list.append(rule)
                 # _ensure_constitution backfills the newly active rule once;
                 # do not append a second provision after that migration pass.
-                self._ensure_constitution(scope_sid if SCHISM_ENABLED else None)
+                self._ensure_constitution(scope_sid if FACTION_SPLIT_ENABLED else None)
                 self._record_rule_kind_enacted(rule.get("kind"))
                 self._push_activity(f'Rule "{rule["name"]}" enacted by vote ({yes} yes)')
                 self._log_benchmark("rule_enacted", len(rules_list), {
@@ -628,7 +628,7 @@ class _CraftingRulesMixin:
         """Compile/apply an enacted law; repeal and amendment reverse it."""
         c = self.civilization
         sid = settlement_id
-        if SCHISM_ENABLED and not self._is_global_governance_ballot(rule):
+        if FACTION_SPLIT_ENABLED and not self._is_global_governance_ballot(rule):
             sid = settlement_id or self._ballot_settlement_id(rule)
             harvest_quotas = self._harvest_quotas_for_settlement(sid)
             rationing_active = self._rationing_for_settlement(sid)
@@ -686,7 +686,7 @@ class _CraftingRulesMixin:
         rid = rule.get("id")
         if not rid:
             return
-        if SCHISM_ENABLED and not self._is_global_governance_ballot(rule):
+        if FACTION_SPLIT_ENABLED and not self._is_global_governance_ballot(rule):
             sid = settlement_id or self._ballot_settlement_id(rule)
             self._harvest_quotas_for_settlement(sid).pop(rid, None)
             self._rationing_for_settlement(sid).pop(rid, None)
@@ -703,7 +703,7 @@ class _CraftingRulesMixin:
         """Active quarantine district ids for one settlement scope."""
         if not RAIDERS_CONTAGION_ENABLED:
             return set()
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or (
                 self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
             active = self._quarantine_for_settlement(sid)
@@ -747,7 +747,7 @@ class _CraftingRulesMixin:
         c = self.civilization
         target_id = repeal_ballot.get("targetRuleId") or repeal_ballot.get("value")
         sid = settlement_id
-        if SCHISM_ENABLED and not self._is_global_governance_ballot(repeal_ballot):
+        if FACTION_SPLIT_ENABLED and not self._is_global_governance_ballot(repeal_ballot):
             sid = settlement_id or self._ballot_settlement_id(repeal_ballot)
             rules_list = self._rules_for_settlement(sid)
         else:
@@ -800,7 +800,7 @@ class _CraftingRulesMixin:
             entry["effect"] = effect
         if rule.get("supersedes"):
             entry["supersedes"] = rule["supersedes"]
-        if SCHISM_ENABLED and not self._is_global_governance_ballot(entry):
+        if FACTION_SPLIT_ENABLED and not self._is_global_governance_ballot(entry):
             entry["settlementId"] = self._settlement_id_for_agent(agent)
             pending_list = self._pending_for_settlement(entry["settlementId"])
         else:
@@ -821,7 +821,7 @@ class _CraftingRulesMixin:
         target_id = decision.get("target")
         if not isinstance(target_id, str) or not target_id:
             return f"{agent['name']} named no rule to repeal"
-        sid = self._settlement_id_for_agent(agent) if SCHISM_ENABLED else None
+        sid = self._settlement_id_for_agent(agent) if FACTION_SPLIT_ENABLED else None
         rules_list = self._rules_for_settlement(sid) if sid else c["rules"]
         pending_list = self._pending_for_settlement(sid) if sid else c["pendingRules"]
         target = next((r for r in rules_list if r["id"] == target_id), None)
@@ -846,7 +846,7 @@ class _CraftingRulesMixin:
             "enacted": False,
             "votes": {agent["name"]: "yes"},
         }
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             entry["settlementId"] = sid
         pending_list.append(entry)
         c["lastRuleActivityFrame"] = self.frameTick
@@ -859,7 +859,7 @@ class _CraftingRulesMixin:
         """Return the resource id from the newest enacted priority rule, if any."""
         if not RULES_ENABLED:
             return None
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or (
                 self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
             rules = self._rules_for_settlement(sid)
@@ -879,7 +879,7 @@ class _CraftingRulesMixin:
         rule = self._find_pending_ballot(decision.get("target"), voter=agent)
         if not rule:
             return f"{agent['name']} found no such pending rule"
-        if SCHISM_ENABLED and not self._is_global_governance_ballot(rule):
+        if FACTION_SPLIT_ENABLED and not self._is_global_governance_ballot(rule):
             voter_sid = self._settlement_id_for_agent(agent)
             ballot_sid = self._ballot_settlement_id(rule)
             if voter_sid != ballot_sid:
@@ -907,7 +907,7 @@ class _CraftingRulesMixin:
     def _active_resource_tax(self, agent=None, settlement_id=None):
         if not RULES_ENABLED:
             return 0
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or (
                 self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
             rules = self._rules_for_settlement(sid)
@@ -925,7 +925,7 @@ class _CraftingRulesMixin:
         full WEATHER_DWELL_TICKS window would re-propose a fresh emergency
         rationing rule every RULE_PROPOSE_COOLDOWN, crowding out ordinary
         priority/tax governance and pressuring MAX_PENDING_RULES."""
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or (
                 self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
             rules = self._rules_for_settlement(sid)

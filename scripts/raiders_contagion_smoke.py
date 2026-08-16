@@ -510,10 +510,10 @@ def test_kill_switch_and_flag_echo():
     assert_true(flags.get("RAIDERS_CONTAGION_ENABLED") is True, flags)
 
     old_raiders = se.RAIDERS_CONTAGION_ENABLED
-    old_schism = se.SCHISM_ENABLED
+    old_faction_split = se.FACTION_SPLIT_ENABLED
     try:
         se.RAIDERS_CONTAGION_ENABLED = False
-        se.SCHISM_ENABLED = False
+        se.FACTION_SPLIT_ENABLED = False
         off_engine = make_engine(8)
         assert_true("quarantineActive" not in off_engine.civilization,
                     "flag-off fresh world seeded quarantineActive")
@@ -538,7 +538,7 @@ def test_kill_switch_and_flag_echo():
         assert_true(off_engine._pressure_telegraph() is None, "pressure telegraph when off")
     finally:
         se.RAIDERS_CONTAGION_ENABLED = old_raiders
-        se.SCHISM_ENABLED = old_schism
+        se.FACTION_SPLIT_ENABLED = old_faction_split
     print("  OK kill switch + flag echo when enabled")
 
 

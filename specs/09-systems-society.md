@@ -294,7 +294,7 @@ Follows the exact `rationing` write/clear pattern in `_apply_governance_rule` /
   `civilization["quarantineActive"][rule["id"]] = {"district": "<quarantined district id>"}`.
   The rule's `value` field names the quarantined district (`_validate_rule` requires
   `value` to be a live key in `civilization["districts"]`, same pattern as
-  `priority`'s resource id). Under `SCHISM_ENABLED`, the write targets
+  `priority`'s resource id). Under `FACTION_SPLIT_ENABLED`, the write targets
   `quarantineActiveBySettlement[settlementId]` via `_quarantine_for_settlement`
   (flat `quarantineActive` aliases home, mirroring `rationingActive`).
 - **Repeal:** `_clear_governance_rule` pops the entry keyed by `rule["id"]`.
@@ -552,7 +552,7 @@ wall-clock) so repeated ticks against the same corrupted save produce the
 same result; once at most one living elder remains, the rest of this
 section's election-repair logic proceeds unchanged.
 
-When schism support delegates this repair per settlement, the same recovery
+When faction split support delegates this repair per settlement, the same recovery
 pass must also project the resulting `pendingSuccession` into the visible
 emergency Daily Council; delegation must not leave a valid election waiting
 without its named-candidate assembly. Emergency detection, attendance, excused
@@ -635,17 +635,17 @@ mutation is logged as activity and recorded in the chronicle under the
 `meme_mutation` kind, and increments `civilization["memeMutations"]`, which
 also feeds the `meme_mutations` benchmark.
 
-## SCHISM_ENABLED (default True) {#schism_enabled}
+## FACTION_SPLIT_ENABLED (default True) {#faction_split_enabled}
 
-Settlement-scoped domestic governance storage for Feature 4 (Schism).
+Settlement-scoped domestic governance storage for Feature 4 (Faction Split).
 **When off:** `civilization["rules"]`, `pendingRules`, `constitution`,
 `customRuleModifiers`, `harvestQuotas`, `rationingActive`, `quarantineActive`
 (when `RAIDERS_CONTAGION_ENABLED`), `beliefRegistry`,
 and `memeTexts` remain the only live shape — byte-identical to pre-F4 worlds.
-No schism trigger ships while the flag is off. F4.2 threads read paths and
+No faction split trigger ships while the flag is off. F4.2 threads read paths and
 voting scope; F4.3 adds trigger/secession/elder when the flag is on.
 
-When **`SCHISM_ENABLED`** is on:
+When **`FACTION_SPLIT_ENABLED`** is on:
 
 **Settlement-keyed maps (Option A):** parallel buckets keyed by settlement id:
 
@@ -678,12 +678,12 @@ under `beliefRegistryBySettlement` when the flag is on (with flat
 `beliefRegistry` aliasing home).
 
 **Rule ids:** remain **globally unique** across settlements for F4.1
-(constitution non-reuse; safer until schism fork mints prefixed ids in a
+(constitution non-reuse; safer until faction split fork mints prefixed ids in a
 later phase).
 
 **Restore migration:** when the flag is on at load and keyed maps are absent,
 `restore_state()` wraps existing flat governance/belief fields under
-`"home"` via `_migrate_schism_storage_on_restore`, then
+`"home"` via `_migrate_faction_split_storage_on_restore`, then
 `_rebuild_settlement_governance` per bucket. Flag-off restore never introduces
 keyed maps.
 
@@ -692,7 +692,7 @@ per-settlement currency.
 
 ### F4.2 — helper threading + voting scope (flag on)
 
-When **`SCHISM_ENABLED`** is on, settlement accessors thread through domestic
+When **`FACTION_SPLIT_ENABLED`** is on, settlement accessors thread through domestic
 read/write paths in `mixin_crafting_rules.py`, `mixin_governance_culture.py`,
 `mixin_think_job.py`, `mixin_council_growth.py`, and belief registry writers.
 
@@ -719,14 +719,14 @@ canonical definitions; per-agent `beliefs` sets unchanged. Pitch adoption and
 **Treaties:** `_propose_treaty` / `_vote_treaty` unchanged — global pending +
 global quorum; domestic settlement rules do not partition treaty ballots.
 
-**Still out of scope:** schism trigger, secession migration, per-settlement elder,
+**Still out of scope:** faction split trigger, secession migration, per-settlement elder,
 viewer settlement panel.
 
-### F4.3 — schism trigger, secession, elder (flag on)
+### F4.3 — faction split trigger, secession, elder (flag on)
 
-When **`SCHISM_ENABLED`** is on, `_maybe_advance_rules` (same `RULES_TICK_FRAMES`
-governance cadence as domestic backstop voting) calls `_maybe_trigger_schism`
-before other work. At most one schism per cooldown (`SCHISM_COOLDOWN_FRAMES`,
+When **`FACTION_SPLIT_ENABLED`** is on, `_maybe_advance_rules` (same `RULES_TICK_FRAMES`
+governance cadence as domestic backstop voting) calls `_maybe_trigger_faction_split`
+before other work. At most one faction split per cooldown (`FACTION_SPLIT_COOLDOWN_FRAMES`,
 default `RULE_PROPOSE_COOLDOWN * 6`).
 
 **Trigger predicate (deterministic, no LLM):** per settlement `sid`, let `E` be
@@ -742,16 +742,16 @@ member such that:
    `LIFECYCLE_ENABLED` also `harvest_quota`, `rationing`) outside that affinity.
 2. Every cluster member holds `b`, has `relationships[E.name] == "rival"`, and
    pairwise mutual `ally` ties with every other member.
-3. `len(cluster) >= SCHISM_MIN_CLUSTER` (default **3**).
+3. `len(cluster) >= FACTION_SPLIT_MIN_CLUSTER` (default **3**).
 
 First matching `(r, b)` in sorted rule-id / belief-id order wins.
 
-**Secession:** `_execute_schism` reuses Path 1 founding helpers
+**Secession:** `_execute_faction_split` reuses Path 1 founding helpers
 (`_init_settlements`, `_claim_frontier_plot` + `_found_district`, or an existing
 non-parent settlement). It deep-copies the parent's enacted rules into the child
 settlement bucket, forks `beliefRegistry` / `memeTexts` entries for beliefs the
 cluster holds, migrates agents' `currentDistrict` (and position) into the child
-settlement, and logs activity + chronicle kind **`schism`** (included in
+settlement, and logs activity + chronicle kind **`faction_split`** (included in
 `CHRONICLE_MILESTONE_KINDS`, so `/state`'s `chronicle` projection surfaces it
 when `CHRONICLE_ENABLED` is on). Inter-settlement
 interaction remains treaty / caravan / tariff only (no war).
@@ -759,7 +759,7 @@ interaction remains treaty / caravan / tariff only (no war).
 **Elder:** `_start_succession_election(settlement_id=child)` opens global
 `succession` ballots scoped with `settlementId` on each record and
 `pendingSuccession.settlementId`. `_enact_succession_winner` allows **multiple
-simultaneous elders** when `SCHISM_ENABLED` — it only blocks a second elder in
+simultaneous elders** when `FACTION_SPLIT_ENABLED` — it only blocks a second elder in
 the **same** settlement. `_ensure_succession_election` delegates to
 `_ensure_settlement_succession_elections` so a home elder does not cancel a
 child settlement's pending election. That same delegate applies the collapse
@@ -809,13 +809,13 @@ ring. It never creates a second event store and never changes prompt history.
 The projection admits only the named milestone kinds `death`, `burial`,
 `election`, `belief_founded`, `belief_adoption`, `meme_mutation`,
 `knowledge_preserved`, `disaster`, `district_founded`, `emergency_measure`,
-`schism`, and `divine`; routine gather, talk, craft, and build activity
+`faction_split`, and `divine`; routine gather, talk, craft, and build activity
 remains exclusively in `activity`. `disaster` entries are pushed unconditionally
 from `_maybe_disaster` (see [08](08-systems-economy.md)); `district_founded`
 entries are pushed from `_found_district` only when `FOUNDING_EVENTS_ENABLED`
-is True (see [05](05-world.md)); `schism` entries are pushed from
-`_execute_schism` when `SCHISM_ENABLED` and `CULTURE_ENABLED` are on (see
-[§schism_enabled](#schism_enabled)). `CHRONICLE_CAP` was raised from 20 to 100
+is True (see [05](05-world.md)); `faction_split` entries are pushed from
+`_execute_faction_split` when `FACTION_SPLIT_ENABLED` and `CULTURE_ENABLED` are on (see
+[§faction_split_enabled](#faction_split_enabled)). `CHRONICLE_CAP` was raised from 20 to 100
 (living-ecosystem Phase 2, item 0) after live verification showed a
 storm-heavy stretch (`DISASTER_PROB` fires roughly every 100 simulated
 minutes) evicting real history (deaths/elections/beliefs) within about a day

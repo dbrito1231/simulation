@@ -198,7 +198,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `WIKI_MEMORY` | True (D2 soak on `main` — see [03](03-cognition.md)) | yes | [03](03-cognition.md) |
 | `TESTAMENT_ENABLED` | True | yes | [06](06-agents.md), [09](09-systems-society.md) |
 | `THEORY_OF_MIND_ENABLED` | False (env-backed, `SIM_THEORY_OF_MIND`) | yes | [03](03-cognition.md) |
-| `SCHISM_ENABLED` | True | yes | [09](09-systems-society.md#schism_enabled) |
+| `FACTION_SPLIT_ENABLED` | True | yes | [09](09-systems-society.md#faction_split_enabled) |
 | `CROP_GROWTH_ENABLED` | True | yes | [05](05-world.md) |
 | `WILDLIFE_ENABLED` | True | yes | [05](05-world.md) (authoritative fauna + hunt + motion; also [02](02-engine-core.md), [07](07-actions.md), [08](08-systems-economy.md), [11](11-viewer.md)) |
 | `CARAVAN_VISUALS_ENABLED` | True | yes | [08](08-systems-economy.md) |

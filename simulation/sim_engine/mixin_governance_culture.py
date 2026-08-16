@@ -20,8 +20,8 @@ class _GovernanceCultureMixin:
     memes, and Phase G skills/library/chronicle/personality-drift. See
     module docstring for exact scope."""
 
-    # --- Schism storage (SCHISM_ENABLED): settlement-scoped governance maps ---
-    _SCHISM_FLAT_KEYED_PAIRS = (
+    # --- Faction split storage (FACTION_SPLIT_ENABLED): settlement-scoped governance maps ---
+    _FACTION_SPLIT_FLAT_KEYED_PAIRS = (
         ("rules", "rulesBySettlement", []),
         ("pendingRules", "pendingRulesBySettlement", []),
         ("constitution", "constitutionBySettlement", []),
@@ -52,7 +52,7 @@ class _GovernanceCultureMixin:
 
     def _rules_for_settlement(self, sid):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return c.get("rules") or []
         if sid == self._primary_settlement_id():
             rules = c.get("rules")
@@ -67,7 +67,7 @@ class _GovernanceCultureMixin:
 
     def _pending_for_settlement(self, sid):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return c.get("pendingRules") or []
         bucket = c.get("pendingRulesBySettlement") or {}
         if sid in bucket:
@@ -79,7 +79,7 @@ class _GovernanceCultureMixin:
 
     def _constitution_for_settlement(self, sid):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return c.get("constitution") or []
         if sid == self._primary_settlement_id():
             constitution = c.get("constitution")
@@ -94,7 +94,7 @@ class _GovernanceCultureMixin:
 
     def _registry_for_settlement(self, sid):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return c.get("beliefRegistry") or {}
         bucket = c.get("beliefRegistryBySettlement") or {}
         if sid in bucket:
@@ -106,7 +106,7 @@ class _GovernanceCultureMixin:
 
     def _meme_texts_for_settlement(self, sid):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return c.get("memeTexts") or {}
         bucket = c.get("memeTextsBySettlement") or {}
         if sid in bucket:
@@ -118,7 +118,7 @@ class _GovernanceCultureMixin:
 
     def _custom_modifiers_for_settlement(self, sid):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return c.get("customRuleModifiers") or {}
         if sid == self._primary_settlement_id():
             modifiers = c.get("customRuleModifiers")
@@ -133,7 +133,7 @@ class _GovernanceCultureMixin:
 
     def _harvest_quotas_for_settlement(self, sid):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return c.get("harvestQuotas") or {}
         bucket = c.get("harvestQuotasBySettlement") or {}
         if sid in bucket:
@@ -145,7 +145,7 @@ class _GovernanceCultureMixin:
 
     def _rationing_for_settlement(self, sid):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return c.get("rationingActive") or {}
         bucket = c.get("rationingActiveBySettlement") or {}
         if sid in bucket:
@@ -157,7 +157,7 @@ class _GovernanceCultureMixin:
 
     def _quarantine_for_settlement(self, sid):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return c.get("quarantineActive") or {}
         bucket = c.get("quarantineActiveBySettlement") or {}
         if sid in bucket:
@@ -167,9 +167,9 @@ class _GovernanceCultureMixin:
             return bucket[home]
         return c.get("quarantineActive") or {}
 
-    def _wrap_schism_storage(self, civ, home):
+    def _wrap_faction_split_storage(self, civ, home):
         """Install settlement-keyed maps sharing refs with flat home fields."""
-        for flat_key, keyed_key, default in self._SCHISM_FLAT_KEYED_PAIRS:
+        for flat_key, keyed_key, default in self._FACTION_SPLIT_FLAT_KEYED_PAIRS:
             if flat_key == "quarantineActive" and not RAIDERS_CONTAGION_ENABLED:
                 continue
             obj = civ.get(flat_key)
@@ -182,19 +182,19 @@ class _GovernanceCultureMixin:
             else:
                 keyed.setdefault(home, obj)
 
-    def _init_schism_storage(self):
-        if not SCHISM_ENABLED:
+    def _init_faction_split_storage(self):
+        if not FACTION_SPLIT_ENABLED:
             return
-        self._wrap_schism_storage(self.civilization, self._primary_settlement_id())
+        self._wrap_faction_split_storage(self.civilization, self._primary_settlement_id())
 
-    def _migrate_schism_storage_on_restore(self, civ):
-        if not SCHISM_ENABLED:
+    def _migrate_faction_split_storage_on_restore(self, civ):
+        if not FACTION_SPLIT_ENABLED:
             return
-        self._wrap_schism_storage(civ, self._primary_settlement_id_for_civ(civ))
+        self._wrap_faction_split_storage(civ, self._primary_settlement_id_for_civ(civ))
 
     def _rebuild_settlement_governance(self, sid):
         """Rebuild constitution + compiled custom effects for one settlement."""
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             self._ensure_constitution()
             self._rebuild_custom_rule_modifiers()
             return
@@ -217,7 +217,7 @@ class _GovernanceCultureMixin:
         return count
 
     def _ballot_settlement_id(self, rule):
-        if not SCHISM_ENABLED or self._is_global_governance_ballot(rule):
+        if not FACTION_SPLIT_ENABLED or self._is_global_governance_ballot(rule):
             return self._primary_settlement_id()
         sid = rule.get("settlementId")
         if isinstance(sid, str) and sid:
@@ -230,7 +230,7 @@ class _GovernanceCultureMixin:
     def _all_enacted_rule_ids(self):
         ids = set()
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             for rule in c.get("rules") or []:
                 if isinstance(rule, dict) and rule.get("id"):
                     ids.add(rule["id"])
@@ -244,7 +244,7 @@ class _GovernanceCultureMixin:
     def _all_pending_rule_ids(self):
         ids = set()
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             for rule in c.get("pendingRules") or []:
                 if isinstance(rule, dict) and rule.get("id"):
                     ids.add(rule["id"])
@@ -258,7 +258,7 @@ class _GovernanceCultureMixin:
     def _all_constitution_rule_ids(self):
         ids = set()
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             for provision in c.get("constitution") or []:
                 if isinstance(provision, dict) and provision.get("id"):
                     ids.add(provision["id"])
@@ -272,14 +272,14 @@ class _GovernanceCultureMixin:
     def _governance_scope_lists(self, rule):
         """Return (rules, pending, settlement_id) for a ballot's domestic scope."""
         c = self.civilization
-        if not SCHISM_ENABLED or self._is_global_governance_ballot(rule):
+        if not FACTION_SPLIT_ENABLED or self._is_global_governance_ballot(rule):
             return c["rules"], c["pendingRules"], self._primary_settlement_id()
         sid = self._ballot_settlement_id(rule)
         return self._rules_for_settlement(sid), self._pending_for_settlement(sid), sid
 
     def _find_pending_ballot(self, ballot_id, voter=None):
         c = self.civilization
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return next((r for r in c.get("pendingRules") or [] if r.get("id") == ballot_id), None)
         for rule in c.get("pendingRules") or []:
             if rule.get("id") == ballot_id and self._is_global_governance_ballot(rule):
@@ -296,7 +296,7 @@ class _GovernanceCultureMixin:
         return None
 
     def _pending_rules_for_voter(self, agent):
-        if not SCHISM_ENABLED:
+        if not FACTION_SPLIT_ENABLED:
             return list(self.civilization.get("pendingRules") or [])
         sid = self._settlement_id_for_agent(agent)
         domestic = [
@@ -309,7 +309,7 @@ class _GovernanceCultureMixin:
         ]
         return domestic + global_pending
 
-    # --- Schism trigger + secession (F4.3, SCHISM_ENABLED) ---
+    # --- Faction split trigger + secession (F4.3, FACTION_SPLIT_ENABLED) ---
     def _governance_rule_kinds_for_beliefs(self):
         kinds = set(RULE_KINDS)
         if LIFECYCLE_ENABLED:
@@ -359,12 +359,12 @@ class _GovernanceCultureMixin:
                 continue
             if agent.get("role") != "elder":
                 continue
-            if not SCHISM_ENABLED or self._settlement_id_for_agent(agent) == settlement_id:
+            if not FACTION_SPLIT_ENABLED or self._settlement_id_for_agent(agent) == settlement_id:
                 return agent
         return None
 
-    def _find_schism_cluster(self, settlement_id):
-        if not SCHISM_ENABLED or not MEMES_ENABLED or not RULES_ENABLED:
+    def _find_faction_split_cluster(self, settlement_id):
+        if not FACTION_SPLIT_ENABLED or not MEMES_ENABLED or not RULES_ENABLED:
             return None
         elder = self._elder_for_settlement(settlement_id)
         if not elder:
@@ -389,7 +389,7 @@ class _GovernanceCultureMixin:
                     if self._belief_contradicts_enacted_rule(a, belief_id, rule)
                     and self._agent_rivals_elder(a, elder)
                 ]
-                if len(cluster) < SCHISM_MIN_CLUSTER:
+                if len(cluster) < FACTION_SPLIT_MIN_CLUSTER:
                     continue
                 if self._cluster_mutual_allies(cluster):
                     return {
@@ -401,7 +401,7 @@ class _GovernanceCultureMixin:
                     }
         return None
 
-    def _init_schism_settlement_buckets(self, settlement_id):
+    def _init_faction_split_settlement_buckets(self, settlement_id):
         c = self.civilization
         c.setdefault("rulesBySettlement", {}).setdefault(settlement_id, [])
         c.setdefault("pendingRulesBySettlement", {}).setdefault(settlement_id, [])
@@ -417,7 +417,7 @@ class _GovernanceCultureMixin:
     def _fork_settlement_governance(self, parent_sid, child_sid):
         parent_rules = self._rules_for_settlement(parent_sid)
         child_rules = [copy.deepcopy(r) for r in parent_rules if r.get("enacted")]
-        self._init_schism_settlement_buckets(child_sid)
+        self._init_faction_split_settlement_buckets(child_sid)
         self.civilization["rulesBySettlement"][child_sid] = child_rules
         self._rebuild_settlement_governance(child_sid)
 
@@ -431,11 +431,11 @@ class _GovernanceCultureMixin:
                 child_reg[bid] = copy.deepcopy(parent_reg[bid])
             if bid in parent_texts:
                 child_texts[bid] = parent_texts[bid]
-        self._init_schism_settlement_buckets(child_sid)
+        self._init_faction_split_settlement_buckets(child_sid)
         self.civilization["beliefRegistryBySettlement"][child_sid] = child_reg
         self.civilization["memeTextsBySettlement"][child_sid] = child_texts
 
-    def _ensure_schism_settlement(self, parent_sid):
+    def _ensure_faction_split_settlement(self, parent_sid):
         """Reuse an existing frontier settlement or found one via Path 1 helpers."""
         self._init_settlements()
         c = self.civilization
@@ -443,7 +443,7 @@ class _GovernanceCultureMixin:
         for entry in c.get("settlements") or []:
             sid = entry.get("id")
             if sid and sid != parent_sid and entry.get("districts"):
-                self._init_schism_settlement_buckets(sid)
+                self._init_faction_split_settlement_buckets(sid)
                 self._ensure_settlement_stores()
                 self._settlement_store_bucket(sid)
                 return sid, entry["districts"][0]
@@ -456,14 +456,14 @@ class _GovernanceCultureMixin:
         new_did = plot.get("claimedBy")
         if not new_did:
             return None, None
-        sid = f"schism_{self.frameTick}"
+        sid = f"faction_split_{self.frameTick}"
         c["settlements"].append({
             "id": sid,
             "name": "Seceding Settlement",
             "districts": [new_did],
         })
         c["districts"][new_did]["settlementId"] = sid
-        self._init_schism_settlement_buckets(sid)
+        self._init_faction_split_settlement_buckets(sid)
         self._ensure_settlement_stores()
         self._settlement_store_bucket(sid)
         self._push_activity(f"A seceding faction claims the frontier as {sid}.")
@@ -481,12 +481,12 @@ class _GovernanceCultureMixin:
                 agent["y"] = cy
             agent["goal"] = None
 
-    def _execute_schism(self, cluster_info):
+    def _execute_faction_split(self, cluster_info):
         parent_sid = cluster_info["parent_sid"]
         agents = cluster_info["agents"]
         belief_id = cluster_info["belief_id"]
         rule = cluster_info["rule"]
-        child_sid, district_id = self._ensure_schism_settlement(parent_sid)
+        child_sid, district_id = self._ensure_faction_split_settlement(parent_sid)
         if not child_sid or not district_id:
             return False
         belief_ids = set()
@@ -498,18 +498,18 @@ class _GovernanceCultureMixin:
         names = ", ".join(a["name"] for a in agents)
         belief_name = self._belief_name(belief_id, agents[0])
         rule_name = rule.get("name") or rule.get("id")
-        self.civilization["lastSchismFrame"] = self.frameTick
+        self.civilization["lastFactionSplitFrame"] = self.frameTick
         self._push_activity(
-            f"Schism: {names} secede to {child_sid} over belief {belief_name} "
+            f"Faction split: {names} secede to {child_sid} over belief {belief_name} "
             f"and enacted rule \"{rule_name}\".")
         self._push_communication(
-            "schism", agents[0]["name"], "everyone",
+            "faction_split", agents[0]["name"], "everyone",
             f"The faction secedes to {child_sid}, rejecting \"{rule_name}\".")
         if CULTURE_ENABLED:
             self._push_chronicle(
                 f"{names} seceded to {child_sid} over {belief_name} vs \"{rule_name}\".",
-                kind="schism")
-        self._log_benchmark("schism", len(agents), {
+                kind="faction_split")
+        self._log_benchmark("faction_split", len(agents), {
             "parent": parent_sid,
             "child": child_sid,
             "belief": belief_id,
@@ -519,34 +519,34 @@ class _GovernanceCultureMixin:
             self._start_succession_election(settlement_id=child_sid)
         return True
 
-    def _maybe_trigger_schism(self):
-        if not SCHISM_ENABLED or not MEMES_ENABLED or not RULES_ENABLED:
+    def _maybe_trigger_faction_split(self):
+        if not FACTION_SPLIT_ENABLED or not MEMES_ENABLED or not RULES_ENABLED:
             return
         c = self.civilization
-        last = c.get("lastSchismFrame")
-        if isinstance(last, int) and self.frameTick - last < SCHISM_COOLDOWN_FRAMES:
+        last = c.get("lastFactionSplitFrame")
+        if isinstance(last, int) and self.frameTick - last < FACTION_SPLIT_COOLDOWN_FRAMES:
             return
         self._init_settlements()
         for entry in sorted(c.get("settlements") or [], key=lambda s: s.get("id") or ""):
             sid = entry.get("id")
             if not sid:
                 continue
-            cluster = self._find_schism_cluster(sid)
-            if cluster and self._execute_schism(cluster):
+            cluster = self._find_faction_split_cluster(sid)
+            if cluster and self._execute_faction_split(cluster):
                 return
 
     def _set_constitution_for_settlement(self, sid, constitution):
         c = self.civilization
-        if not SCHISM_ENABLED or sid == self._primary_settlement_id():
+        if not FACTION_SPLIT_ENABLED or sid == self._primary_settlement_id():
             c["constitution"] = constitution
-            if SCHISM_ENABLED:
+            if FACTION_SPLIT_ENABLED:
                 c.setdefault("constitutionBySettlement", {})[sid] = constitution
         else:
             c.setdefault("constitutionBySettlement", {})[sid] = constitution
 
     def _set_custom_modifiers_for_settlement(self, sid, compiled):
         c = self.civilization
-        if not SCHISM_ENABLED or sid == self._primary_settlement_id():
+        if not FACTION_SPLIT_ENABLED or sid == self._primary_settlement_id():
             c["customRuleModifiers"] = compiled
         else:
             c.setdefault("customRuleModifiersBySettlement", {})[sid] = compiled
@@ -555,7 +555,7 @@ class _GovernanceCultureMixin:
     def _active_harvest_quota(self, agent=None, settlement_id=None):
         if not LIFECYCLE_ENABLED:
             return None
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or (
                 self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
             quotas = self._harvest_quotas_for_settlement(sid)
@@ -601,7 +601,7 @@ class _GovernanceCultureMixin:
     def _rationing_active_cap(self, agent=None, settlement_id=None):
         if not LIFECYCLE_ENABLED:
             return None
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or (
                 self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
             active = self._rationing_for_settlement(sid)
@@ -803,7 +803,7 @@ class _GovernanceCultureMixin:
     def _belief_registry(self, agent=None, settlement_id=None):
         """Live seed + authored beliefs; old saves gain seed records lazily."""
         c = self.civilization
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             sid = settlement_id or (
                 self._settlement_id_for_agent(agent) if agent else self._primary_settlement_id())
             registry = self._registry_for_settlement(sid)
@@ -838,7 +838,7 @@ class _GovernanceCultureMixin:
             return entry["tenet"]
         # Keep legacy mutation overrides readable when restoring an old state.
         if CULTURE_ENABLED:
-            if SCHISM_ENABLED and agent:
+            if FACTION_SPLIT_ENABLED and agent:
                 override = self._meme_texts_for_settlement(self._settlement_id_for_agent(agent)).get(bid)
             else:
                 override = self.civilization.get("memeTexts", {}).get(bid)
@@ -1090,7 +1090,7 @@ class _GovernanceCultureMixin:
             entry.setdefault("originalTenet", entry["tenet"])
             entry["tenet"] = mutated
         else:
-            if SCHISM_ENABLED:
+            if FACTION_SPLIT_ENABLED:
                 self._meme_texts_for_settlement(self._settlement_id_for_agent(speaker))[belief_id] = mutated
             else:
                 c.setdefault("memeTexts", {})[belief_id] = mutated

@@ -332,7 +332,7 @@ class _ThinkJobMixin:
         if RULES_ENABLED:
             voter_pending = self._pending_rules_for_voter(agent)
             unvoted = next((r for r in voter_pending if agent["name"] not in r["votes"]), None)
-            agent_sid_nudge = self._settlement_id_for_agent(agent) if SCHISM_ENABLED else None
+            agent_sid_nudge = self._settlement_id_for_agent(agent) if FACTION_SPLIT_ENABLED else None
             scoped_rules = self._rules_for_settlement(agent_sid_nudge) if agent_sid_nudge else c["rules"]
             scoped_pending_nudge = self._pending_for_settlement(agent_sid_nudge) if agent_sid_nudge else c["pendingRules"]
             if unvoted:
@@ -630,9 +630,9 @@ class _ThinkJobMixin:
         # active_rules: not read by validate_blueprint at all, so a plain cap
         # on the existing field is safe. Already loosely bounded by
         # MAX_ACTIVE_RULES (8) <= MAX_ACTIVE_RULES_PROMPT (12) today.
-        agent_sid = self._settlement_id_for_agent(agent) if SCHISM_ENABLED else None
+        agent_sid = self._settlement_id_for_agent(agent) if FACTION_SPLIT_ENABLED else None
         rules_full = list(self._rules_for_settlement(agent_sid) if agent_sid else c["rules"]) if RULES_ENABLED else []
-        scoped_pending = self._pending_rules_for_voter(agent) if SCHISM_ENABLED else c["pendingRules"]
+        scoped_pending = self._pending_rules_for_voter(agent) if FACTION_SPLIT_ENABLED else c["pendingRules"]
         if len(rules_full) > MAX_ACTIVE_RULES_PROMPT:
             active_rules_list = [{"id": r["id"], "name": r["name"], "kind": r["kind"], "value": r["value"],
                                   "effect": r.get("effect"), "supersedes": r.get("supersedes")}
@@ -834,7 +834,7 @@ class _ThinkJobMixin:
                                "proposed_by": r["proposedBy"]}
                               for r in scoped_pending] if RULES_ENABLED else [],
             "active_rules": active_rules_list if RULES_ENABLED else [],
-            "constitution": [dict(p) for p in self._ensure_constitution(agent_sid if SCHISM_ENABLED else None)] if RULES_ENABLED else [],
+            "constitution": [dict(p) for p in self._ensure_constitution(agent_sid if FACTION_SPLIT_ENABLED else None)] if RULES_ENABLED else [],
             "recent_conversations": self._recent_conversations_text(),
             "inbox": self._drain_inbox(agent),
             "self_prompt": "",

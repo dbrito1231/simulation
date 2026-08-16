@@ -532,17 +532,17 @@ older `simulation/logs/<timestamp>/` directories:
    [12-ops.md](12-ops.md)) flushes on its existing schedule — this route adds
    no new forced flush.
 
-All three detected anomaly kinds, including schism, come from this single
+All three detected anomaly kinds, including faction_split, come from this single
 source: no live-`SimEngine`/`civilization["chronicle"]` access and no
-`self.lock` acquisition is needed. Schism already writes a `metric: "schism"`
+`self.lock` acquisition is needed. Faction split already writes a `metric: "faction_split"`
 record to `benchmarks.jsonl` on every occurrence, independent of
-`_sample_benchmarks()`'s periodic sampling — `_execute_schism`
+`_sample_benchmarks()`'s periodic sampling — `_execute_faction_split`
 (`simulation/sim_engine/mixin_governance_culture.py:486-491`) calls
-`self._log_benchmark("schism", len(agents), {"parent": ..., "child": ...,
-"belief": ..., "rule": ...})` directly, gated by `SCHISM_ENABLED`/
+`self._log_benchmark("faction_split", len(agents), {"parent": ..., "child": ...,
+"belief": ..., "rule": ...})` directly, gated by `FACTION_SPLIT_ENABLED`/
 `BENCHMARKS_ENABLED` (both default True), not by `CULTURE_ENABLED` (which
 gates only the separate chronicle push a few lines earlier). This makes the
-schism source consistent with the other two kinds — a pure
+faction_split source consistent with the other two kinds — a pure
 `benchmarks.jsonl` read.
 
 **Detected anomaly kinds (idea-07 Answers 2-4, idea-07b §2 Answer 4; no other
@@ -553,7 +553,7 @@ was never answered in either plan and is not implemented):**
 |---|---|---|---|
 | `range_break` | `benchmarks.jsonl`, records whose `metric` is one of the **`RANGE_BREAK_METRICS` allowlist** (below) | Fires when a sampled value for an allowlisted metric exceeds every prior value seen so far **this run** for that same metric (a new session-lifetime max) or falls below every prior value seen so far this run for that same metric (a new session-lifetime min). Session-lifetime max/min tracking is per-metric (a separate running max/min per allowlisted metric name, not one shared max/min across all of them). No computed theoretical ceiling/floor; no bound recomputed as `EMERGENT_ROLES` adds roles. | idea-07 §2 Answer 3; idea-07b §2 Answer 4 |
 | `new_rule_kind` | `benchmarks.jsonl`, `metric: "rule_kind_diversity"` records, `detail.kinds` | Fires on the first time a rule kind appears in `detail.kinds` that has not appeared in any earlier `rule_kind_diversity` record this run (mirrors `civilization["ruleKindsEverEnacted"]`). No per-rule-id tracking; no proposer-origin (LLM vs. deterministic auto-proposed) distinction. | idea-07 §2 Answer 4 |
-| `schism` | `benchmarks.jsonl`, `metric: "schism"` records | Every `metric: "schism"` record is reported — written directly by `_execute_schism` on every schism, independent of `_sample_benchmarks()`. | idea-07 §2 Answer 2 |
+| `faction_split` | `benchmarks.jsonl`, `metric: "faction_split"` records | Every `metric: "faction_split"` record is reported — written directly by `_execute_faction_split` on every faction split, independent of `_sample_benchmarks()`. | idea-07 §2 Answer 2 |
 
 **`RANGE_BREAK_METRICS` allowlist (idea-07b §2 Answer 4, exhaustive — exactly
 these 12, no others, no monotonic-counter auto-detection).** Named
@@ -584,7 +584,7 @@ chosen (idea-07b §2 Answer 4).
 ```
 
 - `timestamp` — the record's `frame_tick` field, from the `benchmarks.jsonl`
-  record, for all three kinds (including `schism`). This keeps `timestamp`
+  record, for all three kinds (including `faction_split`). This keeps `timestamp`
   one consistent type (frame tick, not wall-clock `ts`) across all three
   kinds, matching every other frame-tick-based field in `/state`. This same
   field **is** the "jump-to frame" reference the original idea-07 idea text
@@ -599,17 +599,17 @@ chosen (idea-07b §2 Answer 4).
   log tooling, not an in-app navigation target.
 - `metric` — for `range_break`, one of the 12 `RANGE_BREAK_METRICS` allowlist
   names above (was `"specialization_entropy"`-only before idea-07b); for
-  `new_rule_kind`, `"rule_kind_diversity"`; for `schism`, `"schism"`.
+  `new_rule_kind`, `"rule_kind_diversity"`; for `faction_split`, `"faction_split"`.
 - `value` — the triggering value: the allowlisted metric's float value
   (`range_break`), the new rule kind string (`new_rule_kind`), or the
-  `schism` record's `value` field (agent count in the seceding cluster,
-  `schism`).
+  `faction_split` record's `value` field (agent count in the seceding cluster,
+  `faction_split`).
 - `detail` (optional) — kind-specific extra context, e.g. `{direction: "max"|"min"}`
-  for `range_break`, or the `schism` record's own `detail`
-  (`{parent, child, belief, rule}`) for `schism`.
+  for `range_break`, or the `faction_split` record's own `detail`
+  (`{parent, child, belief, rule}`) for `faction_split`.
 - `severity` (new, idea-07b §2 Answer 2) — one of `"high"` / `"medium"` /
   `"low"`. `range_break` is **magnitude-scaled** against the prior
-  session-lifetime bound it broke; `schism` and `new_rule_kind` have no
+  session-lifetime bound it broke; `faction_split` and `new_rule_kind` have no
   magnitude to scale and use a fixed severity each (final decision,
   superseding the earlier fixed-per-`kind` mapping design, which was flagged
   during Phase 1 review as conveying no information beyond `kind` itself).
@@ -674,7 +674,7 @@ chosen (idea-07b §2 Answer 4).
   denominator under range-based normalization — the only denominator is
   `prior_range`, already covered above.)
 
-  **`schism` — fixed `"high"`.** Always `"high"`: a schism is a
+  **`faction_split` — fixed `"high"`.** Always `"high"`: a faction split is a
   civilization-splitting event structurally, not a continuous quantity —
   there is nothing to scale a magnitude against (the `value` field is the
   seceding cluster's agent count, not a bound the record broke).

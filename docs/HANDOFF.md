@@ -144,7 +144,7 @@ uv run python scripts/path1_smoke.py
 uv run python scripts/peer_model_smoke.py   # if Theory of Mind touched
 uv run python scripts/testament_smoke.py    # if Testament touched
 uv run python scripts/contract_smoke.py     # if Contracts/escrow touched
-uv run python scripts/schism_smoke.py       # if Schism storage touched
+uv run python scripts/faction_split_smoke.py # if Faction Split storage touched
 uv run python scripts/god_mode_smoke.py    # if God mode surface touched
 ```
 

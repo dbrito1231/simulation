@@ -232,7 +232,7 @@ const DIVINE_FEATURES = {
     title: "Anomaly",
     sub: "Statistical anomalies detected in village metrics.",
     guide: [
-      "Range breaks, new rule kinds, and schisms detected from this run's benchmark metrics.",
+      "Range breaks, new rule kinds, and faction splits detected from this run's benchmark metrics.",
       "Read-only — this view never changes the village and is not a divine intervention.",
       "Available even without a god token; the sidebar's Anomaly radar panel shows the same data.",
       "Hidden automatically if the server's ANOMALY_RADAR_ENABLED flag is off.",

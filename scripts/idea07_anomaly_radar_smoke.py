@@ -2,7 +2,7 @@
 docs/plans/idea-07-anomaly-radar/plan.md).
 
 Covers the pure `compute_anomalies()` reader (range_break, new_rule_kind,
-schism, and no-anomaly-on-first-sample) against synthetic benchmarks.jsonl
+faction_split, and no-anomaly-on-first-sample) against synthetic benchmarks.jsonl
 content, plus the real `GET /anomalies` route (server.app.test_client())
 flag-on and flag-off shapes, same pattern as
 scripts/_god_mode_smoke/compiler_http.py. No Ollama.
@@ -99,27 +99,27 @@ def test_new_rule_kind_first_occurrence_only():
           "always \"low\" severity")
 
 
-def test_schism_reported_every_time():
+def test_faction_split_reported_every_time():
     tmpdir = tempfile.mkdtemp()
     path = str(Path(tmpdir) / "benchmarks.jsonl")
     records = [
-        _benchmark_record("schism", 3, 150, {"parent": "village", "child": "village_2",
+        _benchmark_record("faction_split", 3, 150, {"parent": "village", "child": "village_2",
                                               "belief": "b1", "rule": "r1"}),
-        _benchmark_record("schism", 2, 500, {"parent": "village_2", "child": "village_3",
+        _benchmark_record("faction_split", 2, 500, {"parent": "village_2", "child": "village_3",
                                               "belief": "b2", "rule": "r2"}),
     ]
     _write_benchmark_lines(path, records)
     anomalies = compute_anomalies(path)
-    schisms = [a for a in anomalies if a["kind"] == "schism"]
-    assert_true(len(schisms) == 2, f"expected every schism record reported, got {schisms}")
-    assert_true(schisms[0]["value"] == 3 and schisms[0]["timestamp"] == 150, schisms[0])
-    assert_true(schisms[0]["detail"] == {"parent": "village", "child": "village_2",
-                                          "belief": "b1", "rule": "r1"}, schisms[0])
-    assert_true(schisms[1]["value"] == 2 and schisms[1]["timestamp"] == 500, schisms[1])
-    assert_true(all(a["metric"] == "schism" for a in schisms), schisms)
-    assert_true(all(a["severity"] == "high" for a in schisms),
-                f"schism must use the fixed \"high\" severity, got {schisms}")
-    print("  OK schism reports every metric:\"schism\" record, unconditionally, "
+    faction_splits = [a for a in anomalies if a["kind"] == "faction_split"]
+    assert_true(len(faction_splits) == 2, f"expected every faction_split record reported, got {faction_splits}")
+    assert_true(faction_splits[0]["value"] == 3 and faction_splits[0]["timestamp"] == 150, faction_splits[0])
+    assert_true(faction_splits[0]["detail"] == {"parent": "village", "child": "village_2",
+                                          "belief": "b1", "rule": "r1"}, faction_splits[0])
+    assert_true(faction_splits[1]["value"] == 2 and faction_splits[1]["timestamp"] == 500, faction_splits[1])
+    assert_true(all(a["metric"] == "faction_split" for a in faction_splits), faction_splits)
+    assert_true(all(a["severity"] == "high" for a in faction_splits),
+                f"faction_split must use the fixed \"high\" severity, got {faction_splits}")
+    print("  OK faction_split reports every metric:\"faction_split\" record, unconditionally, "
           "always \"high\" severity")
 
 
@@ -209,10 +209,10 @@ def test_non_benchmark_and_malformed_lines_ignored():
         fh.write("not json at all\n")
         fh.write(json.dumps({"type": "activity", "message": "irrelevant"}) + "\n")
         fh.write("\n")
-        fh.write(json.dumps(_benchmark_record("schism", 1, 10, {"parent": "a", "child": "b",
+        fh.write(json.dumps(_benchmark_record("faction_split", 1, 10, {"parent": "a", "child": "b",
                                                                   "belief": "x", "rule": "y"})) + "\n")
     anomalies = compute_anomalies(path)
-    assert_true(len(anomalies) == 1 and anomalies[0]["kind"] == "schism", anomalies)
+    assert_true(len(anomalies) == 1 and anomalies[0]["kind"] == "faction_split", anomalies)
     print("  OK malformed lines and non-benchmark records are skipped without raising")
 
 
@@ -239,7 +239,7 @@ def run_http_tests():
 
         # Flag-on: real route reads the live session_logger's benchmarks.jsonl.
         se.ANOMALY_RADAR_ENABLED = True
-        server.session_logger.log_benchmark("schism", 4, server.engine.frameTick,
+        server.session_logger.log_benchmark("faction_split", 4, server.engine.frameTick,
                                             {"parent": "village", "child": "village_http_smoke",
                                              "belief": "b_http", "rule": "r_http"})
         server.session_logger.flush_benchmarks()
@@ -247,11 +247,11 @@ def run_http_tests():
         assert_true(resp.status_code == 200, resp.status_code)
         body = resp.get_json()
         assert_true(body["ok"] is True and body["enabled"] is True, body)
-        schism_entries = [a for a in body["anomalies"] if a["kind"] == "schism"
+        faction_split_entries = [a for a in body["anomalies"] if a["kind"] == "faction_split"
                           and a.get("detail", {}).get("child") == "village_http_smoke"]
-        assert_true(schism_entries, f"expected the just-flushed schism record via HTTP, got {body}")
+        assert_true(faction_split_entries, f"expected the just-flushed faction_split record via HTTP, got {body}")
         print("  OK GET /anomalies with the flag on reads the live session_logger's "
-              "benchmarks.jsonl and reports a freshly flushed schism record")
+              "benchmarks.jsonl and reports a freshly flushed faction_split record")
     finally:
         se.ANOMALY_RADAR_ENABLED = old_flag
 
@@ -260,7 +260,7 @@ def main():
     print("idea07_anomaly_radar_smoke")
     test_range_break_max_and_min()
     test_new_rule_kind_first_occurrence_only()
-    test_schism_reported_every_time()
+    test_faction_split_reported_every_time()
     test_range_break_allowlist_per_metric_independent_tracking()
     test_range_break_non_allowlisted_metric_never_fires()
     test_range_break_severity_all_tiers_reachable()
