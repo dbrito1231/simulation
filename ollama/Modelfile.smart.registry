@@ -1,0 +1,27 @@
+# Modelfile.smart.registry -- portable fallback source for sim-smart
+# (MODEL_SMART)
+#
+# Modelfile.smart's `FROM` line points at an absolute path on the original
+# author's machine (a GGUF cached there by a now-retired LM Studio install).
+# That path does not exist on any other machine, so `ollama create sim-smart
+# -f ollama/Modelfile.smart` fails everywhere else. This file is the portable
+# fallback: `FROM qwen3.5:9b` pulls the same model family from the Ollama
+# registry instead of a local file (verified reachable: `qwen3.5:9b` returns
+# HTTP 200 from https://registry.ollama.ai/v2/library/qwen3.5/manifests/9b).
+#
+# `ollama/Modelfile.smart` (the local GGUF) remains the PREFERRED source on
+# the author's machine -- it avoids a ~5.2 GB registry download and was
+# already verified to import cleanly. `scripts/ollama_setup.py` only falls
+# back to this file when the local GGUF path from Modelfile.smart is not
+# present on disk (see that script's smart-model source selection).
+#
+# PARAMETER lines copied verbatim from ollama/Modelfile.smart -- keep the two
+# files' PARAMETER blocks in sync if either changes.
+
+FROM qwen3.5:9b
+
+PARAMETER num_ctx 20480
+PARAMETER temperature 0.4
+PARAMETER top_p 0.8
+PARAMETER top_k 20
+PARAMETER min_p 0
