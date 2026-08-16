@@ -324,6 +324,7 @@ class _WildlifeMixin:
             "alive": True,
             "respawnAt": None,
             "migrateDest": None,
+            "behaviorState": "wander",
         }
 
     def _normalize_wildlife_records(self):
@@ -349,6 +350,7 @@ class _WildlifeMixin:
             cre.setdefault("alive", True)
             cre.setdefault("respawnAt", None)
             cre.setdefault("waypoints", [])
+            cre.setdefault("behaviorState", "wander")
             max_hp = int(cre.get("maxHp") or WILDLIFE_MAX_HP.get(kind, 1))
             cre["maxHp"] = max_hp
             cre.setdefault("hp", max_hp)
@@ -441,9 +443,74 @@ class _WildlifeMixin:
         creature["targetX"] = tx
         creature["targetY"] = ty
         creature["waypoints"] = []
+        if WILDLIFE_BEHAVIOR_ENABLED:
+            creature["behaviorState"] = "flee"
+
+    # --- WILDLIFE_BEHAVIOR_ENABLED: deterministic per-creature state machine
+    # (graze/wander/flee/rest + loose herding), layered on the motion above.
+    # Off leaves _move_wildlife byte-identical to the pre-flag code path. ---
+
+    def _wildlife_resolve_behavior_state(self, cre, kind, fleeing):
+        """Resolve this tick's behaviorState. Returns True if the creature
+        should skip movement entirely this tick (rest, or a grazing pause).
+        Flee always wins over graze/rest (checked first, via `fleeing`)."""
+        if fleeing:
+            cre["behaviorState"] = "flee"
+            return False
+        if cre.get("migrateDest"):
+            cre["behaviorState"] = "wander"
+            return False
+        if kind in WILDLIFE_LAND_KINDS:
+            if self._is_night():
+                cre["behaviorState"] = "rest"
+                return True
+            cre["behaviorState"] = "graze"
+            return random.random() < WILDLIFE_GRAZE_PAUSE_CHANCE
+        cre["behaviorState"] = "wander"
+        return False
+
+    @staticmethod
+    def _wildlife_effective_speed(cre, base_speed):
+        if cre.get("behaviorState") == "graze":
+            return base_speed * WILDLIFE_GRAZE_SPEED_MULT
+        return base_speed
+
+    def _wildlife_herd_nudge(self, cre):
+        """Mild attraction toward the nearest living same-kind creature within
+        WILDLIFE_HERD_RADIUS. Capped magnitude (WILDLIFE_HERD_PULL) and
+        re-clamped to habitat, so it never overrides flee/rest and never
+        leaves the habitat rect."""
+        kind = cre.get("kind")
+        if kind not in WILDLIFE_FLOCK_KINDS:
+            return
+        did = cre.get("districtId")
+        nearest, nearest_d = None, WILDLIFE_HERD_RADIUS + 1
+        for other in (self.civilization.get("wildlife") or []):
+            if other is cre or not other.get("alive"):
+                continue
+            if other.get("kind") != kind or other.get("districtId") != did:
+                continue
+            dd = _dist(cre["x"], cre["y"], other["x"], other["y"])
+            if dd < nearest_d:
+                nearest_d, nearest = dd, other
+        if nearest is None:
+            return
+        dx = nearest["x"] - cre["targetX"]
+        dy = nearest["y"] - cre["targetY"]
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist <= 0:
+            return
+        pull = min(WILDLIFE_HERD_PULL, dist)
+        cre["targetX"] += (dx / dist) * pull
+        cre["targetY"] += (dy / dist) * pull
+        if did and kind:
+            cre["targetX"], cre["targetY"] = self._wildlife_clamp_pos(
+                did, kind, cre["targetX"], cre["targetY"])
 
     def _move_wildlife(self):
-        """Every-tick fauna motion: wander, flee, follow migration waypoints."""
+        """Every-tick fauna motion: wander, flee, follow migration waypoints.
+        WILDLIFE_BEHAVIOR_ENABLED layers graze/rest/herding on top; off, this
+        is byte-identical to the pre-flag code."""
         if not WILDLIFE_ENABLED:
             return
         fauna = self.civilization.get("wildlife") or []
@@ -455,6 +522,7 @@ class _WildlifeMixin:
                 continue
             kind = cre.get("kind")
             speed = WILDLIFE_SPEED.get(kind, 2.0) * MOVE_SCALE
+            fleeing = False
             # Flee if a living agent is within radius (skip while mid-migration
             # along roads so long-range travel isn't constantly cancelled).
             if not cre.get("migrateDest") and living_agents:
@@ -466,6 +534,17 @@ class _WildlifeMixin:
                         nearest_d, nearest = dd, a
                 if nearest is not None and nearest_d <= WILDLIFE_FLEE_RADIUS:
                     self._wildlife_force_flee(cre, nearest["x"], nearest["y"])
+                    fleeing = True
+            if WILDLIFE_BEHAVIOR_ENABLED:
+                skip_move = self._wildlife_resolve_behavior_state(cre, kind, fleeing)
+                speed = self._wildlife_effective_speed(cre, speed)
+                if not skip_move and cre.get("behaviorState") in ("graze", "wander"):
+                    self._wildlife_herd_nudge(cre)
+                if skip_move:
+                    if not cre.get("migrateDest") and cre.get("districtId") and kind:
+                        cre["x"], cre["y"] = self._wildlife_clamp_pos(
+                            cre["districtId"], kind, cre["x"], cre["y"])
+                    continue
             dx = cre["targetX"] - cre["x"]
             dy = cre["targetY"] - cre["y"]
             dist = math.sqrt(dx * dx + dy * dy)

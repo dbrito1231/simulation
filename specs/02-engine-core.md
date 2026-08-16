@@ -1130,7 +1130,10 @@ Server-authoritative fauna, distinct from Path-1 `_tick_wildlife` pressure
 
 **State.** `civilization["wildlife"]` list under engine lock, persisted
 (cold-start + restore). Fields: `id`, `kind`, `districtId`, `x`, `y`,
-`targetX`/`targetY`, optional `waypoints`, `hp`, `maxHp`, `alive`, `respawnAt`.
+`targetX`/`targetY`, optional `waypoints`, `hp`, `maxHp`, `alive`, `respawnAt`,
+`behaviorState` (see below; defaults to `"wander"` — `_make_wildlife_creature`
+sets it on spawn, `_normalize_wildlife_records` backfills it via `setdefault`
+on restore for saves predating this field).
 `maxHp` from `WILDLIFE_MAX_HP[kind]` (low ≈1–2 hits; mid ≈3–4; high
 `boar`/`seal` ≈5–6; `bee` not combat target). Kind pools/yields:
 [08-systems-economy.md](08-systems-economy.md); caps `WILDLIFE_STAGE_COUNT` /
@@ -1149,6 +1152,40 @@ move). In-district idle wander via simple steering at `WILDLIFE_SPEED[kind]`
 (no road required). When an agent is within `WILDLIFE_FLEE_RADIUS`, or after
 a combat hit, retarget away (flee). Creatures with migration / long-range
 waypoints follow those waypoints at the same step logic.
+
+**Behavior state machine (`WILDLIFE_BEHAVIOR_ENABLED`, default True).**
+Layered inside the same `_move_wildlife()` call — no new tick system, timer,
+or thread. Off reverts `_move_wildlife()` byte-identical to the flag's
+pre-existing wander/flee/migrate code path (the new branches are gated
+behind a single `if WILDLIFE_BEHAVIOR_ENABLED:` block; `_wildlife_force_flee`
+only writes `behaviorState` when the flag is on). Per-creature
+`behaviorState` is one of:
+
+- **`flee`** — always wins. Resolved first each tick from the same
+  proximity check as before (agent within `WILDLIFE_FLEE_RADIUS`, or a
+  combat hit via `_apply_hunt_damage` → `_wildlife_force_flee`); overrides
+  graze/rest/wander unconditionally.
+- **`rest`** — `WILDLIFE_LAND_KINDS` only (forest/farm pool kinds minus the
+  decorative `bee`), when `self._is_night()` is true (existing time-of-day
+  source — [Time model](#time-model), `PRESSURE_LOOP_ENABLED`-gated). Halts
+  movement entirely for the tick.
+- **`graze`** — `WILDLIFE_LAND_KINDS` by day: slow drift at
+  `WILDLIFE_GRAZE_SPEED_MULT` (0.4×) of normal speed, with a
+  `WILDLIFE_GRAZE_PAUSE_CHANCE` (0.4) per-tick chance of holding still
+  (seeded `random.random()`, same global RNG the rest of the wildlife
+  system already uses — no fresh `random` import, deterministic under
+  `DETERMINISM_PINNING`).
+- **`wander`** — default for beach-pool kinds (`fish`, `crab`, `gull`,
+  `turtle`, `seal`) and for any creature mid-migration; identical motion to
+  the pre-existing behavior.
+
+**Loose herding (`WILDLIFE_FLOCK_KINDS`).** While in `graze`/`wander` (never
+`flee`/`rest`), flock kinds (`bird`, `deer`, `cow`, `rabbit`, `chicken`,
+`fish`, `gull`) nudge their current target toward the nearest living
+same-kind creature in the same district within `WILDLIFE_HERD_RADIUS` (140px),
+capped at `WILDLIFE_HERD_PULL` (6px) per tick and re-clamped to the habitat
+rect (`_wildlife_clamp_pos`) — so herding can never leave habitat or override
+an active flee.
 
 **Wildlife stage target (`_wildlife_stage_for_district` /
 `_wildlife_stage_target`).** Maps district stock health to spawn cap via

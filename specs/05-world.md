@@ -301,7 +301,7 @@ This is **not** Path-1's `_tick_wildlife` forest-attack pressure event
 (gated by `PRESSURE_LOOP_ENABLED` — [10-path1.md](10-path1.md)); the names
 are adjacent but the systems are unrelated.
 
-Full tick/combat/migration/god-kind detail:
+Full tick/combat/migration/god-kind/behavior-state-machine detail:
 [02-engine-core.md](02-engine-core.md#huntable-wildlife-wildlife_enabled).
 Yield table and `meat` edible:
 [08-systems-economy.md](08-systems-economy.md#huntable-wildlife-yields-wildlife_enabled).
