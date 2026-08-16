@@ -125,7 +125,7 @@ lifecycle gate (~10 s at 30/s).
   exception (next `RULES_TICK_FRAMES` pass). Phase machine:
   [09-systems-society.md](09-systems-society.md). Council turns replace the
   selected agent's ordinary think turn — no extra worker-pool slot.
-- `_ensure_succession_election()` (and, under `SCHISM_ENABLED`,
+- `_ensure_succession_election()` (and, under `FACTION_SPLIT_ENABLED`,
   `_ensure_settlement_succession_elections()`) runs on this same
   `RULES_TICK_FRAMES` cadence whenever `LIFECYCLE_ENABLED`, so it repairs
   malformed leaderless/succession state continuously from server startup, not
@@ -415,12 +415,12 @@ orphan `ocean_N` districts that lack an edge-adjacent coastal pair (starter
 wildlife/road gates, then validates districts — see
 [05-world.md](05-world.md#restore-migration-inland-founded-beaches).
 
-**Schism storage migration (`SCHISM_ENABLED`):** when the flag is on at load,
+**Faction split storage migration (`FACTION_SPLIT_ENABLED`):** when the flag is on at load,
 `restore_state()` wraps legacy flat `rules` / `pendingRules` / `constitution` /
 compiled governance maps and `beliefRegistry` / `memeTexts` under the primary
 `"home"` settlement id before `_rebuild_settlement_governance` runs per
 bucket. Flag-off restore skips this entirely — see
-[09-systems-society.md](09-systems-society.md#schism_enabled).
+[09-systems-society.md](09-systems-society.md#faction_split_enabled).
 
 Daily Council transcript persistence mirrors `memory`: authoritative in-RAM
 `council_transcript_rows`; append on live event; serialization exports full

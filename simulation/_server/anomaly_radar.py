@@ -73,7 +73,7 @@ def compute_anomalies(benchmark_path):
     - new_rule_kind: the first time a rule kind appears in a
       `rule_kind_diversity` record's `detail.kinds` list that has not
       appeared in any earlier such record this run.
-    - schism: every `metric: "schism"` record, reported as-is.
+    - faction_split: every `metric: "faction_split"` record, reported as-is.
 
     Each entry carries a `severity` field ("high"/"medium"/"low") -- see
     specs/04-http-api.md for the exact per-kind rules.
@@ -130,10 +130,10 @@ def compute_anomalies(benchmark_path):
                                 "kind": "new_rule_kind", "value": kind,
                                 "severity": "low",
                             })
-                elif metric == "schism":
+                elif metric == "faction_split":
                     entry = {
                         "timestamp": timestamp, "metric": metric,
-                        "kind": "schism", "value": value,
+                        "kind": "faction_split", "value": value,
                         "severity": "high",
                     }
                     detail = record.get("detail")

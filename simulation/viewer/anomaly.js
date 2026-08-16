@@ -17,7 +17,7 @@
 // state machine (specs/11-viewer.md).
 // =====================================================================
 const ANOMALY_POLL_MS = 5000;
-const ANOMALY_KIND_ORDER = ["range_break", "new_rule_kind", "schism"];
+const ANOMALY_KIND_ORDER = ["range_break", "new_rule_kind", "faction_split"];
 
 const anomalySectionEl = document.getElementById("anomalySection");
 const anomalyListEl = document.getElementById("anomalyList");
@@ -29,7 +29,7 @@ let lastAnomalyModalKey = null;
 function anomalyKindLabel(kind) {
   if (kind === "range_break") return "Range break";
   if (kind === "new_rule_kind") return "New rule kind";
-  if (kind === "schism") return "Schism";
+  if (kind === "faction_split") return "Faction Split";
   return kind || "anomaly";
 }
 

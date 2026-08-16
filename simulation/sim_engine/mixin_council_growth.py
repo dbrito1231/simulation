@@ -26,7 +26,7 @@ class _CouncilGrowthMixin:
     def _daily_council_living(self, settlement_id=None):
         """Living roster, optionally scoped to one normalized settlement id."""
         living = [a for a in self.agents if a.get("deathFrame") is None]
-        if SCHISM_ENABLED and settlement_id:
+        if FACTION_SPLIT_ENABLED and settlement_id:
             living = [
                 agent for agent in living
                 if self._settlement_id_for_agent(agent) == settlement_id
@@ -38,11 +38,11 @@ class _CouncilGrowthMixin:
         succession = c.get("pendingSuccession")
         succession_sid = (
             (succession.get("settlementId") or self._primary_settlement_id())
-            if SCHISM_ENABLED and isinstance(succession, dict) else None
+            if FACTION_SPLIT_ENABLED and isinstance(succession, dict) else None
         )
         elder = next((a for a in self.agents if a.get("role") == "elder"), None)
         agenda_sid = None
-        if SCHISM_ENABLED:
+        if FACTION_SPLIT_ENABLED:
             agenda_sid = succession_sid or (
                 self._settlement_id_for_agent(elder)
                 if elder else self._primary_settlement_id()
@@ -84,7 +84,7 @@ class _CouncilGrowthMixin:
             {
                 "topic": "rules",
                 "detail": (", ".join(r.get("name") or r.get("id", "rule")
-                                    for r in (self._rules_for_settlement(agenda_sid) if SCHISM_ENABLED
+                                    for r in (self._rules_for_settlement(agenda_sid) if FACTION_SPLIT_ENABLED
                                               else (c.get("rules") or []))[:8])
                            or "No active village rules"),
             },
@@ -237,7 +237,7 @@ class _CouncilGrowthMixin:
         succession = self.civilization.get("pendingSuccession")
         succession_sid = (
             (succession.get("settlementId") or self._primary_settlement_id())
-            if SCHISM_ENABLED and isinstance(succession, dict) else None
+            if FACTION_SPLIT_ENABLED and isinstance(succession, dict) else None
         )
         living = self._daily_council_living(succession_sid)
         succession_emergency = bool(
@@ -298,7 +298,7 @@ class _CouncilGrowthMixin:
             "ballot": succession_ballot,
             "verdict": None,
         }
-        if succession_emergency and SCHISM_ENABLED:
+        if succession_emergency and FACTION_SPLIT_ENABLED:
             council["settlementId"] = succession_sid
         self.civilization["dailyCouncil"] = council
         for seat in seats:
@@ -340,7 +340,7 @@ class _CouncilGrowthMixin:
         """Remove deaths/collapses and seat any newly available living member."""
         settlement_id = (
             council.get("settlementId") or self._primary_settlement_id()
-            if SCHISM_ENABLED and council.get("trigger") == "succession" else None
+            if FACTION_SPLIT_ENABLED and council.get("trigger") == "succession" else None
         )
         living = self._daily_council_living(settlement_id)
         available = [a for a in living if not a.get("incapacitated")]
@@ -596,7 +596,7 @@ class _CouncilGrowthMixin:
         if ballot.get("kind") == "succession":
             settlement_id = (
                 council.get("settlementId") or self._primary_settlement_id()
-                if SCHISM_ENABLED else None
+                if FACTION_SPLIT_ENABLED else None
             )
             candidates = [
                 self._find_agent(name) for name in (ballot.get("candidates") or [])
@@ -700,7 +700,7 @@ class _CouncilGrowthMixin:
             )
         if kind == "rule":
             c = self.civilization
-            elder_sid = self._settlement_id_for_agent(elder) if elder and SCHISM_ENABLED else None
+            elder_sid = self._settlement_id_for_agent(elder) if elder and FACTION_SPLIT_ENABLED else None
             pending = self._find_pending_ballot(ballot.get("id"), voter=elder)
             if pending is None:
                 rules_scan = self._rules_for_settlement(elder_sid) if elder_sid else c.get("rules") or []
@@ -1610,8 +1610,8 @@ class _CouncilGrowthMixin:
     def _maybe_advance_rules(self):
         if not RULES_ENABLED:
             return
-        if SCHISM_ENABLED:
-            self._maybe_trigger_schism()
+        if FACTION_SPLIT_ENABLED:
+            self._maybe_trigger_faction_split()
         c = self.civilization
         if LIFECYCLE_ENABLED and c.get("pendingSuccession"):
             if DAILY_COUNCIL_ENABLED:
@@ -1639,7 +1639,7 @@ class _CouncilGrowthMixin:
                     return
             return
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
-        elder_sid = self._settlement_id_for_agent(elder) if elder and SCHISM_ENABLED else None
+        elder_sid = self._settlement_id_for_agent(elder) if elder and FACTION_SPLIT_ENABLED else None
         pending_list = self._pending_for_settlement(elder_sid) if elder_sid else c["pendingRules"]
         domestic_pending = [
             r for r in pending_list if not self._is_global_governance_ballot(r)
@@ -1647,7 +1647,7 @@ class _CouncilGrowthMixin:
         pending = domestic_pending[0] if domestic_pending else None
         if pending:
             ballot_sid = self._ballot_settlement_id(pending)
-            if SCHISM_ENABLED and not self._is_global_governance_ballot(pending):
+            if FACTION_SPLIT_ENABLED and not self._is_global_governance_ballot(pending):
                 eligible = [a for a in self.agents
                             if not a["incapacitated"] and a["role"] != "elder"
                             and a["name"] not in pending["votes"]
@@ -1676,7 +1676,7 @@ class _CouncilGrowthMixin:
         elder = next((a for a in self.agents if a["role"] == "elder" and not a["incapacitated"]), None)
         if not elder:
             return
-        elder_sid = self._settlement_id_for_agent(elder) if SCHISM_ENABLED else None
+        elder_sid = self._settlement_id_for_agent(elder) if FACTION_SPLIT_ENABLED else None
         # Living-ecosystem Phase 5 (WEATHER_GOVERNANCE_ENABLED): a storm
         # driving an affected district's ecology below STOCK_LOW_RATIO gets a
         # deterministic emergency response -- an auto-proposed "rationing"

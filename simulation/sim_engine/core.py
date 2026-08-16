@@ -595,7 +595,7 @@ class SimEngine(
                 d.setdefault("tiles", {})
                 self._ensure_district_terrain(d)
             self._init_settlements()
-        self._init_schism_storage()
+        self._init_faction_split_storage()
         self._recompute_road_paths()
         self._rebuild_role_maps()
         active_defs = self._select_active_defs(roster_size)

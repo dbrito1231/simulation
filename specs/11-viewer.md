@@ -524,10 +524,10 @@ contract (no simulation/detection logic in the browser). Each entry the
 route returns carries **timestamp** (engine frame tick — also the "jump-to
 frame" reference, see [04-http-api.md](04-http-api.md#anomaly-radar-idea-07)),
 **metric** (one of the 12 `RANGE_BREAK_METRICS` allowlist names for
-`range_break`, `rule_kind_diversity` for `new_rule_kind`, or `schism` for
-`schism`), **kind**, **value**, optional **detail**, and **severity**
+`range_break`, `rule_kind_diversity` for `new_rule_kind`, or `faction_split` for
+`faction_split`), **kind**, **value**, optional **detail**, and **severity**
 (`"high"` / `"medium"` / `"low"` — magnitude-scaled against the prior
-session-lifetime bound for `range_break`, fixed for `schism` (`"high"`) and
+session-lifetime bound for `range_break`, fixed for `faction_split` (`"high"`) and
 `new_rule_kind` (`"low"`) — see
 [04-http-api.md](04-http-api.md#anomaly-radar-idea-07) for the full shape,
 thresholds, and rationale).
@@ -566,7 +566,7 @@ clickable expand/collapse header; clicking it toggles native `<details>`
 open/closed state — no custom toggle JS, matching the existing pattern
 exactly. `#anomalyList` is styled in `css/council.css` alongside
 `#chronicleList`'s rules. Each row renders `kind` (human label: "Range
-break" / "New rule kind" / "Schism"), `metric`, `value`, `severity`, and
+break" / "New rule kind" / "Faction Split"), `metric`, `value`, `severity`, and
 `timestamp` as `frame <n>` — same "newest first" ordering as
 `#chronicleList`. A `JSON.stringify(anomalies)` key-diff (same technique
 `#chronicleList` uses for `world.chronicle`) skips re-render when the list is
@@ -634,7 +634,7 @@ native `<details>/<summary>` pattern as the sidebar panel and
   <summary>Range break (<span class="anomaly-group-count"></span>)</summary>
   <ul></ul>
 </details>
-<!-- one such <details> per kind: range_break, new_rule_kind, schism -->
+<!-- one such <details> per kind: range_break, new_rule_kind, faction_split -->
 ```
 
 Each kind's `<summary>` shows a per-kind count (idea-07b §2 Answer 2,
@@ -647,7 +647,7 @@ grouping field added to the response"). Each row inside a group renders the
 same fields as the sidebar row plus the previously-unused `detail` field
 (idea-07b §2 Answer 2), rendered as a small key/value list when present
 (e.g. `direction: max` for `range_break`, or `parent`/`child`/`belief`/`rule`
-for `schism`) — every dynamic string routed through `escapeHtml()`, same
+for `faction_split`) — every dynamic string routed through `escapeHtml()`, same
 discipline as every other Divine Console render path.
 
 **Flag gating is different from every other flagged panel in this file, and
@@ -692,7 +692,7 @@ opened.
 - `#divineAnomalyGroups` — the container `<div>` inside
   `#divineTab-anomaly` that `renderAnomalyModal()` fills with one
   `.divine-anomaly-group` `<details>` per kind, in the fixed order
-  `range_break`, `new_rule_kind`, `schism` (`ANOMALY_KIND_ORDER` in
+  `range_break`, `new_rule_kind`, `faction_split` (`ANOMALY_KIND_ORDER` in
   `viewer/anomaly.js`) — always all three, even when a kind currently has
   zero entries (rendered as `<li class="civ-label">None detected yet</li>`),
   so the section list itself never reflows as new kinds first appear.

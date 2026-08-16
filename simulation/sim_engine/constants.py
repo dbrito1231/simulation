@@ -365,9 +365,9 @@ __all__ = [
     "ERA_LADDER",
     "ECONOMY_ENABLED",
     "CONTRACTS_ENABLED",
-    "SCHISM_ENABLED",
-    "SCHISM_MIN_CLUSTER",
-    "SCHISM_COOLDOWN_FRAMES",
+    "FACTION_SPLIT_ENABLED",
+    "FACTION_SPLIT_MIN_CLUSTER",
+    "FACTION_SPLIT_COOLDOWN_FRAMES",
     "MAX_OPEN_CONTRACTS",
     "BASE_PRICE",
     "PRICE_SCARCITY_MULT",
@@ -1668,18 +1668,18 @@ HOMELESS_NUDGE_FRAMES = STALL_THRESHOLD * 3  # ~10 min before the nudge repeats
 CONTRACTS_ENABLED = True
 MAX_OPEN_CONTRACTS = 20
 
-# --- Schism / per-settlement governance scoping (SCHISM_ENABLED) ---
-# Settlement-keyed rules/belief registry storage for Feature 4 (Schism).
+# --- Faction split / per-settlement governance scoping (FACTION_SPLIT_ENABLED) ---
+# Settlement-keyed rules/belief registry storage for Feature 4 (Faction Split).
 # When off: flat civilization["rules"] / beliefRegistry remain the only live
 # shape (byte-identical to pre-F4). Default on; keyed maps share object refs
 # with the primary "home" settlement flat fields so single-settlement worlds
 # behave the same until F4.2 read-path threading and F4.3 trigger.
-SCHISM_ENABLED = True
+FACTION_SPLIT_ENABLED = True
 # Minimum mutually-allied agents (all rivals of their settlement elder, sharing
-# one belief that contradicts an enacted domestic rule) before schism fires.
-SCHISM_MIN_CLUSTER = 3
-# Cooldown between schism events (governance ticks share RULES_TICK_FRAMES).
-SCHISM_COOLDOWN_FRAMES = RULE_PROPOSE_COOLDOWN * 6
+# one belief that contradicts an enacted domestic rule) before a faction split fires.
+FACTION_SPLIT_MIN_CLUSTER = 3
+# Cooldown between faction split events (governance ticks share RULES_TICK_FRAMES).
+FACTION_SPLIT_COOLDOWN_FRAMES = RULE_PROPOSE_COOLDOWN * 6
 
 # --- Phase F: population lifecycle & governance depth (LIFECYCLE_ENABLED) ---
 # Aging, birth, natural death (elder included -- succession is the design, not
@@ -1791,7 +1791,7 @@ COUNCIL_DIGEST_PROMPT_ENTRIES = 2    # newest compact Daily Council records per 
 CHRONICLE_MILESTONE_KINDS = frozenset({
     "death", "burial", "election", "belief_founded", "belief_adoption",
     "meme_mutation", "knowledge_preserved", "disaster", "district_founded",
-    "emergency_measure", "schism",
+    "emergency_measure", "faction_split",
     # Sovereign God mode (Phase 2): a proclamation's chronicle entry. Viewer
     # rendering of this kind is out of scope until the later Divine Console
     # phase, but the milestone-set membership itself is data-shape only.
