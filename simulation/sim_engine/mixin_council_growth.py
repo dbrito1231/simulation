@@ -301,6 +301,7 @@ class _CouncilGrowthMixin:
         if succession_emergency and FACTION_SPLIT_ENABLED:
             council["settlementId"] = succession_sid
         self.civilization["dailyCouncil"] = council
+        self._mark_civ_dirty("dailyCouncil")
         for seat in seats:
             agent = self._find_agent(seat["name"])
             if not agent:
@@ -835,6 +836,10 @@ class _CouncilGrowthMixin:
         del digests[DAILY_COUNCIL_DIGEST_CAP:]
         self._prune_daily_council_transcripts()
         self.civilization["dailyCouncil"] = None
+        # Must come after the dailyCouncil=None assignment above so the
+        # delta carries the cleared value (and the newly appended log/
+        # digest entries), not the pre-adjourn council dict.
+        self._mark_civ_dirty("dailyCouncil", "councilLog", "councilDigests")
         self._push_activity(f"Daily Council adjourns: {outcome}")
         return True
 
@@ -844,6 +849,17 @@ class _CouncilGrowthMixin:
         council = self.civilization.get("dailyCouncil")
         if not council:
             return
+        # Delta-protocol chokepoint: while a council is live, re-mark
+        # "dailyCouncil" dirty every tick. _mark_civ_dirty only tracks key
+        # identity, not object contents, and every call path that touches
+        # this session (roster refresh below, phase advance in this
+        # function, and apply_decision's council_speak/council_vote/
+        # council_propose) mutates the SAME council dict in place -- so an
+        # in-place edit is otherwise invisible to snapshot_delta. This one
+        # call is the safety net for all of those; do not remove it as
+        # "redundant" just because individual mutation sites don't mark.
+        # Adjourn below marks its own key set once the session ends.
+        self._mark_civ_dirty("dailyCouncil")
         self._refresh_daily_council_roster(council)
         # A succession session may legitimately convene and continue with a
         # single available survivor (that survivor repairing leaderlessness
@@ -928,6 +944,9 @@ class _CouncilGrowthMixin:
             "needs": dict(bp["needs"]),
             "function_summary": self._function_summary(bp.get("function")),
         })
+        # councilActive.proposals is a live count the snapshot exposes; the
+        # append above mutates the dict in place, so it needs its own mark.
+        self._mark_civ_dirty("councilActive")
         if not decision.get("message"):
             agent["message"] = f"I propose the {bp['name']}!"
             agent["messageTimer"] = 240
@@ -1054,6 +1073,7 @@ class _CouncilGrowthMixin:
         if council:
             self._clear_invention_retry_flags(council)
             c["councilActive"] = None
+        self._mark_civ_dirty("councilLog", "councilActive")
 
     def _maybe_dissolve_council(self):
         """A council whose verdict never lands (elder offline, proposals all
@@ -1092,6 +1112,7 @@ class _CouncilGrowthMixin:
         del log[COUNCIL_LOG_CAP:]
         self._clear_invention_retry_flags(council)
         c["councilActive"] = None
+        self._mark_civ_dirty("councilLog", "councilActive")
         self._push_activity("The invention council disperses without a verdict")
 
     # --- invention-demand backstop (#5.2) ---
@@ -1169,6 +1190,7 @@ class _CouncilGrowthMixin:
                 "proposals": [],
                 "transcript": [],
             }
+            self._mark_civ_dirty("councilActive")
             elder["message"] = f"The council convenes! {', '.join(names)}, bring me your inventions."
             elder["messageTimer"] = 360
             self._append_council_transcript({

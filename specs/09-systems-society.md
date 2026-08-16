@@ -123,6 +123,13 @@ from the client's `/state` poll and never produces or mutates any state the
 ballot/tally logic reads (`mixin_council_growth.py` ballot writers and
 `_resolve_daily_council_ballot` are untouched).
 
+Convene, the per-tick phase advance, and adjourn each mark their affected
+civilization keys dirty via `_mark_civ_dirty` (`dailyCouncil` on convene and
+every tick a session is live; `dailyCouncil`, `councilLog`, and
+`councilDigests` on adjourn) — this is what makes the live council visible to
+the browser's `GET /state?since=` delta polling without a page reload; see
+[04-http-api.md](04-http-api.md#state-delta-protocol).
+
 `_maybe_advance_daily_council()` makes every transition tick-gated and
 deterministic. `DAILY_COUNCIL_DISCUSSION_ROUNDS = 2` bounds round-robin speech;
 `DAILY_COUNCIL_PHASE_TTL_FRAMES = STALL_THRESHOLD * 8` guarantees a stuck phase
