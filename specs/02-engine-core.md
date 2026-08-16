@@ -393,6 +393,17 @@ shutdown.
 `structure_sprites` as v3). v1→v2 migration removed. `setdefault`/flag-gated
 backfill for post-v2 fields still runs on every restore (forward-compat).
 
+**Home settlement back-compat:** a save predating `homeSettlementId`
+(agent field — see [06-agents.md](06-agents.md#home-settlement-homesettlementid))
+gets `a.setdefault("homeSettlementId", None)` in the per-agent backfill
+pass, same discipline as other `setdefault`-only fields; unlike most of
+them, resolving a real value requires `self.civilization` (via
+`_settlement_for_agent`), which isn't assigned yet at that point in
+`restore_state()`. A second pass runs after `self.civilization`/`self.agents`
+are set, resolving every still-`None` value to that agent's current
+physical settlement (`_settlement_for_agent(a)`) — a one-time snapshot, not
+a recurring recompute.
+
 **Lifecycle lineage back-compat (`LIFECYCLE_ENABLED`):** inside the existing
 `if LIFECYCLE_ENABLED:` restore block that already runs
 `a.setdefault("parents", None)` and `a.setdefault("deathFrame", None)`

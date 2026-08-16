@@ -460,6 +460,13 @@ class _PersistenceMixin:
                     a.setdefault("lastRecipeRejection", None)
                     a.setdefault("lastShelterNote", None)
                     a.setdefault("homeStructureId", None)
+                    # Home settlement is a persistent field (Phase: settlement
+                    # residency fix); resolving a sensible default needs
+                    # self.civilization, which isn't assigned yet here, so we
+                    # only stage the field now and resolve None values in the
+                    # post-load pass below (after self.civilization/self.agents
+                    # are set).
+                    a.setdefault("homeSettlementId", None)
                     a.setdefault("lastTradeRejection", None)
                     a.setdefault("lastHomelessNudgeFrame", None)
                     a.setdefault("lastBurialRejection", None)
@@ -608,6 +615,14 @@ class _PersistenceMixin:
                     self._rebuild_custom_rule_modifiers()
                 self.agents = agents
                 self.agent_names = set(a["name"] for a in agents)
+                # One-time snapshot: any agent restored without a persistent
+                # home settlement (pre-fix save) becomes a resident of
+                # wherever they physically are at upgrade time. Must run
+                # after self.civilization/self.agents are assigned --
+                # _settlement_for_agent reads self.civilization["districts"].
+                for a in agents:
+                    if a.get("homeSettlementId") is None:
+                        a["homeSettlementId"] = self._settlement_for_agent(a)
                 self._revert_inland_founded_beaches()
                 self.council_transcript_rows = [
                     dict(row) for row in (data.get("council_transcript") or [])

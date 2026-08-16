@@ -48,7 +48,24 @@ class _GovernanceCultureMixin:
         return "home"
 
     def _settlement_id_for_agent(self, agent):
-        return self._settlement_for_agent(agent)
+        """Governance/culture-facing residency alias: an agent's PERSISTENT
+        home settlement (succession candidacy, Daily Council roster/agenda,
+        rules, memes/beliefs, think-payload scoping) -- distinct from
+        `_settlement_for_agent`, which tracks transient physical position
+        (diplomacy borders, caravans, settlement stores, trade). Walking
+        through another settlement's district must not confer residency
+        there for governance purposes."""
+        if agent is None:
+            return self._primary_settlement_id()
+        sid = agent.get("homeSettlementId")
+        if not sid:
+            return self._settlement_for_agent(agent)
+        settlements = self.civilization.get("settlements") or []
+        if any(isinstance(s, dict) and s.get("id") == sid for s in settlements):
+            return sid
+        # Stored id no longer matches a live settlement (removed/renamed):
+        # never return a dangling id.
+        return self._primary_settlement_id()
 
     def _rules_for_settlement(self, sid):
         c = self.civilization
@@ -476,6 +493,11 @@ class _GovernanceCultureMixin:
         cy = (bounds.get("y1", 0) + bounds.get("y2", 0)) / 2
         for agent in agents:
             agent["currentDistrict"] = district_id
+            # Faction split is a deliberate secession: unlike incidental
+            # walking between districts, migrated agents' persistent home
+            # settlement genuinely changes, so update it alongside the
+            # physical move.
+            agent["homeSettlementId"] = settlement_id
             if bounds:
                 agent["x"] = cx
                 agent["y"] = cy

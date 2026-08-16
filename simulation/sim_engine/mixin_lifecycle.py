@@ -1287,6 +1287,15 @@ class _LifecycleMixin:
         newborn = self._make_agents([slot])[0]
         newborn["age"] = 0.0
         newborn["parents"] = [parent_a["name"], parent_b["name"]]
+        # Inherit persistent home settlement from a parent (governance
+        # residency, not physical position) rather than _make_agents'
+        # cold-start "home" default, so a newborn to outpost-resident
+        # parents is an outpost resident too.
+        newborn["homeSettlementId"] = (
+            parent_a.get("homeSettlementId")
+            or parent_b.get("homeSettlementId")
+            or self._primary_settlement_id()
+        )
         parent_a.setdefault("children", []).append(newborn["name"])
         parent_b.setdefault("children", []).append(newborn["name"])
         # Low-skill start (#2): a newborn's specialty carries no structure/

@@ -114,7 +114,26 @@ settlement owning every starter district. `_maybe_found_settlement()`
 (tick-gated backstop) founds a second settlement — `"outpost"`, on a
 claimed frontier plot — once `structures ≥ SETTLEMENT_STRUCT_THRESHOLD = 5`
 (non-ruin) and `living ≥ SETTLEMENT_POP_THRESHOLD = 6`; caps at 2
-settlements total.
+settlements total. Founding a settlement does not assign it any residents;
+`homeSettlementId` never changes automatically, so a newly founded outpost
+starts with zero governance-facing residents even once physical border
+detection (`_border_settlement_agent`) treats agents standing in its
+district as physically present there (see the membership split below).
+
+**Physical vs. governance membership:** two settlement lookups exist and
+are deliberately not unified. `_settlement_for_agent(agent)`
+(`mixin_diplomacy.py`) derives from `agent["currentDistrict"]` — an
+agent's transient physical position — and is the source of truth for
+diplomacy borders, caravans, `settlementStores`, and trade.
+`_settlement_id_for_agent(agent)` (`mixin_governance_culture.py`) reads the
+agent's persistent `homeSettlementId`
+([06-agents.md](06-agents.md#home-settlement-homesettlementid)) and is the
+source of truth for succession candidacy, Daily Council roster/agenda,
+domestic rules, and belief/meme registry scope
+([09-systems-society.md](09-systems-society.md#faction_split_enabled)). An
+agent merely passing through another settlement's district is physically
+present there (borders/trade see them) but is never a governance resident
+there (succession/council do not).
 
 **Settlement stores:** `civilization["settlementStores"][settlement_id] =
 {resource_id: qty}` — per-settlement stockpiles distinct from the
@@ -133,6 +152,10 @@ caravan tariffs, and `settlementStores` stay as documented here and in
 [09-systems-society.md](09-systems-society.md#faction_split_enabled). F4.3 adds the
 deterministic faction split trigger, secession via frontier founding, and per-settlement
 elder succession — inter-settlement trade remains treaty/caravan/tariff only.
+`_migrate_agents_to_settlement` (`mixin_governance_culture.py`) is the one deliberate-migration
+path that reassigns `homeSettlementId`
+([06-agents.md](06-agents.md#home-settlement-homesettlementid)): seceding agents' governance
+residency moves to the new child settlement alongside their physical relocation.
 
 **Treaties:** `RULE_KINDS` gains `"treaty"` under this flag (see
 [09-systems-society.md](09-systems-society.md) for the shared propose/vote

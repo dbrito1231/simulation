@@ -119,6 +119,7 @@ an emergent role, so the single elder role remains a seed-only invariant.
 |---|---|
 | Identity | `id`, `name`, `role`, `personality`, `color` |
 | Movement | `x`, `y`, `targetX`, `targetY`, `speed`, `waypoints`, `currentZone`, `currentDistrict` |
+| Residency | `homeSettlementId` — persistent home settlement id (governance-facing residency; see below) |
 | Social | `relationships`, `inbox`, `beliefs`, `votes`, `message`, `messageTimer`, `consecutiveTalks`, `lastSpokeFrame` |
 | Survival | `resources`, `hunger`, `health`, `incapacitated`, `infected` (bool, `RAIDERS_CONTAGION_ENABLED`), `infectionFrame` (int epoch tick when infection started, `RAIDERS_CONTAGION_ENABLED`) |
 | Cognition | `memory` (`{working, shortTerm, longTerm}`), `memoryWiki` (`{relationships, goals, lessons}`, each capped at `WIKI_SECTION_CHAR_CAP`=300 chars — see below), `thinkTimer`, `thinkInterval`, `isThinking`, `pendingThink`, `lastAction`, `lastReasoning`, `persona`, `idleFrames`, `moduleTick`, `modules` (`{perception, social, desire, reflection}` plus `theory_of_mind` when `THEORY_OF_MIND_ENABLED`), `moduleReports` (`{module: {tick, text}}` — persistence-only mirror of the engine's `_piano_module_cache` entry for this agent, written alongside `moduleTick` after every think; never read on the hot path, only rehydrated by `restore_state()`), `peerModel` (`THEORY_OF_MIND_ENABLED` only — `{peerIdStr: {wants, good_at, owes_me, trust, frame}}`, capped by `PEER_MODEL_MAX_PEERS` / `PEER_MODEL_FIELD_CHAR_CAP`, LRU eviction by `frame`), `goal` (kinds include `gather`, `deliver`, `build`, `craft_gather`, `plant_terrain`, `seek_shelter`, `dig_relocate`, `caravan`, `repair`, and **`hunt`** — forced starvation backstop; see [08-systems-economy.md](08-systems-economy.md#starvation-reflex-and-forced-hunt-precedence)), `commitment`, `actionCounts` |
@@ -132,6 +133,36 @@ an emergent role, so the single elder role remains a seed-only invariant.
 Post-build setup (`core.py:374-381`) staggers `thinkInterval = 360 + i*60`
 (elder forced to `240`) and `thinkTimer = i*30` per roster index `i`, and sets each
 agent's initial movement target to its starting district.
+
+### Home settlement (`homeSettlementId`)
+
+`homeSettlementId` is an agent's PERSISTENT residency for governance/culture
+purposes (succession candidacy, Daily Council roster/agenda, rules,
+memes/beliefs, think-payload scoping — see
+[09-systems-society.md](09-systems-society.md) and
+[10-path1.md](10-path1.md)), distinct from `currentDistrict`, which is
+transient physical position. Merely walking through another settlement's
+district does not confer governance residency there.
+
+- **Cold start**: `_make_agents` sets `"home"` for every seed/generated
+  agent — all spawn in Home Village districts, and `"home"` is the
+  `_primary_settlement_id()` convention (`mixin_governance_culture.py`).
+- **Birth**: `_spawn_newborn` (`mixin_lifecycle.py`) overwrites the
+  `_make_agents` default, inheriting a parent's `homeSettlementId` (falls
+  back to `_primary_settlement_id()` if neither parent has one), so a
+  newborn to settlement-B parents is a settlement-B resident, not a
+  Home Village one.
+- **Restore (`restore_state()`, `mixin_persistence.py`)**: agents saved
+  before this field existed get `None` staged during the per-agent backfill
+  pass, then resolved once `self.civilization`/`self.agents` are assigned —
+  each such agent becomes a resident of wherever they physically are
+  (`_settlement_for_agent(a)`) at upgrade time, a one-time snapshot.
+- `_settlement_id_for_agent(agent)` (`mixin_governance_culture.py`) reads
+  this field, falling back to `_settlement_for_agent(agent)` if unset and to
+  `_primary_settlement_id()` if the stored id no longer matches a live
+  settlement (settlement removed/renamed). It never auto-migrates an agent
+  into a newly founded settlement — that assignment is a separate,
+  out-of-scope product decision.
 
 ### Contagion infection fields (`RAIDERS_CONTAGION_ENABLED`)
 

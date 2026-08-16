@@ -311,8 +311,7 @@ def test_child_succession_replaces_normal_council_visibly():
         })
         engine._init_faction_split_settlement_buckets(child_sid)
         child_agents = [a for a in engine.agents if a is not home_elder][:3]
-        for agent in child_agents:
-            agent["currentDistrict"] = child_did
+        engine._migrate_agents_to_settlement(child_agents, child_sid, child_did)
 
         engine._start_succession_election(settlement_id=child_sid)
         pending_rules = [
