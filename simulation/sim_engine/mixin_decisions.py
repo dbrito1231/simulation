@@ -1075,13 +1075,28 @@ class _DecisionsMixin:
                 summary = f"{agent['name']} could not assign that task"
 
         elif action == "change_role":
-            if decision.get("new_role"):
-                agent["role"] = decision["new_role"]
-                summary = f"{agent['name']} became a {decision['new_role']}"
+            new_role = decision.get("new_role")
+            # Registry-membership + single-living-leader guard (mirrors
+            # switch_role below): a role marked "leader": true in roles.json
+            # (currently only elder) can only be reached via succession, never
+            # via a direct decision action, or every agent could self-declare
+            # elder simultaneously.
+            if (new_role and new_role in c["roleRegistry"]
+                    and not c["roleRegistry"].get(new_role, {}).get("leader")):
+                agent["role"] = new_role
+                summary = f"{agent['name']} became a {new_role}"
+            else:
+                summary = f"{agent['name']} kept the {agent['role']} role"
 
         elif action == "switch_role":
             new_role = decision.get("new_role") or decision.get("target")
-            if EMERGENT_ROLES and new_role and new_role in c["roleRegistry"] and new_role != agent["role"]:
+            # Leadership roles (roles.json "leader": true, currently only
+            # elder) are excluded here: the sole living elder is established
+            # only by succession election (see _start_succession_election),
+            # never by an agent's own switch_role decision.
+            if (EMERGENT_ROLES and new_role and new_role in c["roleRegistry"]
+                    and new_role != agent["role"]
+                    and not c["roleRegistry"].get(new_role, {}).get("leader")):
                 old = agent["role"]
                 agent["role"] = new_role
                 agent["assignedTask"] = None

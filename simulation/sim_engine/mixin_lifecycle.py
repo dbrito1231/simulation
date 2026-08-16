@@ -810,6 +810,45 @@ class _LifecycleMixin:
         })
         self._sync_daily_council_turns(council)
 
+    # Seed gather roles (the four with a non-empty "specialty" in
+    # roles.json), in the fixed order demotions rotate through.
+    _SEED_GATHER_ROLES = ("farmer", "fisher", "gatherer", "miner")
+
+    def _collapse_duplicate_elders(self, elders, context=None):
+        """Repair a corrupted state with more than one living role=="elder"
+        agent (e.g. a state.db saved before the switch_role/change_role
+        leader-role guard landed). Deterministic, no randomness: the oldest
+        living elder keeps office (ties broken by ascending agent id, the
+        same tie-break convention used elsewhere for deterministic ordering
+        -- see the burial sort in this file). Every other elder is demoted,
+        round-robin by their position in self.agents, through the seed
+        gather roles (farmer/fisher/gatherer/miner) -- mirroring
+        _next_agent_slot's newborn role assignment, which also excludes
+        "elder" from its role pool. Demoted agents have their assignedTask/
+        idleCycles reset the same way switch_role does. Returns the
+        survivor (or the sole elder, or None if `elders` is empty)."""
+        if not elders:
+            return None
+        if len(elders) == 1:
+            return elders[0]
+        ordered = sorted(elders, key=lambda a: (-(a.get("age") or 0.0), a["id"]))
+        survivor = ordered[0]
+        demoted = ordered[1:]
+        roster_order = {id(a): idx for idx, a in enumerate(self.agents)}
+        demoted.sort(key=lambda a: roster_order.get(id(a), 0))
+        demotions = []
+        for i, demoted_agent in enumerate(demoted):
+            new_role = self._SEED_GATHER_ROLES[i % len(self._SEED_GATHER_ROLES)]
+            demoted_agent["role"] = new_role
+            demoted_agent["assignedTask"] = None
+            demoted_agent["idleCycles"] = 0
+            demotions.append(f"{demoted_agent['name']} to {new_role}")
+        where = f" in {context}" if context else ""
+        self._push_activity(
+            f"Duplicate elders repaired{where}: {survivor['name']} retains office; "
+            + "; ".join(demotions) + ".")
+        return survivor
+
     def _ensure_settlement_succession_elections(self):
         """Per-settlement elder repair when SCHISM_ENABLED (multiple elders allowed)."""
         c = self.civilization
@@ -823,6 +862,13 @@ class _LifecycleMixin:
             sid = entry.get("id")
             if not sid:
                 continue
+            settlement_elders = [
+                agent for agent in self._living_agents()
+                if agent.get("role") == "elder"
+                and self._settlement_id_for_agent(agent) == sid
+            ]
+            if len(settlement_elders) > 1:
+                self._collapse_duplicate_elders(settlement_elders, context=f"settlement {sid}")
             formal_elder = next((
                 agent for agent in self._living_agents()
                 if agent.get("role") == "elder"
@@ -864,6 +910,13 @@ class _LifecycleMixin:
         living role=="elder" needs succession. The validator deliberately
         accepts an expired but otherwise sound election so the existing TTL
         resolver can decide it immediately instead of granting a fresh term.
+
+        Runs continuously (tick-gated, not just on restore), so a state.db
+        saved with more than one living role=="elder" agent -- a shape only
+        possible from before the switch_role/change_role leader-role guard
+        existed -- self-heals the moment the engine ticks: see
+        _collapse_duplicate_elders, called below before this function trusts
+        a single `formal_elder`.
         """
         if not LIFECYCLE_ENABLED:
             return
@@ -880,6 +933,10 @@ class _LifecycleMixin:
         living = self._living_agents()
         if not living:
             return
+
+        elders = [a for a in living if a.get("role") == "elder"]
+        if len(elders) > 1:
+            self._collapse_duplicate_elders(elders)
 
         formal_elder = next((a for a in living if a.get("role") == "elder"), None)
         if formal_elder:
