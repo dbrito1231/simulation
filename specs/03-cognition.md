@@ -840,7 +840,7 @@ surfaces to the agent's next prompt):
 | `sage_review_blueprint` | role must be elder; target must be a pending id; `sage_decision` in approve/deny |
 | `approve_blueprint`/`reject_blueprint` | role must be elder; target must be a pending id |
 | `assign_task` | role must be elder; target must be an idle agent name; message required |
-| `switch_role` | `new_role` (or `target`) must be a key in `ROLES` |
+| `switch_role` | `new_role` (or `target`) must be a key in `ROLES`, and that role's `roles.json` definition must not be `"leader": true` (currently only `elder` — a decision can never self-declare a leadership role; see specs/09 succession) |
 | `offer_contract` | `target` required (agent name or `"open"`); `contract` must pass `validate_contract()` — failures stamp `contract_rejection_note` |
 | `accept_contract` | `target` required (contract id) — failures stamp `contract_rejection_note` |
 | `move_to_district` | promotes `target_district` into `target` if target is empty (the engine only reads `target`) |

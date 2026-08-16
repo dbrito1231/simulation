@@ -1153,7 +1153,15 @@ def normalize_decision(decision, agent_data):
     if action == "switch_role":
         new_role = decision.get("new_role") or decision.get("target")
         known_roles = agent_data.get("known_role_ids") or ROLES
-        if new_role in known_roles:
+        # Leadership roles (roles.json "leader": true, currently only elder)
+        # are rejected here too, mirroring the engine-side guard in
+        # apply_decision: elder is reached only via succession, never a
+        # switch_role decision. Emergent/proposed roles can never carry
+        # "leader" (validate_role's field allow-list excludes it), so this
+        # module-level ROLES lookup (the full roles.json load) is sufficient
+        # without threading a separate leader-role set through agent_data.
+        is_leader_role = bool(ROLES.get(new_role, {}).get("leader"))
+        if new_role in known_roles and not is_leader_role:
             decision["new_role"] = new_role
             decision.pop("blueprint", None)
             return decision

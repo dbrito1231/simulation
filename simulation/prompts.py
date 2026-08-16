@@ -138,6 +138,9 @@ EMERGENT ROLES:
     known project type. Only the elder may approve_role or reject_role with the
     proposal slug as target. Approval makes the role immediately available to
     switch_role; it does not alter the seed roles.json file.
+16c. Elder is exempt from switch_role/change_role — it is filled only by
+    succession when the village becomes leaderless. Any attempt to switch to
+    elder is refused.
 
 COLLECTIVE RULES (voting):
 17. Any agent may propose_rule to suggest a village-wide rule (include a "rule"

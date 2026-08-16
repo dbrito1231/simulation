@@ -125,6 +125,16 @@ lifecycle gate (~10 s at 30/s).
   exception (next `RULES_TICK_FRAMES` pass). Phase machine:
   [09-systems-society.md](09-systems-society.md). Council turns replace the
   selected agent's ordinary think turn — no extra worker-pool slot.
+- `_ensure_succession_election()` (and, under `SCHISM_ENABLED`,
+  `_ensure_settlement_succession_elections()`) runs on this same
+  `RULES_TICK_FRAMES` cadence whenever `LIFECYCLE_ENABLED`, so it repairs
+  malformed leaderless/succession state continuously from server startup, not
+  just once at `restore_state()`. That includes a `state.db` restored with
+  more than one living `role=="elder"` agent (possible from a save predating
+  the `switch_role`/`change_role` leader-role guard): the repair collapses it
+  to a single elder every tick pass it runs, deterministically, until the
+  invariant holds — mechanics (survivor/demotion rules) in
+  [09-systems-society.md](09-systems-society.md#succession-lifecycle_enabled-governance-slice).
 
 ### Chronicle saga (`CHRONICLE_SAGA_ENABLED`) {#chronicle-saga-chronicle_saga_enabled}
 

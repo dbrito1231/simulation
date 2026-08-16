@@ -526,6 +526,32 @@ cancelled so a late ballot cannot create two elders. Expired but otherwise
 valid elections are not restarted: the Daily Council phase/session TTL owns
 completion while enabled, and only the flag-off legacy path uses the direct
 election-deadline tiebreak.
+
+The single-living-elder-per-settlement invariant this section establishes is
+guarded outside succession too: `roles.json` marks `elder` (and any future
+role) `"leader": true`, and both the `switch_role` and `change_role` decision
+actions (see [07-actions.md](07-actions.md)) refuse any `new_role` for which
+that flag is set. Only `_enact_succession_winner()` may assign a leader role,
+so no agent can mint a second elder via an ordinary decision turn.
+
+Because that guard postdates the engine, a `state.db` saved before it existed
+can still hold more than one living agent with role `"elder"` at once (not
+just a stray ballot). `_ensure_succession_election()` actively collapses this
+on every `RULES_TICK_FRAMES` pass, before it trusts a single `formal_elder`:
+it gathers every living `"elder"`, and if there is more than one, the oldest
+by `age` keeps office (ties broken by ascending agent `id`, the same
+tie-break convention used elsewhere for deterministic ordering, e.g. the
+burial queue). Every other living elder is demoted, round-robin by their
+position in `self.agents`, through the seed gather roles `farmer`, `fisher`,
+`gatherer`, `miner` (the roles with a non-empty `roles.json` `specialty`) —
+mirroring the role pool newborn villagers draw from, which also excludes
+`elder`. Demoted agents have `assignedTask` cleared and `idleCycles` reset,
+same as `switch_role`, and the repair is logged to `activity.jsonl` naming
+the survivor and every demotion. The collapse is deterministic (no RNG, no
+wall-clock) so repeated ticks against the same corrupted save produce the
+same result; once at most one living elder remains, the rest of this
+section's election-repair logic proceeds unchanged.
+
 When schism support delegates this repair per settlement, the same recovery
 pass must also project the resulting `pendingSuccession` into the visible
 emergency Daily Council; delegation must not leave a valid election waiting
@@ -736,7 +762,11 @@ interaction remains treaty / caravan / tariff only (no war).
 simultaneous elders** when `SCHISM_ENABLED` — it only blocks a second elder in
 the **same** settlement. `_ensure_succession_election` delegates to
 `_ensure_settlement_succession_elections` so a home elder does not cancel a
-child settlement's pending election.
+child settlement's pending election. That same delegate applies the collapse
+described above per settlement (grouping living elders by
+`_settlement_id_for_agent`), so a corrupted save with more than one living
+elder **within the same settlement** self-heals to its oldest elder without
+touching a valid elder holding office in a different settlement.
 
 **Voting hardening:** `_vote_on_rule` rejects domestic ballots when the voter's
 settlement differs from the ballot's `settlementId` (global treaty/succession
