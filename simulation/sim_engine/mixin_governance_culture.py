@@ -353,15 +353,19 @@ class _GovernanceCultureMixin:
             return True
         return False
 
-    def _cluster_mutual_allies(self, agents):
+    def _cluster_is_cohesive(self, agents):
+        # Relationships in practice are sparse and one-directional (see
+        # _nudge_ally), so demanding reciprocated ally ties is a mismatch
+        # with the data model. Instead, a cluster is cohesive as long as no
+        # member considers another member a rival (checked both ways).
         if len(agents) < 2:
             return True
         for i, left in enumerate(agents):
             rels = left.get("relationships") or {}
             for right in agents[i + 1:]:
-                if rels.get(right["name"]) != "ally":
+                if rels.get(right["name"]) == "rival":
                     return False
-                if (right.get("relationships") or {}).get(left["name"]) != "ally":
+                if (right.get("relationships") or {}).get(left["name"]) == "rival":
                     return False
         return True
 
@@ -404,11 +408,12 @@ class _GovernanceCultureMixin:
                 cluster = [
                     a for a in roster
                     if self._belief_contradicts_enacted_rule(a, belief_id, rule)
-                    and self._agent_rivals_elder(a, elder)
                 ]
                 if len(cluster) < FACTION_SPLIT_MIN_CLUSTER:
                     continue
-                if self._cluster_mutual_allies(cluster):
+                if not any(self._agent_rivals_elder(a, elder) for a in cluster):
+                    continue
+                if self._cluster_is_cohesive(cluster):
                     return {
                         "agents": cluster,
                         "belief_id": belief_id,

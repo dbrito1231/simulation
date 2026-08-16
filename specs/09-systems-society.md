@@ -761,8 +761,11 @@ member such that:
    `priority` with `value == fish`), **or** `b` has a non-empty affinity list and
    `r.kind` is a governance kind (`resource_tax`, `custom`, `priority`, and when
    `LIFECYCLE_ENABLED` also `harvest_quota`, `rationing`) outside that affinity.
-2. Every cluster member holds `b`, has `relationships[E.name] == "rival"`, and
-   pairwise mutual `ally` ties with every other member.
+2. Every cluster member holds `b`; **at least one** member has
+   `relationships[E.name] == "rival"`; and the cluster is internally cohesive
+   (`_cluster_is_cohesive`: no member considers another member a `rival`, checked
+   both directions — relationships are sparse and one-directional in practice, so
+   reciprocated mutual `ally` ties are not required).
 3. `len(cluster) >= FACTION_SPLIT_MIN_CLUSTER` (default **3**).
 
 First matching `(r, b)` in sorted rule-id / belief-id order wins.
