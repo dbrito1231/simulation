@@ -109,7 +109,27 @@ palette/season key.
   `fillRectWithTile` / `fillRectWithTiles` (sprites/tiles.js): each 16×16 tile grid
   is rasterized once, then repeated natively; `fillRectWithTiles` pattern-fills
   the whole rect with the base tile and overdrawing `PATH_CELLS` only for
-  road cells. `scheduleTerrainCacheBuild` runs the build synchronously on
+  road cells. Each road cell's path-blend tile is orientation-aware:
+  `pathCellVariant(tx, ty)` checks which of its 4 neighbouring cells
+  (`tx±TILE,ty`/`tx,ty±TILE`) are also in `PATH_CELLS` and picks one of 11
+  variants (`vertical`, `horizontal`, `cross`, the 4 elbows `ne`/`nw`/`se`/`sw`,
+  the 4 T-junctions `tUp`/`tDown`/`tLeft`/`tRight`) so horizontal road legs
+  render as a continuous strip instead of the disconnected vertical tick
+  marks a single fixed vertical-stripe tile produced. `makePathBlendTile`
+  builds each variant from the union of "arms" (half-strips reaching from
+  the tile's always-path 4×4 centre toward each connected side); a straight
+  run's two opposite arms overlap into the same full-width band as before,
+  so terrain with zero road edges renders byte-identically to the prior
+  single-variant tile. Variants are memoized per (district kind, variant)
+  pair in `PATH_BLEND_CACHE`/`pathBlendTile`, built lazily on first use and
+  reused for the page's lifetime — the neighbour lookups run once per
+  terrain-cache build, not per frame. Because `markPathRect` (sprites/core.js)
+  steps by `TILE` from an edge-specific origin, cells from two different road
+  edges usually don't share exact grid keys at their junction; `pathCellVariant`
+  then falls back to a straight `vertical`/`horizontal` band for that cell,
+  which still reads correctly since the two edges' overlapping bands already
+  form the visual corner — no cross-edge grid snapping is attempted.
+  `scheduleTerrainCacheBuild` runs the build synchronously on
   the main thread (~10 ms after pattern-fill); there is no
   `requestIdleCallback` deferral. The `#worldLoading` overlay covers the build
   and is hidden in the same turn via `hideWorldLoading()`. The cache is
@@ -808,7 +828,7 @@ earlier one, never the reverse.
 | Order | File | Contents |
 |---|---|---|
 | 1 | `sprites/core.js` | Shared mutable state (`spriteSeason`, `seasonalAgentAccentsEnabled`), pixel-grid primitives (`tileFromStrings`, `drawPixelGrid`, `drawPixelSprite`), tile-source canvas cache, `drawSnowCap`/`drawWinterGroundAccent`, road-edge `PATH_CELLS` plumbing |
-| 2 | `sprites/tiles.js` | Color palette `C`, path-blend tiles, `fillRectWithTile(s)`, all terrain `TILE_*` grids, ocean tile builder |
+| 2 | `sprites/tiles.js` | Color palette `C`, orientation-aware path-blend tiles (`makePathBlendTile`/`pathCellVariant`/`pathBlendTile`), `fillRectWithTile(s)`, all terrain `TILE_*` grids, ocean tile builder |
 | 3 | `sprites/props.js` | Starter-world decor: trees (`TREE_GRIDS`, `drawTree`/`drawTreeStump`), decorative house/market-stall/cave-entrance, crops, fences, dock, well, rocks |
 | 4 | `sprites/structures.js` | Agent-built `STRUCTURE_GRIDS`, `getStructureGrid` resolution, wear/ruin rendering, forge smoke, weather-particle and activity-dust helpers |
 | 5 | `sprites/agents.js` | Role-keyed 24×32 generator (`ROLE_SPRITE_DEFS`, `_roleSpriteCache`), legacy name grids (`AGENT_SPRITES`), accessories, `tombstoneSprite`, `BELIEF_TINTS`, `drawAgentSprite` |
