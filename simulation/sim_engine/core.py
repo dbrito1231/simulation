@@ -309,6 +309,13 @@ class SimEngine(
                 "resources": {"food": 2, "wood": 0, "gold": 0, "coin": 0},
                 "relationships": {}, "inbox": [], "beliefs": set(), "votes": {},
                 "currentZone": district["kind"], "currentDistrict": d["zone"],
+                # Persistent home settlement (governance/succession/council
+                # residency), distinct from currentDistrict's transient
+                # physical position. All seed agents spawn in Home Village
+                # districts, and "home" is the _primary_settlement_id()
+                # convention -- district records carry no settlementId until
+                # _init_settlements() runs, so this can't be derived yet.
+                "homeSettlementId": "home",
                 "waypoints": [], "message": None, "messageTimer": 0,
                 "thinkTimer": 0, "thinkInterval": 300, "isThinking": False,
                 # Sid-parity Phase 6: frame of this agent's last successfully

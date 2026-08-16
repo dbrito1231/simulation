@@ -48,7 +48,24 @@ class _GovernanceCultureMixin:
         return "home"
 
     def _settlement_id_for_agent(self, agent):
-        return self._settlement_for_agent(agent)
+        """Governance/culture-facing residency alias: an agent's PERSISTENT
+        home settlement (succession candidacy, Daily Council roster/agenda,
+        rules, memes/beliefs, think-payload scoping) -- distinct from
+        `_settlement_for_agent`, which tracks transient physical position
+        (diplomacy borders, caravans, settlement stores, trade). Walking
+        through another settlement's district must not confer residency
+        there for governance purposes."""
+        if agent is None:
+            return self._primary_settlement_id()
+        sid = agent.get("homeSettlementId")
+        if not sid:
+            return self._settlement_for_agent(agent)
+        settlements = self.civilization.get("settlements") or []
+        if any(isinstance(s, dict) and s.get("id") == sid for s in settlements):
+            return sid
+        # Stored id no longer matches a live settlement (removed/renamed):
+        # never return a dangling id.
+        return self._primary_settlement_id()
 
     def _rules_for_settlement(self, sid):
         c = self.civilization
@@ -336,15 +353,19 @@ class _GovernanceCultureMixin:
             return True
         return False
 
-    def _cluster_mutual_allies(self, agents):
+    def _cluster_is_cohesive(self, agents):
+        # Relationships in practice are sparse and one-directional (see
+        # _nudge_ally), so demanding reciprocated ally ties is a mismatch
+        # with the data model. Instead, a cluster is cohesive as long as no
+        # member considers another member a rival (checked both ways).
         if len(agents) < 2:
             return True
         for i, left in enumerate(agents):
             rels = left.get("relationships") or {}
             for right in agents[i + 1:]:
-                if rels.get(right["name"]) != "ally":
+                if rels.get(right["name"]) == "rival":
                     return False
-                if (right.get("relationships") or {}).get(left["name"]) != "ally":
+                if (right.get("relationships") or {}).get(left["name"]) == "rival":
                     return False
         return True
 
@@ -387,11 +408,12 @@ class _GovernanceCultureMixin:
                 cluster = [
                     a for a in roster
                     if self._belief_contradicts_enacted_rule(a, belief_id, rule)
-                    and self._agent_rivals_elder(a, elder)
                 ]
                 if len(cluster) < FACTION_SPLIT_MIN_CLUSTER:
                     continue
-                if self._cluster_mutual_allies(cluster):
+                if not any(self._agent_rivals_elder(a, elder) for a in cluster):
+                    continue
+                if self._cluster_is_cohesive(cluster):
                     return {
                         "agents": cluster,
                         "belief_id": belief_id,
@@ -476,6 +498,11 @@ class _GovernanceCultureMixin:
         cy = (bounds.get("y1", 0) + bounds.get("y2", 0)) / 2
         for agent in agents:
             agent["currentDistrict"] = district_id
+            # Faction split is a deliberate secession: unlike incidental
+            # walking between districts, migrated agents' persistent home
+            # settlement genuinely changes, so update it alongside the
+            # physical move.
+            agent["homeSettlementId"] = settlement_id
             if bounds:
                 agent["x"] = cx
                 agent["y"] = cy

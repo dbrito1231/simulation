@@ -845,6 +845,17 @@ class _CouncilGrowthMixin:
         if not council:
             return
         self._refresh_daily_council_roster(council)
+        # A succession session may legitimately convene and continue with a
+        # single available survivor (that survivor repairing leaderlessness
+        # is the whole point), so the two guards below skip that trigger.
+        # But zero attendees is different for every trigger, succession
+        # included: a council with nobody left can never seat, vote, or
+        # ratify, so leaving it alive would squat the single global council
+        # slot for the full session TTL and starve the ordinary Daily
+        # Council behind it.
+        if not council.get("attendees"):
+            self._adjourn_daily_council("no attendees remain")
+            return
         if len(self._daily_council_living()) < DAILY_COUNCIL_MIN_LIVING \
                 and council.get("trigger") != "succession":
             self._adjourn_daily_council("too few living villagers")

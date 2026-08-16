@@ -128,7 +128,14 @@ deterministic. `DAILY_COUNCIL_DISCUSSION_ROUNDS = 2` bounds round-robin speech;
 `DAILY_COUNCIL_PHASE_TTL_FRAMES = STALL_THRESHOLD * 8` guarantees a stuck phase
 advances/adjourns; and `DAILY_COUNCIL_SESSION_TTL_FRAMES = STALL_THRESHOLD * 30`
 guarantees a stuck meeting closes. Adjourn always clears council-turn state and
-writes a record, including an unresolved result when necessary.
+writes a record, including an unresolved result when necessary. A council whose
+`attendees` roster drops to zero (every member died, collapsed, or left) is
+adjourned immediately regardless of `trigger`, including `succession`: the
+one-survivor succession exemption above lets a session convene and continue
+with a single available candidate, but zero attendees can never seat, vote, or
+ratify, so without this guard it would otherwise squat the single global
+`dailyCouncil` slot for the full session TTL and block the next scheduled
+Daily Council.
 
 ### Majority, proposals, and elder ruling
 
@@ -558,7 +565,12 @@ emergency Daily Council; delegation must not leave a valid election waiting
 without its named-candidate assembly. Emergency detection, attendance, excused
 roster, headless seating, candidate eligibility, and voting are scoped to the
 pending election's normalized `settlementId` (missing means `home`); a living
-elder in another settlement does not suppress that assembly. If an ordinary
+elder in another settlement does not suppress that assembly. Candidate
+eligibility and roster scoping resolve settlement via
+`_settlement_id_for_agent`, i.e. an agent's persistent `homeSettlementId`
+([06-agents.md](06-agents.md#home-settlement-homesettlementid)) — a villager
+merely walking through another settlement's district neither becomes a
+candidate there nor counts toward its quorum. If an ordinary
 Daily Council is active, it is transformed into the settlement's succession
 session and its ordinary ballot is replaced without manufacturing votes. A
 living formal elder in that settlement, including an incapacitated elder,
@@ -662,6 +674,15 @@ paths. Thin accessors (`_rules_for_settlement`, `_pending_for_settlement`,
 `_registry_for_settlement`, `_settlement_id_for_agent`, etc.) live in
 `mixin_governance_culture.py`.
 
+`_settlement_id_for_agent(agent)` reads the agent's PERSISTENT
+`homeSettlementId` ([06-agents.md](06-agents.md#home-settlement-homesettlementid)),
+not transient physical position — an agent merely passing through another
+settlement's district is not a resident there for any governance purpose
+(rule quorum, succession candidacy, Daily Council roster/agenda, belief
+registry scope). Physical-position lookups (diplomacy borders, caravans,
+settlement stores, trade) use the separate `_settlement_for_agent(agent)`
+(`mixin_diplomacy.py`), which is unaffected by this distinction.
+
 For the constitution ledger specifically, replacing the home list must update
 both `constitution` and `constitutionBySettlement["home"]` to reference the
 same replacement object. Non-home constitution ledgers remain keyed and
@@ -740,8 +761,11 @@ member such that:
    `priority` with `value == fish`), **or** `b` has a non-empty affinity list and
    `r.kind` is a governance kind (`resource_tax`, `custom`, `priority`, and when
    `LIFECYCLE_ENABLED` also `harvest_quota`, `rationing`) outside that affinity.
-2. Every cluster member holds `b`, has `relationships[E.name] == "rival"`, and
-   pairwise mutual `ally` ties with every other member.
+2. Every cluster member holds `b`; **at least one** member has
+   `relationships[E.name] == "rival"`; and the cluster is internally cohesive
+   (`_cluster_is_cohesive`: no member considers another member a `rival`, checked
+   both directions — relationships are sparse and one-directional in practice, so
+   reciprocated mutual `ally` ties are not required).
 3. `len(cluster) >= FACTION_SPLIT_MIN_CLUSTER` (default **3**).
 
 First matching `(r, b)` in sorted rule-id / belief-id order wins.
@@ -750,8 +774,10 @@ First matching `(r, b)` in sorted rule-id / belief-id order wins.
 (`_init_settlements`, `_claim_frontier_plot` + `_found_district`, or an existing
 non-parent settlement). It deep-copies the parent's enacted rules into the child
 settlement bucket, forks `beliefRegistry` / `memeTexts` entries for beliefs the
-cluster holds, migrates agents' `currentDistrict` (and position) into the child
-settlement, and logs activity + chronicle kind **`faction_split`** (included in
+cluster holds, migrates agents' `currentDistrict` (and position) into the
+child settlement along with their persistent `homeSettlementId` (so governance
+residency moves with the secession), and logs activity + chronicle kind
+**`faction_split`** (included in
 `CHRONICLE_MILESTONE_KINDS`, so `/state`'s `chronicle` projection surfaces it
 when `CHRONICLE_ENABLED` is on). Inter-settlement
 interaction remains treaty / caravan / tariff only (no war).

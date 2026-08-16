@@ -311,8 +311,7 @@ def test_child_succession_replaces_normal_council_visibly():
         })
         engine._init_faction_split_settlement_buckets(child_sid)
         child_agents = [a for a in engine.agents if a is not home_elder][:3]
-        for agent in child_agents:
-            agent["currentDistrict"] = child_did
+        engine._migrate_agents_to_settlement(child_agents, child_sid, child_did)
 
         engine._start_succession_election(settlement_id=child_sid)
         pending_rules = [
@@ -359,6 +358,99 @@ def test_child_succession_replaces_normal_council_visibly():
     print("  OK child succession is visible, scoped, and vote-neutral")
 
 
+def _sparse_rebel_fixture(engine):
+    """Build a 3-agent rebel cluster mirroring real-world relationship sparsity:
+    one-directional ally edges (not reciprocated), belief contradicting an
+    enacted rule, and no rivalry unless a test explicitly adds it."""
+    c = engine.civilization
+    home = engine._primary_settlement_id()
+    elder = engine._elder_for_settlement(home)
+    assert_true(elder is not None, "home settlement must have an elder")
+
+    fish_rule = {
+        "id": "priority_fish_faction_split_cohesion",
+        "name": "Fish Priority",
+        "kind": "priority",
+        "value": "fish",
+        "enacted": True,
+        "enactedFrame": 1,
+    }
+    c["rules"].append(fish_rule)
+    engine._rebuild_settlement_governance(home)
+
+    # Clear every non-elder agent's beliefs first so only the designated
+    # rebels hold the contradicting belief (other agents may already hold it
+    # by default init, which would otherwise inflate the detected cluster).
+    for agent in engine.agents:
+        if agent.get("role") != "elder":
+            agent["beliefs"] = set()
+            agent["relationships"] = {}
+
+    rebels = [a for a in engine.agents if a.get("role") != "elder"][:3]
+    assert_true(len(rebels) >= se.FACTION_SPLIT_MIN_CLUSTER, "need faction split cluster size")
+    for agent in rebels:
+        agent["beliefs"] = {se.MEME_SEED_ID}
+    # Sparse, one-directional ally edge (real-world shape): rebels[1] -> rebels[2]
+    # only. rebels[2] does NOT reciprocate, and rebels[0] has no ally edges at all.
+    rebels[1].setdefault("relationships", {})[rebels[2]["name"]] = "ally"
+
+    return home, elder, rebels
+
+
+def test_faction_split_cluster_positive_sparse_rivalry():
+    old = se.FACTION_SPLIT_ENABLED
+    se.FACTION_SPLIT_ENABLED = True
+    try:
+        engine = make_engine(8)
+        home, elder, rebels = _sparse_rebel_fixture(engine)
+        # Exactly one member rivals the elder; the other two do not.
+        rebels[0].setdefault("relationships", {})[elder["name"]] = "rival"
+
+        cluster = engine._find_faction_split_cluster(home)
+        assert_true(cluster is not None,
+                    "cluster must be detected when only one member rivals the elder "
+                    "and ally ties are sparse/one-directional")
+        assert_true({a["name"] for a in cluster["agents"]} == {a["name"] for a in rebels},
+                    "detected cluster must be exactly the three rebels")
+    finally:
+        se.FACTION_SPLIT_ENABLED = old
+    print("  OK positive: single rival-elder member + sparse allies triggers cluster")
+
+
+def test_faction_split_cluster_negative_no_rival_of_elder():
+    old = se.FACTION_SPLIT_ENABLED
+    se.FACTION_SPLIT_ENABLED = True
+    try:
+        engine = make_engine(8)
+        home, elder, rebels = _sparse_rebel_fixture(engine)
+        # No cluster member rivals the elder at all.
+        cluster = engine._find_faction_split_cluster(home)
+        assert_true(cluster is None,
+                    "cluster must not be detected when no member rivals the elder")
+    finally:
+        se.FACTION_SPLIT_ENABLED = old
+    print("  OK negative: no member rivals elder blocks cluster")
+
+
+def test_faction_split_cluster_negative_internal_rivalry_breaks_cohesion():
+    old = se.FACTION_SPLIT_ENABLED
+    se.FACTION_SPLIT_ENABLED = True
+    try:
+        engine = make_engine(8)
+        home, elder, rebels = _sparse_rebel_fixture(engine)
+        rebels[0].setdefault("relationships", {})[elder["name"]] = "rival"
+        # One cluster member considers another a rival (one-directional is enough
+        # to break cohesion).
+        rebels[1].setdefault("relationships", {})[rebels[0]["name"]] = "rival"
+
+        cluster = engine._find_faction_split_cluster(home)
+        assert_true(cluster is None,
+                    "cluster must not be detected when a member rivals another member")
+    finally:
+        se.FACTION_SPLIT_ENABLED = old
+    print("  OK negative: internal member-vs-member rivalry blocks cluster (cohesion fails)")
+
+
 def main():
     print("faction_split_smoke.py")
     test_flag_off_no_keyed_maps()
@@ -368,6 +460,9 @@ def main():
     test_flag_on_two_settlement_rules_independent()
     test_flag_on_scripted_faction_split()
     test_child_succession_replaces_normal_council_visibly()
+    test_faction_split_cluster_positive_sparse_rivalry()
+    test_faction_split_cluster_negative_no_rival_of_elder()
+    test_faction_split_cluster_negative_internal_rivalry_breaks_cohesion()
     print("ALL OK")
 
 
