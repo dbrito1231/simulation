@@ -74,7 +74,7 @@ def _build_wiki_pages(engine, sem):
                 else {}
             )
         chronicle_raw = []
-        if sem.CHRONICLE_ENABLED and sem.CULTURE_ENABLED:
+        if sem.CULTURE_ENABLED:
             for entry in list((c.get("chronicle") or [])[-sem.CHRONICLE_CAP:]):
                 if entry.get("kind") in sem.CHRONICLE_MILESTONE_KINDS:
                     chronicle_raw.append(dict(entry))
@@ -93,9 +93,7 @@ def _build_wiki_pages(engine, sem):
         if sem.path1_on("PATH1_DIPLOMACY_ENABLED"):
             settlement_rows = [dict(row) for row in (c.get("settlements") or [])]
             treaty_rows = [dict(row) for row in (c.get("treaties") or [])]
-        social_ties = []
-        if sem.SOCIAL_LAYER_ENABLED:
-            social_ties = engine._social_ties_snapshot()
+        social_ties = engine._social_ties_snapshot()
 
     name_to_id = {row["name"]: row["id"] for row in agent_rows}
 
@@ -144,7 +142,7 @@ def _build_wiki_pages(engine, sem):
         agent_pages.append({"id": aid, "kind": "agent", "fields": fields, "links": links})
 
     # Social tie cross-links on agent pages.
-    if sem.SOCIAL_LAYER_ENABLED and social_ties:
+    if social_ties:
         agent_pages_by_id = {p["id"]: p for p in agent_pages}
         for tie in social_ties:
             from_id = tie.get("from")
@@ -219,7 +217,7 @@ def _build_wiki_pages(engine, sem):
             rule_pages.append({"id": rid, "kind": "rule", "fields": fields, "links": []})
 
     chronicle_pages = []
-    if sem.CHRONICLE_ENABLED and sem.CULTURE_ENABLED:
+    if sem.CULTURE_ENABLED:
         for entry in chronicle_raw:
             frame = entry.get("frame")
             kind = entry.get("kind", "")
@@ -515,14 +513,14 @@ def test_chronicle_page_shape():
     try:
         engine = make_engine(4)
         # Inject a chronicle entry with a milestone kind.
-        if se.CHRONICLE_ENABLED and se.CULTURE_ENABLED:
+        if se.CULTURE_ENABLED:
             engine.civilization.setdefault("chronicle", []).append({
                 "text": "Smoke village was founded",
                 "frame": 42,
                 "kind": "district_founded",
             })
         result = _build_wiki_pages(engine, se)
-        if not (se.CHRONICLE_ENABLED and se.CULTURE_ENABLED):
+        if not se.CULTURE_ENABLED:
             assert_true(result["pages"]["chronicle"] == [],
                         "chronicle pages should be empty when flags off")
             print("  OK chronicle page shape (flags off, empty list)")
@@ -867,9 +865,6 @@ def test_recipe_pages():
 
 def test_social_ties_on_agent_pages():
     """Social ties appear as labeled cross-links on both agent pages."""
-    if not se.SOCIAL_LAYER_ENABLED:
-        print("  SKIP social ties (SOCIAL_LAYER_ENABLED=False)")
-        return
     old = se.WORLD_WIKI_ENABLED
     se.WORLD_WIKI_ENABLED = True
     try:

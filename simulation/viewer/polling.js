@@ -31,12 +31,9 @@ function applyFlags(flags) {
   if ("BENCHMARKS_ENABLED" in flags) BENCHMARKS_ENABLED = !!flags.BENCHMARKS_ENABLED;
   if ("ECOLOGY_ENABLED" in flags) ECOLOGY_ENABLED = !!flags.ECOLOGY_ENABLED;
   if ("PIANO_MODULES" in flags) PIANO_MODULES = !!flags.PIANO_MODULES;
-  if ("META_SYSTEM" in flags) META_SYSTEM = !!flags.META_SYSTEM;
   if ("PATH1_ENABLED" in flags) PATH1_ENABLED = !!flags.PATH1_ENABLED;
   if ("STRUCTURE_WEAR_ENABLED" in flags) STRUCTURE_WEAR_ENABLED = !!flags.STRUCTURE_WEAR_ENABLED;
   if ("ACTIVITY_CUES_ENABLED" in flags) ACTIVITY_CUES_ENABLED = !!flags.ACTIVITY_CUES_ENABLED;
-  if ("SOCIAL_LAYER_ENABLED" in flags) SOCIAL_LAYER_ENABLED = !!flags.SOCIAL_LAYER_ENABLED;
-  if ("CHRONICLE_ENABLED" in flags) CHRONICLE_ENABLED = !!flags.CHRONICLE_ENABLED;
   if ("CHRONICLE_SAGA_ENABLED" in flags) CHRONICLE_SAGA_ENABLED = !!flags.CHRONICLE_SAGA_ENABLED;
   if ("PREDICTION_MARKET_ENABLED" in flags) PREDICTION_MARKET_ENABLED = !!flags.PREDICTION_MARKET_ENABLED;
   if ("FOUNDING_EVENTS_ENABLED" in flags) FOUNDING_EVENTS_ENABLED = !!flags.FOUNDING_EVENTS_ENABLED;
@@ -73,7 +70,6 @@ function applyGodDejaVuAvailability() {
 const SOCIAL_TIE_RADIUS = 180;
 const SOCIAL_TIE_CAP = 36;
 function drawSocialTies(ctx) {
-  if (!SOCIAL_LAYER_ENABLED) return;
   const ties = world.socialTies || [];
   if (!ties.length) return;
   const agentsById = new Map(getLivingAgents().map((agent) => [agent.id, agent]));

@@ -98,7 +98,7 @@ routed to the nearest fresh soil tile in the same district
 (`_find_nearby_terrain`) or, if none exists district-wide, to the nearest
 other diggable district (`_nearest_diggable_district`, nearest by
 district-center distance when an agent is given), setting a `dig_relocate`
-goal (`USE_GOALS`) so the trip completes deterministically rather than
+goal so the trip completes deterministically rather than
 re-deciding every LLM think. Successful digs log a `terrain_mutations`
 benchmark.
 
@@ -169,7 +169,7 @@ see [Treaty tariffs](#treaty-tariffs) below.
 **Caravans:** `_maybe_caravan_goal` (sim_engine/mixin_diplomacy.py:677) — an agent holding
 a cart/wagon (raising `_carry_cap`) and at least `CARAVAN_CARRY_MIN = 3`
 total resources, once a second settlement exists, is assigned a `caravan`
-goal (`USE_GOALS`) to walk to the other settlement's first district. On
+goal to walk to the other settlement's first district. On
 arrival, `_caravan_trade_bundle` + `_deliver_caravan` debit the traveler's
 trade goods, credit the destination `settlementStores`, apply treaty
 tariffs, call `_emit_shipment` per transferred resource, and append an
@@ -193,9 +193,9 @@ remainder is credited to the destination settlement store. Proposers supply
 `tariff` through the existing `propose_treaty` `rule` object (schema detail
 in [09-systems-society.md](09-systems-society.md)).
 
-## TRANSIT_ENABLED
+## Ocean transit
 
-`TRANSIT_ENABLED` defaults to True and requires diplomacy. The `transit`
+Ocean transit is unconditional (no flag) and requires diplomacy. The `transit`
 unlock has the shape `{"kind":"transit","terrain":"ocean",
 "consumes":{"boat":1}}`; `terrain` is currently limited to `ocean` and all
 consumed resource ids must be known positive quantities. A working transit
@@ -203,8 +203,8 @@ structure permits ocean-zone gathering and consumes its cost via
 `_consume_ocean_transit` when a caravan crosses settlement boundaries by
 water.
 
-**Bounded ocean corridor (caravan/transit only):** when `TRANSIT_ENABLED`
-and `_has_ocean_transit()` are true, inter-settlement `caravan` goals that
+**Bounded ocean corridor (caravan/transit only):** when
+`_has_ocean_transit()` is true, inter-settlement `caravan` goals that
 cross settlement boundaries route through an ocean corridor — source
 dock/shipyard district → ocean waypoint(s) → destination dock/district —
 instead of road-only arrival. Transit cost is consumed once per crossing via
@@ -270,7 +270,7 @@ reuse or conflate them.
 
 **Shelter-seeking:** `_maybe_seek_shelter(agent)` (sim_engine/mixin_wildlife.py:764) — at night, an
 unsheltered agent with no active goal is assigned a `seek_shelter` goal
-(`USE_GOALS`) toward the nearest district offering shelter capacity.
+toward the nearest district offering shelter capacity.
 
 ## World Wiki — settlement and treaty pages (`WORLD_WIKI_ENABLED`)
 

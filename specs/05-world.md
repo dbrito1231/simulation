@@ -6,7 +6,7 @@ World geometry, districts (starter core + frontier), roads, terrain tiles, ecolo
 zone kinds, ecology stocks/regrow/terraform, structure registry/levels/upgrades, Path-1
 terrain grid + composable blocks (mechanics), cemetery/grave grid.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index (semantics of
-`ECOLOGY_ENABLED`/`STRUCTURE_UPGRADES_ENABLED`/`CEMETERY_ENABLED`/
+`ECOLOGY_ENABLED`/`STRUCTURE_UPGRADES_ENABLED`/
 `TERRAIN_TILES_ENABLED`/`COMPOSABLE_BUILD_ENABLED`/`WILDLIFE_ENABLED` live in their
 owning specs); [10-path1.md](10-path1.md) for Path-1 flag semantics (industry, tool
 tiers, diplomacy); [07-actions.md](07-actions.md) for the build/terraform/block/dig/
@@ -172,8 +172,8 @@ stay direct.
 
 ## Inter-settlement movement (ocean corridor)
 
-When `PATH1_DIPLOMACY_ENABLED`, `TRANSIT_ENABLED`, and `_has_ocean_transit()`
-are all true, **caravan goals only** that travel between different
+When `PATH1_DIPLOMACY_ENABLED` and `_has_ocean_transit()`
+are both true, **caravan goals only** that travel between different
 `settlementId`s may route through a bounded ocean corridor instead of
 road-only paths:
 
@@ -184,7 +184,7 @@ road-only paths:
 3. Enter the destination settlement at its dock/district.
 
 Transit cost is consumed once per crossing via `_consume_ocean_transit`
-([10-path1.md](10-path1.md#transit_enabled)). `_set_agent_target_once` /
+([10-path1.md](10-path1.md#ocean-transit)). `_set_agent_target_once` /
 `_step_goal` for `kind: "caravan"` selects the corridor when the destination
 district's settlement differs from the actor's. Shipment visuals use
 `mode: "boat"` under the same boundary signal
@@ -583,7 +583,7 @@ restore (status `"restore-closed"`).
 
 ## Cemetery + grave grid
 
-Gated by `CEMETERY_ENABLED` (default True). The `cemetery_grounds` district's
+The `cemetery_grounds` district's
 `grave_grid` (48 slots, same `{x0,y0,cols,dx,dy}` spacing convention as `build_grid`)
 holds tombstone positions distinct from its 1-slot `build_grid` (the Cemetery
 structure itself). `_grave_grid_position(district_id, index)`

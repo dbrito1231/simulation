@@ -259,13 +259,13 @@ Consequence: the plan's Memory/Chronicle/Weather single-item merge bundles are n
 | `ECONOMY_SINKS_ENABLED` | True | 8 | 0 genuine (incidental, verified) | DROP — done (Phase 2a) | Sub-behavior of `ECONOMY_ENABLED`; no independent documented value. |
 | `ROADS_ENABLED` | True | 9 | 0 cues (describes mechanism, not revert) | DROP — done (Phase 2a) | Roads are load-bearing for movement/pathfinding. |
 | `SAGE_REVIEW_ENABLED` | True | 10 | 0 cues | DROP — done (Phase 2a) | Two-stage blueprint gate is the documented core loop, not a toggle anyone flips. |
-| `USE_GOALS` | True | 11 | 0 cues | DROP | Mature, no documented off-path. |
-| `TRANSIT_ENABLED` | True | 11 | 1, verified incidental | DROP | Mentions describe gated mechanism (ocean corridor, viewer boats), not a revert guarantee. |
-| `EMERGENT_ROLES` | True | 14 | 0 cues | DROP | Core mechanic, never flipped. |
-| `META_SYSTEM` | True | 16 | 0 cues | DROP | Default-on since Sid-parity Phase 3. |
-| `SOCIAL_LAYER_ENABLED` | True | 16 | 0 cues | DROP | Cosmetic-adjacent, mature, read-only projection. |
-| `CHRONICLE_ENABLED` | True | 16 | 0 genuine (verified) | DROP | specs/09:839 documents it as a pure viewer-projection gate with no engine-state dependence. |
-| `CEMETERY_ENABLED` | True | 21 | 0 genuine (verified) | DROP | specs/05:585 states what it gates, not a revert guarantee; mature. |
+| `USE_GOALS` | True | 11 | 0 cues | DROP — done (Phase 2b) | Mature, no documented off-path. |
+| `TRANSIT_ENABLED` | True | 11 | 1, verified incidental | DROP — done (Phase 2b) | Mentions describe gated mechanism (ocean corridor, viewer boats), not a revert guarantee. |
+| `EMERGENT_ROLES` | True | 14 | 0 cues | DROP — done (Phase 2b) | Core mechanic, never flipped. |
+| `META_SYSTEM` | True | 16 | 0 cues | DROP — done (Phase 2b) | Default-on since Sid-parity Phase 3. |
+| `SOCIAL_LAYER_ENABLED` | True | 16 | 0 cues | DROP — done (Phase 2b) | Cosmetic-adjacent, mature, read-only projection. |
+| `CHRONICLE_ENABLED` | True | 16 | 0 genuine (verified) | DROP — done (Phase 2b) | specs/09:839 documents it as a pure viewer-projection gate with no engine-state dependence. |
+| `CEMETERY_ENABLED` | True | 21 | 0 genuine (verified) | DROP — done (Phase 2b) | specs/05:585 states what it gates, not a revert guarantee; mature. |
 | `INDUSTRY_ENABLED` | True | 10 | 0 genuine | MERGE → `PATH1_ENABLED` | Path 1 sub-flag; `path1_on()` bundles it whenever parent is on. |
 | `TOOL_TIERS_ENABLED` | True | 11 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
 | `COMPOSABLE_BUILD_ENABLED` | True | 10 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |

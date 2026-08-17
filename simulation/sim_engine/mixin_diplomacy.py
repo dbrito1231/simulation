@@ -128,9 +128,8 @@ class _DiplomacyMixin:
         if not dest:
             return None
         self._set_agent_target_once(agent, dest)
-        if USE_GOALS:
-            agent["goal"] = {"kind": "dig_relocate", "target_district": dest,
-                             "ttl": STALL_THRESHOLD * 2}
+        agent["goal"] = {"kind": "dig_relocate", "target_district": dest,
+                         "ttl": STALL_THRESHOLD * 2}
         return f"{agent['name']} heads to {dest} to find diggable ground"
 
     def _ensure_district_tiles(self, district):
@@ -263,14 +262,13 @@ class _DiplomacyMixin:
             dest = self._nearest_diggable_district(did, agent)
             if dest:
                 self._set_agent_target_once(agent, dest)
-                if USE_GOALS:
-                    # Persistent goal: while it's set, the think tick steps
-                    # this deterministically instead of dispatching an LLM
-                    # think, so the agent's role reflexes can't reverse the
-                    # trip mid-transit (a miner would otherwise bounce back
-                    # to the cave every think cycle and never arrive).
-                    agent["goal"] = {"kind": "dig_relocate", "target_district": dest,
-                                     "ttl": STALL_THRESHOLD * 2}
+                # Persistent goal: while it's set, the think tick steps
+                # this deterministically instead of dispatching an LLM
+                # think, so the agent's role reflexes can't reverse the
+                # trip mid-transit (a miner would otherwise bounce back
+                # to the cave every think cycle and never arrive).
+                agent["goal"] = {"kind": "dig_relocate", "target_district": dest,
+                                 "ttl": STALL_THRESHOLD * 2}
                 agent["lastTerrainRejection"] = None
                 return f"{agent['name']} heads to {dest} to find diggable ground"
             agent["lastTerrainRejection"] = {
@@ -548,7 +546,6 @@ class _DiplomacyMixin:
         dest_sid = (c["districts"].get(dest_district_id) or {}).get("settlementId", "home")
         if (my_sid == dest_sid
                 or not path1_on("PATH1_DIPLOMACY_ENABLED")
-                or not TRANSIT_ENABLED
                 or not self._has_ocean_transit()):
             return [dest_district_id]
         source_dock = self._transit_district_for_settlement(my_sid)
@@ -676,7 +673,7 @@ class _DiplomacyMixin:
             goal = agent.get("goal") or {}
             source_sid = goal.get("source_settlement") or next(
                 (s["id"] for s in c["settlements"] if s["id"] != dest_sid), my_sid)
-            if (source_sid != dest_sid and TRANSIT_ENABLED and self._has_ocean_transit()
+            if (source_sid != dest_sid and self._has_ocean_transit()
                     and not self._consume_ocean_transit(agent)):
                 return
             if self._deliver_caravan(agent, dest_sid, source_settlement_id=source_sid):
@@ -686,8 +683,6 @@ class _DiplomacyMixin:
             self._assign_caravan_goal(agent, dest)
 
     def _ocean_transit_unlocks(self):
-        if not TRANSIT_ENABLED:
-            return []
         out = []
         for s in self.civilization["structures"]:
             if s.get("isRuin") or s.get("condition", 100) < STRUCTURE_DISREPAIR_THRESHOLD:

@@ -22,8 +22,8 @@ their own cadence (all frame counts are ticks at 30/s):
 |---|---|---|
 | `SURVIVAL_ENABLED` | 30 | `_update_survival` per agent |
 | `MEMORY_ENABLED` | 1800 | `_run_memory_maintenance` |
-| `META_SYSTEM` (off) | 2400 | `_maybe_meta_update` |
-| `EMERGENT_ROLES` | 120 | `_maybe_auto_switch_role` |
+| (unconditional) | 2400 | `_maybe_meta_update` |
+| (unconditional) | 120 | `_maybe_auto_switch_role` |
 | `RULES_ENABLED` | 150 | `_maybe_advance_rules` |
 | `LIFECYCLE_ENABLED` | 150 | `_maybe_resolve_stalled_succession` |
 | `LIFECYCLE_ENABLED` | 300 | `_tick_lifecycle` |
@@ -32,7 +32,7 @@ their own cadence (all frame counts are ticks at 30/s):
 | `DAILY_COUNCIL_ENABLED` | day boundary (`frameTick % DAY_FRAMES == 0`) and deterministic phase gate | `_maybe_convene_daily_council`, `_maybe_advance_daily_council` |
 | `CHRONICLE_SAGA_ENABLED` | day boundary (`frameTick % DAY_FRAMES == 0`) | `_maybe_append_daily_saga` — see [Chronicle saga](#chronicle-saga-chronicle_saga_enabled) |
 | within the 150-batch, `CULTURE_ENABLED` | 150 | `_maybe_study_at_library` |
-| within the 150-batch, `CEMETERY_ENABLED` | 150 | `_maybe_handle_burials` |
+| within the 150-batch, (unconditional) | 150 | `_maybe_handle_burials` |
 | within the 150-batch, `ECONOMY_ENABLED` | 150 | `_maybe_mint_coin`, `_maybe_fund_project_coin` |
 | within the 150-batch, `path1_on()` | 150 | `_maybe_found_settlement`, `_path1_industry_benchmark` |
 | `path1_on("PRESSURE_LOOP_ENABLED")` | 900 | `_tick_wildlife` (Path-1 forest attack pressure — **not** huntable fauna) |

@@ -99,10 +99,9 @@ Full action-by-action detail (params, gates, effects) lives in
 
 The emergent-role actions (`propose_role`, `approve_role`, `reject_role`) follow
 this complete table as well: their role-object field is in `DECISION_SCHEMA`,
-their instructions are in `SYSTEM_PROMPT`, and the engine filters them when
-`EMERGENT_ROLES` is disabled. Approval rebuilds the engine's live derived role
-maps; server startup maps remain seed-only conveniences and are not a second role
-registry.
+their instructions are in `SYSTEM_PROMPT`, and they are always offered.
+Approval rebuilds the engine's live derived role maps; server startup maps
+remain seed-only conveniences and are not a second role registry.
 
 ## Control-plane data flow (Sovereign God mode)
 
@@ -139,7 +138,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 62 module-level flags, sim_engine.py)
+## Flag index (complete — 55 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -149,13 +148,10 @@ complete list and default state. "Echoed" = present in `/state`'s
 |---|---|---|---|
 | `SURVIVAL_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `CRAFTING_ENABLED` | True | yes | [08](08-systems-economy.md) |
-| `USE_GOALS` | True | yes | [08](08-systems-economy.md) |
 | `STRUCTURE_EFFECTS_ENABLED` | True | no | [08](08-systems-economy.md) |
 | `MEMORY_ENABLED` | True | no | [06](06-agents.md) |
 | `PIANO_MODULES` | True | yes | [03](03-cognition.md) |
 | `ALWAYS_ON_MODULES` | False | no | [03](03-cognition.md) |
-| `META_SYSTEM` | True | yes | [03](03-cognition.md) |
-| `EMERGENT_ROLES` | True | yes | [06](06-agents.md) |
 | `RULES_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `MEMES_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `BENCHMARKS_ENABLED` | True | no | [12](12-ops.md) |
@@ -164,8 +160,6 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `STRUCTURE_UPGRADES_ENABLED` | True | yes | [05](05-world.md) |
 | `STRUCTURE_WEAR_ENABLED` | True | yes | [11](11-viewer.md) |
 | `ACTIVITY_CUES_ENABLED` | True | yes | [11](11-viewer.md) |
-| `SOCIAL_LAYER_ENABLED` | True | yes | [09](09-systems-society.md) |
-| `CHRONICLE_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `CHRONICLE_SAGA_ENABLED` | True | yes | [09](09-systems-society.md#saga-chronicle_saga_enabled), [02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled), [03](03-cognition.md), [12](12-ops.md) |
 | `FOUNDING_EVENTS_ENABLED` | True | yes | [05](05-world.md) |
 | `WORLD_CLOCK_HUD_ENABLED` | True | yes | [11](11-viewer.md) |
@@ -178,7 +172,6 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `LIFECYCLE_ENABLED` | True | yes | [06](06-agents.md) |
 | `DYNASTY_TREE_ENABLED` | True | yes | [06](06-agents.md) (Divine Lineage viewer — Phase 3) |
 | `CULTURE_ENABLED` | True | yes | [09](09-systems-society.md) |
-| `CEMETERY_ENABLED` | True | yes | [05](05-world.md) |
 | `PATH1_ENABLED` | True | yes | [10](10-path1.md) |
 | `INDUSTRY_ENABLED` | True | yes (as `INDUSTRY_ENABLED`) | [10](10-path1.md) |
 | `TOOL_TIERS_ENABLED` | True | yes | [10](10-path1.md) |
@@ -189,7 +182,6 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `PRESSURE_LOOP_ENABLED` | True | yes | [10](10-path1.md) |
 | `RAIDERS_CONTAGION_ENABLED` | True | yes | [10](10-path1.md) |
 | `ENV_EFFECTS_ENABLED` | True | yes | [08](08-systems-economy.md) |
-| `TRANSIT_ENABLED` | True | yes | [10](10-path1.md) |
 | `WIKI_MEMORY` | True (D2 soak on `main` — see [03](03-cognition.md)) | yes | [03](03-cognition.md) |
 | `TESTAMENT_ENABLED` | True | yes | [06](06-agents.md), [09](09-systems-society.md) |
 | `THEORY_OF_MIND_ENABLED` | False (env-backed, `SIM_THEORY_OF_MIND`) | yes | [03](03-cognition.md) |

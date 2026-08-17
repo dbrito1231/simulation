@@ -1502,14 +1502,10 @@ class _WorldStateMixin:
         allowed, _, _ = self._ecology_gather_gate(agent, missing)
         if not allowed and ECOLOGY_ENABLED:
             self._scarcity_reflex_on_depletion(agent, missing)
-        elif USE_GOALS:
+        else:
             agent["goal"] = {
                 "kind": "craft_gather", "target": missing, "recipe": recipe_id, "ttl": 10,
             }
-        else:
-            gz = self._gather_zone_for_resource(missing)
-            if gz and agent["currentZone"] != gz:
-                self._set_agent_target(agent, gz)
         self._push_activity(
             f"{agent['name']} craft reflex: gathering {missing} for {recipe_id}")
 
@@ -1613,13 +1609,12 @@ class _WorldStateMixin:
         if terraform_did:
             p = c["districtProjects"][terraform_did]
             unmet = self._first_unmet_project_resource(terraform_did)
-            if USE_GOALS:
-                agent["goal"] = {
-                    "kind": "gather" if unmet else "deliver",
-                    "target": unmet,
-                    "district": terraform_did,
-                    "ttl": 10,
-                }
+            agent["goal"] = {
+                "kind": "gather" if unmet else "deliver",
+                "target": unmet,
+                "district": terraform_did,
+                "ttl": 10,
+            }
             self._push_activity(
                 f"{agent['name']} scarcity reflex: contributing to {p['name']} in {terraform_did}")
             return

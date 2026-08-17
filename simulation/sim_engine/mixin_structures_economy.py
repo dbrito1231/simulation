@@ -1786,7 +1786,7 @@ class _StructuresEconomyMixin:
     def _perform_gather(self, agent, resource):
         """Ecology-aware gather with structure boosts. Returns summary string."""
         c = self.civilization
-        if (TRANSIT_ENABLED and self._gather_zone_for_resource(resource) == "ocean"
+        if (self._gather_zone_for_resource(resource) == "ocean"
                 and not self._has_ocean_transit()):
             return f"{agent['name']} needs a working ocean transit structure to gather {resource}"
         if LIFECYCLE_ENABLED:

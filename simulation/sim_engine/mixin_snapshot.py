@@ -140,7 +140,7 @@ class _SnapshotMixin:
             "skills": {k: round(v, 1) for k, v in a["skills"].items()} if CULTURE_ENABLED else None,
             "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
             "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
-            "buried": bool(CEMETERY_ENABLED and a.get("buried")),
+            "buried": bool(a.get("buried")),
             "parents": a.get("parents") if LIFECYCLE_ENABLED else None,
             "children": list(a.get("children") or []) if LIFECYCLE_ENABLED else [],
             "inheritedTestament": list(a.get("inheritedTestament") or []) if LIFECYCLE_ENABLED else [],
@@ -254,20 +254,19 @@ class _SnapshotMixin:
             civ["isNight"] = self._is_night()
         if ENV_EFFECTS_ENABLED:
             civ["litDistricts"] = list(c.get("litDistricts") or [])
-        if TRANSIT_ENABLED:
-            boat_count = int(c.get("stockpile", {}).get("boat", 0))
-            civ["physicalProps"] = ([{"resource": "boat", "count": min(3, boat_count)}]
-                                    if boat_count >= 3 else [])
+        boat_count = int(c.get("stockpile", {}).get("boat", 0))
+        civ["physicalProps"] = ([{"resource": "boat", "count": min(3, boat_count)}]
+                                if boat_count >= 3 else [])
         return civ
 
     def _build_snapshot_config(self):
         return {
             "WORLD_W": WORLD_W, "WORLD_H": WORLD_H,
             "flags": {
-                "SURVIVAL_ENABLED": SURVIVAL_ENABLED, "USE_GOALS": USE_GOALS,
-                "EMERGENT_ROLES": EMERGENT_ROLES, "RULES_ENABLED": RULES_ENABLED,
+                "SURVIVAL_ENABLED": SURVIVAL_ENABLED,
+                "RULES_ENABLED": RULES_ENABLED,
                 "MEMES_ENABLED": MEMES_ENABLED, "CRAFTING_ENABLED": CRAFTING_ENABLED,
-                "META_SYSTEM": META_SYSTEM, "PIANO_MODULES": PIANO_MODULES,
+                "PIANO_MODULES": PIANO_MODULES,
                 "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
                 "GOODS_ENABLED": GOODS_ENABLED,
                 "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
@@ -276,12 +275,9 @@ class _SnapshotMixin:
                 "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
                 "DYNASTY_TREE_ENABLED": DYNASTY_TREE_ENABLED,
                 "CULTURE_ENABLED": CULTURE_ENABLED,
-                "CEMETERY_ENABLED": CEMETERY_ENABLED,
                 "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
                 "STRUCTURE_WEAR_ENABLED": STRUCTURE_WEAR_ENABLED,
                 "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
-                "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
-                "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
                 "CHRONICLE_SAGA_ENABLED": CHRONICLE_SAGA_ENABLED,
                 "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
                 "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
@@ -296,7 +292,6 @@ class _SnapshotMixin:
                 "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
                 "RAIDERS_CONTAGION_ENABLED": RAIDERS_CONTAGION_ENABLED,
                 "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
-                "TRANSIT_ENABLED": TRANSIT_ENABLED,
                 "WIKI_MEMORY": WIKI_MEMORY,
                 "TESTAMENT_ENABLED": TESTAMENT_ENABLED,
                 "THEORY_OF_MIND_ENABLED": THEORY_OF_MIND_ENABLED,
@@ -348,9 +343,8 @@ class _SnapshotMixin:
             "conversation": list(self.conversationLog[:30]),
             "config": self._build_snapshot_config(),
         }
-        if SOCIAL_LAYER_ENABLED:
-            snapshot["socialTies"] = self._social_ties_snapshot()
-        if CHRONICLE_ENABLED and CULTURE_ENABLED:
+        snapshot["socialTies"] = self._social_ties_snapshot()
+        if CULTURE_ENABLED:
             snapshot["chronicle"] = self._chronicle_snapshot()
         if CHRONICLE_SAGA_ENABLED:
             snapshot["saga"] = self._saga_snapshot()
@@ -390,9 +384,9 @@ class _SnapshotMixin:
             return "weather", self._weather_snapshot()
         if key == "pressureTelegraph" and RAIDERS_CONTAGION_ENABLED:
             return "pressureTelegraph", self._pressure_telegraph_snapshot()
-        if key == "socialTies" and SOCIAL_LAYER_ENABLED:
+        if key == "socialTies":
             return "socialTies", self._social_ties_snapshot()
-        if key == "chronicle" and CHRONICLE_ENABLED and CULTURE_ENABLED:
+        if key == "chronicle" and CULTURE_ENABLED:
             return "chronicle", self._chronicle_snapshot()
         if key == "saga" and CHRONICLE_SAGA_ENABLED:
             return "saga", self._saga_snapshot()

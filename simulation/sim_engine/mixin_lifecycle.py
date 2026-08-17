@@ -202,12 +202,10 @@ class _LifecycleMixin:
             f"{agent['name']}'s belongings pass to " +
             (heirs[0]["name"] if len(heirs) == 1 else f"{len(heirs)} villagers") + ".")
 
-    # --- Cemetery & burial (CEMETERY_ENABLED): permanent death shouldn't
-    # leave a corpse lying wherever it fell. ---
+    # --- Cemetery & burial: permanent death shouldn't leave a corpse lying
+    # wherever it fell. ---
     def _cemetery_district_id(self):
         """The dedicated burial-grounds district, if present."""
-        if not CEMETERY_ENABLED:
-            return None
         for did, d in self.civilization["districts"].items():
             if d.get("kind") == "cemetery" and d.get("grave_grid"):
                 return did
@@ -218,8 +216,6 @@ class _LifecycleMixin:
         grave_grid, not the chapel's produce/boost status -- so a disrepaired
         or ruined chapel must not strand corpses (the escape is repair, but
         burial itself stays reachable)."""
-        if not CEMETERY_ENABLED:
-            return []
         did = self._cemetery_district_id()
         return [s for s in self.civilization["structures"]
                 if s.get("type") == "cemetery"
@@ -281,8 +277,6 @@ class _LifecycleMixin:
 
     def _ensure_cemetery_district(self):
         """Back-compat: older saves may lack the starter cemetery grounds."""
-        if not CEMETERY_ENABLED:
-            return
         c = self.civilization
         starter = STARTER_DISTRICTS["cemetery_grounds"]
         mutated = False
@@ -401,7 +395,7 @@ class _LifecycleMixin:
         (deathFrame is None) -- only LIFECYCLE_ENABLED's permanent death is
         eligible, matching "any non-permanent death should not be in the
         cemetery"."""
-        if not CEMETERY_ENABLED or not LIFECYCLE_ENABLED:
+        if not LIFECYCLE_ENABLED:
             return
         unburied = [a for a in self.agents if a.get("deathFrame") is not None and not a.get("buried")]
         if not unburied:

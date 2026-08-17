@@ -249,20 +249,19 @@ class _ThinkJobMixin:
                     if r["kind"] == "succession" and r.get("electionId") == pending_succession["electionId"])
                 note(1, f"NOTE: The village elder has died. Vote for the next elder with vote_rule: "
                         f"{candidate_ids}. Set target to your preferred candidate's id and vote yes.")
-        if CEMETERY_ENABLED:
-            burial_rejection = agent.get("lastBurialRejection")
-            if burial_rejection and self.frameTick - burial_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
-                note(2, f"NOTE: {burial_rejection['reason']}. "
-                        f"Use start_project with target cemetery to build one.")
-            unburied = next((a for a in self.agents
-                             if a.get("deathFrame") is not None and not a.get("buried")), None)
-            if unburied:
-                if self._working_cemeteries():
-                    note(3, f"NOTE: {unburied['name']} awaits burial. "
-                            f"Use bury_agent (target {unburied['name']}) to lay them to rest in the Cemetery.")
-                else:
-                    note(3, f"NOTE: {unburied['name']} awaits burial but the village has no Cemetery yet. "
-                            f"Use start_project with target cemetery.")
+        burial_rejection = agent.get("lastBurialRejection")
+        if burial_rejection and self.frameTick - burial_rejection.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
+            note(2, f"NOTE: {burial_rejection['reason']}. "
+                    f"Use start_project with target cemetery to build one.")
+        unburied = next((a for a in self.agents
+                         if a.get("deathFrame") is not None and not a.get("buried")), None)
+        if unburied:
+            if self._working_cemeteries():
+                note(3, f"NOTE: {unburied['name']} awaits burial. "
+                        f"Use bury_agent (target {unburied['name']}) to lay them to rest in the Cemetery.")
+            else:
+                note(3, f"NOTE: {unburied['name']} awaits burial but the village has no Cemetery yet. "
+                        f"Use start_project with target cemetery.")
         abandonment = c.get("lastProjectAbandonment")
         if abandonment and self.frameTick - abandonment.get("frame", 0) <= DIRECTIVE_TTL_FRAMES:
             note(2, f"NOTE: {abandonment['reason']}.")
@@ -317,18 +316,17 @@ class _ThinkJobMixin:
         spec = self._role_specialty_resource(agent["role"])
         if spec and spec == self._first_unmet_resource_anywhere():
             note(3, f"NOTE: Your role specializes in {spec}, which an active project still needs. Prioritize collect_resource.")
-        if EMERGENT_ROLES:
-            need_role = self._village_needed_role()
-            if need_role and need_role != agent["role"] and self._is_flexible_role(agent["role"]):
-                unmet = self._first_unmet_resource_anywhere()
-                if unmet:
-                    note(3,
-                        f"NOTE: No one is gathering {unmet}, which a build needs. "
-                        f"Consider switch_role to {need_role} to fill the gap.")
-                else:
-                    note(3,
-                        f"NOTE: The village needs a {need_role} (survival or scarce "
-                        f"resources). Consider switch_role to {need_role} to fill the gap.")
+        need_role = self._village_needed_role()
+        if need_role and need_role != agent["role"] and self._is_flexible_role(agent["role"]):
+            unmet = self._first_unmet_resource_anywhere()
+            if unmet:
+                note(3,
+                    f"NOTE: No one is gathering {unmet}, which a build needs. "
+                    f"Consider switch_role to {need_role} to fill the gap.")
+            else:
+                note(3,
+                    f"NOTE: The village needs a {need_role} (survival or scarce "
+                    f"resources). Consider switch_role to {need_role} to fill the gap.")
         if RULES_ENABLED:
             voter_pending = self._pending_rules_for_voter(agent)
             unvoted = next((r for r in voter_pending if agent["name"] not in r["votes"]), None)
@@ -675,12 +673,9 @@ class _ThinkJobMixin:
             and (action_name != "start_terraform" or ECOLOGY_ENABLED)
             and (action_name != "found_belief" or MEMES_ENABLED)
             and (action_name != "repair_structure" or GOODS_ENABLED)
-            and (action_name != "bury_agent" or CEMETERY_ENABLED)
             and (action_name != "repeal_rule" or RULES_ENABLED)
             and (action_name != "upgrade_structure" or STRUCTURE_UPGRADES_ENABLED)
             and (action_name != "submit_structure_sprite" or sprite_design_turn)
-            and (action_name not in ("propose_role", "approve_role", "reject_role")
-                 or EMERGENT_ROLES)
             and (action_name not in ("place_block", "remove_block")
                  or path1_on("COMPOSABLE_BUILD_ENABLED"))
             and (action_name not in ("dig_terrain", "plant_terrain")
@@ -842,7 +837,7 @@ class _ThinkJobMixin:
             "behavior_nudge": behavior_nudge,
             "nudges_total": nudges_total,
             "nudges_dropped": nudges_dropped,
-            "needed_role": self._village_needed_role() if EMERGENT_ROLES else None,
+            "needed_role": self._village_needed_role(),
             "known_role_ids": sorted(c["roleRegistry"]),
             "pending_role_count": len(c["pendingRoles"]),
             "emergent_role_count": len(set(c["roleRegistry"]) - set(self.d["ROLES"])),
@@ -1190,10 +1185,8 @@ class _ThinkJobMixin:
         return (" | ".join(reports) if reports else "none"), tick, runs
 
     def _maybe_meta_update(self):
-        """Sid-parity Phase 5: rotate one living agent through META_SYSTEM
+        """Sid-parity Phase 5: rotate one living agent through the meta-system
         persona refresh on META_TICK_FRAMES. Amortized: one agent per gate."""
-        if not META_SYSTEM:
-            return
         runner = self.d.get("run_meta_update")
         if not runner:
             return
@@ -1255,7 +1248,7 @@ class _ThinkJobMixin:
                     and gate.get("bypassLlm")
                 )
                 payload = self._build_think_payload(agent)
-                self_prompt = (agent.get("persona") or "").strip() if META_SYSTEM else ""
+                self_prompt = (agent.get("persona") or "").strip()
                 payload["self_prompt"] = self_prompt
                 piano_context = None
                 piano_modules = None
@@ -1510,9 +1503,9 @@ class _ThinkJobMixin:
                     self._update_survival(a)
             if MEMORY_ENABLED and ft % MEMORY_TICK_FRAMES == 0:
                 self._run_memory_maintenance()
-            if META_SYSTEM and ft % META_TICK_FRAMES == 0:
+            if ft % META_TICK_FRAMES == 0:
                 self._maybe_meta_update()
-            if EMERGENT_ROLES and ft % ROLE_SWITCH_TICK_FRAMES == 0:
+            if ft % ROLE_SWITCH_TICK_FRAMES == 0:
                 self._maybe_auto_switch_role()
             if LIFECYCLE_ENABLED and ft % RULES_TICK_FRAMES == 0:
                 # Repair restored/malformed leaderless state before the rule
@@ -1554,8 +1547,7 @@ class _ThinkJobMixin:
                     self._maybe_dissolve_council()
                 if CULTURE_ENABLED:
                     self._maybe_study_at_library()
-                if CEMETERY_ENABLED:
-                    self._maybe_handle_burials()
+                self._maybe_handle_burials()
                 if ECONOMY_ENABLED:
                     self._maybe_mint_coin()
                     self._maybe_fund_project_coin()
@@ -1645,7 +1637,7 @@ class _ThinkJobMixin:
                     continue
                 a["thinkTimer"] -= 1
                 if a["thinkTimer"] <= 0 and not a["isThinking"] and a["name"] not in self._inflight:
-                    if USE_GOALS and a["goal"] and not self._has_unread(a):
+                    if a["goal"] and not self._has_unread(a):
                         continuing = self._step_goal(a)
                         a["thinkTimer"] = GOAL_STEP_FRAMES if continuing else 1
                     else:

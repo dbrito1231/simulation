@@ -59,14 +59,14 @@ truth.
 | `craft_item` | `target` (recipe id) | `CRAFTING_ENABLED`; recipe known, inputs available, correct station present | Consumes recipe inputs, produces the crafted resource ([08](08-systems-economy.md)) |
 | `propose_recipe` | `recipe` (object) | `CRAFTING_ENABLED` | Adds to `pendingRecipes` for elder review |
 | `approve_recipe` / `reject_recipe` | `target` (recipe id), `message` | actor role `elder` | Registers or discards a pending recipe |
-| `switch_role` | `new_role` or `target` | `EMERGENT_ROLES`; `new_role` must be a known role, differ from current, and not be a leadership role (`roles.json` `"leader": true`, currently only `elder`) | Sets role, clears `assignedTask`/`idleCycles` — same code path the deterministic auto-switch backstop uses ([06](06-agents.md)). Leadership roles are excluded so an agent can never self-declare elder — only `_enact_succession_winner()` may seat one ([09](09-systems-society.md#succession-lifecycle_enabled-governance-slice)) |
-| `propose_role` | `role` (`slug`/`name`/`specialty`/`preferredProject`/`skill`) | `EMERGENT_ROLES`; proposal must pass live-registry validation and the `MAX_PENDING_ROLES = 5` queue cap | Adds the role definition to `pendingRoles` for elder review; seed-role data remains in `roles.json` ([06](06-agents.md)) |
+| `switch_role` | `new_role` or `target` | `new_role` must be a known role, differ from current, and not be a leadership role (`roles.json` `"leader": true`, currently only `elder`) | Sets role, clears `assignedTask`/`idleCycles` — same code path the deterministic auto-switch backstop uses ([06](06-agents.md)). Leadership roles are excluded so an agent can never self-declare elder — only `_enact_succession_winner()` may seat one ([09](09-systems-society.md#succession-lifecycle_enabled-governance-slice)) |
+| `propose_role` | `role` (`slug`/`name`/`specialty`/`preferredProject`/`skill`) | proposal must pass live-registry validation and the `MAX_PENDING_ROLES = 5` queue cap | Adds the role definition to `pendingRoles` for elder review; seed-role data remains in `roles.json` ([06](06-agents.md)) |
 | `approve_role` | `target` (pending role slug) | actor role `elder`; proposal must be pending | Adds the validated role to the persistent live registry and rebuilds all derived role maps, making it immediately switchable |
 | `reject_role` | `target` (pending role slug) | actor role `elder`; proposal must be pending | Discards the pending role definition |
 | `propose_rule` | `rule` (id/name/kind/value/description) | `RULES_ENABLED`; must pass `_validate_rule` | Adds to `pendingRules` with the proposer's own `yes` vote, tallies immediately |
 | `vote_rule` | `target` (rule id), `vote` | `RULES_ENABLED`; rule must be pending | Records the agent's vote; succession ballots cross-cancel sibling candidate votes ([06](06-agents.md), [09](09-systems-society.md)) |
 | `repeal_rule` | `target` (enacted rule id) | `RULES_ENABLED`; rule must be currently enacted; pending-rule cap not exceeded | Opens a `repeal_<id>` ballot reusing the same vote/quorum scaffold |
-| `bury_agent` | `target` (deceased agent name, optional) | `CEMETERY_ENABLED`; a working (non-disrepaired) cemetery structure must exist; actor within `BURY_CONTACT_DIST` of the corpse | Assigns the corpse a grave-grid slot, marks `buried: True` ([05](05-world.md)) |
+| `bury_agent` | `target` (deceased agent name, optional) | a working (non-disrepaired) cemetery structure must exist; actor within `BURY_CONTACT_DIST` of the corpse | Assigns the corpse a grave-grid slot, marks `buried: True` ([05](05-world.md)) |
 | `place_block` | `target` (block type or `"gx,gy"`), `message`/`new_role` (block type fallback) | `COMPOSABLE_BUILD_ENABLED` (path1); tile unoccupied, district tile cap not reached, resource cost affordable | Charges the block's cost, writes `district["tiles"][gx,gy]` ([05](05-world.md)) |
 | `remove_block` | `target` (`"gx,gy"`, optional — defaults to agent's cell) | `COMPOSABLE_BUILD_ENABLED` | Refunds the block's cost, clears the tile |
 | `dig_terrain` | — (acts on agent's current cell) | `TERRAIN_TILES_ENABLED`; tool-free by design (bootstrap stone source) | Converts `grove`→`soil` (or similar) at the agent's grid cell, yields a resource |
@@ -80,8 +80,8 @@ truth.
 
 `available_actions` in the think payload (`mixin_think_job.py:667-691`) further filters
 this list per-agent by live flag state: `start_terraform` requires
-`ECOLOGY_ENABLED`; `repair_structure` requires `GOODS_ENABLED`; `bury_agent`
-requires `CEMETERY_ENABLED`; `repeal_rule` requires `RULES_ENABLED`;
+`ECOLOGY_ENABLED`; `repair_structure` requires `GOODS_ENABLED`;
+`repeal_rule` requires `RULES_ENABLED`;
 `upgrade_structure` requires `STRUCTURE_UPGRADES_ENABLED`;
 `submit_structure_sprite` only appears on an agent's actual sprite-design turn;
 `place_block`/`remove_block` require `COMPOSABLE_BUILD_ENABLED`;
@@ -95,9 +95,9 @@ vehicle/minimum cargo;
 (see action table); `offer_contract`/`accept_contract` require
 `CONTRACTS_ENABLED` (`accept_contract` further requires an open contract the
 actor may accept); viewer `ACTION_LABELS` map them to "offering a contract" /
-"accepting a contract" (`viewer/sidebar.js`). The three role
-proposal actions require `EMERGENT_ROLES`. All other
-actions in the table are always offered (subject to `DECISION_SCHEMA`'s fixed
+"accepting a contract" (`viewer/sidebar.js`). All other
+actions in the table (including the three role proposal actions and
+`bury_agent`) are always offered (subject to `DECISION_SCHEMA`'s fixed
 enum superset — [03-cognition.md](03-cognition.md)). Invalid or disallowed choices
 are replaced by `normalize_decision` + `role_fallback_action` (server.py) before
 reaching `apply_decision`, per the action-sync invariant. `role_fallback_action`

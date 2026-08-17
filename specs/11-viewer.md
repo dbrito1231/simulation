@@ -228,12 +228,12 @@ mechanism the season tint already uses.
   `build_structure`, `contribute_resources`, or `start_project`. The effects
   are keyed by existing ids and `frameTick`; they retain no viewer state and
   disappear entirely when the flag is off.
-- **Social layer** (`SOCIAL_LAYER_ENABLED`): before agent sprites, the viewer
+- **Social layer:** before agent sprites, the viewer
   draws at most a bounded number of thin relationship lines for `socialTies`
   whose two living endpoints are currently inside the canvas viewport and
   nearby in world space. Ally lines are warm and rival lines cool; alpha fades
   with distance. The pass does no all-world pair scan and is a clean no-op when
-  the flag is off or an older snapshot lacks `socialTies`.
+  an older snapshot lacks `socialTies`.
 - **Zoom**: `zoomLevel` (`viewer/setup.js`) scales `canvas.style.width/height`
   over the fixed-resolution backing store (`applyZoom`, `viewer/setup.js`);
   +/- buttons multiply by 1.25/0.8, scroll-wheel zoom
@@ -289,7 +289,7 @@ mechanism the season tint already uses.
     re-render on every poll; the breakdown is the stockpile's proxy in this
     key. **Chronicle** is a curated projection of top-level `world.chronicle`,
     distinct from the raw Activity feed; it preserves scroll position across
-    snapshot updates and is hidden cleanly when `CHRONICLE_ENABLED` is off.
+    snapshot updates and is always visible.
     **Village paper** (`#sagaLog`, `#sagaList`) is a pure renderer for top-level
     `world.saga` (daily LLM narrative entries `{text, frame, dayIndex}` from the
     engine's saga ring — not folded into chronicle or founding/disaster banners).
@@ -503,8 +503,8 @@ hidden or the flag is off. All dynamic text is escaped before insertion.
 `#foundingBanner` is a fixed, centered, non-modal banner (same positioning
 family as `#councilBanner`, offset 30px lower so the two never overlap) that
 names a newly founded district. Gated client-side by `FOUNDING_EVENTS_ENABLED`
-(mirrors `config.flags.FOUNDING_EVENTS_ENABLED`, wired in `applyFlags` the same
-way as `CHRONICLE_ENABLED`); when off, the element is force-hidden.
+(mirrors `config.flags.FOUNDING_EVENTS_ENABLED`, wired in `applyFlags`);
+when off, the element is force-hidden.
 
 Unlike `#councilBanner` (which is level-triggered off `civ.councilActive.active`
 every render), founding is a one-off event with no ongoing "active" state to
@@ -995,8 +995,8 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   banner pattern — edge-detects new `world.chronicle` entries with
   `kind === "disaster"` via a first-snapshot-seen `Set` on `frame` (no replay
   on page load). Shows storm-colored slate/teal banner for 5.5s with entry
-  text. Gated on `CHRONICLE_ENABLED`; edge-detection mirrors founding (runs
-  whenever enabled — empty chronicle clears the seen Set).
+  text. Always active; edge-detection mirrors founding (runs
+  unconditionally — empty chronicle clears the seen Set).
 - **Structure hit flash** (`trackStructureConditionDeltas`, `viewer/sidebar.js`;
   `drawStructureHitFlash`, `viewer/render.js`): client-only diff of structure
   `condition`/`isRuin` between polls; flashes when condition drops by at
@@ -1202,7 +1202,7 @@ via `drawShipments(ctx, world.frameTick)`, called right after
 - **Gate:** `CARAVAN_VISUALS_ENABLED = false` → `drawShipments` returns
   immediately; nothing is drawn. The moored `physicalProps` boats render
   through their own, entirely separate code path
-  (`civilization.physicalProps`, gated by `TRANSIT_ENABLED`) and are
+  (`civilization.physicalProps`, always populated) and are
   unaffected either way — this flag never touches that block.
 - **Restore safety:** shipments are not persisted (see 08); after a
   server restart `world.shipments` is simply absent/empty until new

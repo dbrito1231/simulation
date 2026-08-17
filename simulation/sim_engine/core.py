@@ -376,8 +376,8 @@ class SimEngine(
                 a["inheritedTestament"] = []
                 a["inheritedBeliefs"] = []
                 a["deathFrame"] = None
-                # Cemetery/burial: unset until a permanent death is buried
-                # (see CEMETERY_ENABLED above); irrelevant while alive.
+                # Cemetery/burial: unset until a permanent death is buried;
+                # irrelevant while alive.
                 a["buried"] = False
                 a["restingPlaceId"] = None
                 a["restingDistrictId"] = None

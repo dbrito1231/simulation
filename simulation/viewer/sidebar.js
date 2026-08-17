@@ -328,9 +328,7 @@ function renderBenchmarks() {
   if (b.ecologyScarcity != null && b.ecologyScarcity !== undefined) {
     systems.push(`<span class="res-chip">ecology <span class="civ-value">${Math.round(b.ecologyScarcity * 100)}%</span></span>`);
   }
-  if (PIANO_MODULES || META_SYSTEM) {
-    systems.push(`<span class="res-chip">modules <span class="civ-value">${b.moduleTotal}</span></span>`);
-  }
+  systems.push(`<span class="res-chip">modules <span class="civ-value">${b.moduleTotal}</span></span>`);
   const html = renderGroup("Culture", culture)
     + renderGroup("Governance", governance)
     + renderGroup("Systems", systems);
@@ -983,10 +981,8 @@ function renderSidebar() {
     ).join("");
   }
 
-  if (!CHRONICLE_ENABLED) {
-    chronicleLogEl.style.display = "none";
-  } else {
-    chronicleLogEl.style.display = "";
+  chronicleLogEl.style.display = "";
+  {
     const chronicle = world.chronicle || [];
     const chronicleKey = JSON.stringify(chronicle);
     if (chronicleKey !== lastChronicleKey) {
@@ -1062,7 +1058,7 @@ function renderSidebar() {
   }
 
   // Disaster banner: edge-detect new chronicle entries with kind === "disaster".
-  if (CHRONICLE_ENABLED) {
+  {
     const disasterEntries = (world.chronicle || []).filter((e) => e.kind === "disaster");
     if (disasterFramesSeen === null) {
       disasterFramesSeen = new Set(disasterEntries.map((e) => e.frame));
@@ -1082,8 +1078,6 @@ function renderSidebar() {
         if (!disasterEntries.some((e) => e.frame === f)) disasterFramesSeen.delete(f);
       }
     }
-  } else {
-    disasterBannerEl.style.display = "none";
   }
 
   renderPressureBanner();

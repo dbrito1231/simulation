@@ -4,7 +4,8 @@ Flag semantics for the survival/production/goods/market layer: hunger and
 health, crafting, deterministic goal-stepping, structure effects, physical
 goods (spoilage/decay/disasters/shelter/vehicles), and the priced market.
 
-**Canonical for:** `SURVIVAL_ENABLED`, `CRAFTING_ENABLED`, `USE_GOALS`,
+**Canonical for:** `SURVIVAL_ENABLED`, `CRAFTING_ENABLED`, deterministic
+goal-stepping (always on — see "Goal-stepping" below),
 `STRUCTURE_EFFECTS_ENABLED`, `GOODS_ENABLED`, `ECONOMY_ENABLED`,
 `RAIDERS_CONTAGION_ENABLED` raid/contagion economy effects (stockpile loss,
 structure damage, `"mitigates"`/`"heals"` seed structure functions).
@@ -117,7 +118,7 @@ Related action: `hunt_wildlife`
 ([07-actions.md](07-actions.md)); hunter specialty `meat`
 ([06-agents.md](06-agents.md)).
 
-## Survival role rebalance (`EMERGENT_ROLES`)
+## Survival role rebalance
 
 `_village_needed_role()` branch **(2) survival-critical** replaces the old
 fixed-order `farmer → fisher → hunter` walk with a stock-aware,
@@ -210,7 +211,7 @@ the same tick, prefer candidates whose role is `hunter`, then nearest to prey.
 **Goal execution (`_step_goal`, kind `hunt`):** each `GOAL_STEP_FRAMES` tick,
 synthesize `hunt_wildlife` with `target` set to the goal prey id until kill,
 prey flees out of range, goal TTL expires, or agent becomes incapacitated.
-Incoming inbox messages still interrupt per ordinary `USE_GOALS` rules.
+Incoming inbox messages still interrupt per ordinary goal-stepping rules.
 
 **Mutual exclusion:** if step (1) assigned movement or a `gather` goal, step (2)
 is a no-op that tick. If step (1) skipped because no gather zone exists but prey
@@ -241,9 +242,9 @@ shared with blueprints, `MAX_CUSTOM_RECIPES = 12` approved custom recipes,
 1–6 inputs each drawn from `resourceRegistry`, id/name format checks,
 rejection blacklist (`rejectedRecipeIds`).
 
-## USE_GOALS
+## Goal-stepping
 
-Deterministic goal-stepping that runs *between* LLM think calls so routine
+Deterministic goal-stepping (unconditional, no flag) that runs *between* LLM think calls so routine
 multi-tick actions (travel, relocate-and-retry) don't cost a think dispatch
 each tick. In the main loop (sim_engine/mixin_think_job.py:1603): when an agent's think
 timer elapses and it already holds a `goal` dict and has no unread inbox
@@ -766,7 +767,7 @@ drops any shipment whose `endFrame` has passed. `SHIPMENT_TRAVEL_FRAMES =
 via `_shipment_snapshot`) is present only when the flag is on; the flag
 itself is echoed in `config.flags.CARAVAN_VISUALS_ENABLED`. Off means the
 key is simply absent and the viewer draws nothing extra — the moored
-`physicalProps` boats (`TRANSIT_ENABLED`, [11](11-viewer.md)) are entirely
+`physicalProps` boats ([11](11-viewer.md)) are entirely
 unaffected by this flag either way.
 
 ## Sovereign God mode: `grant_resource` semantics (Phase 4)

@@ -8,7 +8,7 @@ schema (data stays in roles.json), agent state fields, movement speeds, lifecycl
 constants (aging/births/deaths/succession), the memory system, emergent-role
 auto-switch.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index
-(`MEMORY_ENABLED`, `EMERGENT_ROLES`, `LIFECYCLE_ENABLED` echo
+(`MEMORY_ENABLED`, `LIFECYCLE_ENABLED` echo
 status); [09-systems-society.md](09-systems-society.md) for succession-election
 detail beyond the summary here; [07-actions.md](07-actions.md) for `switch_role`/
 `change_role`/`heal_agent`/`bury_agent`.
@@ -448,7 +448,7 @@ miracle is more liberal so a divine vitals change is always reflected in the
 agent's next think payload rather than waiting for the next survival tick to
 happen to cross a threshold).
 
-## Emergent roles (`EMERGENT_ROLES`, default True)
+## Emergent roles
 
 Any agent may submit `propose_role` with a role object containing `slug`, `name`,
 `specialty`, `preferredProject`, and `skill`. The proposal is held in

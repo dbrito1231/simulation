@@ -55,7 +55,7 @@ class _BackstopsMixin:
         return self.d["ROLE_PRIMARY_RESOURCE"].get((role or "").lower())
 
     def _is_flexible_role(self, role):
-        return EMERGENT_ROLES and not self._role_specialty_resource(role) and role != "elder"
+        return not self._role_specialty_resource(role) and role != "elder"
 
     def _role_is_filled(self, roles):
         """True if any living, able agent currently holds one of the roles."""
@@ -203,9 +203,6 @@ class _BackstopsMixin:
         ecology). Sid-parity Phase 1: specialization must rebalance to real
         collective need, not only stalled builds.
         """
-        if not EMERGENT_ROLES:
-            return None
-
         # 1) Build-project gather gap (original signal).
         if self._active_project_districts():
             unmet = self._first_unmet_resource_anywhere()
@@ -298,8 +295,6 @@ class _BackstopsMixin:
         return cands[0]
 
     def _maybe_auto_switch_role(self):
-        if not EMERGENT_ROLES:
-            return
         c = self.civilization
         needed_role = self._village_needed_role()
         if not needed_role:

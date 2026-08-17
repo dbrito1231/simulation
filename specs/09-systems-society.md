@@ -12,7 +12,7 @@ agent messaging; the succession/harvest_quota/rationing rule
 kinds under `LIFECYCLE_ENABLED`.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index;
 [06-agents.md](06-agents.md) for lifecycle state fields, aging/birth/death
-mechanics, and the `EMERGENT_ROLES` summary (this file covers only the rule
+mechanics, and the emergent-role summary (this file covers only the rule
 kinds elections ride on); [07-actions.md](07-actions.md) for action params;
 [08-systems-economy.md](08-systems-economy.md) for structure effects the
 tech tree gates.
@@ -784,8 +784,8 @@ cluster holds, migrates agents' `currentDistrict` (and position) into the
 child settlement along with their persistent `homeSettlementId` (so governance
 residency moves with the secession), and logs activity + chronicle kind
 **`faction_split`** (included in
-`CHRONICLE_MILESTONE_KINDS`, so `/state`'s `chronicle` projection surfaces it
-when `CHRONICLE_ENABLED` is on). Inter-settlement
+`CHRONICLE_MILESTONE_KINDS`, so `/state`'s `chronicle` projection surfaces
+it). Inter-settlement
 interaction remains treaty / caravan / tariff only (no war).
 
 **Elder:** `_start_succession_election(settlement_id=child)` opens global
@@ -835,9 +835,9 @@ retires first) so studying agents can still learn it
 events, folded into prompts as one "Village history: ..." line
 (`CHRONICLE_PROMPT_ENTRIES = 3` most recent, sliced independently of
 `CHRONICLE_CAP` — raising the ring size never changes prompt length).
-`CHRONICLE_ENABLED` is a viewer-projection gate (default True): when enabled,
-`/state` adds a bounded top-level `chronicle` projection of that existing
-ring. It never creates a second event store and never changes prompt history.
+`/state` unconditionally adds a bounded top-level `chronicle` projection of
+that existing ring. It never creates a second event store and never changes
+prompt history.
 The projection admits only the named milestone kinds `death`, `burial`,
 `election`, `belief_founded`, `belief_adoption`, `meme_mutation`,
 `knowledge_preserved`, `disaster`, `district_founded`, `emergency_measure`,
@@ -864,7 +864,7 @@ the day boundary when `CHRONICLE_SAGA_ENABLED` is on ([02](02-engine-core.md#chr
 capped at `SAGA_CAP = 100` (same magnitude as `CHRONICLE_CAP`).
 
 **Not prompt-facing.** Saga text is explicitly **not** part of the
-`CHRONICLE_ENABLED` `/state` chronicle projection, **not** folded into
+`/state` chronicle projection, **not** folded into
 `_chronicle_prompt_line()` / the "Village history: ..." prompt line, and
 **never** injected into any agent think payload — a ~150-word saga paragraph
 landing there would crowd out the milestone entries (`death`/`election`/
@@ -981,8 +981,7 @@ expiry/revocation narration. See
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
 for the full command/composition/closure contract.
 
-**Social ties:** `SOCIAL_LAYER_ENABLED` (default True) is another read-only
-viewer gate. `/state.socialTies` is a compact, deduplicated list of non-neutral
+**Social ties:** `/state.socialTies` is a compact, deduplicated list of non-neutral
 relationships between living agents, shaped as `{from, to, valence}` where
 `from` and `to` are agent ids and `valence` is `ally` or `rival`. A reciprocal
 disagreement resolves conservatively to `rival`. The browser uses this
@@ -1097,7 +1096,7 @@ recipient's `inbox` (broadcast when `to` is `"everyone"`/`"all"`/`None`),
 trimmed to `INBOX_CAP = 6` most-recent entries. `_drain_inbox(agent)`
 (called once per think-payload build) folds the inbox into the prompt as a
 single joined line and clears it — messages are consumed exactly once, on
-the recipient's next think. `_has_unread(agent)` also gates `USE_GOALS`
+the recipient's next think. `_has_unread(agent)` also gates goal-stepping
 (an unread message interrupts an in-progress goal so the agent responds
 promptly — see [08-systems-economy.md](08-systems-economy.md)).
 
@@ -1109,9 +1108,9 @@ promptly — see [08-systems-economy.md](08-systems-economy.md)).
 role counts), rule adherence (tax paid/due ratio), meme adoption count +
 rate + per-meme breakdown, active rule count, structure count, memory-store
 size, effect throughput (`STRUCTURE_EFFECTS_ENABLED`), ecology scarcity
-index (`ECOLOGY_ENABLED`), role-rebalance latency (`EMERGENT_ROLES`), rule
+index (`ECOLOGY_ENABLED`), role-rebalance latency, rule
 kind diversity (`RULES_ENABLED`); plus era name/tech tier
-(`TECH_TREE_ENABLED`), module-total (`PIANO_MODULES`/`META_SYSTEM`). When
+(`TECH_TREE_ENABLED`), module-total. When
 `THEORY_OF_MIND_ENABLED`, also samples `peer_prediction_accuracy` (hits/total
 against pending `expect=` predictions from `theory_of_mind` module reports).
 When `TESTAMENT_ENABLED`, also samples `cultural_carryover` (oldest surviving
@@ -1171,7 +1170,7 @@ free prose and is excluded from auto-linking per Answer 2.
 
 ### Chronicle event page
 
-Source: top-level `chronicle` (only when `CHRONICLE_ENABLED and CULTURE_ENABLED`,
+Source: top-level `chronicle` (only when `CULTURE_ENABLED`,
 `_chronicle_snapshot()`, `mixin_snapshot.py:105-111`): bounded `{text, frame, kind}`
 rows filtered to `CHRONICLE_MILESTONE_KINDS`.
 
@@ -1189,8 +1188,8 @@ Answer 2 ("No free-text scanning of chronicle/reasoning/rule-description strings
 
 ### Social tie — cross-link only, no standalone page
 
-Source: `socialTies` (`_social_ties_snapshot()`, `mixin_snapshot.py:79-103`). Gated by
-`SOCIAL_LAYER_ENABLED`.
+Source: `socialTies` (`_social_ties_snapshot()`, `mixin_snapshot.py:79-103`).
+Always present.
 
 Social ties are **not** a thirteenth page kind. The engine server-canonicalizes each
 tie to one entry per pair (sorted `(source_id, target_id)`, valence conflicts resolved

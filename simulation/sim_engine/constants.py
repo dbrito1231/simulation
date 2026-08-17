@@ -12,12 +12,9 @@ import os
 __all__ = [
     "SURVIVAL_ENABLED",
     "CRAFTING_ENABLED",
-    "USE_GOALS",
     "STRUCTURE_EFFECTS_ENABLED",
     "STRUCTURE_WEAR_ENABLED",
     "ACTIVITY_CUES_ENABLED",
-    "SOCIAL_LAYER_ENABLED",
-    "CHRONICLE_ENABLED",
     "CHRONICLE_SAGA_ENABLED",
     "FOUNDING_EVENTS_ENABLED",
     "WORLD_CLOCK_HUD_ENABLED",
@@ -35,8 +32,6 @@ __all__ = [
     "PEER_MODEL_FIELD_CHAR_CAP",
     "PIANO_MODULES",
     "ALWAYS_ON_MODULES",
-    "META_SYSTEM",
-    "EMERGENT_ROLES",
     "RULES_ENABLED",
     "MEMES_ENABLED",
     "BENCHMARKS_ENABLED",
@@ -420,7 +415,6 @@ __all__ = [
     "MEME_MUTATION_PROB",
     "MEME_MUTATION_SESSION_CAP",
     "PERSONALITY_DRIFT_CAP",
-    "CEMETERY_ENABLED",
     "BURY_CONTACT_DIST",
     "CONFRONT_CONTACT_DIST",
     "CONFRONT_DAMAGE",
@@ -440,7 +434,6 @@ __all__ = [
     "TIER3_CONTENT_ENABLED",
     "PRESSURE_LOOP_ENABLED",
     "ENV_EFFECTS_ENABLED",
-    "TRANSIT_ENABLED",
     "COMFORT_EVERY_N_GOODS_TICKS",
     "path1_on",
     "PROJECT_TEMPLATES",
@@ -500,16 +493,11 @@ __all__ = [
 # --- Feature flags (ported from index.html consts; now server config) ---
 SURVIVAL_ENABLED = True
 CRAFTING_ENABLED = True
-USE_GOALS = True
 STRUCTURE_EFFECTS_ENABLED = True
 # Viewer-only projections of existing simulation state. These flags never
 # change decay, ruin, or action mechanics; they only control /state consumers.
 STRUCTURE_WEAR_ENABLED = True
 ACTIVITY_CUES_ENABLED = True
-# Read-only viewer projections of relationships and the existing culture
-# chronicle. These never alter social/culture simulation state or prompts.
-SOCIAL_LAYER_ENABLED = True
-CHRONICLE_ENABLED = True
 # Daily village saga dispatch ring (viewer-only; never prompt-facing).
 # Phase 2: day-boundary sim-fast lm_complete dispatch via run_chronicle_saga.
 CHRONICLE_SAGA_ENABLED = True
@@ -571,8 +559,6 @@ PIANO_MODULES = True
 # contention soak proves it is safe; false preserves the existing per-think
 # fan-out path exactly.
 ALWAYS_ON_MODULES = False
-META_SYSTEM = True
-EMERGENT_ROLES = True
 RULES_ENABLED = True
 MEMES_ENABLED = True
 BENCHMARKS_ENABLED = True
@@ -1820,7 +1806,7 @@ MEME_MUTATION_SESSION_CAP = 30        # hard ceiling on lm_complete calls for me
 # agent's existing persona/personality text (deterministic templates only).
 # Capped so a long-lived elder doesn't accumulate an unbounded run-on string.
 PERSONALITY_DRIFT_CAP = 3
-# --- Cemetery & burial (permanent-death handling, CEMETERY_ENABLED) ---
+# --- Cemetery & burial (permanent-death handling) ---
 # A permanent death (LIFECYCLE_ENABLED) used to leave the corpse lying
 # wherever it fell -- incapacitated forever, at a random world position, with
 # no in-fiction acknowledgement. This closes that gap: a seed Cemetery
@@ -1830,7 +1816,6 @@ PERSONALITY_DRIFT_CAP = 3
 # the backstop does it itself -- so no corpse waits forever. A collapsed-but-
 # not-dead agent (deathFrame is None) is never eligible; burial is strictly
 # for LIFECYCLE_ENABLED's permanent death.
-CEMETERY_ENABLED = True
 BURY_CONTACT_DIST = 80                # matches heal_agent's contact radius
 CONFRONT_CONTACT_DIST = 80            # bounded PvP adjacency (heal/bury/trade parity)
 CONFRONT_DAMAGE = 10
@@ -1853,7 +1838,6 @@ TIER3_CONTENT_ENABLED = True
 PRESSURE_LOOP_ENABLED = True
 RAIDERS_CONTAGION_ENABLED = True
 ENV_EFFECTS_ENABLED = True
-TRANSIT_ENABLED = True
 COMFORT_EVERY_N_GOODS_TICKS = 4  # comfort consumption fires every Nth goods tick, not every one
 
 
@@ -2161,24 +2145,23 @@ if CULTURE_ENABLED:
         "unlocks": [{"kind": "knowledge", "station": "library"}],
     }
 
-if CEMETERY_ENABLED:
-    # The Cemetery: the seed burial STATION. Plain tier-1, buildable like
-    # house/wall/market/library (the deterministic escape -- a village never
-    # needs an uninvented resource to bury its dead). Its "unlocks" effect is
-    # a new kind ("burial") consulted by _working_cemeteries(); the actual
-    # burial mechanic (moving a corpse to a grave slot) lives in
-    # _bury_agent_at, not in the function block.
-    PROJECT_TEMPLATES["cemetery"] = {
-        "name": "Cemetery",
-        "needs": {"stone": 3, "wood": 1},
-        "visualStyle": "cemetery",
-        **({"tier": 1} if TECH_TREE_ENABLED else {}),
-    }
-    PROJECT_ORDER.append("cemetery")
-    PROJECT_KIND["cemetery"] = "cemetery"
-    SEED_STRUCTURE_FUNCTIONS["cemetery"] = {
-        "unlocks": [{"kind": "burial", "station": "cemetery"}],
-    }
+# The Cemetery: the seed burial STATION. Plain tier-1, buildable like
+# house/wall/market/library (the deterministic escape -- a village never
+# needs an uninvented resource to bury its dead). Its "unlocks" effect is
+# a new kind ("burial") consulted by _working_cemeteries(); the actual
+# burial mechanic (moving a corpse to a grave slot) lives in
+# _bury_agent_at, not in the function block.
+PROJECT_TEMPLATES["cemetery"] = {
+    "name": "Cemetery",
+    "needs": {"stone": 3, "wood": 1},
+    "visualStyle": "cemetery",
+    **({"tier": 1} if TECH_TREE_ENABLED else {}),
+}
+PROJECT_ORDER.append("cemetery")
+PROJECT_KIND["cemetery"] = "cemetery"
+SEED_STRUCTURE_FUNCTIONS["cemetery"] = {
+    "unlocks": [{"kind": "burial", "station": "cemetery"}],
+}
 
 # Path 1 constants + registry extensions (flags defined above).
 TILE_CELL = 40
