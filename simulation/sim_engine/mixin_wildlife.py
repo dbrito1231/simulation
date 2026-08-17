@@ -24,7 +24,7 @@ class _WildlifeMixin:
 
     # --- Path 1: pressure loop ---
     def _is_night(self):
-        if not path1_on("PRESSURE_LOOP_ENABLED"):
+        if not PATH1_ENABLED:
             return False
         phase = self.frameTick % DAY_FRAMES
         return phase >= int(DAY_FRAMES * (1 - NIGHT_FRACTION))
@@ -124,7 +124,7 @@ class _WildlifeMixin:
         return lit
 
     def _tick_night_pressure(self):
-        if not path1_on("PRESSURE_LOOP_ENABLED") or not SURVIVAL_ENABLED:
+        if not PATH1_ENABLED or not SURVIVAL_ENABLED:
             return
         if not self._is_night():
             return
@@ -392,8 +392,6 @@ class _WildlifeMixin:
 
     def _wildlife_road_waypoints(self, from_district_id, to_district_id, dest_x, dest_y):
         """Reuse agent road cache between districts; [] if no road path."""
-        if not ROADS_ENABLED:
-            return []
         path_nodes = self._road_path_between_districts(from_district_id, to_district_id)
         if not path_nodes:
             return []
@@ -824,7 +822,7 @@ class _WildlifeMixin:
         return out
 
     def _tick_wildlife(self):
-        if not path1_on("PRESSURE_LOOP_ENABLED") or not SURVIVAL_ENABLED:
+        if not PATH1_ENABLED or not SURVIVAL_ENABLED:
             return
         if random.random() > WILDLIFE_EVENT_PROB:
             return
@@ -846,7 +844,7 @@ class _WildlifeMixin:
         self._push_activity(f"Wildlife attacks {victim['name']} in the forest!")
 
     def _maybe_seek_shelter(self, agent):
-        if not path1_on("PRESSURE_LOOP_ENABLED") or not self._is_night():
+        if not PATH1_ENABLED or not self._is_night():
             return
         if agent.get("homeStructureId") or agent.get("goal"):
             return

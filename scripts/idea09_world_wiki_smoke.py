@@ -3,7 +3,7 @@
 Covers: route shape, cross-link resolution for agent relationships and
 structure homeOf/districtId (Phase 2a), district/settlement/treaty/resource/
 project/recipe pages with correct links (Phase 2b), social tie cross-links on
-agent pages, settlements/treaties absent when PATH1_DIPLOMACY_ENABLED=False,
+agent pages, settlements/treaties absent when PATH1_ENABLED=False,
 districts helper extraction regression, and flag-off disabled response.
 Ollama-free.
 
@@ -74,7 +74,7 @@ def _build_wiki_pages(engine, sem):
                 else {}
             )
         chronicle_raw = []
-        if sem.CHRONICLE_ENABLED and sem.CULTURE_ENABLED:
+        if sem.CULTURE_ENABLED:
             for entry in list((c.get("chronicle") or [])[-sem.CHRONICLE_CAP:]):
                 if entry.get("kind") in sem.CHRONICLE_MILESTONE_KINDS:
                     chronicle_raw.append(dict(entry))
@@ -90,12 +90,10 @@ def _build_wiki_pages(engine, sem):
             }
         settlement_rows = []
         treaty_rows = []
-        if sem.path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if sem.PATH1_ENABLED:
             settlement_rows = [dict(row) for row in (c.get("settlements") or [])]
             treaty_rows = [dict(row) for row in (c.get("treaties") or [])]
-        social_ties = []
-        if sem.SOCIAL_LAYER_ENABLED:
-            social_ties = engine._social_ties_snapshot()
+        social_ties = engine._social_ties_snapshot()
 
     name_to_id = {row["name"]: row["id"] for row in agent_rows}
 
@@ -144,7 +142,7 @@ def _build_wiki_pages(engine, sem):
         agent_pages.append({"id": aid, "kind": "agent", "fields": fields, "links": links})
 
     # Social tie cross-links on agent pages.
-    if sem.SOCIAL_LAYER_ENABLED and social_ties:
+    if social_ties:
         agent_pages_by_id = {p["id"]: p for p in agent_pages}
         for tie in social_ties:
             from_id = tie.get("from")
@@ -219,7 +217,7 @@ def _build_wiki_pages(engine, sem):
             rule_pages.append({"id": rid, "kind": "rule", "fields": fields, "links": []})
 
     chronicle_pages = []
-    if sem.CHRONICLE_ENABLED and sem.CULTURE_ENABLED:
+    if sem.CULTURE_ENABLED:
         for entry in chronicle_raw:
             frame = entry.get("frame")
             kind = entry.get("kind", "")
@@ -251,7 +249,7 @@ def _build_wiki_pages(engine, sem):
 
     # Settlement pages.
     settlement_pages = []
-    if sem.path1_on("PATH1_DIPLOMACY_ENABLED"):
+    if sem.PATH1_ENABLED:
         for s in settlement_rows:
             sid = s.get("id")
             if not sid:
@@ -269,7 +267,7 @@ def _build_wiki_pages(engine, sem):
 
     # Treaty pages.
     treaty_pages = []
-    if sem.path1_on("PATH1_DIPLOMACY_ENABLED"):
+    if sem.PATH1_ENABLED:
         for t in treaty_rows:
             tid = t.get("id")
             if not tid:
@@ -515,14 +513,14 @@ def test_chronicle_page_shape():
     try:
         engine = make_engine(4)
         # Inject a chronicle entry with a milestone kind.
-        if se.CHRONICLE_ENABLED and se.CULTURE_ENABLED:
+        if se.CULTURE_ENABLED:
             engine.civilization.setdefault("chronicle", []).append({
                 "text": "Smoke village was founded",
                 "frame": 42,
                 "kind": "district_founded",
             })
         result = _build_wiki_pages(engine, se)
-        if not (se.CHRONICLE_ENABLED and se.CULTURE_ENABLED):
+        if not se.CULTURE_ENABLED:
             assert_true(result["pages"]["chronicle"] == [],
                         "chronicle pages should be empty when flags off")
             print("  OK chronicle page shape (flags off, empty list)")
@@ -634,9 +632,9 @@ def test_district_pages():
 
 
 def test_settlement_pages_flag_on():
-    """Settlement pages appear when PATH1_DIPLOMACY_ENABLED, with districts[] cross-links."""
-    if not se.path1_on("PATH1_DIPLOMACY_ENABLED"):
-        print("  SKIP settlement pages (PATH1_DIPLOMACY_ENABLED=False)")
+    """Settlement pages appear when PATH1_ENABLED, with districts[] cross-links."""
+    if not se.PATH1_ENABLED:
+        print("  SKIP settlement pages (PATH1_ENABLED=False)")
         return
     old = se.WORLD_WIKI_ENABLED
     se.WORLD_WIKI_ENABLED = True
@@ -674,20 +672,25 @@ def test_settlement_pages_flag_on():
 
 
 def test_settlements_absent_when_diplomacy_off():
-    """When PATH1_DIPLOMACY_ENABLED is False, settlements and treaties are absent."""
+    """When PATH1_ENABLED is False, settlements and treaties are absent.
+
+    Path 1's seven sub-flags (including the former PATH1_DIPLOMACY_ENABLED)
+    were merged into the single PATH1_ENABLED switch (Phase 3,
+    flag-minimization) -- diplomacy can no longer be disabled independently
+    of the rest of Path 1, so this now exercises the merged flag's off
+    state directly. See specs/10-path1.md."""
     old_wiki = se.WORLD_WIKI_ENABLED
     se.WORLD_WIKI_ENABLED = True
 
-    # Build a thin mock of `sem` that replaces path1_on to return False for
-    # PATH1_DIPLOMACY_ENABLED, leaving all other attributes untouched.
+    # Build a thin mock of `sem` that reports PATH1_ENABLED=False, leaving
+    # all other attributes untouched.
     class _DiplomacyOffSem:
         def __getattr__(self, name):
             return getattr(se, name)
 
-        def path1_on(self, subflag=None):  # noqa: D401
-            if subflag == "PATH1_DIPLOMACY_ENABLED":
-                return False
-            return se.path1_on(subflag)
+        @property
+        def PATH1_ENABLED(self):
+            return False
 
     mock_sem = _DiplomacyOffSem()
 
@@ -721,9 +724,9 @@ def test_settlements_absent_when_diplomacy_off():
 
 
 def test_treaty_pages():
-    """Treaty pages appear when PATH1_DIPLOMACY_ENABLED, no cross-links (no settlement id in shape)."""
-    if not se.path1_on("PATH1_DIPLOMACY_ENABLED"):
-        print("  SKIP treaty pages (PATH1_DIPLOMACY_ENABLED=False)")
+    """Treaty pages appear when PATH1_ENABLED, no cross-links (no settlement id in shape)."""
+    if not se.PATH1_ENABLED:
+        print("  SKIP treaty pages (PATH1_ENABLED=False)")
         return
     old = se.WORLD_WIKI_ENABLED
     se.WORLD_WIKI_ENABLED = True
@@ -867,9 +870,6 @@ def test_recipe_pages():
 
 def test_social_ties_on_agent_pages():
     """Social ties appear as labeled cross-links on both agent pages."""
-    if not se.SOCIAL_LAYER_ENABLED:
-        print("  SKIP social ties (SOCIAL_LAYER_ENABLED=False)")
-        return
     old = se.WORLD_WIKI_ENABLED
     se.WORLD_WIKI_ENABLED = True
     try:

@@ -85,7 +85,6 @@ def test_flags(engine):
     snap = engine.snapshot()
     flags = snap["config"]["flags"]
     assert_true(flags.get("PATH1_ENABLED"), "PATH1_ENABLED not in snapshot flags")
-    assert_true(flags.get("INDUSTRY_ENABLED"), "INDUSTRY_ENABLED not bundled")
     print(f"  OK flags: PATH1_ENABLED={flags.get('PATH1_ENABLED')}")
 
 
@@ -621,7 +620,6 @@ def test_caravan_ocean_route_when_transit_unlocked():
     engine = make_engine()
     home_sid, outpost_sid = _seed_two_settlements(engine)
     _seed_ocean_transit(engine, district_id="beach")
-    assert_true(se.TRANSIT_ENABLED, "TRANSIT_ENABLED must be on")
     assert_true(engine._has_ocean_transit(), "dock should unlock ocean transit")
 
     agent = _caravan_ready_agent(engine, "village_core")
@@ -630,13 +628,6 @@ def test_caravan_ocean_route_when_transit_unlocked():
     assert_true("ocean" in legs, legs)
     assert_true(legs[0] == "beach", legs)
     assert_true(legs[-1] == dest_district, legs)
-
-    se.TRANSIT_ENABLED = False
-    try:
-        direct = engine._caravan_route_legs(agent, dest_district)
-        assert_true(direct == [dest_district], direct)
-    finally:
-        se.TRANSIT_ENABLED = True
     print(f"  OK ocean corridor route when transit unlocked: {legs}")
 
 

@@ -49,7 +49,7 @@ function tickBody() {
     else drawAgent(ctx, item.agent, renderFrame);
   }
   drawDivineSightOverlays(ctx, renderFrame);
-  if (ACTIVITY_CUES_ENABLED) {
+  if (VISUALS_ENABLED) {
     // Pure frame-derived accents: no activity state is retained in the viewer.
     for (const structure of structures) drawStructureSmoke(ctx, structure, renderFrame);
     for (const agent of agents) drawActivityDust(ctx, agent, renderFrame);

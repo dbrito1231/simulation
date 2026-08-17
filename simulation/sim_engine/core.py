@@ -220,7 +220,7 @@ class SimEngine(
         self._peer_prediction_total = 0
         self.ROAD_PATH_CACHE = {}   # (nodeA, nodeB) -> [node ids]; see _recompute_road_paths
         # Living-ecosystem Phase 3: cosmetic shipment ring. Deliberately kept
-        # off the civilization dict (see CARAVAN_VISUALS_ENABLED) so it is
+        # off the civilization dict (see VISUALS_ENABLED) so it is
         # never written to state.db.
         self.shipments = []
         self._shipment_seq = 0
@@ -376,8 +376,8 @@ class SimEngine(
                 a["inheritedTestament"] = []
                 a["inheritedBeliefs"] = []
                 a["deathFrame"] = None
-                # Cemetery/burial: unset until a permanent death is buried
-                # (see CEMETERY_ENABLED above); irrelevant while alive.
+                # Cemetery/burial: unset until a permanent death is buried;
+                # irrelevant while alive.
                 a["buried"] = False
                 a["restingPlaceId"] = None
                 a["restingDistrictId"] = None
@@ -597,7 +597,7 @@ class SimEngine(
             self.civilization["districtStocks"] = self._init_district_stocks(self.civilization["districts"])
         self.civilization["weather"] = self._weather_default(0)
         self.civilization["godState"] = self._default_god_state()
-        if path1_on():
+        if PATH1_ENABLED:
             for d in self.civilization["districts"].values():
                 d.setdefault("tiles", {})
                 self._ensure_district_terrain(d)

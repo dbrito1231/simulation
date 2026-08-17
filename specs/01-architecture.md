@@ -99,10 +99,9 @@ Full action-by-action detail (params, gates, effects) lives in
 
 The emergent-role actions (`propose_role`, `approve_role`, `reject_role`) follow
 this complete table as well: their role-object field is in `DECISION_SCHEMA`,
-their instructions are in `SYSTEM_PROMPT`, and the engine filters them when
-`EMERGENT_ROLES` is disabled. Approval rebuilds the engine's live derived role
-maps; server startup maps remain seed-only conveniences and are not a second role
-registry.
+their instructions are in `SYSTEM_PROMPT`, and they are always offered.
+Approval rebuilds the engine's live derived role maps; server startup maps
+remain seed-only conveniences and are not a second role registry.
 
 ## Control-plane data flow (Sovereign God mode)
 
@@ -139,7 +138,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 67 module-level flags, sim_engine.py)
+## Flag index (complete — 43 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -149,52 +148,29 @@ complete list and default state. "Echoed" = present in `/state`'s
 |---|---|---|---|
 | `SURVIVAL_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `CRAFTING_ENABLED` | True | yes | [08](08-systems-economy.md) |
-| `USE_GOALS` | True | yes | [08](08-systems-economy.md) |
 | `STRUCTURE_EFFECTS_ENABLED` | True | no | [08](08-systems-economy.md) |
 | `MEMORY_ENABLED` | True | no | [06](06-agents.md) |
-| `AGENT_MESSAGING` | True | no | [06](06-agents.md) |
 | `PIANO_MODULES` | True | yes | [03](03-cognition.md) |
 | `ALWAYS_ON_MODULES` | False | no | [03](03-cognition.md) |
-| `META_SYSTEM` | True | yes | [03](03-cognition.md) |
-| `EMERGENT_ROLES` | True | yes | [06](06-agents.md) |
 | `RULES_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `MEMES_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `BENCHMARKS_ENABLED` | True | no | [12](12-ops.md) |
 | `DETERMINISM_PINNING` | False (env-backed, `SIM_DETERMINISM_PINNING`) | no | [02](02-engine-core.md), [12](12-ops.md) |
 | `ECOLOGY_ENABLED` | True | yes | [05](05-world.md) |
-| `ROADS_ENABLED` | True | yes | [05](05-world.md) |
 | `STRUCTURE_UPGRADES_ENABLED` | True | yes | [05](05-world.md) |
-| `STRUCTURE_WEAR_ENABLED` | True | yes | [11](11-viewer.md) |
-| `ACTIVITY_CUES_ENABLED` | True | yes | [11](11-viewer.md) |
-| `SOCIAL_LAYER_ENABLED` | True | yes | [09](09-systems-society.md) |
-| `CHRONICLE_ENABLED` | True | yes | [09](09-systems-society.md) |
+| `VISUALS_ENABLED` | True | yes | [11](11-viewer.md) |
 | `CHRONICLE_SAGA_ENABLED` | True | yes | [09](09-systems-society.md#saga-chronicle_saga_enabled), [02](02-engine-core.md#chronicle-saga-chronicle_saga_enabled), [03](03-cognition.md), [12](12-ops.md) |
-| `FOUNDING_EVENTS_ENABLED` | True | yes | [05](05-world.md) |
-| `WORLD_CLOCK_HUD_ENABLED` | True | yes | [11](11-viewer.md) |
-| `SEASONAL_AGENTS_ENABLED` | True | yes | [11](11-viewer.md) |
 | `GOODS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `TECH_TREE_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `DAILY_COUNCIL_ENABLED` | True | no | [09](09-systems-society.md) |
-| `SAGE_REVIEW_ENABLED` | True | no | [09](09-systems-society.md) |
 | `ECONOMY_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `CONTRACTS_ENABLED` | True | yes | [07](07-actions.md), [08](08-systems-economy.md) |
 | `LIFECYCLE_ENABLED` | True | yes | [06](06-agents.md) |
 | `DYNASTY_TREE_ENABLED` | True | yes | [06](06-agents.md) (Divine Lineage viewer — Phase 3) |
 | `CULTURE_ENABLED` | True | yes | [09](09-systems-society.md) |
-| `CEMETERY_ENABLED` | True | yes | [05](05-world.md) |
 | `PATH1_ENABLED` | True | yes | [10](10-path1.md) |
-| `INDUSTRY_ENABLED` | True | yes (as `INDUSTRY_ENABLED`) | [10](10-path1.md) |
-| `TOOL_TIERS_ENABLED` | True | yes | [10](10-path1.md) |
-| `COMPOSABLE_BUILD_ENABLED` | True | yes | [10](10-path1.md) |
-| `TERRAIN_TILES_ENABLED` | True | yes | [10](10-path1.md) |
-| `PATH1_DIPLOMACY_ENABLED` | True | yes (as `DIPLOMACY_ENABLED`) | [10](10-path1.md) |
-| `TIER3_CONTENT_ENABLED` | True | yes | [10](10-path1.md) |
-| `PRESSURE_LOOP_ENABLED` | True | yes | [10](10-path1.md) |
 | `RAIDERS_CONTAGION_ENABLED` | True | yes | [10](10-path1.md) |
 | `ENV_EFFECTS_ENABLED` | True | yes | [08](08-systems-economy.md) |
-| `LIBRARY_SCALING_ENABLED` | True | yes | [09](09-systems-society.md) |
-| `TRANSIT_ENABLED` | True | yes | [10](10-path1.md) |
-| `ECONOMY_SINKS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WIKI_MEMORY` | True (D2 soak on `main` — see [03](03-cognition.md)) | yes | [03](03-cognition.md) |
 | `TESTAMENT_ENABLED` | True | yes | [06](06-agents.md), [09](09-systems-society.md) |
 | `THEORY_OF_MIND_ENABLED` | False (env-backed, `SIM_THEORY_OF_MIND`) | yes | [03](03-cognition.md) |
@@ -202,7 +178,6 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `CROP_GROWTH_ENABLED` | True | yes | [05](05-world.md) |
 | `WILDLIFE_ENABLED` | True | yes | [05](05-world.md) (authoritative fauna + hunt + motion; also [02](02-engine-core.md), [07](07-actions.md), [08](08-systems-economy.md), [11](11-viewer.md)) |
 | `WILDLIFE_BEHAVIOR_ENABLED` | True | yes | [02](02-engine-core.md#huntable-wildlife-wildlife_enabled) (graze/wander/flee/rest state machine + loose herding) |
-| `CARAVAN_VISUALS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WEATHER_ENABLED` | True | yes | [05](05-world.md) |
 | `WEATHER_GOVERNANCE_ENABLED` | True | yes | [05](05-world.md) |
 | `GOD_MODE_ENABLED` | True (env-backed, `SIM_GOD_MODE`; disable via `0`/`false`/`no`/`off`) | yes | [02](02-engine-core.md), [04](04-http-api.md) |

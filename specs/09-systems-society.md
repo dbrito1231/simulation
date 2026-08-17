@@ -5,14 +5,14 @@ pipeline, the rules/voting system (including the anti-oscillation guard),
 memes, culture (skills/teaching/library/chronicle), messaging, benchmarks,
 and the governance-specific slice of lifecycle succession.
 
-**Canonical for:** `TECH_TREE_ENABLED`, `DAILY_COUNCIL_ENABLED`, `SAGE_REVIEW_ENABLED`,
+**Canonical for:** `TECH_TREE_ENABLED`, `DAILY_COUNCIL_ENABLED`,
 `RULES_ENABLED`, `MEMES_ENABLED`, `CULTURE_ENABLED`, `CHRONICLE_SAGA_ENABLED`,
-`AGENT_MESSAGING`,
-`BENCHMARKS_ENABLED` semantics; the succession/harvest_quota/rationing rule
+`BENCHMARKS_ENABLED` semantics; the two-stage blueprint (Sage review) gate;
+agent messaging; the succession/harvest_quota/rationing rule
 kinds under `LIFECYCLE_ENABLED`.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index;
 [06-agents.md](06-agents.md) for lifecycle state fields, aging/birth/death
-mechanics, and the `EMERGENT_ROLES` summary (this file covers only the rule
+mechanics, and the emergent-role summary (this file covers only the rule
 kinds elections ride on); [07-actions.md](07-actions.md) for action params;
 [08-systems-economy.md](08-systems-economy.md) for structure effects the
 tech tree gates.
@@ -29,7 +29,7 @@ tier lower (e.g. the Forge, tier-2 unlock, is plain tier-1 tech).
 
 **Era ladder** (`ERA_LADDER`, sim_engine/constants.py:1505): Founding → Craftsman
 (working craft station) → Forge (working tier-2 station) → Wagon (a
-cart/wagon in village hands) → (`TIER3_CONTENT_ENABLED`) Harbor → Mill.
+cart/wagon in village hands) → (`PATH1_ENABLED`) Harbor → Mill.
 `_maybe_era_transition()` (sim_engine/mixin_structures_economy.py:251) is tick-gated and monotonic
 — a broken Forge never un-names the era — and logs/benchmarks (`era`) on
 advance.
@@ -203,12 +203,11 @@ retention keeps the newest 30 meeting ids, as specified in [02](02-engine-core.m
 | Sage review timeout | `SAGE_REVIEW_TIMEOUT_FRAMES = STALL_THRESHOLD * 20` (~6.7 min) | `_maybe_skip_sage_review`: if no living, non-incapacitated elder exists, a pending review auto-skips rather than blocking forever. |
 | Denied-review amnesty | same `BLUEPRINT_AMNESTY_FRAMES` | `_maybe_amnesty_denied_sage_reviews`: a sage-denied proposal is withdrawn and blacklisted (subject to the same rejection amnesty) after the window. |
 
-**`SAGE_REVIEW_ENABLED`** — two-stage blueprint approval: the elder must
+**Sage review** — two-stage blueprint approval, always on: the elder must
 `sage_review_blueprint` (a geography/resource sanity pass, verdict
 `approved`/`denied`) before `approve_blueprint`/`reject_blueprint` is
 accepted on that id. `_is_sage_reviewer` is any agent with `role == "elder"`
-(no separate Sage role). Flag-off: `approve_blueprint` behaves exactly as
-before (no review gate).
+(no separate Sage role).
 
 Related actions: `propose_blueprint`, `sage_review_blueprint`,
 `approve_blueprint`, `reject_blueprint`, `craft_item` (tier gate) —
@@ -216,7 +215,7 @@ Related actions: `propose_blueprint`, `sage_review_blueprint`,
 
 ## Library scaling
 
-`LIBRARY_SCALING_ENABLED` defaults to True. The strongest working Library in
+The strongest working Library in
 the agent's district scales preservation capacity and study gain by its upgrade
 weight (`max(1, level // UPGRADE_STAT_STEP)`). The knowledge-capacity
 multiplier is capped at 10; the study-gain multiplier is capped at
@@ -236,7 +235,7 @@ checks.
 Rule kinds: `RULE_KINDS = {"resource_tax", "custom", "priority"}`
 (sim_engine/constants.py:1281), unioned with `{"harvest_quota", "rationing",
 "succession"}` when `LIFECYCLE_ENABLED`, `{"treaty"}` when
-`PATH1_DIPLOMACY_ENABLED` (see [10-path1.md](10-path1.md) for treaty
+`PATH1_ENABLED` (see [10-path1.md](10-path1.md) for treaty
 mechanics), and `{"quarantine"}` when `RAIDERS_CONTAGION_ENABLED` (see
 [Quarantine](#quarantine-kind-quarantine-raiders_contagion_enabled) below). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
 enacted at `MAX_ACTIVE_RULES = 8`.
@@ -628,8 +627,8 @@ arrive after the cap are ignored without changing belief state.
 Beliefs have mechanical consequences beyond votes. Their affinity continues
 to bias `_belief_biased_vote`; believers prefer matching projects when choosing
 the role-default project and co-believers receive a reciprocal relationship
-bonus on adoption/persuasion. `HARVEST_SPIRIT_CONTRIB_BOOST = True` remains a
-small compatible food-contribution tilt. `meme_adoption` benchmarks include
+bonus on adoption/persuasion. Believers in the seed harvest_spirit meme get a
+small, unconditional food-contribution tilt. `meme_adoption` benchmarks include
 all live beliefs with a per-belief holder breakdown, including authored
 beliefs.
 
@@ -785,8 +784,8 @@ cluster holds, migrates agents' `currentDistrict` (and position) into the
 child settlement along with their persistent `homeSettlementId` (so governance
 residency moves with the secession), and logs activity + chronicle kind
 **`faction_split`** (included in
-`CHRONICLE_MILESTONE_KINDS`, so `/state`'s `chronicle` projection surfaces it
-when `CHRONICLE_ENABLED` is on). Inter-settlement
+`CHRONICLE_MILESTONE_KINDS`, so `/state`'s `chronicle` projection surfaces
+it). Inter-settlement
 interaction remains treaty / caravan / tariff only (no war).
 
 **Elder:** `_start_succession_election(settlement_id=child)` opens global
@@ -836,17 +835,17 @@ retires first) so studying agents can still learn it
 events, folded into prompts as one "Village history: ..." line
 (`CHRONICLE_PROMPT_ENTRIES = 3` most recent, sliced independently of
 `CHRONICLE_CAP` — raising the ring size never changes prompt length).
-`CHRONICLE_ENABLED` is a viewer-projection gate (default True): when enabled,
-`/state` adds a bounded top-level `chronicle` projection of that existing
-ring. It never creates a second event store and never changes prompt history.
+`/state` unconditionally adds a bounded top-level `chronicle` projection of
+that existing ring. It never creates a second event store and never changes
+prompt history.
 The projection admits only the named milestone kinds `death`, `burial`,
 `election`, `belief_founded`, `belief_adoption`, `meme_mutation`,
 `knowledge_preserved`, `disaster`, `district_founded`, `emergency_measure`,
 `faction_split`, and `divine`; routine gather, talk, craft, and build activity
 remains exclusively in `activity`. `disaster` entries are pushed unconditionally
 from `_maybe_disaster` (see [08](08-systems-economy.md)); `district_founded`
-entries are pushed from `_found_district` only when `FOUNDING_EVENTS_ENABLED`
-is True (see [05](05-world.md)); `faction_split` entries are pushed from
+entries are pushed from `_found_district` only when `VISUALS_ENABLED`
+is True (see [05](05-world.md), [11](11-viewer.md)); `faction_split` entries are pushed from
 `_execute_faction_split` when `FACTION_SPLIT_ENABLED` and `CULTURE_ENABLED` are on (see
 [§faction_split_enabled](#faction_split_enabled)). `CHRONICLE_CAP` was raised from 20 to 100
 (living-ecosystem Phase 2, item 0) after live verification showed a
@@ -865,7 +864,7 @@ the day boundary when `CHRONICLE_SAGA_ENABLED` is on ([02](02-engine-core.md#chr
 capped at `SAGA_CAP = 100` (same magnitude as `CHRONICLE_CAP`).
 
 **Not prompt-facing.** Saga text is explicitly **not** part of the
-`CHRONICLE_ENABLED` `/state` chronicle projection, **not** folded into
+`/state` chronicle projection, **not** folded into
 `_chronicle_prompt_line()` / the "Village history: ..." prompt line, and
 **never** injected into any agent think payload — a ~150-word saga paragraph
 landing there would crowd out the milestone entries (`death`/`election`/
@@ -982,8 +981,7 @@ expiry/revocation narration. See
 [02-engine-core.md](02-engine-core.md#sovereign-god-mode-phase-5--storyteller-events-and-timed-lawgiver-modifiers)
 for the full command/composition/closure contract.
 
-**Social ties:** `SOCIAL_LAYER_ENABLED` (default True) is another read-only
-viewer gate. `/state.socialTies` is a compact, deduplicated list of non-neutral
+**Social ties:** `/state.socialTies` is a compact, deduplicated list of non-neutral
 relationships between living agents, shaped as `{from, to, valence}` where
 `from` and `to` are agent ids and `valence` is `ally` or `rival`. A reciprocal
 disagreement resolves conservatively to `rival`. The browser uses this
@@ -1025,7 +1023,7 @@ valid target and at least one **authorization** holds:
 | Authorization | Condition |
 |---|---|
 | Rivalry | Actor's `relationships[targetName] == "rival"` (seller-side opinion semantics — the actor must personally hold the rival tie toward the named target). |
-| Path-1 pressure context | `path1_on("PRESSURE_LOOP_ENABLED")` **and** (`_is_night()` with actor unsheltered **or** actor was startled by Path-1 forest wildlife within `CONFRONT_PRESSURE_WINDOW_FRAMES = STALL_THRESHOLD * 2` — i.e. recent `lastNightNote` / wildlife-attack frame). |
+| Path-1 pressure context | `PATH1_ENABLED` **and** (`_is_night()` with actor unsheltered **or** actor was startled by Path-1 forest wildlife within `CONFRONT_PRESSURE_WINDOW_FRAMES = STALL_THRESHOLD * 2` — i.e. recent `lastNightNote` / wildlife-attack frame). |
 
 Neutral and ally pairs **reject** at validation (`normalize_decision` /
 `apply_decision`) even if the action were forced. Sage (`role == "elder"`) is
@@ -1090,15 +1088,15 @@ deterministic trait clause to an agent's persona text, capped at
 `PERSONALITY_DRIFT_CAP = 3` clauses so a long-lived elder's persona doesn't
 run on unbounded.
 
-## AGENT_MESSAGING
+## Agent messaging
 
-A simple per-agent inbox: `_deliver_message(from, to, text, kind)`
+A simple per-agent inbox, always on: `_deliver_message(from, to, text, kind)`
 (sim_engine/mixin_backstops.py:38) appends `{from, text, kind, frame}` to every matching
 recipient's `inbox` (broadcast when `to` is `"everyone"`/`"all"`/`None`),
 trimmed to `INBOX_CAP = 6` most-recent entries. `_drain_inbox(agent)`
 (called once per think-payload build) folds the inbox into the prompt as a
 single joined line and clears it — messages are consumed exactly once, on
-the recipient's next think. `_has_unread(agent)` also gates `USE_GOALS`
+the recipient's next think. `_has_unread(agent)` also gates goal-stepping
 (an unread message interrupts an in-progress goal so the agent responds
 promptly — see [08-systems-economy.md](08-systems-economy.md)).
 
@@ -1110,9 +1108,9 @@ promptly — see [08-systems-economy.md](08-systems-economy.md)).
 role counts), rule adherence (tax paid/due ratio), meme adoption count +
 rate + per-meme breakdown, active rule count, structure count, memory-store
 size, effect throughput (`STRUCTURE_EFFECTS_ENABLED`), ecology scarcity
-index (`ECOLOGY_ENABLED`), role-rebalance latency (`EMERGENT_ROLES`), rule
+index (`ECOLOGY_ENABLED`), role-rebalance latency, rule
 kind diversity (`RULES_ENABLED`); plus era name/tech tier
-(`TECH_TREE_ENABLED`), module-total (`PIANO_MODULES`/`META_SYSTEM`). When
+(`TECH_TREE_ENABLED`), module-total. When
 `THEORY_OF_MIND_ENABLED`, also samples `peer_prediction_accuracy` (hits/total
 against pending `expect=` predictions from `theory_of_mind` module reports).
 When `TESTAMENT_ENABLED`, also samples `cultural_carryover` (oldest surviving
@@ -1172,7 +1170,7 @@ free prose and is excluded from auto-linking per Answer 2.
 
 ### Chronicle event page
 
-Source: top-level `chronicle` (only when `CHRONICLE_ENABLED and CULTURE_ENABLED`,
+Source: top-level `chronicle` (only when `CULTURE_ENABLED`,
 `_chronicle_snapshot()`, `mixin_snapshot.py:105-111`): bounded `{text, frame, kind}`
 rows filtered to `CHRONICLE_MILESTONE_KINDS`.
 
@@ -1190,8 +1188,8 @@ Answer 2 ("No free-text scanning of chronicle/reasoning/rule-description strings
 
 ### Social tie — cross-link only, no standalone page
 
-Source: `socialTies` (`_social_ties_snapshot()`, `mixin_snapshot.py:79-103`). Gated by
-`SOCIAL_LAYER_ENABLED`.
+Source: `socialTies` (`_social_ties_snapshot()`, `mixin_snapshot.py:79-103`).
+Always present.
 
 Social ties are **not** a thirteenth page kind. The engine server-canonicalizes each
 tie to one entry per pair (sorted `(source_id, target_id)`, valence conflicts resolved

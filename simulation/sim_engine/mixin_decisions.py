@@ -220,7 +220,7 @@ class _DecisionsMixin:
             role_counts[a["role"]] = role_counts.get(a["role"], 0) + 1
         self._log_benchmark("specialization_entropy", round(entropy, 2), {"counts": role_counts})
         latency = self.civilization.get("lastRoleRebalanceLatency")
-        if EMERGENT_ROLES and latency is not None:
+        if latency is not None:
             self._log_benchmark("role_rebalance_latency", latency,
                                 {"frames": latency})
         if adherence is not None:
@@ -237,10 +237,9 @@ class _DecisionsMixin:
                                                           if not b.get("seed")),
                                  "belief_pitch_calls": self.civilization.get("beliefPitchCalls", 0),
                                  "of": living_n})
-        if PIANO_MODULES or META_SYSTEM:
-            self._log_benchmark("module_total", self._module_period_runs,
-                                {"period_ticks": BENCHMARK_TICK_FRAMES})
-            self._module_period_runs = 0
+        self._log_benchmark("module_total", self._module_period_runs,
+                            {"period_ticks": BENCHMARK_TICK_FRAMES})
+        self._module_period_runs = 0
         if PIANO_MODULES:
             # Sid-parity Phase 1: surface module-pool health so regressions
             # (slow modules, timeout spikes) are visible in soak runs.
@@ -924,7 +923,7 @@ class _DecisionsMixin:
         elif action == "approve_blueprint":
             idx = next((i for i, p in enumerate(c["pendingBlueprints"]) if p["id"] == decision.get("target")), -1)
             bp = c["pendingBlueprints"][idx] if idx != -1 else None
-            review_ok = not SAGE_REVIEW_ENABLED or (bp and bp.get("sageReview") in ("approved", "skipped"))
+            review_ok = bool(bp and bp.get("sageReview") in ("approved", "skipped"))
             resolved = False
             if agent["role"] == "elder" and idx != -1 and review_ok:
                 if bp.get("duplicateOf") and not self._structure_type_built(bp["duplicateOf"]):
@@ -1094,7 +1093,7 @@ class _DecisionsMixin:
             # elder) are excluded here: the sole living elder is established
             # only by succession election (see _start_succession_election),
             # never by an agent's own switch_role decision.
-            if (EMERGENT_ROLES and new_role and new_role in c["roleRegistry"]
+            if (new_role and new_role in c["roleRegistry"]
                     and new_role != agent["role"]
                     and not c["roleRegistry"].get(new_role, {}).get("leader")):
                 old = agent["role"]
@@ -1307,7 +1306,7 @@ class _DecisionsMixin:
 
     # --- goals (#1) ---
     def _goal_for_decision(self, decision):
-        if not USE_GOALS or not decision:
+        if not decision:
             return None
         a = decision.get("action")
         district = decision.get("target_district")

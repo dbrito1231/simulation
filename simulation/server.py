@@ -383,8 +383,7 @@ DECISION_ACTIONS = [
     # CMA + Sid enhancement actions (emergent roles + collective rules/voting).
     "switch_role", "propose_role", "approve_role", "reject_role",
     "propose_rule", "vote_rule", "repeal_rule",
-    # Cemetery/burial (permanent-death handling): the engine filters it from
-    # available_actions when CEMETERY_ENABLED is off, same pattern as repair_structure.
+    # Cemetery/burial (permanent-death handling).
     "bury_agent",
     # Path 1: composable tiles, terrain mutation, diplomacy treaties.
     "place_block", "remove_block", "dig_terrain", "plant_terrain",
@@ -3213,9 +3212,9 @@ def world_wiki():
     Cross-link rules follow the plan's §2 Answer 2 table exactly:
     structured id-keyed fields only; type/category strings (recipe station,
     resourceRegistry gatherZone, treaty→settlement) are NOT linked.
-    Settlements/treaties are gated on PATH1_DIPLOMACY_ENABLED.
-    Social ties are gated on SOCIAL_LAYER_ENABLED (surfaced as labeled links
-    on both agent pages they connect, not as standalone pages).
+    Settlements/treaties are gated on PATH1_ENABLED.
+    Social ties are surfaced as labeled links on both agent pages they
+    connect, not as standalone pages.
     """
     if not _sim_engine.WORLD_WIKI_ENABLED:
         return jsonify({"ok": False, "reason": "disabled"})
@@ -3236,7 +3235,7 @@ def world_wiki():
             raw_reg = engine._belief_registry()
             belief_reg = {bid: dict(e) for bid, e in raw_reg.items()} if isinstance(raw_reg, dict) else {}
         chronicle_raw = []
-        if _sim_engine.CHRONICLE_ENABLED and _sim_engine.CULTURE_ENABLED:
+        if _sim_engine.CULTURE_ENABLED:
             for entry in list((c.get("chronicle") or [])[-_sim_engine.CHRONICLE_CAP:]):
                 if entry.get("kind") in _sim_engine.CHRONICLE_MILESTONE_KINDS:
                     chronicle_raw.append(dict(entry))
@@ -3252,12 +3251,10 @@ def world_wiki():
             }
         settlement_rows = []
         treaty_rows = []
-        if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if _sim_engine.PATH1_ENABLED:
             settlement_rows = [dict(row) for row in (c.get("settlements") or [])]
             treaty_rows = [dict(row) for row in (c.get("treaties") or [])]
-        social_ties = []
-        if _sim_engine.SOCIAL_LAYER_ENABLED:
-            social_ties = engine._social_ties_snapshot()
+        social_ties = engine._social_ties_snapshot()
 
     # Build name→id lookup for agent relationship cross-links (name-keyed).
     name_to_id = {row["name"]: row["id"] for row in agent_rows}
@@ -3307,10 +3304,10 @@ def world_wiki():
             fields["personality"] = row["personalityTraits"]
         agent_pages.append({"id": aid, "kind": "agent", "fields": fields, "links": links})
 
-    # Social tie cross-links on agent pages (SOCIAL_LAYER_ENABLED only).
+    # Social tie cross-links on agent pages.
     # Each tie is a canonical pair (from, to, valence); the labeled link appears
     # on both agent pages — no standalone social-tie page kind.
-    if _sim_engine.SOCIAL_LAYER_ENABLED and social_ties:
+    if social_ties:
         agent_pages_by_id = {p["id"]: p for p in agent_pages}
         for tie in social_ties:
             from_id = tie.get("from")
@@ -3388,9 +3385,9 @@ def world_wiki():
                 fields["value"] = r["value"]
             rule_pages.append({"id": rid, "kind": "rule", "fields": fields, "links": []})
 
-    # Chronicle pages (CHRONICLE_ENABLED and CULTURE_ENABLED only).
+    # Chronicle pages (CULTURE_ENABLED only).
     chronicle_pages = []
-    if _sim_engine.CHRONICLE_ENABLED and _sim_engine.CULTURE_ENABLED:
+    if _sim_engine.CULTURE_ENABLED:
         for entry in chronicle_raw:
             frame = entry.get("frame")
             kind = entry.get("kind", "")
@@ -3421,10 +3418,10 @@ def world_wiki():
         }
         district_pages.append({"id": did, "kind": "district", "fields": fields, "links": links})
 
-    # Settlement pages (PATH1_DIPLOMACY_ENABLED only).
+    # Settlement pages (PATH1_ENABLED only).
     # Cross-links: districts[] → district (list of district ids).
     settlement_pages = []
-    if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+    if _sim_engine.PATH1_ENABLED:
         for s in settlement_rows:
             sid = s.get("id")
             if not sid:
@@ -3440,11 +3437,11 @@ def world_wiki():
             }
             settlement_pages.append({"id": sid, "kind": "settlement", "fields": fields, "links": links})
 
-    # Treaty pages (PATH1_DIPLOMACY_ENABLED only).
+    # Treaty pages (PATH1_ENABLED only).
     # No structured settlement id in the enacted treaty shape (plan §2 Answer 2),
     # so no treaty→settlement cross-link.
     treaty_pages = []
-    if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+    if _sim_engine.PATH1_ENABLED:
         for t in treaty_rows:
             tid = t.get("id")
             if not tid:

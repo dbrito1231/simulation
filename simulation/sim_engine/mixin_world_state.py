@@ -718,7 +718,7 @@ class _WorldStateMixin:
         """Like _road_path_between, but resolved purely from two district
         ids (no agent needed) -- reuses the same ROAD_PATH_CACHE agent
         movement already populates via _recompute_road_paths. Used by the
-        cosmetic shipment system (CARAVAN_VISUALS_ENABLED) to interpolate
+        cosmetic shipment system (VISUALS_ENABLED) to interpolate
         goods along the existing road graph. Returns [] (never a fabricated
         straight line) when either district or its entryNode is missing, or
         no cached path connects them."""
@@ -735,7 +735,7 @@ class _WorldStateMixin:
 
     def _set_agent_target(self, agent, target):
         """Route the agent to a random interior point of the destination
-        district. When ROADS_ENABLED, travel goes via cached road-node paths
+        district. Travel goes via cached road-node paths
         (agent["waypoints"]) instead of a straight line -- this is general
         travel (idle wander, craft-station redirects, move_to_district);
         move_to_agent/trade/talk and Sage-emergency rescue use
@@ -749,11 +749,6 @@ class _WorldStateMixin:
         bounds = self.civilization["districts"][district_id]["bounds"]
         dest_x = bounds["x1"] + random.random() * (bounds["x2"] - bounds["x1"])
         dest_y = bounds["y1"] + random.random() * (bounds["y2"] - bounds["y1"])
-        if not ROADS_ENABLED:
-            agent["targetX"] = dest_x
-            agent["targetY"] = dest_y
-            agent["waypoints"] = []
-            return
         path_nodes = self._road_path_between(agent, district_id)
         waypoints = [dict(self.civilization["roadNodes"][n]) for n in path_nodes]
         waypoints.append({"x": dest_x, "y": dest_y})
@@ -1507,14 +1502,10 @@ class _WorldStateMixin:
         allowed, _, _ = self._ecology_gather_gate(agent, missing)
         if not allowed and ECOLOGY_ENABLED:
             self._scarcity_reflex_on_depletion(agent, missing)
-        elif USE_GOALS:
+        else:
             agent["goal"] = {
                 "kind": "craft_gather", "target": missing, "recipe": recipe_id, "ttl": 10,
             }
-        else:
-            gz = self._gather_zone_for_resource(missing)
-            if gz and agent["currentZone"] != gz:
-                self._set_agent_target(agent, gz)
         self._push_activity(
             f"{agent['name']} craft reflex: gathering {missing} for {recipe_id}")
 
@@ -1618,13 +1609,12 @@ class _WorldStateMixin:
         if terraform_did:
             p = c["districtProjects"][terraform_did]
             unmet = self._first_unmet_project_resource(terraform_did)
-            if USE_GOALS:
-                agent["goal"] = {
-                    "kind": "gather" if unmet else "deliver",
-                    "target": unmet,
-                    "district": terraform_did,
-                    "ttl": 10,
-                }
+            agent["goal"] = {
+                "kind": "gather" if unmet else "deliver",
+                "target": unmet,
+                "district": terraform_did,
+                "ttl": 10,
+            }
             self._push_activity(
                 f"{agent['name']} scarcity reflex: contributing to {p['name']} in {terraform_did}")
             return

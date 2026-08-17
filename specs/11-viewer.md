@@ -97,6 +97,51 @@ palette/season key.
   value (default `reset` when unset) after the confirm dialog; cancel/empty
   aborts, and HTTP 401 shows an alert — see [04-http-api.md](04-http-api.md).
 
+## VISUALS_ENABLED bundle (Phase 4 flag-minimization)
+
+`VISUALS_ENABLED` (default True, echoed in `/state` `config.flags`,
+[01-architecture.md](01-architecture.md) flag index) replaces six former
+independent flags — `ACTIVITY_CUES_ENABLED`, `SEASONAL_AGENTS_ENABLED`,
+`WORLD_CLOCK_HUD_ENABLED`, `FOUNDING_EVENTS_ENABLED`, `STRUCTURE_WEAR_ENABLED`,
+`CARAVAN_VISUALS_ENABLED` — which always shipped on together and were all
+pure viewer presentation with no engine-behavior dependence, except one:
+the founding-milestone chronicle push (item 4 below) also feeds
+`chronicle_line` in every agent's think payload, so its effect is
+cognition-facing, not purely visual — see "Founding banner + chronicle
+push" below. None of the six gates world mutation, persisted data, or
+tick behavior. One flag now covers all six sub-behaviors, documented in
+their respective sections below:
+
+1. **Activity cues** — per-frame smoke/dust canvas accents over
+   working structures and building agents (see "Activity cues" below).
+2. **Seasonal agent accents** — small seasonal accessory pixels on agent
+   sprites (winter cap/scarf, spring leaf pin, etc.; see "Seasonal
+   variants" below).
+3. **World clock HUD** — the fixed season/day-phase/weather badge (see
+   "World clock HUD" below).
+4. **Founding banner + chronicle push** — `#foundingBanner` and the
+   `_found_district()` chronicle milestone; district founding itself
+   (`_maybe_found_district`) stays unconditional either way. Unlike the
+   other five sub-behaviors, the chronicle push is not purely visual: it
+   appends to `civilization["chronicle"]`, which `_chronicle_prompt_line()`
+   folds into every agent's `chronicle_line` think-payload field (see
+   [03-cognition.md](03-cognition.md)), so turning the flag off omits the
+   founding milestone from agent prompts (see "Founding banner" below and
+   [05-world.md](05-world.md)).
+5. **Structure wear rendering** — the pristine/worn/crumbling/ruin visual
+   tiers and the structure hit-flash cue; underlying `condition`/`isRuin`
+   state and decay mechanics are unaffected (see "Structure wear" and
+   "Structure hit flash" below).
+6. **Caravan visuals (goods-in-motion shipments)** — the cosmetic
+   in-flight shipment records; the underlying transfer they animate is
+   never gated or delayed (see "Goods-in-motion shipments" below and
+   [08-systems-economy.md](08-systems-economy.md#caravan-visuals-visuals_enabled)).
+
+Off means all six presentations disappear cleanly with no other viewer or
+engine behavior change, except the bounded cognition-facing effect of
+item 4 noted above; `WEATHER_ENABLED` (sky tint/particles) is a separate,
+unmerged flag not part of this bundle.
+
 ## Canvas / world rendering
 
 - `WORLD_W = 5200`, `WORLD_H = 5400` (`viewer/setup.js`) must match
@@ -201,7 +246,7 @@ mechanism the season tint already uses.
   `na > 0.35`; golden hour (`ENV_EFFECTS_ENABLED`) peaks at
   `GOLDEN_HOUR_MAX = 0.22` over those bands plus a warm rim pass at band edges.
   Applied as full-canvas `fillRect` after agents/structures each frame.
-- **World clock HUD** (`WORLD_CLOCK_HUD_ENABLED`): a fixed, non-interactive
+- **World clock HUD** (`VISUALS_ENABLED`): a fixed, non-interactive
   badge over the map projects the existing `calendar.season` and
   `calendar.dayFraction`/`isNight` as one of dawn, day, dusk, or night. It is
   a pure read of the latest `/state` snapshot and disappears cleanly when the
@@ -215,25 +260,25 @@ mechanism the season tint already uses.
   unfueled lights (they simply lack the flag/district entry that night).
 - **Weather sky tint + particles** (`WEATHER_ENABLED`, living-ecosystem
   Phase 4): see the dedicated section below.
-- **Structure wear** (`STRUCTURE_WEAR_ENABLED`): the server snapshot's
+- **Structure wear** (`VISUALS_ENABLED`): the server snapshot's
   `conditionTier` selects a deterministic visual pass over every structure:
   pristine has no treatment, worn adds subtle desaturation and edge gaps,
   crumbling adds dark cracks/corner damage, and ruin uses a dedicated rubble
   silhouette. The client accepts older snapshots by deriving the same tier from
   `condition`/`isRuin`, then defaults to pristine when neither exists. Turning
   the flag off leaves the pre-wear structure sprites untouched.
-- **Activity cues** (`ACTIVITY_CUES_ENABLED`): the per-frame world pass adds
+- **Activity cues** (`VISUALS_ENABLED`): the per-frame world pass adds
   small deterministic canvas-only smoke puffs above working heat/craft
   structures and brief dust puffs beneath agents whose last action is
   `build_structure`, `contribute_resources`, or `start_project`. The effects
   are keyed by existing ids and `frameTick`; they retain no viewer state and
   disappear entirely when the flag is off.
-- **Social layer** (`SOCIAL_LAYER_ENABLED`): before agent sprites, the viewer
+- **Social layer:** before agent sprites, the viewer
   draws at most a bounded number of thin relationship lines for `socialTies`
   whose two living endpoints are currently inside the canvas viewport and
   nearby in world space. Ally lines are warm and rival lines cool; alpha fades
   with distance. The pass does no all-world pair scan and is a clean no-op when
-  the flag is off or an older snapshot lacks `socialTies`.
+  an older snapshot lacks `socialTies`.
 - **Zoom**: `zoomLevel` (`viewer/setup.js`) scales `canvas.style.width/height`
   over the fixed-resolution backing store (`applyZoom`, `viewer/setup.js`);
   +/- buttons multiply by 1.25/0.8, scroll-wheel zoom
@@ -289,7 +334,7 @@ mechanism the season tint already uses.
     re-render on every poll; the breakdown is the stockpile's proxy in this
     key. **Chronicle** is a curated projection of top-level `world.chronicle`,
     distinct from the raw Activity feed; it preserves scroll position across
-    snapshot updates and is hidden cleanly when `CHRONICLE_ENABLED` is off.
+    snapshot updates and is always visible.
     **Village paper** (`#sagaLog`, `#sagaList`) is a pure renderer for top-level
     `world.saga` (daily LLM narrative entries `{text, frame, dayIndex}` from the
     engine's saga ring — not folded into chronicle or founding/disaster banners).
@@ -498,13 +543,13 @@ stored history can be correlated to the verdict frame. History
 polling is gated by `PREDICTION_MARKET_ENABLED` and stops when the panel is
 hidden or the flag is off. All dynamic text is escaped before insertion.
 
-## Founding banner (`FOUNDING_EVENTS_ENABLED`)
+## Founding banner (`VISUALS_ENABLED`)
 
 `#foundingBanner` is a fixed, centered, non-modal banner (same positioning
 family as `#councilBanner`, offset 30px lower so the two never overlap) that
-names a newly founded district. Gated client-side by `FOUNDING_EVENTS_ENABLED`
-(mirrors `config.flags.FOUNDING_EVENTS_ENABLED`, wired in `applyFlags` the same
-way as `CHRONICLE_ENABLED`); when off, the element is force-hidden.
+names a newly founded district. Gated client-side by `VISUALS_ENABLED`
+(mirrors `config.flags.VISUALS_ENABLED`, wired in `applyFlags`);
+when off, the element is force-hidden.
 
 Unlike `#councilBanner` (which is level-triggered off `civ.councilActive.active`
 every render), founding is a one-off event with no ongoing "active" state to
@@ -874,7 +919,7 @@ earlier one, never the reverse.
   rather than an explicit `season` param.
   `setSpriteSeason(season)` (sprites/core.js) is called once per `/state` poll
   from `pollState()` (`viewer/polling.js`) so rendering tracks
-  `calendar.season`. `SEASONAL_AGENTS_ENABLED` uses the same mirror and a
+  `calendar.season`. `VISUALS_ENABLED` uses the same mirror and a
   viewer-set boolean to draw small post-body seasonal accessory pixels on
   living agents (winter wool cap/scarf, spring leaf pin, summer straw brim,
   autumn scarf); turning it off leaves their base and named accessory sprites
@@ -988,22 +1033,22 @@ placement as `socialTies`/`districtEcology`/`shipments`.
   alpha ~0.10–0.20 so readability is preserved. ~12% of buckets may flash
   (~every ~75s at 60fps), not every second.
 - **Weather chip on World Clock HUD** (`renderWorldClockHud`, `viewer/sidebar.js`,
-  `WORLD_CLOCK_HUD_ENABLED`): when `WEATHER_ENABLED` and `world.weather` are
+  `VISUALS_ENABLED`): when `WEATHER_ENABLED` and `world.weather` are
   present, appends the title-case state label after season+phase, e.g.
   `spring day · Storm`.
 - **Disaster banner** (`#disasterBanner`, `viewer/sidebar.js`): mirrors the founding
   banner pattern — edge-detects new `world.chronicle` entries with
   `kind === "disaster"` via a first-snapshot-seen `Set` on `frame` (no replay
   on page load). Shows storm-colored slate/teal banner for 5.5s with entry
-  text. Gated on `CHRONICLE_ENABLED`; edge-detection mirrors founding (runs
-  whenever enabled — empty chronicle clears the seen Set).
+  text. Always active; edge-detection mirrors founding (runs
+  unconditionally — empty chronicle clears the seen Set).
 - **Structure hit flash** (`trackStructureConditionDeltas`, `viewer/sidebar.js`;
   `drawStructureHitFlash`, `viewer/render.js`): client-only diff of structure
   `condition`/`isRuin` between polls; flashes when condition drops by at
   least `STRUCTURE_HIT_FLASH_MIN_DROP` (5 — enough to ignore passive decay
   ~0.025 per goods tick, still catches disasters at 40–70) or when
   `isRuin` newly becomes true. That id flashes white/cyan outline + bright
-  overlay for ~800ms wall clock. Gated on `STRUCTURE_WEAR_ENABLED`.
+  overlay for ~800ms wall clock. Gated on `VISUALS_ENABLED`.
 - **Gate:** `WEATHER_ENABLED = false` — `weatherSkyAlpha` returns 0 (no sky
   change), lightning/veil/particles all no-op, and the World Clock HUD omits
   the weather chip, regardless of `world.weather`'s presence/content.
@@ -1167,11 +1212,11 @@ own and does **not** pathfind, spawn, or reposition creatures.
   `drawWildlife` returns immediately; nothing is drawn beyond the flag
   check.
 
-## Goods-in-motion shipments (`CARAVAN_VISUALS_ENABLED`, living-ecosystem Phase 3)
+## Goods-in-motion shipments (`VISUALS_ENABLED`, living-ecosystem Phase 3)
 
 Purely cosmetic render pass over `world.shipments`, the read-only projection
 of the engine's `self.shipments` ring (see
-[08-systems-economy.md](08-systems-economy.md#caravan_visuals_enabled) for
+[08-systems-economy.md](08-systems-economy.md#caravan-visuals-visuals_enabled) for
 the emission side and the hard non-gating constraint). Drawn in `tickBody()`
 via `drawShipments(ctx, world.frameTick)`, called right after
 `drawWildlife`, so it composites above terrain/wildlife and below agents.
@@ -1199,10 +1244,10 @@ via `drawShipments(ctx, world.frameTick)`, called right after
   `SHIPMENT_DRAW_CAP = 8` regardless of how many live shipments exist
   (the server-side ring is already capped at the same order of magnitude,
   so this is a second, independent bound).
-- **Gate:** `CARAVAN_VISUALS_ENABLED = false` → `drawShipments` returns
+- **Gate:** `VISUALS_ENABLED = false` → `drawShipments` returns
   immediately; nothing is drawn. The moored `physicalProps` boats render
   through their own, entirely separate code path
-  (`civilization.physicalProps`, gated by `TRANSIT_ENABLED`) and are
+  (`civilization.physicalProps`, always populated) and are
   unaffected either way — this flag never touches that block.
 - **Restore safety:** shipments are not persisted (see 08); after a
   server restart `world.shipments` is simply absent/empty until new

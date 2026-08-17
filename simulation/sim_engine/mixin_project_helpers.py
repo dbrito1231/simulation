@@ -20,13 +20,13 @@ class _ProjectHelpersMixin:
     helpers. See module docstring for exact scope."""
 
     def _path1_industry_benchmark(self):
-        if not path1_on("INDUSTRY_ENABLED"):
+        if not PATH1_ENABLED:
             return
         depth = len([r for r in self.RECIPES if r not in ("planks", "bricks", "tools", "cart", "wagon")])
         self._log_benchmark("industry_recipe_depth", depth, {"recipes": depth})
 
     def _path1_tool_benchmark(self, resource, success):
-        if not path1_on("TOOL_TIERS_ENABLED"):
+        if not PATH1_ENABLED:
             return
         c = self.civilization
         key = "tool_gather_ok" if success else "tool_gather_fail"
@@ -231,7 +231,7 @@ class _ProjectHelpersMixin:
         if not district_id or c["districtProjects"].get(district_id):
             return None
         project_needs = dict(tmpl["needs"])
-        if ECONOMY_SINKS_ENABLED and self._type_tier(type_) >= 2:
+        if self._type_tier(type_) >= 2:
             material = next((r for r in ("planks", "bricks", "tools") if r not in project_needs), "planks")
             project_needs[material] = project_needs.get(material, 0) + 1
         contributed = {res: 0 for res in project_needs}

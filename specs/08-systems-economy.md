@@ -4,7 +4,8 @@ Flag semantics for the survival/production/goods/market layer: hunger and
 health, crafting, deterministic goal-stepping, structure effects, physical
 goods (spoilage/decay/disasters/shelter/vehicles), and the priced market.
 
-**Canonical for:** `SURVIVAL_ENABLED`, `CRAFTING_ENABLED`, `USE_GOALS`,
+**Canonical for:** `SURVIVAL_ENABLED`, `CRAFTING_ENABLED`, deterministic
+goal-stepping (always on — see "Goal-stepping" below),
 `STRUCTURE_EFFECTS_ENABLED`, `GOODS_ENABLED`, `ECONOMY_ENABLED`,
 `RAIDERS_CONTAGION_ENABLED` raid/contagion economy effects (stockpile loss,
 structure damage, `"mitigates"`/`"heals"` seed structure functions).
@@ -117,7 +118,7 @@ Related action: `hunt_wildlife`
 ([07-actions.md](07-actions.md)); hunter specialty `meat`
 ([06-agents.md](06-agents.md)).
 
-## Survival role rebalance (`EMERGENT_ROLES`)
+## Survival role rebalance
 
 `_village_needed_role()` branch **(2) survival-critical** replaces the old
 fixed-order `farmer → fisher → hunter` walk with a stock-aware,
@@ -210,7 +211,7 @@ the same tick, prefer candidates whose role is `hunter`, then nearest to prey.
 **Goal execution (`_step_goal`, kind `hunt`):** each `GOAL_STEP_FRAMES` tick,
 synthesize `hunt_wildlife` with `target` set to the goal prey id until kill,
 prey flees out of range, goal TTL expires, or agent becomes incapacitated.
-Incoming inbox messages still interrupt per ordinary `USE_GOALS` rules.
+Incoming inbox messages still interrupt per ordinary goal-stepping rules.
 
 **Mutual exclusion:** if step (1) assigned movement or a `gather` goal, step (2)
 is a no-op that tick. If step (1) skipped because no gather zone exists but prey
@@ -222,7 +223,7 @@ agent in one batch pass.
 Adds a recipe registry (`SEED_RECIPES`, sim_engine/constants.py:1856) and crafted
 resources (`CRAFTED_RESOURCES`, sim_engine/constants.py:1851): `planks` (1 wood),
 `bricks` (2 stone), `tools` (2 wood + 1 stone) — all `station: "workshop"`.
-`INDUSTRY_ENABLED` (path1) extends the registry with charcoal/ingots/
+`PATH1_ENABLED` (industry) extends the registry with charcoal/ingots/
 rope/cloth/tool-tier picks at the workshop or kiln (sim_engine/constants.py:2022).
 
 `_craft_item(agent, recipe_id)` (sim_engine/mixin_crafting_rules.py:73) gate order: station
@@ -241,9 +242,9 @@ shared with blueprints, `MAX_CUSTOM_RECIPES = 12` approved custom recipes,
 1–6 inputs each drawn from `resourceRegistry`, id/name format checks,
 rejection blacklist (`rejectedRecipeIds`).
 
-## USE_GOALS
+## Goal-stepping
 
-Deterministic goal-stepping that runs *between* LLM think calls so routine
+Deterministic goal-stepping (unconditional, no flag) that runs *between* LLM think calls so routine
 multi-tick actions (travel, relocate-and-retry) don't cost a think dispatch
 each tick. In the main loop (sim_engine/mixin_think_job.py:1603): when an agent's think
 timer elapses and it already holds a `goal` dict and has no unread inbox
@@ -255,11 +256,11 @@ the goal (`ttl < 0`) as a deadlock-avoidance backstop.
 
 Goal kinds (`g["kind"]`): `craft_gather` (walk to gather missing craft
 inputs), `plant_terrain` (apply `plant_terrain` once), `seek_shelter`
-(walk to a district with shelter, `PRESSURE_LOOP_ENABLED`), `dig_relocate`
+(walk to a district with shelter, `PATH1_ENABLED`), `dig_relocate`
 (walk to a diggable district, then `_dig_terrain` until carry-capped),
 `caravan` (walk to the other settlement and deliver goods on arrival,
-`PATH1_DIPLOMACY_ENABLED` — see
-[Settlement stores and inter-settlement trade](#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)),
+`PATH1_ENABLED` — see
+[Settlement stores and inter-settlement trade](#settlement-stores-and-inter-settlement-trade-path1_enabled)),
 **`hunt`** (synthesize `hunt_wildlife` against `target` wildlife id —
 [Starvation reflex and forced hunt precedence](#starvation-reflex-and-forced-hunt-precedence)),
 plus generic `gather`/`deliver`/`build` goals resolved against a target district.
@@ -500,7 +501,7 @@ priority order:
 | `house` | `GOODS_ENABLED` | zero working houses, **or** `_village_repair_pressure()` with any disrepaired/ruined house |
 | `market` | `GOODS_ENABLED`, `ECONOMY_ENABLED`, at least one market built | `not _market_active()` (no pricing-unlock market working), **or** pressure with any disrepaired/ruined market |
 | `workshop` | `GOODS_ENABLED`, at least one workshop built | zero working workshops, **or** pressure with any disrepaired/ruined workshop |
-| `foundry` | `GOODS_ENABLED`, `path1_on("TIER3_CONTENT_ENABLED")`, at least one foundry built | zero working foundries, **or** pressure with any disrepaired/ruined foundry |
+| `foundry` | `GOODS_ENABLED`, `PATH1_ENABLED`, at least one foundry built | zero working foundries, **or** pressure with any disrepaired/ruined foundry |
 | `granary` | `GOODS_ENABLED`, `CRAFTING_ENABLED`, at least one granary built | zero working granaries, **or** pressure with any disrepaired/ruined granary |
 | `farm_plot` | `GOODS_ENABLED`, at least one farm plot built | zero working farm plots, **or** pressure with any disrepaired/ruined farm plot |
 
@@ -551,9 +552,9 @@ exact `total`, `working`, `disrepaired` (below `STRUCTURE_DISREPAIR_THRESHOLD`
 but not yet a ruin), and `ruined` (`isRuin`) counts so a soak-analysis script
 can reconstruct the full picture, not just the ratio.
 
-## ECONOMY_SINKS_ENABLED
+## Economy sinks
 
-`ECONOMY_SINKS_ENABLED` defaults to True. Repairs prefer one plank when
+Repairs prefer one plank when
 available; tier-2+ projects add one crafted material (planks, then bricks,
 then tools); and comfort consumption *opportunistically* drains one `pottery`
 or `dried_fish` per living agent every `COMFORT_EVERY_N_GOODS_TICKS = 4`
@@ -661,9 +662,9 @@ coin yet — the mechanism is ready the moment one does.
 
 Related actions: `trade_resource` — [07-actions.md](07-actions.md).
 
-## Settlement stores and inter-settlement trade (PATH1_DIPLOMACY_ENABLED)
+## Settlement stores and inter-settlement trade (PATH1_ENABLED)
 
-Gated by `path1_on("PATH1_DIPLOMACY_ENABLED")`. Adds authoritative
+Gated by `PATH1_ENABLED`. Adds authoritative
 per-settlement stockpiles alongside the village-wide `stockpile`.
 
 **Shape:** `civilization["settlementStores"][settlement_id][resource_id] =
@@ -704,9 +705,11 @@ known settlement so old saves gain the field without inventing goods.
 Related actions: `deliver_caravan`, `propose_treaty`, `vote_treaty` —
 [07-actions.md](07-actions.md).
 
-## CARAVAN_VISUALS_ENABLED
+## Caravan visuals (`VISUALS_ENABLED`)
 
-`CARAVAN_VISUALS_ENABLED` defaults to True. Living-ecosystem Phase 3
+Caravan visuals are one of the six behaviors folded into `VISUALS_ENABLED`
+(Phase 4 flag-minimization — see [11-viewer.md](11-viewer.md) for the full
+bundle). `VISUALS_ENABLED` defaults to True. Living-ecosystem Phase 3
 ("goods in motion"): a short-lived, **purely cosmetic** in-flight shipment
 record, emitted so the viewer has something to animate along the road
 graph when goods move between districts.
@@ -734,7 +737,7 @@ call):
   most-stalled-district fallback), i.e. a genuine stockpile transfer
   between districts.
 - `_deliver_caravan` — each resource moved between settlement stores on
-  caravan arrival ([Settlement stores](#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
+  caravan arrival ([Settlement stores](#settlement-stores-and-inter-settlement-trade-path1_enabled)).
 
 **Shape**: `{id, fromDistrict, toDistrict, resource, path, startFrame,
 endFrame, mode}`. `path` is the list of `{x, y}` road-graph waypoints
@@ -742,7 +745,7 @@ between the two districts' `entryNode`s, resolved once at emission time by
 `_road_path_between_districts` (same `ROAD_PATH_CACHE` agent travel already
 populates via `_recompute_road_paths` — no second pathfinder). `mode` is
 `"boat"` when the shipment crosses a settlement boundary
-(`districts[*].settlementId`, `PATH1_DIPLOMACY_ENABLED`) and
+(`districts[*].settlementId`, `PATH1_ENABLED`) and
 `_has_ocean_transit()` is true (reusing the existing ocean-caravan
 foothold — `_has_ocean_transit`/`_consume_ocean_transit`,
 [10-path1.md](10-path1.md)), else `"cart"`.
@@ -764,9 +767,9 @@ drops any shipment whose `endFrame` has passed. `SHIPMENT_TRAVEL_FRAMES =
 
 **`/state` exposure**: `snapshot["shipments"]` (only still-live records,
 via `_shipment_snapshot`) is present only when the flag is on; the flag
-itself is echoed in `config.flags.CARAVAN_VISUALS_ENABLED`. Off means the
+itself is echoed in `config.flags.VISUALS_ENABLED`. Off means the
 key is simply absent and the viewer draws nothing extra — the moored
-`physicalProps` boats (`TRANSIT_ENABLED`, [11](11-viewer.md)) are entirely
+`physicalProps` boats ([11](11-viewer.md)) are entirely
 unaffected by this flag either way.
 
 ## Sovereign God mode: `grant_resource` semantics (Phase 4)

@@ -749,8 +749,8 @@ function roleAgentSprite(role, walk) {
 }
 
 // Tombstone: replaces the agent body entirely (not an overlay -- see
-// drawAgentSprite below) once a permanent death (CEMETERY_ENABLED/
-// LIFECYCLE_ENABLED, `agent.deceased`) is confirmed. Grey stone arch on a
+// drawAgentSprite below) once a permanent death (LIFECYCLE_ENABLED,
+// `agent.deceased`) is confirmed. Grey stone arch on a
 // grass mound, sized to the same 16x16 footprint as every living sprite so
 // drawPixelSprite's existing origin math needs no changes. The small moss
 // tuft is tinted with the agent's own color as a quiet personal touch, but

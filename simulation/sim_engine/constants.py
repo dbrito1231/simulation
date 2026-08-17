@@ -12,16 +12,9 @@ import os
 __all__ = [
     "SURVIVAL_ENABLED",
     "CRAFTING_ENABLED",
-    "USE_GOALS",
     "STRUCTURE_EFFECTS_ENABLED",
-    "STRUCTURE_WEAR_ENABLED",
-    "ACTIVITY_CUES_ENABLED",
-    "SOCIAL_LAYER_ENABLED",
-    "CHRONICLE_ENABLED",
+    "VISUALS_ENABLED",
     "CHRONICLE_SAGA_ENABLED",
-    "FOUNDING_EVENTS_ENABLED",
-    "WORLD_CLOCK_HUD_ENABLED",
-    "SEASONAL_AGENTS_ENABLED",
     "MEMORY_ENABLED",
     "WIKI_MEMORY",
     "TESTAMENT_ENABLED",
@@ -33,18 +26,14 @@ __all__ = [
     "THEORY_OF_MIND_ENABLED",
     "PEER_MODEL_MAX_PEERS",
     "PEER_MODEL_FIELD_CHAR_CAP",
-    "AGENT_MESSAGING",
     "PIANO_MODULES",
     "ALWAYS_ON_MODULES",
-    "META_SYSTEM",
-    "EMERGENT_ROLES",
     "RULES_ENABLED",
     "MEMES_ENABLED",
     "BENCHMARKS_ENABLED",
     "DETERMINISM_PINNING",
     "DETERMINISM_SEED",
     "ECOLOGY_ENABLED",
-    "ROADS_ENABLED",
     "CROP_GROWTH_ENABLED",
     "WILDLIFE_ENABLED",
     "WILDLIFE_KIND_POOLS",
@@ -73,7 +62,6 @@ __all__ = [
     "WILDLIFE_GRAZE_PAUSE_CHANCE",
     "WILDLIFE_HERD_RADIUS",
     "WILDLIFE_HERD_PULL",
-    "CARAVAN_VISUALS_ENABLED",
     "SHIPMENT_TRAVEL_FRAMES",
     "SHIPMENT_RING_CAP",
     "WEATHER_ENABLED",
@@ -316,7 +304,6 @@ __all__ = [
     "MODULE_PULSE_INTERVAL_S",
     "MODULE_PULSE_MAX_BATCH",
     "MODULE_NOTE_MAX_AGE_S",
-    "MODULE_REFRESH_IDLE_SKIP",
     "MODULE_REFRESH_TIMEOUT_S",
     "PIANO_MODULE_TIMEOUT_WAIT_S",
     "LLM_ORPHAN_TIMEOUT_THRESHOLD",
@@ -354,7 +341,6 @@ __all__ = [
     "TECH_TREE_ENABLED",
     "DAILY_COUNCIL_ENABLED",
     "MAX_TECH_TIER",
-    "SAGE_REVIEW_ENABLED",
     "WAGON_CARRY_BONUS",
     "WAGON_SPEED_MULT",
     "INVENTION_COUNCIL_SIZE",
@@ -396,7 +382,6 @@ __all__ = [
     "BIRTH_CHECK_FRAMES",
     "BIRTH_FOOD_SURPLUS_PER_AGENT",
     "BIRTH_MIN_INTERVAL_FRAMES",
-    "BIRTH_STARTING_SKILL_PENALTY",
     "NEWBORN_GOODS_SHARE",
     "SUCCESSION_ELECTION_TTL_FRAMES",
     "HARVEST_QUOTA_PERIOD_FRAMES",
@@ -424,9 +409,7 @@ __all__ = [
     "CHRONICLE_MILESTONE_KINDS",
     "MEME_MUTATION_PROB",
     "MEME_MUTATION_SESSION_CAP",
-    "HARVEST_SPIRIT_CONTRIB_BOOST",
     "PERSONALITY_DRIFT_CAP",
-    "CEMETERY_ENABLED",
     "BURY_CONTACT_DIST",
     "CONFRONT_CONTACT_DIST",
     "CONFRONT_DAMAGE",
@@ -438,19 +421,8 @@ __all__ = [
     "FORCED_HUNT_GOAL_TTL",
     "BURIAL_BACKSTOP_FRAMES",
     "PATH1_ENABLED",
-    "INDUSTRY_ENABLED",
-    "TOOL_TIERS_ENABLED",
-    "COMPOSABLE_BUILD_ENABLED",
-    "TERRAIN_TILES_ENABLED",
-    "PATH1_DIPLOMACY_ENABLED",
-    "TIER3_CONTENT_ENABLED",
-    "PRESSURE_LOOP_ENABLED",
     "ENV_EFFECTS_ENABLED",
-    "LIBRARY_SCALING_ENABLED",
-    "TRANSIT_ENABLED",
-    "ECONOMY_SINKS_ENABLED",
     "COMFORT_EVERY_N_GOODS_TICKS",
-    "path1_on",
     "PROJECT_TEMPLATES",
     "PROJECT_ORDER",
     "SEED_STRUCTURE_FUNCTIONS",
@@ -508,28 +480,20 @@ __all__ = [
 # --- Feature flags (ported from index.html consts; now server config) ---
 SURVIVAL_ENABLED = True
 CRAFTING_ENABLED = True
-USE_GOALS = True
 STRUCTURE_EFFECTS_ENABLED = True
-# Viewer-only projections of existing simulation state. These flags never
-# change decay, ruin, or action mechanics; they only control /state consumers.
-STRUCTURE_WEAR_ENABLED = True
-ACTIVITY_CUES_ENABLED = True
-# Read-only viewer projections of relationships and the existing culture
-# chronicle. These never alter social/culture simulation state or prompts.
-SOCIAL_LAYER_ENABLED = True
-CHRONICLE_ENABLED = True
+# Bundle of six flags (Phase 4, flag-minimization plan): structure wear
+# rendering, world/activity cues, founding banner + chronicle push
+# (district founding itself is unconditional), world clock HUD, and
+# seasonal agent sprite accents. None ever change decay, ruin, action
+# mechanics, simulation time, or terrain. Five of the six only control
+# /state consumers (the viewer); the founding-milestone chronicle push is
+# the exception -- it also feeds civilization["chronicle"], which reaches
+# every agent's think payload via chronicle_line, so turning this flag off
+# has a bounded cognition-facing effect. See specs/11-viewer.md.
+VISUALS_ENABLED = True
 # Daily village saga dispatch ring (viewer-only; never prompt-facing).
 # Phase 2: day-boundary sim-fast lm_complete dispatch via run_chronicle_saga.
 CHRONICLE_SAGA_ENABLED = True
-# Read-only viewer projection: announces a newly founded district as a
-# chronicle milestone + a brief banner (index.html). Gates only the
-# _found_district chronicle call and the banner trigger -- district founding
-# itself (_maybe_found_district) is unconditional and unaffected.
-FOUNDING_EVENTS_ENABLED = True
-# Viewer-only projections of the existing calendar and sprite season mirror.
-# They do not alter simulation time, terrain, or agent state.
-WORLD_CLOCK_HUD_ENABLED = True
-SEASONAL_AGENTS_ENABLED = True
 MEMORY_ENABLED = True
 # Wiki-style compounding memory (TASKS_PENDING item 3 / plan Phase 4): when
 # True, _run_memory_maintenance's existing round-robin summarizer call is
@@ -574,14 +538,11 @@ THEORY_OF_MIND_ENABLED = str(os.environ.get("SIM_THEORY_OF_MIND", "")).strip().l
 # Hard caps on agent["peerModel"][peerIdStr] entries (LRU by frame).
 PEER_MODEL_MAX_PEERS = 8
 PEER_MODEL_FIELD_CHAR_CAP = 48
-AGENT_MESSAGING = True
 PIANO_MODULES = True
 # Gated scheduler for the PIANO whiteboard.  Kept dark until Phase B's
 # contention soak proves it is safe; false preserves the existing per-think
 # fan-out path exactly.
 ALWAYS_ON_MODULES = False
-META_SYSTEM = True
-EMERGENT_ROLES = True
 RULES_ENABLED = True
 MEMES_ENABLED = True
 BENCHMARKS_ENABLED = True
@@ -599,10 +560,7 @@ ECOLOGY_ENABLED = True
 # World-expansion plan: waypoint-based road routing for general travel
 # (move_to_district / idle wander / craft-station redirects). Sage-emergency
 # rescue and short local hops (move_to_agent, trade, talk) always stay direct
-# regardless of this flag -- see _set_agent_target_to_agent. Off reverts
-# _set_agent_target to the old straight-to-random-interior-point behavior so
-# routing can be A/B compared.
-ROADS_ENABLED = True
+# -- see _set_agent_target_to_agent.
 # Living-ecosystem Phase 2: districtEcology projection (CROP_GROWTH_ENABLED)
 # plus server-authoritative huntable fauna (WILDLIFE_ENABLED). Crop growth is
 # still viewer-facing only; WILDLIFE_ENABLED now also gates engine fauna
@@ -674,10 +632,9 @@ WILDLIFE_HERD_PULL = 6
 # authoritative stockpile/inventory. The transfer itself is never delayed
 # or gated by this -- see _emit_shipment. Shipments live only in
 # self.shipments (NOT civilization state), so they are never persisted to
-# state.db and simply vanish on restore, which is harmless. Off means
-# /state omits "shipments" and the viewer draws nothing extra; the static
-# physicalProps moored boats are unaffected either way.
-CARAVAN_VISUALS_ENABLED = True
+# state.db and simply vanish on restore, which is harmless. Off (via
+# VISUALS_ENABLED) means /state omits "shipments" and the viewer draws
+# nothing extra; the static physicalProps moored boats are unaffected either way.
 SHIPMENT_TRAVEL_FRAMES = 240   # ~8s at 30 ticks/s: how long a shipment animates across the road graph
 SHIPMENT_RING_CAP = 8          # bounded ring -- oldest live shipments drop first
 
@@ -1462,7 +1419,6 @@ PIANO_CROSS_CONTEXT_TTL = 6
 MODULE_PULSE_INTERVAL_S = 45
 MODULE_PULSE_MAX_BATCH = 2
 MODULE_NOTE_MAX_AGE_S = 600
-MODULE_REFRESH_IDLE_SKIP = True
 MODULE_REFRESH_TIMEOUT_S = 60
 # Wait budget for a dispatched module future -- strictly above server.py's
 # PIANO_MODULE_TIMEOUT_S (15s) HTTP timeout so that timeout, not this one,
@@ -1603,9 +1559,7 @@ DAILY_COUNCIL_ENABLED = True
 MAX_TECH_TIER = 3
 # Two-stage blueprint approval: the elder must sage_review_blueprint (a
 # geography/resource sanity pass) before approve_blueprint/reject_blueprint is
-# accepted on that id. Flag-gated so it can be killed instantly if it ever
-# deadlocks approval; with it off, approve_blueprint behaves exactly as before.
-SAGE_REVIEW_ENABLED = True
+# accepted on that id.
 # The wagon (tier-2 vehicle, crafted at the Forge, consumes the Phase C cart):
 # query-time effects on its holder, same pattern as the cart.
 WAGON_CARRY_BONUS = 40
@@ -1748,7 +1702,7 @@ POPULATION_FLOOR = 4                # never below this many non-incapacitated ad
 BIRTH_CHECK_FRAMES = LIFECYCLE_TICK_FRAMES
 BIRTH_FOOD_SURPLUS_PER_AGENT = 4    # stockpile+carried edibles must exceed this * population
 BIRTH_MIN_INTERVAL_FRAMES = STALL_THRESHOLD * 6  # ~2 min cooldown between births village-wide
-BIRTH_STARTING_SKILL_PENALTY = True  # newborns start at the "young" life stage (see _life_stage)
+# Newborns start at the "young" life stage (see _life_stage).
 NEWBORN_GOODS_SHARE = 0.15          # newborn inherits this fraction of a parent's held goods
 # Succession: on the elder's death, an election runs on the existing
 # propose_rule/vote_rule machinery -- one pending rule per eligible candidate
@@ -1831,12 +1785,11 @@ MEME_MUTATION_SESSION_CAP = 30        # hard ceiling on lm_complete calls for me
 # Belief-driven bias: believers in the seed harvest_spirit meme contribute
 # food more readily (a deterministic behavioral tilt, not a new action) --
 # folded into _pick_contribution_resource so it costs no new template line.
-HARVEST_SPIRIT_CONTRIB_BOOST = True
 # Personality drift: major life events append one short trait clause to the
 # agent's existing persona/personality text (deterministic templates only).
 # Capped so a long-lived elder doesn't accumulate an unbounded run-on string.
 PERSONALITY_DRIFT_CAP = 3
-# --- Cemetery & burial (permanent-death handling, CEMETERY_ENABLED) ---
+# --- Cemetery & burial (permanent-death handling) ---
 # A permanent death (LIFECYCLE_ENABLED) used to leave the corpse lying
 # wherever it fell -- incapacitated forever, at a random world position, with
 # no in-fiction acknowledgement. This closes that gap: a seed Cemetery
@@ -1846,7 +1799,6 @@ PERSONALITY_DRIFT_CAP = 3
 # the backstop does it itself -- so no corpse waits forever. A collapsed-but-
 # not-dead agent (deathFrame is None) is never eligible; burial is strictly
 # for LIFECYCLE_ENABLED's permanent death.
-CEMETERY_ENABLED = True
 BURY_CONTACT_DIST = 80                # matches heal_agent's contact radius
 CONFRONT_CONTACT_DIST = 80            # bounded PvP adjacency (heal/bury/trade parity)
 CONFRONT_DAMAGE = 10
@@ -1859,29 +1811,15 @@ FORCED_HUNT_GOAL_TTL = STALL_THRESHOLD
 BURIAL_BACKSTOP_FRAMES = STALL_THRESHOLD * 3  # ~1 min grace for organic bury_agent before the backstop buries directly
 
 # --- Path 1: Minecraft-like world depth (PATH1_ENABLED) ---
+# Single switch: PATH1_ENABLED. The seven sub-flags that used to gate
+# individual Path 1 features (industry, tool tiers, composable build,
+# terrain tiles, diplomacy, tier-3 content, pressure loop) were merged
+# into this one flag (Phase 3, flag-minimization) — Path 1 is now
+# all-or-nothing; see specs/10-path1.md for the accepted consequence.
 PATH1_ENABLED = True
-INDUSTRY_ENABLED = True
-TOOL_TIERS_ENABLED = True
-COMPOSABLE_BUILD_ENABLED = True
-TERRAIN_TILES_ENABLED = True
-PATH1_DIPLOMACY_ENABLED = True
-TIER3_CONTENT_ENABLED = True
-PRESSURE_LOOP_ENABLED = True
 RAIDERS_CONTAGION_ENABLED = True
 ENV_EFFECTS_ENABLED = True
-LIBRARY_SCALING_ENABLED = True
-TRANSIT_ENABLED = True
-ECONOMY_SINKS_ENABLED = True
 COMFORT_EVERY_N_GOODS_TICKS = 4  # comfort consumption fires every Nth goods tick, not every one
-
-
-def path1_on(subflag=None):
-    """True when a Path 1 sub-flag is active. PATH1_ENABLED bundles all on."""
-    if PATH1_ENABLED:
-        return True
-    if subflag:
-        return globals().get(subflag, False)
-    return False
 
 
 if LIFECYCLE_ENABLED:
@@ -1890,7 +1828,7 @@ if LIFECYCLE_ENABLED:
     # {resource_tax, custom, priority} and byte-identical propose_rule
     # validation for those kinds.
     RULE_KINDS = RULE_KINDS | {"harvest_quota", "rationing", "succession"}
-if path1_on("PATH1_DIPLOMACY_ENABLED"):
+if PATH1_ENABLED:
     RULE_KINDS = RULE_KINDS | {"treaty"}
 if RAIDERS_CONTAGION_ENABLED:
     RULE_KINDS = RULE_KINDS | {"quarantine"}
@@ -2179,24 +2117,23 @@ if CULTURE_ENABLED:
         "unlocks": [{"kind": "knowledge", "station": "library"}],
     }
 
-if CEMETERY_ENABLED:
-    # The Cemetery: the seed burial STATION. Plain tier-1, buildable like
-    # house/wall/market/library (the deterministic escape -- a village never
-    # needs an uninvented resource to bury its dead). Its "unlocks" effect is
-    # a new kind ("burial") consulted by _working_cemeteries(); the actual
-    # burial mechanic (moving a corpse to a grave slot) lives in
-    # _bury_agent_at, not in the function block.
-    PROJECT_TEMPLATES["cemetery"] = {
-        "name": "Cemetery",
-        "needs": {"stone": 3, "wood": 1},
-        "visualStyle": "cemetery",
-        **({"tier": 1} if TECH_TREE_ENABLED else {}),
-    }
-    PROJECT_ORDER.append("cemetery")
-    PROJECT_KIND["cemetery"] = "cemetery"
-    SEED_STRUCTURE_FUNCTIONS["cemetery"] = {
-        "unlocks": [{"kind": "burial", "station": "cemetery"}],
-    }
+# The Cemetery: the seed burial STATION. Plain tier-1, buildable like
+# house/wall/market/library (the deterministic escape -- a village never
+# needs an uninvented resource to bury its dead). Its "unlocks" effect is
+# a new kind ("burial") consulted by _working_cemeteries(); the actual
+# burial mechanic (moving a corpse to a grave slot) lives in
+# _bury_agent_at, not in the function block.
+PROJECT_TEMPLATES["cemetery"] = {
+    "name": "Cemetery",
+    "needs": {"stone": 3, "wood": 1},
+    "visualStyle": "cemetery",
+    **({"tier": 1} if TECH_TREE_ENABLED else {}),
+}
+PROJECT_ORDER.append("cemetery")
+PROJECT_KIND["cemetery"] = "cemetery"
+SEED_STRUCTURE_FUNCTIONS["cemetery"] = {
+    "unlocks": [{"kind": "burial", "station": "cemetery"}],
+}
 
 # Path 1 constants + registry extensions (flags defined above).
 TILE_CELL = 40
@@ -2234,7 +2171,7 @@ TREATY_TARIFF_MAX = 0.25
 PATH1_GRID_COLS = 8
 PATH1_GRID_ROWS = 8
 
-if path1_on("INDUSTRY_ENABLED"):
+if PATH1_ENABLED:
     _P1_BASE = {
         "clay": {"name": "Clay", "gatherZone": "beach", "color": "#BCAAA4"},
         "sand": {"name": "Sand", "gatherZone": "beach", "color": "#FFE082"},
@@ -2275,7 +2212,7 @@ if path1_on("INDUSTRY_ENABLED"):
         "unlocks": [{"kind": "craft", "station": "kiln"}],
         "produces": [{"resource": "charcoal", "amount": 1, "every_ticks": 1800, "scope": "district"}],
     }
-    if path1_on("TIER3_CONTENT_ENABLED"):
+    if PATH1_ENABLED:
         PROJECT_TEMPLATES["harbor"] = {
             "name": "Harbor", "needs": {"planks": 3, "stone": 2, "rope": 1},
             "visualStyle": "dock", **({"tier": 2} if TECH_TREE_ENABLED else {}),

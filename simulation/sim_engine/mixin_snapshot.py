@@ -140,7 +140,7 @@ class _SnapshotMixin:
             "skills": {k: round(v, 1) for k, v in a["skills"].items()} if CULTURE_ENABLED else None,
             "personalityTraits": list(a.get("personalityTraits") or []) if CULTURE_ENABLED else [],
             "deceased": bool(LIFECYCLE_ENABLED and a.get("deathFrame") is not None),
-            "buried": bool(CEMETERY_ENABLED and a.get("buried")),
+            "buried": bool(a.get("buried")),
             "parents": a.get("parents") if LIFECYCLE_ENABLED else None,
             "children": list(a.get("children") or []) if LIFECYCLE_ENABLED else [],
             "inheritedTestament": list(a.get("inheritedTestament") or []) if LIFECYCLE_ENABLED else [],
@@ -243,7 +243,7 @@ class _SnapshotMixin:
             civ["prices"] = ({rid: self._resource_price(rid)
                               for rid in c["resourceRegistry"] if rid != "gold"}
                              if civ["marketActive"] else {})
-        if path1_on():
+        if PATH1_ENABLED:
             civ["settlements"] = list(c.get("settlements") or [])
             civ["treaties"] = list(c.get("treaties") or [])
             civ["settlementStores"] = {
@@ -254,21 +254,19 @@ class _SnapshotMixin:
             civ["isNight"] = self._is_night()
         if ENV_EFFECTS_ENABLED:
             civ["litDistricts"] = list(c.get("litDistricts") or [])
-        if TRANSIT_ENABLED:
-            boat_count = int(c.get("stockpile", {}).get("boat", 0))
-            civ["physicalProps"] = ([{"resource": "boat", "count": min(3, boat_count)}]
-                                    if boat_count >= 3 else [])
+        boat_count = int(c.get("stockpile", {}).get("boat", 0))
+        civ["physicalProps"] = ([{"resource": "boat", "count": min(3, boat_count)}]
+                                if boat_count >= 3 else [])
         return civ
 
     def _build_snapshot_config(self):
         return {
             "WORLD_W": WORLD_W, "WORLD_H": WORLD_H,
             "flags": {
-                "SURVIVAL_ENABLED": SURVIVAL_ENABLED, "USE_GOALS": USE_GOALS,
-                "EMERGENT_ROLES": EMERGENT_ROLES, "RULES_ENABLED": RULES_ENABLED,
+                "SURVIVAL_ENABLED": SURVIVAL_ENABLED,
+                "RULES_ENABLED": RULES_ENABLED,
                 "MEMES_ENABLED": MEMES_ENABLED, "CRAFTING_ENABLED": CRAFTING_ENABLED,
-                "META_SYSTEM": META_SYSTEM, "PIANO_MODULES": PIANO_MODULES,
-                "ROADS_ENABLED": ROADS_ENABLED,
+                "PIANO_MODULES": PIANO_MODULES,
                 "ECOLOGY_ENABLED": ECOLOGY_ENABLED,
                 "GOODS_ENABLED": GOODS_ENABLED,
                 "TECH_TREE_ENABLED": TECH_TREE_ENABLED,
@@ -277,29 +275,12 @@ class _SnapshotMixin:
                 "LIFECYCLE_ENABLED": LIFECYCLE_ENABLED,
                 "DYNASTY_TREE_ENABLED": DYNASTY_TREE_ENABLED,
                 "CULTURE_ENABLED": CULTURE_ENABLED,
-                "CEMETERY_ENABLED": CEMETERY_ENABLED,
                 "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
-                "STRUCTURE_WEAR_ENABLED": STRUCTURE_WEAR_ENABLED,
-                "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
-                "SOCIAL_LAYER_ENABLED": SOCIAL_LAYER_ENABLED,
-                "CHRONICLE_ENABLED": CHRONICLE_ENABLED,
+                "VISUALS_ENABLED": VISUALS_ENABLED,
                 "CHRONICLE_SAGA_ENABLED": CHRONICLE_SAGA_ENABLED,
-                "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
-                "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
-                "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
                 "PATH1_ENABLED": PATH1_ENABLED,
-                "INDUSTRY_ENABLED": path1_on("INDUSTRY_ENABLED"),
-                "TOOL_TIERS_ENABLED": path1_on("TOOL_TIERS_ENABLED"),
-                "COMPOSABLE_BUILD_ENABLED": path1_on("COMPOSABLE_BUILD_ENABLED"),
-                "TERRAIN_TILES_ENABLED": path1_on("TERRAIN_TILES_ENABLED"),
-                "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
-                "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
-                "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
                 "RAIDERS_CONTAGION_ENABLED": RAIDERS_CONTAGION_ENABLED,
                 "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
-                "LIBRARY_SCALING_ENABLED": LIBRARY_SCALING_ENABLED,
-                "TRANSIT_ENABLED": TRANSIT_ENABLED,
-                "ECONOMY_SINKS_ENABLED": ECONOMY_SINKS_ENABLED,
                 "WIKI_MEMORY": WIKI_MEMORY,
                 "TESTAMENT_ENABLED": TESTAMENT_ENABLED,
                 "THEORY_OF_MIND_ENABLED": THEORY_OF_MIND_ENABLED,
@@ -307,7 +288,6 @@ class _SnapshotMixin:
                 "CROP_GROWTH_ENABLED": CROP_GROWTH_ENABLED,
                 "WILDLIFE_ENABLED": WILDLIFE_ENABLED,
                 "WILDLIFE_BEHAVIOR_ENABLED": WILDLIFE_BEHAVIOR_ENABLED,
-                "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
                 "WEATHER_ENABLED": WEATHER_ENABLED,
                 "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
                 "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
@@ -351,9 +331,8 @@ class _SnapshotMixin:
             "conversation": list(self.conversationLog[:30]),
             "config": self._build_snapshot_config(),
         }
-        if SOCIAL_LAYER_ENABLED:
-            snapshot["socialTies"] = self._social_ties_snapshot()
-        if CHRONICLE_ENABLED and CULTURE_ENABLED:
+        snapshot["socialTies"] = self._social_ties_snapshot()
+        if CULTURE_ENABLED:
             snapshot["chronicle"] = self._chronicle_snapshot()
         if CHRONICLE_SAGA_ENABLED:
             snapshot["saga"] = self._saga_snapshot()
@@ -367,7 +346,7 @@ class _SnapshotMixin:
             tele_snap = self._pressure_telegraph_snapshot()
             if tele_snap:
                 snapshot["pressureTelegraph"] = tele_snap
-        if CARAVAN_VISUALS_ENABLED:
+        if VISUALS_ENABLED:
             snapshot["shipments"] = self._shipment_snapshot()
         if WEATHER_ENABLED:
             snapshot["weather"] = self._weather_snapshot()
@@ -387,15 +366,15 @@ class _SnapshotMixin:
             return "lmStatus", self.lmStatus
         if key == "wildlife":
             return "wildlife", self._wildlife_snapshot() if WILDLIFE_ENABLED else []
-        if key == "shipments" and CARAVAN_VISUALS_ENABLED:
+        if key == "shipments" and VISUALS_ENABLED:
             return "shipments", self._shipment_snapshot()
         if key == "weather" and WEATHER_ENABLED:
             return "weather", self._weather_snapshot()
         if key == "pressureTelegraph" and RAIDERS_CONTAGION_ENABLED:
             return "pressureTelegraph", self._pressure_telegraph_snapshot()
-        if key == "socialTies" and SOCIAL_LAYER_ENABLED:
+        if key == "socialTies":
             return "socialTies", self._social_ties_snapshot()
-        if key == "chronicle" and CHRONICLE_ENABLED and CULTURE_ENABLED:
+        if key == "chronicle" and CULTURE_ENABLED:
             return "chronicle", self._chronicle_snapshot()
         if key == "saga" and CHRONICLE_SAGA_ENABLED:
             return "saga", self._saga_snapshot()

@@ -467,7 +467,7 @@ and expiry: [02-engine-core.md](02-engine-core.md#anointed-divine-matrix-phase-7
 `agent["role"]` immediately. `_build_think_payload` reflects changes on the next
 think: `personality` via `_personality_with_drift(agent)`, `role` and
 `role_skill` from the updated role, and `self_prompt` from `agent["persona"]`
-when `META_SYSTEM` is on (set in `_think_job` before the LLM call).
+(set in `_think_job` before the LLM call).
 `identity_copy_overwrite` blends persona/personality toward a source agent each
 think (`_advance_identity_forge_on_think`). Optional `syncMemories` plants up
 to three source memory lines — never a full clone. Restore semantics:
@@ -1090,7 +1090,7 @@ see [05-world.md](05-world.md#structures) and
 
 ## Civ-1 library lessons
 
-When `LIBRARY_SCALING_ENABLED` is enabled, an agent in a district with a
+When `CULTURE_ENABLED`, an agent in a district with a
 working Library receives a `library_lessons` prompt line. It contains at most
 three highest preserved skill records and two newest chronicle entries, with a
 480-character cap; it is omitted otherwise.
@@ -1261,7 +1261,7 @@ agent's `contextDirty` flag is set by a meaningful context event, or its
 wall-clock age reaches the long fossilization backstop
 `MODULE_NOTE_MAX_AGE_S = 600`; a stale-but-correct quiet note is deliberately
 not refreshed merely because a decision occurs. Incapacitated agents are
-skipped when `MODULE_REFRESH_IDLE_SKIP` is true. Phase A does not add a
+skipped unconditionally. Phase A does not add a
 night-wide throttle. The scheduler remains dark by default; its 45-second
 interval restores the existing GPU-rest window when the gate is off. Phase C's
 optional night backstop has not been attempted.
@@ -1344,8 +1344,8 @@ specs/04-http-api.md), not a URL query parameter, or via the `SIM_AGENTS`
 environment variable at server startup (server.py, default 8, clamped to
 `MAX_ROSTER_SIZE = 20` — see specs/02-engine-core.md and specs/06-agents.md).
 
-`META_SYSTEM` (`constants.py:488`, default `True` since Sid-parity Phase 3) —
-autobiography/persona meta update, still bounded by `MAX_CONCURRENT_LLM`
+The meta-system (autobiography/persona meta update, unconditional since
+Sid-parity Phase 3) is still bounded by `MAX_CONCURRENT_LLM`
 (runs inline on the decision path, not on `piano_workers`). Authored beliefs
 and adoption events give the rotating autobiography update material to
 summarize.

@@ -55,7 +55,7 @@ function structureAtWorldPoint(wx, wy) {
   let best = null;
   let bestArea = Infinity;
   for (const s of structures) {
-    const size = getStructureRenderSize(s, STRUCTURE_WEAR_ENABLED);
+    const size = getStructureRenderSize(s, VISUALS_ENABLED);
     const x0 = s.x;
     const y0 = s.y;
     const x1 = x0 + size.width;
@@ -328,9 +328,7 @@ function renderBenchmarks() {
   if (b.ecologyScarcity != null && b.ecologyScarcity !== undefined) {
     systems.push(`<span class="res-chip">ecology <span class="civ-value">${Math.round(b.ecologyScarcity * 100)}%</span></span>`);
   }
-  if (PIANO_MODULES || META_SYSTEM) {
-    systems.push(`<span class="res-chip">modules <span class="civ-value">${b.moduleTotal}</span></span>`);
-  }
+  systems.push(`<span class="res-chip">modules <span class="civ-value">${b.moduleTotal}</span></span>`);
   const html = renderGroup("Culture", culture)
     + renderGroup("Governance", governance)
     + renderGroup("Systems", systems);
@@ -402,7 +400,7 @@ const STRUCTURE_HIT_FLASH_MIN_DROP = 5; // ignore passive decay (~0.05/tick); ca
 // Client-only diff of structure condition/isRuin between polls; flash on meaningful
 // damage or a new ruin transition — not every passive decay tick.
 function trackStructureConditionDeltas() {
-  if (!STRUCTURE_WEAR_ENABLED) return;
+  if (!VISUALS_ENABLED) return;
   const structures = getCiv().structures || [];
   const liveIds = new Set();
   for (const s of structures) {
@@ -983,10 +981,8 @@ function renderSidebar() {
     ).join("");
   }
 
-  if (!CHRONICLE_ENABLED) {
-    chronicleLogEl.style.display = "none";
-  } else {
-    chronicleLogEl.style.display = "";
+  chronicleLogEl.style.display = "";
+  {
     const chronicle = world.chronicle || [];
     const chronicleKey = JSON.stringify(chronicle);
     if (chronicleKey !== lastChronicleKey) {
@@ -1032,7 +1028,7 @@ function renderSidebar() {
   // chronicleKey above), so remembering which frames have already been
   // banner-ed needs no new /state shape and no extra server-side state --
   // the simpler option per the phase brief.
-  if (FOUNDING_EVENTS_ENABLED) {
+  if (VISUALS_ENABLED) {
     const foundingEntries = (world.chronicle || []).filter((e) => e.kind === "district_founded");
     if (foundingFramesSeen === null) {
       // First snapshot after page load/refresh: remember whatever foundings
@@ -1062,7 +1058,7 @@ function renderSidebar() {
   }
 
   // Disaster banner: edge-detect new chronicle entries with kind === "disaster".
-  if (CHRONICLE_ENABLED) {
+  {
     const disasterEntries = (world.chronicle || []).filter((e) => e.kind === "disaster");
     if (disasterFramesSeen === null) {
       disasterFramesSeen = new Set(disasterEntries.map((e) => e.frame));
@@ -1082,8 +1078,6 @@ function renderSidebar() {
         if (!disasterEntries.some((e) => e.frame === f)) disasterFramesSeen.delete(f);
       }
     }
-  } else {
-    disasterBannerEl.style.display = "none";
   }
 
   renderPressureBanner();
@@ -1113,7 +1107,7 @@ function weatherStateLabel(weather) {
 }
 
 function renderWorldClockHud() {
-  if (!WORLD_CLOCK_HUD_ENABLED) {
+  if (!VISUALS_ENABLED) {
     worldClockHudEl.style.display = "none";
     return;
   }

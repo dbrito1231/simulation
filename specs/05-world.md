@@ -6,8 +6,8 @@ World geometry, districts (starter core + frontier), roads, terrain tiles, ecolo
 zone kinds, ecology stocks/regrow/terraform, structure registry/levels/upgrades, Path-1
 terrain grid + composable blocks (mechanics), cemetery/grave grid.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index (semantics of
-`ECOLOGY_ENABLED`/`ROADS_ENABLED`/`STRUCTURE_UPGRADES_ENABLED`/`CEMETERY_ENABLED`/
-`TERRAIN_TILES_ENABLED`/`COMPOSABLE_BUILD_ENABLED`/`WILDLIFE_ENABLED` live in their
+`ECOLOGY_ENABLED`/`STRUCTURE_UPGRADES_ENABLED`/
+`PATH1_ENABLED` (terrain tiles/composable blocks)/`WILDLIFE_ENABLED` live in their
 owning specs); [10-path1.md](10-path1.md) for Path-1 flag semantics (industry, tool
 tiers, diplomacy); [07-actions.md](07-actions.md) for the build/terraform/block/dig/
 hunt actions; [08-systems-economy.md](08-systems-economy.md) for structure
@@ -89,7 +89,8 @@ must be built in (falls back to `village` for unlisted/custom-blueprint types).
   space of that kind. `_maybe_found_district` (sim_engine/mixin_council_growth.py:1468) also checks
   `len(districts) < MAX_TOTAL_DISTRICTS` and a per-village cooldown
   (`lastDistrictFoundFrame`).
-- `FOUNDING_EVENTS_ENABLED` (default True): when True, `_found_district()` pushes a
+- `VISUALS_ENABLED` (default True; Phase 4 flag-minimization bundle — see
+  [11-viewer.md](11-viewer.md)): when True, `_found_district()` pushes a
   `district_founded`-kind chronicle milestone ("`{label}` was founded on the
   frontier.") alongside the existing unconditional `_push_activity` line. Gates only
   this chronicle call — district creation itself, the road-graph extension, and
@@ -165,14 +166,15 @@ size (a dozen-ish nodes even after several foundings), so it is never treated as
 one-time module-load constant. `_road_path_between(agent, dest_district_id)`
 (sim_engine/mixin_world_state.py:554) resolves an agent's origin node (its current district's
 `entryNode`, or the nearest road node by position) and the destination district's
-`entryNode`, then looks up the cached path. Movement flag: `ROADS_ENABLED` (default
-True; semantics/rendering owned here, echo status in
-[01-architecture.md](01-architecture.md#flag-index-complete--52-module-level-flags-sim_enginepy)).
+`entryNode`, then looks up the cached path. Road-node routing is unconditional
+for general travel (idle wander, craft-station redirects, move_to_district);
+Sage-emergency rescue and short local hops (move_to_agent, trade, talk) always
+stay direct.
 
 ## Inter-settlement movement (ocean corridor)
 
-When `PATH1_DIPLOMACY_ENABLED`, `TRANSIT_ENABLED`, and `_has_ocean_transit()`
-are all true, **caravan goals only** that travel between different
+When `PATH1_ENABLED` and `_has_ocean_transit()`
+are both true, **caravan goals only** that travel between different
 `settlementId`s may route through a bounded ocean corridor instead of
 road-only paths:
 
@@ -183,7 +185,7 @@ road-only paths:
 3. Enter the destination settlement at its dock/district.
 
 Transit cost is consumed once per crossing via `_consume_ocean_transit`
-([10-path1.md](10-path1.md#transit_enabled)). `_set_agent_target_once` /
+([10-path1.md](10-path1.md#ocean-transit)). `_set_agent_target_once` /
 `_step_goal` for `kind: "caravan"` selects the corridor when the destination
 district's settlement differs from the actor's. Shipment visuals use
 `mode: "boat"` under the same boundary signal
@@ -298,7 +300,7 @@ slower spawn/respawn/migration (`_tick_huntable_wildlife`), the agent action
 `available_actions`, viewer draw no-ops.
 
 This is **not** Path-1's `_tick_wildlife` forest-attack pressure event
-(gated by `PRESSURE_LOOP_ENABLED` — [10-path1.md](10-path1.md)); the names
+(gated by `PATH1_ENABLED` — [10-path1.md](10-path1.md)); the names
 are adjacent but the systems are unrelated.
 
 Full tick/combat/migration/god-kind/behavior-state-machine detail:
@@ -429,8 +431,8 @@ to `0`, same as a freshly issued turn.
 
 ## Path-1 terrain grid + composable blocks
 
-Mechanics only — flag semantics (`TERRAIN_TILES_ENABLED`, `COMPOSABLE_BUILD_ENABLED`)
-are owned by [10-path1.md](10-path1.md).
+Mechanics only — flag semantics (`PATH1_ENABLED`) are owned by
+[10-path1.md](10-path1.md).
 
 - **Grid:** each district has a fixed `PATH1_GRID_COLS = 8` × `PATH1_GRID_ROWS = 8`
   cell grid (sim_engine/constants.py:2019-2020) at `TILE_CELL = 40` px per cell
@@ -582,7 +584,7 @@ restore (status `"restore-closed"`).
 
 ## Cemetery + grave grid
 
-Gated by `CEMETERY_ENABLED` (default True). The `cemetery_grounds` district's
+The `cemetery_grounds` district's
 `grave_grid` (48 slots, same `{x0,y0,cols,dx,dy}` spacing convention as `build_grid`)
 holds tombstone positions distinct from its 1-slot `build_grid` (the Cemetery
 structure itself). `_grave_grid_position(district_id, index)`

@@ -22,22 +22,21 @@ their own cadence (all frame counts are ticks at 30/s):
 |---|---|---|
 | `SURVIVAL_ENABLED` | 30 | `_update_survival` per agent |
 | `MEMORY_ENABLED` | 1800 | `_run_memory_maintenance` |
-| `META_SYSTEM` (off) | 2400 | `_maybe_meta_update` |
-| `EMERGENT_ROLES` | 120 | `_maybe_auto_switch_role` |
+| (unconditional) | 2400 | `_maybe_meta_update` |
+| (unconditional) | 120 | `_maybe_auto_switch_role` |
 | `RULES_ENABLED` | 150 | `_maybe_advance_rules` |
 | `LIFECYCLE_ENABLED` | 150 | `_maybe_resolve_stalled_succession` |
 | `LIFECYCLE_ENABLED` | 300 | `_tick_lifecycle` |
-| (unconditional) | 150 | a fixed batch: `_maybe_feed_starving`, `_maybe_repair_critical`, `_maybe_repair_campaign`, `_maybe_cull_ruins`, `_maybe_abandon_stalled_projects`, `_maybe_relocate_stuck_project`, `_maybe_reorganize_structures`, `_maybe_force_contribution`, `_maybe_start_idle_district_project`, `_maybe_build_funded_project`, `_maybe_start_approved_custom`, `_maybe_retire_blueprint`, `_maybe_amnesty_rejected_blueprints`, `_maybe_retire_custom_resource`, `_maybe_invention_backstop`, `_maybe_found_district`, `_maybe_welcome_newcomer` |
-| within the 150-batch, `SAGE_REVIEW_ENABLED` | 150 | `_maybe_skip_sage_review`, `_maybe_amnesty_denied_sage_reviews` |
+| (unconditional) | 150 | a fixed batch: `_maybe_feed_starving`, `_maybe_repair_critical`, `_maybe_repair_campaign`, `_maybe_cull_ruins`, `_maybe_abandon_stalled_projects`, `_maybe_relocate_stuck_project`, `_maybe_reorganize_structures`, `_maybe_force_contribution`, `_maybe_start_idle_district_project`, `_maybe_build_funded_project`, `_maybe_start_approved_custom`, `_maybe_retire_blueprint`, `_maybe_amnesty_rejected_blueprints`, `_maybe_skip_sage_review`, `_maybe_amnesty_denied_sage_reviews`, `_maybe_retire_custom_resource`, `_maybe_invention_backstop`, `_maybe_found_district`, `_maybe_welcome_newcomer` |
 | within the 150-batch, `TECH_TREE_ENABLED` | 150 | `_maybe_era_transition`, `_maybe_dissolve_council` |
 | `DAILY_COUNCIL_ENABLED` | day boundary (`frameTick % DAY_FRAMES == 0`) and deterministic phase gate | `_maybe_convene_daily_council`, `_maybe_advance_daily_council` |
 | `CHRONICLE_SAGA_ENABLED` | day boundary (`frameTick % DAY_FRAMES == 0`) | `_maybe_append_daily_saga` — see [Chronicle saga](#chronicle-saga-chronicle_saga_enabled) |
 | within the 150-batch, `CULTURE_ENABLED` | 150 | `_maybe_study_at_library` |
-| within the 150-batch, `CEMETERY_ENABLED` | 150 | `_maybe_handle_burials` |
+| within the 150-batch, (unconditional) | 150 | `_maybe_handle_burials` |
 | within the 150-batch, `ECONOMY_ENABLED` | 150 | `_maybe_mint_coin`, `_maybe_fund_project_coin` |
-| within the 150-batch, `path1_on()` | 150 | `_maybe_found_settlement`, `_path1_industry_benchmark` |
-| `path1_on("PRESSURE_LOOP_ENABLED")` | 900 | `_tick_wildlife` (Path-1 forest attack pressure — **not** huntable fauna) |
-| `path1_on("PRESSURE_LOOP_ENABLED")` and `_is_night()` | 30 | `_tick_night_pressure` |
+| within the 150-batch, `PATH1_ENABLED` | 150 | `_maybe_found_settlement`, `_path1_industry_benchmark` |
+| `PATH1_ENABLED` | 900 | `_tick_wildlife` (Path-1 forest attack pressure — **not** huntable fauna) |
+| `PATH1_ENABLED` and `_is_night()` | 30 | `_tick_night_pressure` |
 | `STRUCTURE_EFFECTS_ENABLED` | 150 | `_tick_structure_effects` |
 | `ECOLOGY_ENABLED` | 600 | `_tick_ecology_regrow` |
 | `GOODS_ENABLED` | 900 | `_tick_goods` |
@@ -115,7 +114,7 @@ aging, season clock, and GUI calendar share that year. Today: `1/1440` per
 lifecycle gate (~10 s at 30/s).
 
 - `NIGHT_FRACTION = 0.25` (sim_engine/constants.py:2009): `_is_night()` is true for the last
-  quarter of each `DAY_FRAMES` cycle, but only when `PRESSURE_LOOP_ENABLED` — night
+  quarter of each `DAY_FRAMES` cycle, but only when `PATH1_ENABLED` — night
   otherwise never triggers.
 - `SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}`
   (sim_engine/constants.py:1453): ecology regrowth is doubled in spring and fully halted in
@@ -1167,7 +1166,7 @@ only writes `behaviorState` when the flag is on). Per-creature
   graze/rest/wander unconditionally.
 - **`rest`** — `WILDLIFE_LAND_KINDS` only (forest/farm pool kinds minus the
   decorative `bee`), when `self._is_night()` is true (existing time-of-day
-  source — [Time model](#time-model), `PRESSURE_LOOP_ENABLED`-gated). Halts
+  source — [Time model](#time-model), `PATH1_ENABLED`-gated). Halts
   movement entirely for the tick.
 - **`graze`** — `WILDLIFE_LAND_KINDS` by day: slow drift at
   `WILDLIFE_GRAZE_SPEED_MULT` (0.4×) of normal speed, with a

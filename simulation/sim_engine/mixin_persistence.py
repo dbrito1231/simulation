@@ -392,17 +392,16 @@ class _PersistenceMixin:
                 if TESTAMENT_ENABLED:
                     civ.setdefault("testament", [])
                     civ.setdefault("testamentAuthored", 0)
-                if CEMETERY_ENABLED:
-                    # Cemetery/burial state: purely additive, same discipline
-                    # as every other phase's setdefault-only back-compat --
-                    # an old save can build a Cemetery with no migration step.
-                    if isinstance(civ.get("projectRegistry"), dict):
-                        civ["projectRegistry"].setdefault("cemetery", dict(PROJECT_TEMPLATES["cemetery"]))
-                    civ.setdefault("lastCemeteryCheckFrame", 0)
-                    civ.setdefault("cemeteryBackoffUntil", 0)
-                    civ.setdefault("cemeteryBackstopFailures", 0)
-                    civ.setdefault("cemeteryEscalationLogged", False)
-                if path1_on():
+                # Cemetery/burial state: purely additive, same discipline
+                # as every other phase's setdefault-only back-compat --
+                # an old save can build a Cemetery with no migration step.
+                if isinstance(civ.get("projectRegistry"), dict):
+                    civ["projectRegistry"].setdefault("cemetery", dict(PROJECT_TEMPLATES["cemetery"]))
+                civ.setdefault("lastCemeteryCheckFrame", 0)
+                civ.setdefault("cemeteryBackoffUntil", 0)
+                civ.setdefault("cemeteryBackstopFailures", 0)
+                civ.setdefault("cemeteryEscalationLogged", False)
+                if PATH1_ENABLED:
                     for tid, tmpl in PROJECT_TEMPLATES.items():
                         if isinstance(civ.get("projectRegistry"), dict):
                             civ["projectRegistry"].setdefault(tid, dict(tmpl))
@@ -434,15 +433,14 @@ class _PersistenceMixin:
                         if not isinstance(fn.get("light"), dict):
                             fn["light"] = {"scope": "district"}
                         fn.setdefault("upkeep", {"resource": "charcoal", "amount": 1})
-                if TRANSIT_ENABLED:
-                    for tid in ("dock", "shipyard"):
-                        entry = self._ensure_registry_entry_from_instance(civ, tid)
-                        if not isinstance(entry, dict):
-                            continue
-                        fn = entry.setdefault("function", {})
-                        unlocks = fn.setdefault("unlocks", [])
-                        if not any(u.get("kind") == "transit" for u in unlocks if isinstance(u, dict)):
-                            unlocks.append({"kind": "transit", "terrain": "ocean", "consumes": {"boat": 1}})
+                for tid in ("dock", "shipyard"):
+                    entry = self._ensure_registry_entry_from_instance(civ, tid)
+                    if not isinstance(entry, dict):
+                        continue
+                    fn = entry.setdefault("function", {})
+                    unlocks = fn.setdefault("unlocks", [])
+                    if not any(u.get("kind") == "transit" for u in unlocks if isinstance(u, dict)):
+                        unlocks.append({"kind": "transit", "terrain": "ocean", "consumes": {"boat": 1}})
                 agents = []
                 is_scaffold = self.d.get("is_scaffold_text")
                 for ad in (data.get("agents") or []):
@@ -667,10 +665,9 @@ class _PersistenceMixin:
                         self._seed_wildlife_population()
                     else:
                         self._normalize_wildlife_records()
-                if CEMETERY_ENABLED:
-                    self._ensure_cemetery_district()
-                    self._migrate_cemetery_structure()
-                    self._relayout_cemetery_graves()
+                self._ensure_cemetery_district()
+                self._migrate_cemetery_structure()
+                self._relayout_cemetery_graves()
                 _validate_districts(self.civilization["districts"])
                 _validate_road_graph(self.civilization["roadNodes"], self.civilization["roadEdges"])
                 self._bump_districts_epoch()
