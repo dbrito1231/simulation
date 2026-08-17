@@ -26,7 +26,7 @@ class _BackstopsMixin:
 
     # --- message bus / inbox ---
     def _deliver_message(self, from_name, to_name, text, kind):
-        if not AGENT_MESSAGING or not text:
+        if not text:
             return
         broadcast = to_name in ("everyone", "all", None)
         for r in self.agents:
@@ -41,14 +41,14 @@ class _BackstopsMixin:
                 r["inbox"].pop(0)
 
     def _drain_inbox(self, agent):
-        if not AGENT_MESSAGING or not agent["inbox"]:
+        if not agent["inbox"]:
             return "none"
         msgs = " | ".join(f"{m['from']} ({m['kind']}): {m['text']}" for m in agent["inbox"])
         agent["inbox"] = []
         return msgs
 
     def _has_unread(self, agent):
-        return AGENT_MESSAGING and bool(agent["inbox"])
+        return bool(agent["inbox"])
 
     # --- emergent roles ---
     def _role_specialty_resource(self, role):
@@ -732,7 +732,7 @@ class _BackstopsMixin:
                     f"The old rejection of the '{bid}' blueprint has been forgotten -- "
                     f"it may be proposed again")
 
-    # --- sage review (two-stage blueprint approval: SAGE_REVIEW_ENABLED) ---
+    # --- sage review (two-stage blueprint approval, always on) ---
     def _is_sage_reviewer(self, agent):
         """Who may perform the geography/resource review stage. No separate
         Sage role exists -- the current elder does both the review and the

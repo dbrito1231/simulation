@@ -8,7 +8,7 @@ schema (data stays in roles.json), agent state fields, movement speeds, lifecycl
 constants (aging/births/deaths/succession), the memory system, emergent-role
 auto-switch.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index
-(`MEMORY_ENABLED`, `AGENT_MESSAGING`, `EMERGENT_ROLES`, `LIFECYCLE_ENABLED` echo
+(`MEMORY_ENABLED`, `EMERGENT_ROLES`, `LIFECYCLE_ENABLED` echo
 status); [09-systems-society.md](09-systems-society.md) for succession-election
 detail beyond the summary here; [07-actions.md](07-actions.md) for `switch_role`/
 `change_role`/`heal_agent`/`bury_agent`.

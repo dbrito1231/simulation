@@ -1090,7 +1090,7 @@ see [05-world.md](05-world.md#structures) and
 
 ## Civ-1 library lessons
 
-When `LIBRARY_SCALING_ENABLED` is enabled, an agent in a district with a
+When `CULTURE_ENABLED`, an agent in a district with a
 working Library receives a `library_lessons` prompt line. It contains at most
 three highest preserved skill records and two newest chronicle entries, with a
 480-character cap; it is omitted otherwise.
@@ -1261,7 +1261,7 @@ agent's `contextDirty` flag is set by a meaningful context event, or its
 wall-clock age reaches the long fossilization backstop
 `MODULE_NOTE_MAX_AGE_S = 600`; a stale-but-correct quiet note is deliberately
 not refreshed merely because a decision occurs. Incapacitated agents are
-skipped when `MODULE_REFRESH_IDLE_SKIP` is true. Phase A does not add a
+skipped unconditionally. Phase A does not add a
 night-wide throttle. The scheduler remains dark by default; its 45-second
 interval restores the existing GPU-rest window when the gate is off. Phase C's
 optional night backstop has not been attempted.

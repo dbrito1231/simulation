@@ -551,9 +551,9 @@ exact `total`, `working`, `disrepaired` (below `STRUCTURE_DISREPAIR_THRESHOLD`
 but not yet a ruin), and `ruined` (`isRuin`) counts so a soak-analysis script
 can reconstruct the full picture, not just the ratio.
 
-## ECONOMY_SINKS_ENABLED
+## Economy sinks
 
-`ECONOMY_SINKS_ENABLED` defaults to True. Repairs prefer one plank when
+Repairs prefer one plank when
 available; tier-2+ projects add one crafted material (planks, then bricks,
 then tools); and comfort consumption *opportunistically* drains one `pottery`
 or `dried_fish` per living agent every `COMFORT_EVERY_N_GOODS_TICKS = 4`

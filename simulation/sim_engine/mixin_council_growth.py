@@ -738,7 +738,7 @@ class _CouncilGrowthMixin:
                     "reasoning": "Ratifying the Daily Council rejection.",
                 })
                 return "blueprint rejected through elder review path"
-            if SAGE_REVIEW_ENABLED and pending.get("sageReview") == "pending":
+            if pending.get("sageReview") == "pending":
                 self.apply_decision(elder, {
                     "action": "sage_review_blueprint", "target": ballot.get("id"),
                     "sage_decision": "approve",

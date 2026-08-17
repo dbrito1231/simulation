@@ -392,8 +392,6 @@ class _WildlifeMixin:
 
     def _wildlife_road_waypoints(self, from_district_id, to_district_id, dest_x, dest_y):
         """Reuse agent road cache between districts; [] if no road path."""
-        if not ROADS_ENABLED:
-            return []
         path_nodes = self._road_path_between_districts(from_district_id, to_district_id)
         if not path_nodes:
             return []

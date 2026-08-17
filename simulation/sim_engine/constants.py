@@ -33,7 +33,6 @@ __all__ = [
     "THEORY_OF_MIND_ENABLED",
     "PEER_MODEL_MAX_PEERS",
     "PEER_MODEL_FIELD_CHAR_CAP",
-    "AGENT_MESSAGING",
     "PIANO_MODULES",
     "ALWAYS_ON_MODULES",
     "META_SYSTEM",
@@ -44,7 +43,6 @@ __all__ = [
     "DETERMINISM_PINNING",
     "DETERMINISM_SEED",
     "ECOLOGY_ENABLED",
-    "ROADS_ENABLED",
     "CROP_GROWTH_ENABLED",
     "WILDLIFE_ENABLED",
     "WILDLIFE_KIND_POOLS",
@@ -316,7 +314,6 @@ __all__ = [
     "MODULE_PULSE_INTERVAL_S",
     "MODULE_PULSE_MAX_BATCH",
     "MODULE_NOTE_MAX_AGE_S",
-    "MODULE_REFRESH_IDLE_SKIP",
     "MODULE_REFRESH_TIMEOUT_S",
     "PIANO_MODULE_TIMEOUT_WAIT_S",
     "LLM_ORPHAN_TIMEOUT_THRESHOLD",
@@ -354,7 +351,6 @@ __all__ = [
     "TECH_TREE_ENABLED",
     "DAILY_COUNCIL_ENABLED",
     "MAX_TECH_TIER",
-    "SAGE_REVIEW_ENABLED",
     "WAGON_CARRY_BONUS",
     "WAGON_SPEED_MULT",
     "INVENTION_COUNCIL_SIZE",
@@ -396,7 +392,6 @@ __all__ = [
     "BIRTH_CHECK_FRAMES",
     "BIRTH_FOOD_SURPLUS_PER_AGENT",
     "BIRTH_MIN_INTERVAL_FRAMES",
-    "BIRTH_STARTING_SKILL_PENALTY",
     "NEWBORN_GOODS_SHARE",
     "SUCCESSION_ELECTION_TTL_FRAMES",
     "HARVEST_QUOTA_PERIOD_FRAMES",
@@ -424,7 +419,6 @@ __all__ = [
     "CHRONICLE_MILESTONE_KINDS",
     "MEME_MUTATION_PROB",
     "MEME_MUTATION_SESSION_CAP",
-    "HARVEST_SPIRIT_CONTRIB_BOOST",
     "PERSONALITY_DRIFT_CAP",
     "CEMETERY_ENABLED",
     "BURY_CONTACT_DIST",
@@ -446,9 +440,7 @@ __all__ = [
     "TIER3_CONTENT_ENABLED",
     "PRESSURE_LOOP_ENABLED",
     "ENV_EFFECTS_ENABLED",
-    "LIBRARY_SCALING_ENABLED",
     "TRANSIT_ENABLED",
-    "ECONOMY_SINKS_ENABLED",
     "COMFORT_EVERY_N_GOODS_TICKS",
     "path1_on",
     "PROJECT_TEMPLATES",
@@ -574,7 +566,6 @@ THEORY_OF_MIND_ENABLED = str(os.environ.get("SIM_THEORY_OF_MIND", "")).strip().l
 # Hard caps on agent["peerModel"][peerIdStr] entries (LRU by frame).
 PEER_MODEL_MAX_PEERS = 8
 PEER_MODEL_FIELD_CHAR_CAP = 48
-AGENT_MESSAGING = True
 PIANO_MODULES = True
 # Gated scheduler for the PIANO whiteboard.  Kept dark until Phase B's
 # contention soak proves it is safe; false preserves the existing per-think
@@ -599,10 +590,7 @@ ECOLOGY_ENABLED = True
 # World-expansion plan: waypoint-based road routing for general travel
 # (move_to_district / idle wander / craft-station redirects). Sage-emergency
 # rescue and short local hops (move_to_agent, trade, talk) always stay direct
-# regardless of this flag -- see _set_agent_target_to_agent. Off reverts
-# _set_agent_target to the old straight-to-random-interior-point behavior so
-# routing can be A/B compared.
-ROADS_ENABLED = True
+# -- see _set_agent_target_to_agent.
 # Living-ecosystem Phase 2: districtEcology projection (CROP_GROWTH_ENABLED)
 # plus server-authoritative huntable fauna (WILDLIFE_ENABLED). Crop growth is
 # still viewer-facing only; WILDLIFE_ENABLED now also gates engine fauna
@@ -1462,7 +1450,6 @@ PIANO_CROSS_CONTEXT_TTL = 6
 MODULE_PULSE_INTERVAL_S = 45
 MODULE_PULSE_MAX_BATCH = 2
 MODULE_NOTE_MAX_AGE_S = 600
-MODULE_REFRESH_IDLE_SKIP = True
 MODULE_REFRESH_TIMEOUT_S = 60
 # Wait budget for a dispatched module future -- strictly above server.py's
 # PIANO_MODULE_TIMEOUT_S (15s) HTTP timeout so that timeout, not this one,
@@ -1603,9 +1590,7 @@ DAILY_COUNCIL_ENABLED = True
 MAX_TECH_TIER = 3
 # Two-stage blueprint approval: the elder must sage_review_blueprint (a
 # geography/resource sanity pass) before approve_blueprint/reject_blueprint is
-# accepted on that id. Flag-gated so it can be killed instantly if it ever
-# deadlocks approval; with it off, approve_blueprint behaves exactly as before.
-SAGE_REVIEW_ENABLED = True
+# accepted on that id.
 # The wagon (tier-2 vehicle, crafted at the Forge, consumes the Phase C cart):
 # query-time effects on its holder, same pattern as the cart.
 WAGON_CARRY_BONUS = 40
@@ -1748,7 +1733,7 @@ POPULATION_FLOOR = 4                # never below this many non-incapacitated ad
 BIRTH_CHECK_FRAMES = LIFECYCLE_TICK_FRAMES
 BIRTH_FOOD_SURPLUS_PER_AGENT = 4    # stockpile+carried edibles must exceed this * population
 BIRTH_MIN_INTERVAL_FRAMES = STALL_THRESHOLD * 6  # ~2 min cooldown between births village-wide
-BIRTH_STARTING_SKILL_PENALTY = True  # newborns start at the "young" life stage (see _life_stage)
+# Newborns start at the "young" life stage (see _life_stage).
 NEWBORN_GOODS_SHARE = 0.15          # newborn inherits this fraction of a parent's held goods
 # Succession: on the elder's death, an election runs on the existing
 # propose_rule/vote_rule machinery -- one pending rule per eligible candidate
@@ -1831,7 +1816,6 @@ MEME_MUTATION_SESSION_CAP = 30        # hard ceiling on lm_complete calls for me
 # Belief-driven bias: believers in the seed harvest_spirit meme contribute
 # food more readily (a deterministic behavioral tilt, not a new action) --
 # folded into _pick_contribution_resource so it costs no new template line.
-HARVEST_SPIRIT_CONTRIB_BOOST = True
 # Personality drift: major life events append one short trait clause to the
 # agent's existing persona/personality text (deterministic templates only).
 # Capped so a long-lived elder doesn't accumulate an unbounded run-on string.
@@ -1869,9 +1853,7 @@ TIER3_CONTENT_ENABLED = True
 PRESSURE_LOOP_ENABLED = True
 RAIDERS_CONTAGION_ENABLED = True
 ENV_EFFECTS_ENABLED = True
-LIBRARY_SCALING_ENABLED = True
 TRANSIT_ENABLED = True
-ECONOMY_SINKS_ENABLED = True
 COMFORT_EVERY_N_GOODS_TICKS = 4  # comfort consumption fires every Nth goods tick, not every one
 
 

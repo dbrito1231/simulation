@@ -6,7 +6,7 @@ World geometry, districts (starter core + frontier), roads, terrain tiles, ecolo
 zone kinds, ecology stocks/regrow/terraform, structure registry/levels/upgrades, Path-1
 terrain grid + composable blocks (mechanics), cemetery/grave grid.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index (semantics of
-`ECOLOGY_ENABLED`/`ROADS_ENABLED`/`STRUCTURE_UPGRADES_ENABLED`/`CEMETERY_ENABLED`/
+`ECOLOGY_ENABLED`/`STRUCTURE_UPGRADES_ENABLED`/`CEMETERY_ENABLED`/
 `TERRAIN_TILES_ENABLED`/`COMPOSABLE_BUILD_ENABLED`/`WILDLIFE_ENABLED` live in their
 owning specs); [10-path1.md](10-path1.md) for Path-1 flag semantics (industry, tool
 tiers, diplomacy); [07-actions.md](07-actions.md) for the build/terraform/block/dig/
@@ -165,9 +165,10 @@ size (a dozen-ish nodes even after several foundings), so it is never treated as
 one-time module-load constant. `_road_path_between(agent, dest_district_id)`
 (sim_engine/mixin_world_state.py:554) resolves an agent's origin node (its current district's
 `entryNode`, or the nearest road node by position) and the destination district's
-`entryNode`, then looks up the cached path. Movement flag: `ROADS_ENABLED` (default
-True; semantics/rendering owned here, echo status in
-[01-architecture.md](01-architecture.md#flag-index-complete--52-module-level-flags-sim_enginepy)).
+`entryNode`, then looks up the cached path. Road-node routing is unconditional
+for general travel (idle wander, craft-station redirects, move_to_district);
+Sage-emergency rescue and short local hops (move_to_agent, trade, talk) always
+stay direct.
 
 ## Inter-settlement movement (ocean corridor)
 

@@ -924,7 +924,7 @@ class _DecisionsMixin:
         elif action == "approve_blueprint":
             idx = next((i for i, p in enumerate(c["pendingBlueprints"]) if p["id"] == decision.get("target")), -1)
             bp = c["pendingBlueprints"][idx] if idx != -1 else None
-            review_ok = not SAGE_REVIEW_ENABLED or (bp and bp.get("sageReview") in ("approved", "skipped"))
+            review_ok = bool(bp and bp.get("sageReview") in ("approved", "skipped"))
             resolved = False
             if agent["role"] == "elder" and idx != -1 and review_ok:
                 if bp.get("duplicateOf") and not self._structure_type_built(bp["duplicateOf"]):

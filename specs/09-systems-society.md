@@ -5,10 +5,10 @@ pipeline, the rules/voting system (including the anti-oscillation guard),
 memes, culture (skills/teaching/library/chronicle), messaging, benchmarks,
 and the governance-specific slice of lifecycle succession.
 
-**Canonical for:** `TECH_TREE_ENABLED`, `DAILY_COUNCIL_ENABLED`, `SAGE_REVIEW_ENABLED`,
+**Canonical for:** `TECH_TREE_ENABLED`, `DAILY_COUNCIL_ENABLED`,
 `RULES_ENABLED`, `MEMES_ENABLED`, `CULTURE_ENABLED`, `CHRONICLE_SAGA_ENABLED`,
-`AGENT_MESSAGING`,
-`BENCHMARKS_ENABLED` semantics; the succession/harvest_quota/rationing rule
+`BENCHMARKS_ENABLED` semantics; the two-stage blueprint (Sage review) gate;
+agent messaging; the succession/harvest_quota/rationing rule
 kinds under `LIFECYCLE_ENABLED`.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index;
 [06-agents.md](06-agents.md) for lifecycle state fields, aging/birth/death
@@ -203,12 +203,11 @@ retention keeps the newest 30 meeting ids, as specified in [02](02-engine-core.m
 | Sage review timeout | `SAGE_REVIEW_TIMEOUT_FRAMES = STALL_THRESHOLD * 20` (~6.7 min) | `_maybe_skip_sage_review`: if no living, non-incapacitated elder exists, a pending review auto-skips rather than blocking forever. |
 | Denied-review amnesty | same `BLUEPRINT_AMNESTY_FRAMES` | `_maybe_amnesty_denied_sage_reviews`: a sage-denied proposal is withdrawn and blacklisted (subject to the same rejection amnesty) after the window. |
 
-**`SAGE_REVIEW_ENABLED`** — two-stage blueprint approval: the elder must
+**Sage review** — two-stage blueprint approval, always on: the elder must
 `sage_review_blueprint` (a geography/resource sanity pass, verdict
 `approved`/`denied`) before `approve_blueprint`/`reject_blueprint` is
 accepted on that id. `_is_sage_reviewer` is any agent with `role == "elder"`
-(no separate Sage role). Flag-off: `approve_blueprint` behaves exactly as
-before (no review gate).
+(no separate Sage role).
 
 Related actions: `propose_blueprint`, `sage_review_blueprint`,
 `approve_blueprint`, `reject_blueprint`, `craft_item` (tier gate) —
@@ -216,7 +215,7 @@ Related actions: `propose_blueprint`, `sage_review_blueprint`,
 
 ## Library scaling
 
-`LIBRARY_SCALING_ENABLED` defaults to True. The strongest working Library in
+The strongest working Library in
 the agent's district scales preservation capacity and study gain by its upgrade
 weight (`max(1, level // UPGRADE_STAT_STEP)`). The knowledge-capacity
 multiplier is capped at 10; the study-gain multiplier is capped at
@@ -628,8 +627,8 @@ arrive after the cap are ignored without changing belief state.
 Beliefs have mechanical consequences beyond votes. Their affinity continues
 to bias `_belief_biased_vote`; believers prefer matching projects when choosing
 the role-default project and co-believers receive a reciprocal relationship
-bonus on adoption/persuasion. `HARVEST_SPIRIT_CONTRIB_BOOST = True` remains a
-small compatible food-contribution tilt. `meme_adoption` benchmarks include
+bonus on adoption/persuasion. Believers in the seed harvest_spirit meme get a
+small, unconditional food-contribution tilt. `meme_adoption` benchmarks include
 all live beliefs with a per-belief holder breakdown, including authored
 beliefs.
 
@@ -1090,9 +1089,9 @@ deterministic trait clause to an agent's persona text, capped at
 `PERSONALITY_DRIFT_CAP = 3` clauses so a long-lived elder's persona doesn't
 run on unbounded.
 
-## AGENT_MESSAGING
+## Agent messaging
 
-A simple per-agent inbox: `_deliver_message(from, to, text, kind)`
+A simple per-agent inbox, always on: `_deliver_message(from, to, text, kind)`
 (sim_engine/mixin_backstops.py:38) appends `{from, text, kind, frame}` to every matching
 recipient's `inbox` (broadcast when `to` is `"everyone"`/`"all"`/`None`),
 trimmed to `INBOX_CAP = 6` most-recent entries. `_drain_inbox(agent)`

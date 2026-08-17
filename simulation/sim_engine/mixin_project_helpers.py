@@ -231,7 +231,7 @@ class _ProjectHelpersMixin:
         if not district_id or c["districtProjects"].get(district_id):
             return None
         project_needs = dict(tmpl["needs"])
-        if ECONOMY_SINKS_ENABLED and self._type_tier(type_) >= 2:
+        if self._type_tier(type_) >= 2:
             material = next((r for r in ("planks", "bricks", "tools") if r not in project_needs), "planks")
             project_needs[material] = project_needs.get(material, 0) + 1
         contributed = {res: 0 for res in project_needs}

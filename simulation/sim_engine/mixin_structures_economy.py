@@ -895,8 +895,6 @@ class _StructuresEconomyMixin:
         self._mark_top_dirty("weather")
 
     def _tick_comfort_consumption(self):
-        if not ECONOMY_SINKS_ENABLED:
-            return
         if (self.frameTick // GOODS_TICK_FRAMES) % COMFORT_EVERY_N_GOODS_TICKS != 0:
             return
         stock = self.civilization["stockpile"]
@@ -1238,7 +1236,7 @@ class _StructuresEconomyMixin:
         needs = tmpl.get("needs") or {"wood": 2}
         if structure.get("isRuin") or structure.get("condition", 100) <= 0:
             return {res: max(1, amt // 2) for res, amt in needs.items()}
-        if ECONOMY_SINKS_ENABLED and c["stockpile"].get("planks", 0) > 0:
+        if c["stockpile"].get("planks", 0) > 0:
             return {"planks": 1}
         primary = next(iter(needs), "wood")
         return {primary: 1}

@@ -139,7 +139,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 70 module-level flags, sim_engine.py)
+## Flag index (complete — 62 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -152,7 +152,6 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `USE_GOALS` | True | yes | [08](08-systems-economy.md) |
 | `STRUCTURE_EFFECTS_ENABLED` | True | no | [08](08-systems-economy.md) |
 | `MEMORY_ENABLED` | True | no | [06](06-agents.md) |
-| `AGENT_MESSAGING` | True | no | [06](06-agents.md) |
 | `PIANO_MODULES` | True | yes | [03](03-cognition.md) |
 | `ALWAYS_ON_MODULES` | False | no | [03](03-cognition.md) |
 | `META_SYSTEM` | True | yes | [03](03-cognition.md) |
@@ -162,7 +161,6 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `BENCHMARKS_ENABLED` | True | no | [12](12-ops.md) |
 | `DETERMINISM_PINNING` | False (env-backed, `SIM_DETERMINISM_PINNING`) | no | [02](02-engine-core.md), [12](12-ops.md) |
 | `ECOLOGY_ENABLED` | True | yes | [05](05-world.md) |
-| `ROADS_ENABLED` | True | yes | [05](05-world.md) |
 | `STRUCTURE_UPGRADES_ENABLED` | True | yes | [05](05-world.md) |
 | `STRUCTURE_WEAR_ENABLED` | True | yes | [11](11-viewer.md) |
 | `ACTIVITY_CUES_ENABLED` | True | yes | [11](11-viewer.md) |
@@ -175,7 +173,6 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `GOODS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `TECH_TREE_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `DAILY_COUNCIL_ENABLED` | True | no | [09](09-systems-society.md) |
-| `SAGE_REVIEW_ENABLED` | True | no | [09](09-systems-society.md) |
 | `ECONOMY_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `CONTRACTS_ENABLED` | True | yes | [07](07-actions.md), [08](08-systems-economy.md) |
 | `LIFECYCLE_ENABLED` | True | yes | [06](06-agents.md) |
@@ -192,9 +189,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `PRESSURE_LOOP_ENABLED` | True | yes | [10](10-path1.md) |
 | `RAIDERS_CONTAGION_ENABLED` | True | yes | [10](10-path1.md) |
 | `ENV_EFFECTS_ENABLED` | True | yes | [08](08-systems-economy.md) |
-| `LIBRARY_SCALING_ENABLED` | True | yes | [09](09-systems-society.md) |
 | `TRANSIT_ENABLED` | True | yes | [10](10-path1.md) |
-| `ECONOMY_SINKS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WIKI_MEMORY` | True (D2 soak on `main` — see [03](03-cognition.md)) | yes | [03](03-cognition.md) |
 | `TESTAMENT_ENABLED` | True | yes | [06](06-agents.md), [09](09-systems-society.md) |
 | `THEORY_OF_MIND_ENABLED` | False (env-backed, `SIM_THEORY_OF_MIND`) | yes | [03](03-cognition.md) |
@@ -214,9 +209,6 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `WORLD_WIKI_ENABLED` | True | yes | [04](04-http-api.md), [11](11-viewer.md) |
 | `PREDICTION_MARKET_ENABLED` | True | yes | [04](04-http-api.md), [11](11-viewer.md) |
 | `AGENT_INTERVIEW_ENABLED` | True | yes | [03](03-cognition.md), [04](04-http-api.md), [11](11-viewer.md) |
-| `MODULE_REFRESH_IDLE_SKIP` | True | no | [03](03-cognition.md) |
-| `BIRTH_STARTING_SKILL_PENALTY` | True | no | [06](06-agents.md) |
-| `HARVEST_SPIRIT_CONTRIB_BOOST` | True | no | [09](09-systems-society.md) |
 
 `DECISION_AUDIT_ENABLED` gates both engine-side correlation-id minting
 (`run_agent_decision` to `llm.jsonl` and `apply_decision` to `activity.jsonl`)

@@ -96,7 +96,7 @@ const MOCK_STATE = {
     flags: {
       SURVIVAL_ENABLED: true, CRAFTING_ENABLED: true, MEMES_ENABLED: true,
       RULES_ENABLED: true, MEMORY_ENABLED: true, BENCHMARKS_ENABLED: true,
-      PIANO_MODULES: false, META_SYSTEM: false, ROADS_ENABLED: true
+      PIANO_MODULES: false, META_SYSTEM: false
     }
   }
 };

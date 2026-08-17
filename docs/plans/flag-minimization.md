@@ -251,14 +251,14 @@ Consequence: the plan's Memory/Chronicle/Weather single-item merge bundles are n
 
 | Flag | Default | Code refs | Spec-cue verdict | Disposition | Justification |
 |---|---|---|---|---|---|
-| `BIRTH_STARTING_SKILL_PENALTY` | True | 3 | 0 cues (undocumented flag, no spec mention) | DROP | Tuning boolean, never in the flag index, never toggled. |
-| `HARVEST_SPIRIT_CONTRIB_BOOST` | True | 4 | 0 cues (mentioned once in specs/09 prose, not a revert guarantee) | DROP | Tuning constant masquerading as a flag. |
-| `MODULE_REFRESH_IDLE_SKIP` | True | 4 | 0 cues (undocumented flag) | DROP | Only meaningful under dark `ALWAYS_ON_MODULES`; fold into it. |
-| `AGENT_MESSAGING` | True | 6 | 0 cues | DROP | Core mechanic — a village where agents cannot message is not a supported mode. |
-| `LIBRARY_SCALING_ENABLED` | True | 7 | 0 cues | DROP | Shipped, stable, never flipped. |
-| `ECONOMY_SINKS_ENABLED` | True | 8 | 0 genuine (incidental, verified) | DROP | Sub-behavior of `ECONOMY_ENABLED`; no independent documented value. |
-| `ROADS_ENABLED` | True | 9 | 0 cues (describes mechanism, not revert) | DROP | Roads are load-bearing for movement/pathfinding. |
-| `SAGE_REVIEW_ENABLED` | True | 10 | 0 cues | DROP | Two-stage blueprint gate is the documented core loop, not a toggle anyone flips. |
+| `BIRTH_STARTING_SKILL_PENALTY` | True | 3 | 0 cues (undocumented flag, no spec mention) | DROP — done (Phase 2a) | Tuning boolean, never in the flag index, never toggled. |
+| `HARVEST_SPIRIT_CONTRIB_BOOST` | True | 4 | 0 cues (mentioned once in specs/09 prose, not a revert guarantee) | DROP — done (Phase 2a) | Tuning constant masquerading as a flag. |
+| `MODULE_REFRESH_IDLE_SKIP` | True | 4 | 0 cues (undocumented flag) | DROP — done (Phase 2a) | Only meaningful under dark `ALWAYS_ON_MODULES`; fold into it. |
+| `AGENT_MESSAGING` | True | 6 | 0 cues | DROP — done (Phase 2a) | Core mechanic — a village where agents cannot message is not a supported mode. |
+| `LIBRARY_SCALING_ENABLED` | True | 7 | 0 cues | DROP — done (Phase 2a) | Shipped, stable, never flipped. |
+| `ECONOMY_SINKS_ENABLED` | True | 8 | 0 genuine (incidental, verified) | DROP — done (Phase 2a) | Sub-behavior of `ECONOMY_ENABLED`; no independent documented value. |
+| `ROADS_ENABLED` | True | 9 | 0 cues (describes mechanism, not revert) | DROP — done (Phase 2a) | Roads are load-bearing for movement/pathfinding. |
+| `SAGE_REVIEW_ENABLED` | True | 10 | 0 cues | DROP — done (Phase 2a) | Two-stage blueprint gate is the documented core loop, not a toggle anyone flips. |
 | `USE_GOALS` | True | 11 | 0 cues | DROP | Mature, no documented off-path. |
 | `TRANSIT_ENABLED` | True | 11 | 1, verified incidental | DROP | Mentions describe gated mechanism (ocean corridor, viewer boats), not a revert guarantee. |
 | `EMERGENT_ROLES` | True | 14 | 0 cues | DROP | Core mechanic, never flipped. |

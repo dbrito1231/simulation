@@ -351,14 +351,14 @@ class _ThinkJobMixin:
             # was never surfaced back to him because it was the only one
             # pending. Now covers n=1 too, with matching singular wording.
             #
-            # SAGE_REVIEW_ENABLED splits the queue into three buckets: still
+            # Sage review splits the queue into three buckets: still
             # needs a geography/resource review pass, cleared and awaiting a
             # verdict, or denied at review (no action offered -- it expires on
             # its own via _maybe_amnesty_denied_sage_reviews).
             needs_review = [b for b in c["pendingBlueprints"]
-                            if SAGE_REVIEW_ENABLED and b.get("sageReview", "pending") == "pending"]
+                            if b.get("sageReview", "pending") == "pending"]
             ready = [b for b in c["pendingBlueprints"]
-                     if not SAGE_REVIEW_ENABLED or b.get("sageReview") in ("approved", "skipped")]
+                     if b.get("sageReview") in ("approved", "skipped")]
             denied = [b for b in c["pendingBlueprints"] if b.get("sageReview") == "denied"]
             elder_blueprint_review_active = bool(needs_review or ready)
             if needs_review:
@@ -874,7 +874,7 @@ class _ThinkJobMixin:
             "weather_line": self._weather_prompt_line(),
             "pressure_warning_line": self._pressure_warning_prompt_line(),
             "library_lessons": (self._library_lessons(agent.get("currentDistrict"))
-                                if CULTURE_ENABLED and LIBRARY_SCALING_ENABLED else None),
+                                if CULTURE_ENABLED else None),
             "path1_tool_line": tool_line,
             "path1_industry_line": industry_line,
             "path1_neighbor_line": neighbor_line,
@@ -1015,7 +1015,7 @@ class _ThinkJobMixin:
             # Phase A skips only agents who cannot act.  A night-wide cadence
             # change is deliberately reserved for the optional Phase C
             # backstop, not smuggled into this gate.
-            if MODULE_REFRESH_IDLE_SKIP and agent.get("incapacitated"):
+            if agent.get("incapacitated"):
                 continue
             dirty = bool(agent.get("contextDirty"))
             dirty_since = agent.get("contextDirtySince") or now
@@ -1543,9 +1543,8 @@ class _ThinkJobMixin:
                 self._maybe_start_approved_custom()
                 self._maybe_retire_blueprint()
                 self._maybe_amnesty_rejected_blueprints()
-                if SAGE_REVIEW_ENABLED:
-                    self._maybe_skip_sage_review()
-                    self._maybe_amnesty_denied_sage_reviews()
+                self._maybe_skip_sage_review()
+                self._maybe_amnesty_denied_sage_reviews()
                 self._maybe_retire_custom_resource()
                 self._maybe_invention_backstop()
                 self._maybe_found_district()

@@ -813,7 +813,7 @@ class _GovernanceCultureMixin:
         # project still needs, ahead of the generic need-order scan below --
         # "beliefs influence a deterministic bias" from the plan, at zero
         # token cost (it reads the existing beliefs set, no new prompt line).
-        if CULTURE_ENABLED and HARVEST_SPIRIT_CONTRIB_BOOST and MEME_SEED_ID in agent.get("beliefs", ()):
+        if CULTURE_ENABLED and MEME_SEED_ID in agent.get("beliefs", ()):
             for res in EDIBLE_RESOURCES:
                 need = p["needs"].get(res, 0)
                 have = p["contributed"].get(res, 0)
@@ -1197,8 +1197,6 @@ class _GovernanceCultureMixin:
         """Best local working Library's bounded upgrade contribution. `cap`
         defaults to 10 for knowledge-capacity scaling; study-gain callers pass
         LIBRARY_STUDY_WEIGHT_CAP (5) to keep skill-by-study bounded."""
-        if not LIBRARY_SCALING_ENABLED:
-            return 1
         libraries = [s for s in self.civilization["structures"]
                      if s.get("type") == "library"
                      and (district_id is None or s.get("districtId") == district_id)
