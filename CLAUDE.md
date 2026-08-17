@@ -4,6 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Ops and architecture companion. **Workflow source of truth is [AGENTS.md](AGENTS.md)** — read it before making any change. Deep mechanics live in [docs/REFERENCE.md](docs/REFERENCE.md); read that only when your task touches those systems.
 
+## Response style — non-negotiable
+
+- Keep replies to the user simple and easy to understand.
+- Keep replies short — condense wherever possible, but never drop factual data.
+- No open-ended questions, except the final "Other" option in a multiple-choice question.
+
 ## What this is
 
 A server-authoritative AI village simulation: a Python engine runs the world headless; a local LLM (Ollama) is the "brain" for 8–12 pixel-art agents that move, talk, trade, gather, and build; the browser is a thin viewer. Proof-of-concept of the LLM-as-brain loop, inspired by Project Sid — minimal and observable (non-goals: [specs/00-overview.md](specs/00-overview.md)).

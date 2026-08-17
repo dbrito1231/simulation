@@ -2,6 +2,12 @@
 
 This file is the **single AI development source of truth** for this repo. All AI-driven changes the user requests must follow the development loop below. Product and architecture truth live in [`specs/`](specs/00-overview.md). The loop can also be started manually via the `loop-in-devs` skill (see [Manual start](#manual-start)).
 
+## Response style — non-negotiable
+
+- Keep replies to the user simple and easy to understand.
+- Keep replies short — condense wherever possible, but never drop factual data.
+- No open-ended questions, except the final "Other" option in a multiple-choice question.
+
 ## KISS
 
 Keep It Simple. Prefer the smallest change that satisfies the approved plan and owning specs. No speculative refactors, no extra abstractions, no out-of-scope edits unless the user explicitly approves.

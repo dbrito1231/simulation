@@ -11,3 +11,9 @@ Read and follow [AGENTS.md](AGENTS.md) for every user-requested change.
 - Orchestrator is read-only for edits; only implementers write. Doubts escalate orchestrator → user.
 - KISS. No hallucinations, unproven theories, or AI slop. No out-of-scope work without user approval.
 - Manual start/resume: project skills `loop-in-devs`, `orchestrator`, `implementer`, `reviewer`.
+
+## Response style — non-negotiable
+
+- Keep replies to the user simple and easy to understand.
+- Keep replies short — condense wherever possible, but never drop factual data.
+- No open-ended questions, except the final "Other" option in a multiple-choice question.
