@@ -210,3 +210,120 @@ Each phase = one implementer + one reviewer, per the AGENTS.md loop.
 Net effect: **70 → ~45 flags**, all from low-reference, low-risk changes, with no runtime behavior change.
 
 **Ready to execute on approval.** Five phases, each one implementer + one reviewer per the AGENTS.md loop.
+
+---
+
+## 8. Authoritative disposition (Phase 1 output)
+
+Produced by reading, not grepping: reference counts are `grep -rEo '\bFLAG\b' --include="*.py" --include="*.js" simulation/` (per-flag, run from repo root); cue verdicts are read from the surrounding paragraph of every `specs/*.md` hit, not inferred from the hit count alone.
+
+**Enumeration command used (reproducible; supersedes the earlier "61 rows + 3 dropped from one intermediate grep pass" note — that note described a `\b`-anchored regex that under-matches trailing-underscore-digit names):**
+`grep -nE '^[A-Z][A-Z0-9_]* = (True|False)( |#|$)' simulation/sim_engine/constants.py` → 64 plain-assignment flags (this pattern correctly matches `PATH1_ENABLED`, `PATH1_DIPLOMACY_ENABLED`, `TIER3_CONTENT_ENABLED` on the first pass), plus 6 env-backed booleans found via `grep -n 'os\.environ\.get' simulation/sim_engine/constants.py` (`THEORY_OF_MIND_ENABLED`, `DETERMINISM_PINNING`, `GOD_MODE_ENABLED`, `GOD_AUTH_REQUIRED`, `GOD_DEJA_VU_REPLAY`, `GOD_COMPILER_ENABLED` — `DETERMINISM_SEED` is an int, excluded). Total: **70**, matching `specs/01-architecture.md`'s corrected header count.
+
+**Scope note — `server.py`-defined flags are OUT of scope for this plan.** `SYSTEM_PROMPT_AT_LOAD_TIME` and `STRUCTURED_OUTPUT_MODE` live in `simulation/server.py`, not `simulation/sim_engine/constants.py`, and are not part of the 70 counted above. Verified: `STRUCTURED_OUTPUT_MODE` (server.py:357) is a three-valued mode string (`"json_schema"` / `"json_object"` / `"off"`, server.py:599,675,683,688), not a boolean, so it does not fit this plan's DROP/MERGE/KEEP boolean-flag disposition. `SYSTEM_PROMPT_AT_LOAD_TIME` (server.py:177) gates the dark, default-off load-time-rulebook experiment, which already has its own documented A/B gate and section at specs/03-cognition.md:657 ("Load-time rulebook … default False, dark"). This plan's stated subject is the `constants.py` module-level flag surface (§1: "enumerated from `simulation/sim_engine/constants.py`"); both `server.py` flags are left untouched by every phase below.
+
+**Four corrections to the plan's first-pass classification, found by reading spec context (not by grep count):**
+
+| Flag | Plan's first pass | Corrected verdict | Deciding spec line |
+|---|---|---|---|
+| `TESTAMENT_ENABLED` | MERGE into `MEMORY_ENABLED` | **KEEP** | specs/09-systems-society.md:883-884 — "`WIKI_MEMORY` on to be meaningful; `TESTAMENT_ENABLED` is its own flag (default **on**, one-flag revert)." |
+| `CHRONICLE_SAGA_ENABLED` | MERGE into `CHRONICLE_ENABLED` | **KEEP** | specs/09-systems-society.md:876 — "Kill switch: set `CHRONICLE_SAGA_ENABLED = False` in `simulation/sim_engine/constants.py` and restart; no env-var override." |
+| `WEATHER_GOVERNANCE_ENABLED` | MERGE into `WEATHER_ENABLED` | **KEEP** | specs/05-world.md:223-237 — "`WEATHER_GOVERNANCE_ENABLED` off is byte-identical to Phase 4 alone." |
+| `DAILY_COUNCIL_ENABLED` | DROP (re-triage, cue marked incidental/needs verify) | **KEEP** | specs/09-systems-society.md:37 — "**Legacy invention council (only while `DAILY_COUNCIL_ENABLED` is off).**" The flag-off path is a real, documented, still-live fallback deliberation mechanism (`_maybe_invention_backstop`), not an incidental mention — dropping the flag means deleting that entire fallback code path. |
+
+Consequence: the plan's Memory/Chronicle/Weather single-item merge bundles are now empty (both members of each pair KEEP independently) — no bundle phase needed for those three families. Only the Lifecycle family was already resolved this way (`DYNASTY_TREE_ENABLED` KEEP, established pre-Phase-1).
+
+**Flags verified as correctly classified by the plan's first pass (read in context, no correction needed):**
+
+| Flag | Cues found | Verdict | Note |
+|---|---|---|---|
+| `TRANSIT_ENABLED` | 1, incidental | DROP confirmed | specs/05, 08, 10, 11 describe what it gates (ocean corridor, viewer boats) — no revert/kill-switch/byte-identical language anywhere. |
+| `CHRONICLE_ENABLED` | 0 | DROP confirmed | specs/09-systems-society.md:839 — "a viewer-projection gate ... never creates a second event store and never changes prompt history." Read-only projection toggle, no documented off-path dependence. |
+| `CEMETERY_ENABLED` | 0 | DROP confirmed | specs/05-world.md:585 only states what it gates ("Gated by `CEMETERY_ENABLED` (default True)"), no revert guarantee. |
+| `WIKI_MEMORY` | genuine | KEEP confirmed | Already settled per §4 correction 1; re-verified at specs/03-cognition.md and 09:539 comment "Default off; one-flag revert" language pattern. |
+| `DYNASTY_TREE_ENABLED` | genuine | KEEP confirmed | specs/01-architecture.md:223-231 documents the kill-switch + restart procedure explicitly. |
+| `ECONOMY_SINKS_ENABLED` | incidental | DROP confirmed | No genuine flag-off dependence found in specs/08. |
+| Path 1 sub-flags (7) | incidental | MERGE confirmed | specs/10-path1.md describes mechanics, not revert guarantees; `path1_on()` fallback documented as an accepted all-or-nothing consequence (see below). |
+
+**Path 1 merge consequence (must be recorded in specs/10 when Phase 3 executes):** `path1_on(subflag)` currently falls back to the named sub-flag's own value when `PATH1_ENABLED` is off, so today a sub-flag can be independently disabled while `PATH1_ENABLED` stays on. Merging the seven sub-flags into `PATH1_ENABLED` removes that fallback — Path 1 becomes **all-or-nothing**: one flag, no per-feature staged rollout. This is an accepted, deliberate loss of granularity, not a bug.
+
+### Full disposition table (70 flags)
+
+| Flag | Default | Code refs | Spec-cue verdict | Disposition | Justification |
+|---|---|---|---|---|---|
+| `BIRTH_STARTING_SKILL_PENALTY` | True | 3 | 0 cues (undocumented flag, no spec mention) | DROP | Tuning boolean, never in the flag index, never toggled. |
+| `HARVEST_SPIRIT_CONTRIB_BOOST` | True | 4 | 0 cues (mentioned once in specs/09 prose, not a revert guarantee) | DROP | Tuning constant masquerading as a flag. |
+| `MODULE_REFRESH_IDLE_SKIP` | True | 4 | 0 cues (undocumented flag) | DROP | Only meaningful under dark `ALWAYS_ON_MODULES`; fold into it. |
+| `AGENT_MESSAGING` | True | 6 | 0 cues | DROP | Core mechanic — a village where agents cannot message is not a supported mode. |
+| `LIBRARY_SCALING_ENABLED` | True | 7 | 0 cues | DROP | Shipped, stable, never flipped. |
+| `ECONOMY_SINKS_ENABLED` | True | 8 | 0 genuine (incidental, verified) | DROP | Sub-behavior of `ECONOMY_ENABLED`; no independent documented value. |
+| `ROADS_ENABLED` | True | 9 | 0 cues (describes mechanism, not revert) | DROP | Roads are load-bearing for movement/pathfinding. |
+| `SAGE_REVIEW_ENABLED` | True | 10 | 0 cues | DROP | Two-stage blueprint gate is the documented core loop, not a toggle anyone flips. |
+| `USE_GOALS` | True | 11 | 0 cues | DROP | Mature, no documented off-path. |
+| `TRANSIT_ENABLED` | True | 11 | 1, verified incidental | DROP | Mentions describe gated mechanism (ocean corridor, viewer boats), not a revert guarantee. |
+| `EMERGENT_ROLES` | True | 14 | 0 cues | DROP | Core mechanic, never flipped. |
+| `META_SYSTEM` | True | 16 | 0 cues | DROP | Default-on since Sid-parity Phase 3. |
+| `SOCIAL_LAYER_ENABLED` | True | 16 | 0 cues | DROP | Cosmetic-adjacent, mature, read-only projection. |
+| `CHRONICLE_ENABLED` | True | 16 | 0 genuine (verified) | DROP | specs/09:839 documents it as a pure viewer-projection gate with no engine-state dependence. |
+| `CEMETERY_ENABLED` | True | 21 | 0 genuine (verified) | DROP | specs/05:585 states what it gates, not a revert guarantee; mature. |
+| `INDUSTRY_ENABLED` | True | 10 | 0 genuine | MERGE → `PATH1_ENABLED` | Path 1 sub-flag; `path1_on()` bundles it whenever parent is on. |
+| `TOOL_TIERS_ENABLED` | True | 11 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
+| `COMPOSABLE_BUILD_ENABLED` | True | 10 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
+| `TERRAIN_TILES_ENABLED` | True | 14 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
+| `PATH1_DIPLOMACY_ENABLED` | True | 24 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
+| `TIER3_CONTENT_ENABLED` | True | 9 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
+| `PRESSURE_LOOP_ENABLED` | True | 12 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. Merging all 7 makes Path 1 all-or-nothing (see consequence note above) — accepted, deliberate. |
+| `ACTIVITY_CUES_ENABLED` | True | 10 | 0 cues | MERGE → `VISUALS_ENABLED` | Pure presentation, always ships on with the others. |
+| `SEASONAL_AGENTS_ENABLED` | True | 10 | 0 cues | MERGE → `VISUALS_ENABLED` | Same. |
+| `WORLD_CLOCK_HUD_ENABLED` | True | 10 | 0 cues | MERGE → `VISUALS_ENABLED` | Same. |
+| `FOUNDING_EVENTS_ENABLED` | True | 11 | 0 cues | MERGE → `VISUALS_ENABLED` | Same — gates only a banner + chronicle call, district founding unconditional. |
+| `STRUCTURE_WEAR_ENABLED` | True | 14 | 0 cues | MERGE → `VISUALS_ENABLED` | Viewer-only projection of existing decay state; never alters mechanics. |
+| `CARAVAN_VISUALS_ENABLED` | True | 18 | 0 cues | MERGE → `VISUALS_ENABLED` | Cosmetic shipment records, never gates the underlying transfer. |
+| `SURVIVAL_ENABLED` | True | 33 | high refs | KEEP | Emergency lever on a 24/7 run; removal cost dominates. |
+| `CRAFTING_ENABLED` | True | 29 | 0 cues, borderline refs | KEEP | Borderline (25-35 refs); not touched in Phase 1 scope, deferred per plan §3c-bis. |
+| `STRUCTURE_EFFECTS_ENABLED` | True | 26 | 0 cues, borderline refs | KEEP | Same — borderline, deferred. |
+| `RULES_ENABLED` | True | 33 | 0 cues, borderline refs | KEEP | Same — borderline, deferred. |
+| `STRUCTURE_UPGRADES_ENABLED` | True | 28 | 0 cues, borderline refs | KEEP | Same — borderline, deferred. |
+| `CHRONICLE_SAGA_ENABLED` | True | 16 | genuine (verified) | KEEP | specs/09:876 documents an explicit kill switch — corrected from plan's MERGE proposal. |
+| `TESTAMENT_ENABLED` | True | 16 | genuine (verified) | KEEP | specs/09:883-884 documents "its own flag ... one-flag revert" — corrected from plan's MERGE proposal. |
+| `WEATHER_GOVERNANCE_ENABLED` | True | 14 | genuine (verified) | KEEP | specs/05:223-237 documents "off is byte-identical to Phase 4 alone" — corrected from plan's MERGE proposal. |
+| `DAILY_COUNCIL_ENABLED` | True | 15 | genuine (verified) | KEEP | specs/09:37 documents a still-live legacy fallback (invention council) that only activates when this flag is off — corrected from plan's DROP proposal. |
+| `MEMORY_ENABLED` | True | 16 | 1, genuine (bundle target) | KEEP | Parent gate; `WIKI_MEMORY`/`TESTAMENT_ENABLED` both independently kept, so no merge target work remains, but the flag itself stands. |
+| `WIKI_MEMORY` | True | 21 | genuine | KEEP | specs/03: "Default flipped to True ... after D2 soak ... flag-off remains a one-flag revert." Settled per orchestrator. |
+| `ANOMALY_RADAR_ENABLED` | True | 7 | — (observability) | KEEP | Depends on `BENCHMARKS_ENABLED`'s output; §3b decision — all six observability flags stay independent. |
+| `DECISION_AUDIT_ENABLED` | True | 4 | — (observability) | KEEP | Gates engine-side correlation-id minting, a logging-behavior flag not a panel toggle. |
+| `WORLD_WIKI_ENABLED` | True | 10 | — (observability) | KEEP | Read-only route + modal; §3b decision. |
+| `PREDICTION_MARKET_ENABLED` | True | 13 | — (observability) | KEEP | Gates `predictions.json` file I/O; §3b decision. |
+| `AGENT_INTERVIEW_ENABLED` | True | 8 | — (observability) | KEEP | Live LLM call site with its own concurrency pool; §3b decision. |
+| `BENCHMARKS_ENABLED` | True | 13 | — (observability) | KEEP | Writes the `benchmarks.jsonl` stream `ANOMALY_RADAR_ENABLED` reads; §3b decision. |
+| `THEORY_OF_MIND_ENABLED` | False (env, `SIM_THEORY_OF_MIND`) | 20 | — (dark/env) | KEEP | Default-off, opt-in soak surface; dark-toggle rule. |
+| `PIANO_MODULES` | True | 19 | 1, genuine | KEEP | Gates a worker pool + GPU load. |
+| `ALWAYS_ON_MODULES` | False | 11 | — (dark, gate failed) | KEEP | Dark/experimental — kept exactly as-is. |
+| `DETERMINISM_PINNING` | False (env, `SIM_DETERMINISM_PINNING`) | 9 | — (dark/env) | KEEP | Needed for repro runs; dark-toggle rule. |
+| `ECOLOGY_ENABLED` | True | 39 | 0 cues, high refs | KEEP | Removal risk dominates. |
+| `CROP_GROWTH_ENABLED` | True | 23 | 2 | KEEP | Viewer-facing crop projection tied to district ecology state. |
+| `WILDLIFE_ENABLED` | True | 52 | 3 | KEEP | Authoritative fauna state, motion, spawn/hunt — high removal cost. |
+| `WILDLIFE_BEHAVIOR_ENABLED` | True | 8 | 3 (maturity) | KEEP | Shipped days ago; maturity rule protects it. |
+| `WEATHER_ENABLED` | True | 40 | 4, genuine | KEEP | Documented off-path behavior (Phase 4 baseline). |
+| `GOODS_ENABLED` | True | 45 | 2 | KEEP | High refs, major subsystem kill switch. |
+| `TECH_TREE_ENABLED` | True | 71 | 2 | KEEP | Import-time prompt/schema rewrite — not safely removable without touching prompts. |
+| `ECONOMY_ENABLED` | True | 35 | 1 | KEEP | High refs, major subsystem kill switch. |
+| `MEMES_ENABLED` | True | 36 | 1, incidental | KEEP | specs/09:586-621 describes belief-authoring/spread mechanics only — no revert/kill-switch/soak/byte-identical language; the one cue (specs/06:226) is incidental prose, not a documented off-path. 36 refs and named as a "major subsystem kill switch" in §3; removal risk dominates same as `ECONOMY_ENABLED`/`GOODS_ENABLED` at this ref band. |
+| `CONTRACTS_ENABLED` | True | 23 | 7, genuine | KEEP | D9 prompt-cost measurement is stated flag-off vs flag-on; needs the off path. |
+| `FACTION_SPLIT_ENABLED` | True | 93 | 4, genuine | KEEP | Highest removal cost in the repo; most flag-off documentation. |
+| `LIFECYCLE_ENABLED` | True | 55 | 3 | KEEP | Governs persisted agent shape. |
+| `DYNASTY_TREE_ENABLED` | True | 11 | genuine | KEEP | specs/01:223-231 documents an explicit kill switch + restart procedure. Settled per orchestrator. |
+| `CULTURE_ENABLED` | True | 63 | 0 cues, very high refs | KEEP | Zero cues, but 63 refs — removal risk dominates. |
+| `PATH1_ENABLED` | True | 13 | 1 | KEEP | Bundle target for the 7 merged sub-flags. |
+| `RAIDERS_CONTAGION_ENABLED` | True | 42 | 6, genuine | KEEP | Most flag-off documentation of any Path-1 flag. |
+| `ENV_EFFECTS_ENABLED` | True | 28 | 1 | KEEP | High refs. |
+| `GOD_MODE_ENABLED` | True (env, `SIM_GOD_MODE`) | 46 | — | KEEP | Settled by user decision — not re-argued. |
+| `GOD_AUTH_REQUIRED` | False (env, `SIM_GOD_AUTH`) | 19 | — | KEEP | Settled by user decision — not re-argued. |
+| `GOD_COMPILER_ENABLED` | False (env, `SIM_GOD_COMPILER`) | 11 | — (dark) | KEEP | No A/B contention measurement run yet; stays dark per specs/12-ops.md. |
+| `GOD_DEJA_VU_REPLAY` | False (env, `SIM_GOD_DEJA_VU_REPLAY`) | 8 | — (dark) | KEEP | Stub-only replay, dark by default. |
+
+**Revised totals:** 70 total — **DROP 15**, **MERGE 13** (7 Path 1 sub-flags absorbed into the existing `PATH1_ENABLED`, 6 cosmetic flags absorbed into one new `VISUALS_ENABLED`), **KEEP 42** (including `PATH1_ENABLED` itself, which stays as the merge target).
+
+This differs from the plan's headline ("Drop 8 + merge 17 + re-triage drop 8 → keep ~37/~33") because: (a) `DAILY_COUNCIL_ENABLED` moved DROP→KEEP (legacy-fallback dependence found), and (b) the Memory/Chronicle/Weather merge bundles collapsed to zero mergeable members each — `TESTAMENT_ENABLED`, `CHRONICLE_SAGA_ENABLED`, `WEATHER_GOVERNANCE_ENABLED` all moved MERGE→KEEP on documented flag-off dependence. Net effect: 4 more flags kept than the plan's first pass expected.
+
+**Resulting flag count after all drop/merge phases execute:** 70 − 15 (deleted) − 13 (absorbed into bundle parents) + 1 (new `VISUALS_ENABLED`) = **43 flags** — smaller than the plan's original ~37/~45 estimate on the drop side (DAILY_COUNCIL_ENABLED survives), but also smaller on the merge side (3 of the plan's proposed 1-item bundles turned out to have no mergeable members).
