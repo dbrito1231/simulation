@@ -66,6 +66,13 @@ __all__ = [
     "WILDLIFE_HABITAT_INSET",
     "WILDLIFE_BEACH_WATER_KINDS",
     "WILDLIFE_HABITAT_KINDS",
+    "WILDLIFE_BEHAVIOR_ENABLED",
+    "WILDLIFE_LAND_KINDS",
+    "WILDLIFE_FLOCK_KINDS",
+    "WILDLIFE_GRAZE_SPEED_MULT",
+    "WILDLIFE_GRAZE_PAUSE_CHANCE",
+    "WILDLIFE_HERD_RADIUS",
+    "WILDLIFE_HERD_PULL",
     "CARAVAN_VISUALS_ENABLED",
     "SHIPMENT_TRAVEL_FRAMES",
     "SHIPMENT_RING_CAP",
@@ -643,6 +650,24 @@ WILDLIFE_SHORE_STRIP = 70
 WILDLIFE_HABITAT_INSET = 16
 WILDLIFE_BEACH_WATER_KINDS = {"fish", "crab", "turtle", "seal"}
 WILDLIFE_HABITAT_KINDS = set(WILDLIFE_KIND_POOLS.keys())
+# Review-fixes phase 5: deterministic per-creature behavior state machine
+# (graze/wander/flee/rest + loose herding) layered on the motion above.
+# Off -> _move_wildlife is byte-identical to the pre-flag code path.
+WILDLIFE_BEHAVIOR_ENABLED = True
+# "Land kinds" graze by day and rest at night; beach-pool kinds (fish, crab,
+# gull, turtle, seal) stay on plain wander/flee -- no graze/rest for them.
+WILDLIFE_LAND_KINDS = {
+    "bird", "squirrel", "deer", "fox", "boar", "owl",
+    "cow", "rabbit", "chicken", "mouse",
+}
+# Kinds that loosely herd/flock toward the nearest living same-kind creature.
+# Solitary hunters/foragers (fox, owl, boar, squirrel, mouse, crab, turtle,
+# seal) and decorative bees are excluded.
+WILDLIFE_FLOCK_KINDS = {"bird", "deer", "cow", "rabbit", "chicken", "fish", "gull"}
+WILDLIFE_GRAZE_SPEED_MULT = 0.4
+WILDLIFE_GRAZE_PAUSE_CHANCE = 0.4
+WILDLIFE_HERD_RADIUS = 140
+WILDLIFE_HERD_PULL = 6
 # Living-ecosystem Phase 3: purely cosmetic in-flight "shipment" records
 # emitted AFTER an existing transfer (trade_resource, the priced-trade
 # market path, district-project contributions) has already mutated the

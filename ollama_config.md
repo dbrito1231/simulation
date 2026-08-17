@@ -10,7 +10,7 @@ else after a restart, re-apply with `uv run python scripts/ollama_setup.py`
 
 | Setting | Value | How it's set | Why |
 |---|---|---|---|
-| Smart model | `sim-smart` (from `ollama/Modelfile.smart`, base GGUF: Qwen3.5-9B-Q4_K_M imported from the old LM Studio cache) | `scripts/ollama_setup.py` → `ollama create sim-smart -f ollama/Modelfile.smart` | Matches `MODEL_SMART` in `simulation/server.py`. Serves **every decision turn** — routine and high-stakes alike (`model_for_decision` always returns `MODEL_SMART`), plus invention/sprite turns |
+| Smart model | `sim-smart`, built from one of three sources selected in priority order by `scripts/ollama_setup.py`'s `resolve_smart_source()`: **(a)** `SIM_SMART_GGUF` env var, if set and the file it names exists — generates `ollama/Modelfile.smart.generated` (gitignored, DO-NOT-EDIT) with that path substituted in; **(b)** `ollama/Modelfile.smart`'s own local GGUF `FROM` path (Qwen3.5-9B-Q4_K_M imported from the old LM Studio cache), if that path exists on disk — original behavior, unchanged; **(c)** otherwise, `ollama pull qwen3.5:9b` from the registry, then `ollama create` from `ollama/Modelfile.smart.registry` | `scripts/ollama_setup.py` → `ollama create sim-smart -f <selected Modelfile>`, printing which source was picked | Matches `MODEL_SMART` in `simulation/server.py`. Serves **every decision turn** — routine and high-stakes alike (`model_for_decision` always returns `MODEL_SMART`), plus invention/sprite turns. Case (b) only works on the original author's machine (path is local to that machine); (a) and (c) make the script succeed on any machine that has never had LM Studio installed |
 | Fast model | `sim-fast` (from `ollama/Modelfile.fast`, base: registry `llama3.2:3b` Q4_K_M) | `scripts/ollama_setup.py` → `ollama pull llama3.2:3b` then `ollama create sim-fast -f ollama/Modelfile.fast` | Matches `MODEL_FAST` (Phase 3, 2026-07-24 — live, revised). Serves **only background cognition**: all PIANO modules, the memory summarizer/wiki merge, meta system/autobiography, and belief-pitch scoring — never decisions. An initial Phase 3 attempt also routed routine decisions here; a live soak found `piano_module_drops` rising to ~25-38% (vs. ~9% pre-migration) from decision/module contention on `sim-fast`'s parallel slots, so decisions were moved back to `sim-smart` entirely. Distinct from `sim-smart` so the two-model MUST is real (was a no-op under LM Studio) |
 | Smart context length | **20480** (`num_ctx`) | `ollama/Modelfile.smart` `PARAMETER num_ctx` | Successor to LM Studio's 20000/parallel-3 budget; round number above the old value, per-slot budget below |
 | Fast context length | **4096** (`num_ctx`) | `ollama/Modelfile.fast` `PARAMETER num_ctx` | PIANO module / summarizer / meta-system prompts run ~1k tokens; 4096 leaves generous headroom without wasting VRAM |
@@ -53,6 +53,30 @@ create` for both `sim-smart`/`sim-fast` (idempotent — safe to re-run),
 warms both with a trivial `/api/chat` call (`keep_alive: -1`), and verifies
 dual residency via `/api/ps`. Readback only: `uv run python
 scripts/ollama_setup.py --check`.
+
+**`sim-smart` source on a machine that never had LM Studio installed:**
+`ollama/Modelfile.smart`'s `FROM` path is local to the original author's
+machine, so `create_models()` selects a source in priority order and prints
+which one it picked (e.g. `-- smart model source: registry (qwen3.5:9b) --`):
+
+1. **`SIM_SMART_GGUF` env var**, if set and the file it names exists on
+   disk — generates `ollama/Modelfile.smart.generated` (gitignored,
+   DO-NOT-EDIT header, regenerated each run) with that path substituted for
+   `Modelfile.smart`'s `FROM` line, then `ollama create`s from it. Use this
+   if you have the GGUF cached somewhere other than the hardcoded path:
+   `SIM_SMART_GGUF="D:\models\Qwen3.5-9B-Q4_K_M.gguf" uv run python scripts/ollama_setup.py`.
+2. **`ollama/Modelfile.smart`'s own local GGUF path**, if it exists on disk
+   (true only on the original author's machine, or after manually restoring
+   the same path) — original behavior, unchanged.
+3. **Registry fallback**: `ollama pull qwen3.5:9b` (~5 GB download, registry
+   default quant — verified reachable at
+   `https://registry.ollama.ai/v2/library/qwen3.5/manifests/9b`), then
+   `ollama create` from `ollama/Modelfile.smart.registry` (same `PARAMETER`
+   block as `Modelfile.smart`, `FROM qwen3.5:9b`).
+
+If none of the three work (bad `SIM_SMART_GGUF` path, no local GGUF, and the
+registry pull fails), the script exits non-zero and names all three options
+in the error message.
 
 Expected `ollama ps` / `/api/ps` output (both models resident
 simultaneously):

@@ -57,11 +57,18 @@ SIMULATION_DIR = REPO_ROOT / "simulation"
 MODELFILE_SMART = REPO_ROOT / "ollama" / "Modelfile.smart"
 MODELFILE_FAST = REPO_ROOT / "ollama" / "Modelfile.fast"
 MODELFILE_SMART_SYS = REPO_ROOT / "ollama" / "Modelfile.smart.system"
+# Portable registry fallback (see that file's header) -- used when neither
+# SIM_SMART_GGUF nor Modelfile.smart's local GGUF path is available.
+MODELFILE_SMART_REGISTRY = REPO_ROOT / "ollama" / "Modelfile.smart.registry"
+# Generated (not committed) when SIM_SMART_GGUF points at a valid local
+# override path -- same pattern as Modelfile.smart.system below.
+MODELFILE_SMART_GENERATED = REPO_ROOT / "ollama" / "Modelfile.smart.generated"
 
 SIM_SMART = "sim-smart"
 SIM_FAST = "sim-fast"
 SIM_SMART_SYS = "sim-smart-sys"
 FAST_BASE_MODEL = "llama3.2:3b"
+SMART_REGISTRY_MODEL = "qwen3.5:9b"
 
 ENV_VARS = {
     "OLLAMA_NUM_PARALLEL": "3",
@@ -232,10 +239,95 @@ def ensure_fast_base_pulled():
     return True
 
 
+def _parse_from_path(modelfile_path):
+    """Return the path after a Modelfile's `FROM` line, or None."""
+    if not modelfile_path.exists():
+        return None
+    for line in modelfile_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("FROM "):
+            return line[len("FROM "):].strip()
+    return None
+
+
+def _generate_smart_modelfile_from_gguf(gguf_path):
+    """Write ollama/Modelfile.smart.generated: Modelfile.smart's PARAMETER
+    block with `FROM <gguf_path>` substituted in, plus a DO-NOT-EDIT header
+    -- same generated-file pattern as generate_system_modelfile() below.
+    Not committed to version control (report the needed .gitignore line
+    separately -- another change owns .gitignore)."""
+    base_text = MODELFILE_SMART.read_text(encoding="utf-8")
+    out_lines = []
+    replaced = False
+    for line in base_text.splitlines():
+        if not replaced and line.strip().startswith("FROM "):
+            out_lines.append(f"FROM {gguf_path}")
+            replaced = True
+        else:
+            out_lines.append(line)
+    header = (
+        "# ============================================================\n"
+        "# GENERATED FILE -- DO NOT EDIT BY HAND.\n"
+        "# Produced by scripts/ollama_setup.py from ollama/Modelfile.smart\n"
+        "# with FROM replaced by the SIM_SMART_GGUF env var override.\n"
+        "# ============================================================\n\n"
+    )
+    generated = header + "\n".join(out_lines) + "\n"
+    MODELFILE_SMART_GENERATED.write_text(generated, encoding="utf-8")
+    print(f"  wrote {MODELFILE_SMART_GENERATED}")
+    return MODELFILE_SMART_GENERATED
+
+
+def resolve_smart_source():
+    """Select the sim-smart Modelfile source, in priority order:
+      a. SIM_SMART_GGUF env var, if set AND the file it names exists
+      b. ollama/Modelfile.smart's own local GGUF FROM path, if that path
+         exists on disk (current/original behavior, unchanged)
+      c. the registry fallback (ollama/Modelfile.smart.registry, pulls
+         qwen3.5:9b)
+    Returns (modelfile_path, pull_tag_or_None). Prints exactly which source
+    was selected."""
+    gguf_override = os.environ.get("SIM_SMART_GGUF", "").strip()
+    if gguf_override:
+        override_path = __import__("pathlib").Path(gguf_override)
+        if override_path.exists():
+            print(f"-- smart model source: SIM_SMART_GGUF override ({override_path}) --")
+            return _generate_smart_modelfile_from_gguf(override_path), None
+        print(f"  WARNING: SIM_SMART_GGUF={gguf_override!r} does not exist; "
+              "ignoring override and falling back.")
+
+    local_from = _parse_from_path(MODELFILE_SMART)
+    if local_from and __import__("pathlib").Path(local_from).exists():
+        print(f"-- smart model source: local GGUF (ollama/Modelfile.smart -> {local_from}) --")
+        return MODELFILE_SMART, None
+
+    print(f"-- smart model source: registry ({SMART_REGISTRY_MODEL}) --")
+    return MODELFILE_SMART_REGISTRY, SMART_REGISTRY_MODEL
+
+
 def create_models():
     print("-- creating/updating sim-smart and sim-fast (idempotent) --")
     ok = True
-    rc, _ = sh([OLLAMA_CLI_EXE, "create", SIM_SMART, "-f", str(MODELFILE_SMART)],
+
+    smart_modelfile, pull_tag = resolve_smart_source()
+    if pull_tag:
+        rc, out = sh([OLLAMA_CLI_EXE, "list"], timeout=30)
+        if pull_tag in out:
+            print(f"  {pull_tag} already present.")
+        else:
+            rc2, _ = sh([OLLAMA_CLI_EXE, "pull", pull_tag], timeout=1800)
+            if rc2 != 0:
+                print(
+                    f"ERROR: no smart model source available. Tried, in order:\n"
+                    f"  a. SIM_SMART_GGUF env var (unset or file missing)\n"
+                    f"  b. local GGUF path in ollama/Modelfile.smart (missing on this machine)\n"
+                    f"  c. registry pull of {pull_tag} (FAILED -- check network/registry access)\n"
+                    "Set SIM_SMART_GGUF to a local GGUF path, restore the "
+                    "expected local GGUF, or fix registry access, then re-run."
+                )
+                return False
+
+    rc, _ = sh([OLLAMA_CLI_EXE, "create", SIM_SMART, "-f", str(smart_modelfile)],
                timeout=600)
     ok = ok and rc == 0
     rc, _ = sh([OLLAMA_CLI_EXE, "create", SIM_FAST, "-f", str(MODELFILE_FAST)],

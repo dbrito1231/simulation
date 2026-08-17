@@ -2,12 +2,19 @@
 
 A server-authoritative AI village simulation where a local LLM acts as the brain for each inhabitant. 8 autonomous agents move, talk, trade, gather resources, and propose build projects in a top-down pixel-art world by default — up to 12, via a roster override (`{"agents": N}` JSON body on `POST /control/reset`, or the `SIM_AGENTS` env var).
 
-Inspired by the multi-agent civilization research in Project Sid, kept intentionally minimal: a proof-of-concept for the LLM-as-brain loop.
+Inspired by the multi-agent civilization research in Project Sid; started as a proof-of-concept of the LLM-as-brain loop and has grown well past that: ~37,700 lines of Python (engine + server), ~13,800 lines of viewer JS/CSS/sprites, 66 feature flags, 47 agent actions, 67 HTTP routes, 43 God-mode command kinds, 35 smoke/soak scripts, 13 spec files. It still holds to a minimal-and-observable *design bar* — every mechanic must be debuggable from JSONL logs and `/state`, not just from behavior — but the implementation itself is no longer small.
+
+## Start here
+
+1. Run it (below) and open `http://127.0.0.1:5001`.
+2. Read [specs/00-overview.md](specs/00-overview.md) for goals, scope, and the spec index.
+3. Everything else is reference — [docs/README.md](docs/README.md) indexes the rest.
 
 ## Prerequisites
 
+- **Windows only.** The commands below are PowerShell/`cmd` — a deliberate scope decision, not an oversight. There is no supported Linux/macOS path.
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (supported primary run path)
-- [Ollama](https://ollama.com/) running **on the host** (not containerized) with `sim-smart`/`sim-fast` models — run on the host: `uv run python scripts/ollama_setup.py` (see [ollama_config.md](ollama_config.md))
+- [Ollama](https://ollama.com/) running **on the host** (not containerized) with `sim-smart`/`sim-fast` models — run on the host: `uv run python scripts/ollama_setup.py` (see [ollama_config.md](ollama_config.md)). `sim-smart` build sources a local GGUF where available, or pulls `qwen3.5:9b` from the registry when no local GGUF is present (~5 GB download, first run only)
 - Port **5001** free (macOS AirPlay uses port 5000 and can return 403 — this project uses **5001** on purpose)
 - For **native fallback** only: Python 3.12+ and [uv](https://docs.astral.sh/uv/) (also needed for host-side `scripts/` tools either way)
 

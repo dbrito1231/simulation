@@ -139,7 +139,7 @@ decision action-sync set.
 once at import). `SIM_GOD_TOKEN` stays in server.py only (token check lives
 there).
 
-## Flag index (complete — 66 module-level flags, sim_engine.py)
+## Flag index (complete — 67 module-level flags, sim_engine.py)
 
 Semantics for each flag live in its owning spec; this table is the single
 complete list and default state. "Echoed" = present in `/state`'s
@@ -201,6 +201,7 @@ complete list and default state. "Echoed" = present in `/state`'s
 | `FACTION_SPLIT_ENABLED` | True | yes | [09](09-systems-society.md#faction_split_enabled) |
 | `CROP_GROWTH_ENABLED` | True | yes | [05](05-world.md) |
 | `WILDLIFE_ENABLED` | True | yes | [05](05-world.md) (authoritative fauna + hunt + motion; also [02](02-engine-core.md), [07](07-actions.md), [08](08-systems-economy.md), [11](11-viewer.md)) |
+| `WILDLIFE_BEHAVIOR_ENABLED` | True | yes | [02](02-engine-core.md#huntable-wildlife-wildlife_enabled) (graze/wander/flee/rest state machine + loose herding) |
 | `CARAVAN_VISUALS_ENABLED` | True | yes | [08](08-systems-economy.md) |
 | `WEATHER_ENABLED` | True | yes | [05](05-world.md) |
 | `WEATHER_GOVERNANCE_ENABLED` | True | yes | [05](05-world.md) |
