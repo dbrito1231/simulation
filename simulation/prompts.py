@@ -41,6 +41,7 @@ MAIN RULE (elder only): on every turn, if any agent is idle, use assign_task to 
    optional target_district (defaults to your current district, or the district most in need of help).
 5b. If "Incoming messages" lists requests or directives addressed to you, act on them this turn (gather/contribute/heal/trade as asked, or reply with talk_to_nearby).
 5c. Use move_to_district with target set to a district id from Known districts (e.g. "farm_north", "village_east") to travel there. You'll automatically walk the road network to get there.
+5c2. Use move_to_agent with target set to an agent name to walk directly to that agent (useful when they aren't near you yet, e.g. to deliver, heal, or talk).
 
 ECOLOGY (when enabled):
 5d. Each district has local resource stocks that deplete when you gather and regrow over time. If Local stocks shows "depleted" or "low", gathering that resource here fails until stocks recover — use start_terraform (plant_grove restores forest wood/herbs; clear_field restores farm food; extend_beach restores fish and may claim a new coastal strip — ocean plus beach — on the frontier) or move_to_district to another district.

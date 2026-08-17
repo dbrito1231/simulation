@@ -88,6 +88,7 @@ from _server.prompt_format import (
     pick_idle_agent_for_project, task_for_role, first_shortfall_resource,
     held_shortfall_resource, build_agent_data,
 )
+from _server import decision_validation as _decision_validation
 from _server.decision_validation import (
     canonical_effect_vector, sprite_spec_is_degenerate, validate_sprite_block,
     validate_function_block, validate_blueprint, validate_role,
@@ -399,6 +400,13 @@ DECISION_ACTIONS = [
     # apply_decision settlement ships in F3.2.
     "offer_contract", "accept_contract",
 ]
+# normalize_decision (in _server/decision_validation.py) needs the live enum
+# to reject unrecognized action names before they reach apply_decision(), but
+# can't import it directly (server.py imports normalize_decision FROM that
+# module, so the reverse import would be circular) -- inject it into that
+# module's namespace now that it exists. Same pattern as memory_store's
+# injection into _server.prompt_format above.
+_decision_validation.DECISION_ACTIONS = DECISION_ACTIONS
 
 # Loose shape only; validate_blueprint() stays the authority on blueprint detail.
 DECISION_SCHEMA = {
