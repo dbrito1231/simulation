@@ -705,9 +705,11 @@ known settlement so old saves gain the field without inventing goods.
 Related actions: `deliver_caravan`, `propose_treaty`, `vote_treaty` —
 [07-actions.md](07-actions.md).
 
-## CARAVAN_VISUALS_ENABLED
+## Caravan visuals (`VISUALS_ENABLED`)
 
-`CARAVAN_VISUALS_ENABLED` defaults to True. Living-ecosystem Phase 3
+Caravan visuals are one of the six behaviors folded into `VISUALS_ENABLED`
+(Phase 4 flag-minimization — see [11-viewer.md](11-viewer.md) for the full
+bundle). `VISUALS_ENABLED` defaults to True. Living-ecosystem Phase 3
 ("goods in motion"): a short-lived, **purely cosmetic** in-flight shipment
 record, emitted so the viewer has something to animate along the road
 graph when goods move between districts.
@@ -765,7 +767,7 @@ drops any shipment whose `endFrame` has passed. `SHIPMENT_TRAVEL_FRAMES =
 
 **`/state` exposure**: `snapshot["shipments"]` (only still-live records,
 via `_shipment_snapshot`) is present only when the flag is on; the flag
-itself is echoed in `config.flags.CARAVAN_VISUALS_ENABLED`. Off means the
+itself is echoed in `config.flags.VISUALS_ENABLED`. Off means the
 key is simply absent and the viewer draws nothing extra — the moored
 `physicalProps` boats ([11](11-viewer.md)) are entirely
 unaffected by this flag either way.

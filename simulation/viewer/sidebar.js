@@ -55,7 +55,7 @@ function structureAtWorldPoint(wx, wy) {
   let best = null;
   let bestArea = Infinity;
   for (const s of structures) {
-    const size = getStructureRenderSize(s, STRUCTURE_WEAR_ENABLED);
+    const size = getStructureRenderSize(s, VISUALS_ENABLED);
     const x0 = s.x;
     const y0 = s.y;
     const x1 = x0 + size.width;
@@ -400,7 +400,7 @@ const STRUCTURE_HIT_FLASH_MIN_DROP = 5; // ignore passive decay (~0.05/tick); ca
 // Client-only diff of structure condition/isRuin between polls; flash on meaningful
 // damage or a new ruin transition — not every passive decay tick.
 function trackStructureConditionDeltas() {
-  if (!STRUCTURE_WEAR_ENABLED) return;
+  if (!VISUALS_ENABLED) return;
   const structures = getCiv().structures || [];
   const liveIds = new Set();
   for (const s of structures) {
@@ -1028,7 +1028,7 @@ function renderSidebar() {
   // chronicleKey above), so remembering which frames have already been
   // banner-ed needs no new /state shape and no extra server-side state --
   // the simpler option per the phase brief.
-  if (FOUNDING_EVENTS_ENABLED) {
+  if (VISUALS_ENABLED) {
     const foundingEntries = (world.chronicle || []).filter((e) => e.kind === "district_founded");
     if (foundingFramesSeen === null) {
       // First snapshot after page load/refresh: remember whatever foundings
@@ -1107,7 +1107,7 @@ function weatherStateLabel(weather) {
 }
 
 function renderWorldClockHud() {
-  if (!WORLD_CLOCK_HUD_ENABLED) {
+  if (!VISUALS_ENABLED) {
     worldClockHudEl.style.display = "none";
     return;
   }

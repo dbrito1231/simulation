@@ -276,12 +276,8 @@ class _SnapshotMixin:
                 "DYNASTY_TREE_ENABLED": DYNASTY_TREE_ENABLED,
                 "CULTURE_ENABLED": CULTURE_ENABLED,
                 "STRUCTURE_UPGRADES_ENABLED": STRUCTURE_UPGRADES_ENABLED,
-                "STRUCTURE_WEAR_ENABLED": STRUCTURE_WEAR_ENABLED,
-                "ACTIVITY_CUES_ENABLED": ACTIVITY_CUES_ENABLED,
+                "VISUALS_ENABLED": VISUALS_ENABLED,
                 "CHRONICLE_SAGA_ENABLED": CHRONICLE_SAGA_ENABLED,
-                "FOUNDING_EVENTS_ENABLED": FOUNDING_EVENTS_ENABLED,
-                "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
-                "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
                 "PATH1_ENABLED": PATH1_ENABLED,
                 "RAIDERS_CONTAGION_ENABLED": RAIDERS_CONTAGION_ENABLED,
                 "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
@@ -292,7 +288,6 @@ class _SnapshotMixin:
                 "CROP_GROWTH_ENABLED": CROP_GROWTH_ENABLED,
                 "WILDLIFE_ENABLED": WILDLIFE_ENABLED,
                 "WILDLIFE_BEHAVIOR_ENABLED": WILDLIFE_BEHAVIOR_ENABLED,
-                "CARAVAN_VISUALS_ENABLED": CARAVAN_VISUALS_ENABLED,
                 "WEATHER_ENABLED": WEATHER_ENABLED,
                 "WEATHER_GOVERNANCE_ENABLED": WEATHER_GOVERNANCE_ENABLED,
                 "GOD_MODE_ENABLED": GOD_MODE_ENABLED,
@@ -351,7 +346,7 @@ class _SnapshotMixin:
             tele_snap = self._pressure_telegraph_snapshot()
             if tele_snap:
                 snapshot["pressureTelegraph"] = tele_snap
-        if CARAVAN_VISUALS_ENABLED:
+        if VISUALS_ENABLED:
             snapshot["shipments"] = self._shipment_snapshot()
         if WEATHER_ENABLED:
             snapshot["weather"] = self._weather_snapshot()
@@ -371,7 +366,7 @@ class _SnapshotMixin:
             return "lmStatus", self.lmStatus
         if key == "wildlife":
             return "wildlife", self._wildlife_snapshot() if WILDLIFE_ENABLED else []
-        if key == "shipments" and CARAVAN_VISUALS_ENABLED:
+        if key == "shipments" and VISUALS_ENABLED:
             return "shipments", self._shipment_snapshot()
         if key == "weather" and WEATHER_ENABLED:
             return "weather", self._weather_snapshot()

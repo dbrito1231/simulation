@@ -89,7 +89,8 @@ must be built in (falls back to `village` for unlisted/custom-blueprint types).
   space of that kind. `_maybe_found_district` (sim_engine/mixin_council_growth.py:1468) also checks
   `len(districts) < MAX_TOTAL_DISTRICTS` and a per-village cooldown
   (`lastDistrictFoundFrame`).
-- `FOUNDING_EVENTS_ENABLED` (default True): when True, `_found_district()` pushes a
+- `VISUALS_ENABLED` (default True; Phase 4 flag-minimization bundle — see
+  [11-viewer.md](11-viewer.md)): when True, `_found_district()` pushes a
   `district_founded`-kind chronicle milestone ("`{label}` was founded on the
   frontier.") alongside the existing unconditional `_push_activity` line. Gates only
   this chronicle call — district creation itself, the road-graph extension, and

@@ -718,7 +718,7 @@ class _WorldStateMixin:
         """Like _road_path_between, but resolved purely from two district
         ids (no agent needed) -- reuses the same ROAD_PATH_CACHE agent
         movement already populates via _recompute_road_paths. Used by the
-        cosmetic shipment system (CARAVAN_VISUALS_ENABLED) to interpolate
+        cosmetic shipment system (VISUALS_ENABLED) to interpolate
         goods along the existing road graph. Returns [] (never a fabricated
         straight line) when either district or its entryNode is missing, or
         no cached path connects them."""

@@ -1548,7 +1548,7 @@ class _CouncilGrowthMixin:
         _validate_road_graph(c["roadNodes"], c["roadEdges"])
         self._push_activity(f"The village claims new land in the frontier for a {kind} district ({did}).")
         self._log_benchmark("district_founded", len(c["districts"]), {"id": did, "kind": kind})
-        if FOUNDING_EVENTS_ENABLED and label:
+        if VISUALS_ENABLED and label:
             self._push_chronicle(f"{label} was founded on the frontier.", kind="district_founded")
         if ECOLOGY_ENABLED:
             self._ensure_district_stocks()

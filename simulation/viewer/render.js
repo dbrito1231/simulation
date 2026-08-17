@@ -500,13 +500,13 @@ function drawAgent(ctx, agent, frameTick) {
 }
 
 function drawStructureWithShadow(structure) {
-  const size = getStructureRenderSize(structure, STRUCTURE_WEAR_ENABLED);
+  const size = getStructureRenderSize(structure, VISUALS_ENABLED);
   ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
   ctx.beginPath();
   ctx.ellipse(structure.x + size.width / 2, structure.y + size.height, size.width * 0.55, 7, 0, 0, Math.PI * 2);
   ctx.fill();
-  drawStructure(ctx, structure, STRUCTURE_WEAR_ENABLED);
-  if (STRUCTURE_WEAR_ENABLED && isStructureHitFlashing(structure.id)) {
+  drawStructure(ctx, structure, VISUALS_ENABLED);
+  if (VISUALS_ENABLED && isStructureHitFlashing(structure.id)) {
     drawStructureHitFlash(ctx, structure, size);
   }
   drawStructureLabel(ctx, structure, size);

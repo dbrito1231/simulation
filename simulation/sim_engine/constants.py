@@ -13,12 +13,8 @@ __all__ = [
     "SURVIVAL_ENABLED",
     "CRAFTING_ENABLED",
     "STRUCTURE_EFFECTS_ENABLED",
-    "STRUCTURE_WEAR_ENABLED",
-    "ACTIVITY_CUES_ENABLED",
+    "VISUALS_ENABLED",
     "CHRONICLE_SAGA_ENABLED",
-    "FOUNDING_EVENTS_ENABLED",
-    "WORLD_CLOCK_HUD_ENABLED",
-    "SEASONAL_AGENTS_ENABLED",
     "MEMORY_ENABLED",
     "WIKI_MEMORY",
     "TESTAMENT_ENABLED",
@@ -66,7 +62,6 @@ __all__ = [
     "WILDLIFE_GRAZE_PAUSE_CHANCE",
     "WILDLIFE_HERD_RADIUS",
     "WILDLIFE_HERD_PULL",
-    "CARAVAN_VISUALS_ENABLED",
     "SHIPMENT_TRAVEL_FRAMES",
     "SHIPMENT_RING_CAP",
     "WEATHER_ENABLED",
@@ -486,22 +481,19 @@ __all__ = [
 SURVIVAL_ENABLED = True
 CRAFTING_ENABLED = True
 STRUCTURE_EFFECTS_ENABLED = True
-# Viewer-only projections of existing simulation state. These flags never
-# change decay, ruin, or action mechanics; they only control /state consumers.
-STRUCTURE_WEAR_ENABLED = True
-ACTIVITY_CUES_ENABLED = True
+# Bundle of six flags (Phase 4, flag-minimization plan): structure wear
+# rendering, world/activity cues, founding banner + chronicle push
+# (district founding itself is unconditional), world clock HUD, and
+# seasonal agent sprite accents. None ever change decay, ruin, action
+# mechanics, simulation time, or terrain. Five of the six only control
+# /state consumers (the viewer); the founding-milestone chronicle push is
+# the exception -- it also feeds civilization["chronicle"], which reaches
+# every agent's think payload via chronicle_line, so turning this flag off
+# has a bounded cognition-facing effect. See specs/11-viewer.md.
+VISUALS_ENABLED = True
 # Daily village saga dispatch ring (viewer-only; never prompt-facing).
 # Phase 2: day-boundary sim-fast lm_complete dispatch via run_chronicle_saga.
 CHRONICLE_SAGA_ENABLED = True
-# Read-only viewer projection: announces a newly founded district as a
-# chronicle milestone + a brief banner (index.html). Gates only the
-# _found_district chronicle call and the banner trigger -- district founding
-# itself (_maybe_found_district) is unconditional and unaffected.
-FOUNDING_EVENTS_ENABLED = True
-# Viewer-only projections of the existing calendar and sprite season mirror.
-# They do not alter simulation time, terrain, or agent state.
-WORLD_CLOCK_HUD_ENABLED = True
-SEASONAL_AGENTS_ENABLED = True
 MEMORY_ENABLED = True
 # Wiki-style compounding memory (TASKS_PENDING item 3 / plan Phase 4): when
 # True, _run_memory_maintenance's existing round-robin summarizer call is
@@ -640,10 +632,9 @@ WILDLIFE_HERD_PULL = 6
 # authoritative stockpile/inventory. The transfer itself is never delayed
 # or gated by this -- see _emit_shipment. Shipments live only in
 # self.shipments (NOT civilization state), so they are never persisted to
-# state.db and simply vanish on restore, which is harmless. Off means
-# /state omits "shipments" and the viewer draws nothing extra; the static
-# physicalProps moored boats are unaffected either way.
-CARAVAN_VISUALS_ENABLED = True
+# state.db and simply vanish on restore, which is harmless. Off (via
+# VISUALS_ENABLED) means /state omits "shipments" and the viewer draws
+# nothing extra; the static physicalProps moored boats are unaffected either way.
 SHIPMENT_TRAVEL_FRAMES = 240   # ~8s at 30 ticks/s: how long a shipment animates across the road graph
 SHIPMENT_RING_CAP = 8          # bounded ring -- oldest live shipments drop first
 

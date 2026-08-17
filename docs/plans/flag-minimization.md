@@ -273,12 +273,13 @@ Consequence: the plan's Memory/Chronicle/Weather single-item merge bundles are n
 | `PATH1_DIPLOMACY_ENABLED` | True | 24 | 0 genuine | MERGE — done (Phase 3) | Same. |
 | `TIER3_CONTENT_ENABLED` | True | 9 | 0 genuine | MERGE — done (Phase 3) | Same. |
 | `PRESSURE_LOOP_ENABLED` | True | 12 | 0 genuine | MERGE — done (Phase 3) | Same. Merging all 7 makes Path 1 all-or-nothing (see consequence note above) — accepted, deliberate. |
-| `ACTIVITY_CUES_ENABLED` | True | 10 | 0 cues | MERGE → `VISUALS_ENABLED` | Pure presentation, always ships on with the others. |
-| `SEASONAL_AGENTS_ENABLED` | True | 10 | 0 cues | MERGE → `VISUALS_ENABLED` | Same. |
-| `WORLD_CLOCK_HUD_ENABLED` | True | 10 | 0 cues | MERGE → `VISUALS_ENABLED` | Same. |
-| `FOUNDING_EVENTS_ENABLED` | True | 11 | 0 cues | MERGE → `VISUALS_ENABLED` | Same — gates only a banner + chronicle call, district founding unconditional. |
-| `STRUCTURE_WEAR_ENABLED` | True | 14 | 0 cues | MERGE → `VISUALS_ENABLED` | Viewer-only projection of existing decay state; never alters mechanics. |
-| `CARAVAN_VISUALS_ENABLED` | True | 18 | 0 cues | MERGE → `VISUALS_ENABLED` | Cosmetic shipment records, never gates the underlying transfer. |
+| `ACTIVITY_CUES_ENABLED` | True | 10 | 0 cues | MERGE — done (Phase 4) | Pure presentation, always ships on with the others. |
+| `SEASONAL_AGENTS_ENABLED` | True | 10 | 0 cues | MERGE — done (Phase 4) | Same. |
+| `WORLD_CLOCK_HUD_ENABLED` | True | 10 | 0 cues | MERGE — done (Phase 4) | Same. |
+| `FOUNDING_EVENTS_ENABLED` | True | 11 | 0 cues | MERGE — done (Phase 4) | Same — gates only a banner + chronicle call, district founding unconditional. |
+| `STRUCTURE_WEAR_ENABLED` | True | 14 | 0 cues | MERGE — done (Phase 4) | Viewer-only projection of existing decay state; never alters mechanics. |
+| `CARAVAN_VISUALS_ENABLED` | True | 18 | 0 cues | MERGE — done (Phase 4) | Cosmetic shipment records, never gates the underlying transfer. |
+| `VISUALS_ENABLED` | True | 0 (new bundle target) | — | KEEP (new, Phase 4) | Merge target for the six rows above; see [11-viewer.md](../../specs/11-viewer.md#visuals_enabled-bundle-phase-4-flag-minimization). |
 | `SURVIVAL_ENABLED` | True | 33 | high refs | KEEP | Emergency lever on a 24/7 run; removal cost dominates. |
 | `CRAFTING_ENABLED` | True | 29 | 0 cues, borderline refs | KEEP | Borderline (25-35 refs); not touched in Phase 1 scope, deferred per plan §3c-bis. |
 | `STRUCTURE_EFFECTS_ENABLED` | True | 26 | 0 cues, borderline refs | KEEP | Same — borderline, deferred. |

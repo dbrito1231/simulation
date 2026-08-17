@@ -32,17 +32,12 @@ function applyFlags(flags) {
   if ("ECOLOGY_ENABLED" in flags) ECOLOGY_ENABLED = !!flags.ECOLOGY_ENABLED;
   if ("PIANO_MODULES" in flags) PIANO_MODULES = !!flags.PIANO_MODULES;
   if ("PATH1_ENABLED" in flags) PATH1_ENABLED = !!flags.PATH1_ENABLED;
-  if ("STRUCTURE_WEAR_ENABLED" in flags) STRUCTURE_WEAR_ENABLED = !!flags.STRUCTURE_WEAR_ENABLED;
-  if ("ACTIVITY_CUES_ENABLED" in flags) ACTIVITY_CUES_ENABLED = !!flags.ACTIVITY_CUES_ENABLED;
+  if ("VISUALS_ENABLED" in flags) VISUALS_ENABLED = !!flags.VISUALS_ENABLED;
   if ("CHRONICLE_SAGA_ENABLED" in flags) CHRONICLE_SAGA_ENABLED = !!flags.CHRONICLE_SAGA_ENABLED;
   if ("PREDICTION_MARKET_ENABLED" in flags) PREDICTION_MARKET_ENABLED = !!flags.PREDICTION_MARKET_ENABLED;
-  if ("FOUNDING_EVENTS_ENABLED" in flags) FOUNDING_EVENTS_ENABLED = !!flags.FOUNDING_EVENTS_ENABLED;
   if ("ENV_EFFECTS_ENABLED" in flags) ENV_EFFECTS_ENABLED = !!flags.ENV_EFFECTS_ENABLED;
-  if ("WORLD_CLOCK_HUD_ENABLED" in flags) WORLD_CLOCK_HUD_ENABLED = !!flags.WORLD_CLOCK_HUD_ENABLED;
-  if ("SEASONAL_AGENTS_ENABLED" in flags) SEASONAL_AGENTS_ENABLED = !!flags.SEASONAL_AGENTS_ENABLED;
   if ("CROP_GROWTH_ENABLED" in flags) CROP_GROWTH_ENABLED = !!flags.CROP_GROWTH_ENABLED;
   if ("WILDLIFE_ENABLED" in flags) WILDLIFE_ENABLED = !!flags.WILDLIFE_ENABLED;
-  if ("CARAVAN_VISUALS_ENABLED" in flags) CARAVAN_VISUALS_ENABLED = !!flags.CARAVAN_VISUALS_ENABLED;
   if ("WEATHER_ENABLED" in flags) WEATHER_ENABLED = !!flags.WEATHER_ENABLED;
   if ("RAIDERS_CONTAGION_ENABLED" in flags) RAIDERS_CONTAGION_ENABLED = !!flags.RAIDERS_CONTAGION_ENABLED;
   if ("GOD_MODE_ENABLED" in flags) GOD_MODE_ENABLED_FLAG = !!flags.GOD_MODE_ENABLED;
@@ -123,7 +118,7 @@ function drawWildlife(ctx, frameTick) {
   }
 }
 
-// Goods-in-motion (Phase 3 living-ecosystem, CARAVAN_VISUALS_ENABLED). The
+// Goods-in-motion (Phase 3 living-ecosystem, VISUALS_ENABLED). The
 // engine emits a shipment AFTER a transfer already completed and moved the
 // authoritative resource counts -- this pass never touches simulation
 // state, it only interpolates the already-resolved road-graph `path` the
@@ -149,7 +144,7 @@ function shipmentPosition(shipment, frameTick) {
 }
 
 function drawShipments(ctx, frameTick) {
-  if (!CARAVAN_VISUALS_ENABLED) return;
+  if (!VISUALS_ENABLED) return;
   const shipments = world.shipments || [];
   if (!shipments.length) return;
   const reg = resourceRegistry();
@@ -223,7 +218,7 @@ async function pollState() {
       }
     }
     applyFlags(snapshot.config && snapshot.config.flags);
-    setSeasonalAgentAccentsEnabled(SEASONAL_AGENTS_ENABLED);
+    setSeasonalAgentAccentsEnabled(VISUALS_ENABLED);
     if (terrainCanvas && !terrainBuildScheduled) {
       const [, ecologyStageKey] = ecologyStagesForTerrain();
       const seasonNow = snapshot.calendar && snapshot.calendar.season;

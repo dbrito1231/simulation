@@ -737,7 +737,7 @@ class _DiplomacyMixin:
 
     def _emit_shipment(self, from_district_id, to_district_id, resource):
         """Append a short-lived, purely cosmetic in-flight record for the
-        viewer to animate along the road graph (CARAVAN_VISUALS_ENABLED).
+        viewer to animate along the road graph (VISUALS_ENABLED).
 
         HARD CONSTRAINT: this is called AFTER the resource has already
         moved between its authoritative owners (agent inventories /
@@ -751,7 +751,7 @@ class _DiplomacyMixin:
         the viewer interpolates the exact same route the engine's own
         road-resolution helper (_road_path_between_districts, backed by the
         shared ROAD_PATH_CACHE) computed -- no second pathfinder in JS."""
-        if not CARAVAN_VISUALS_ENABLED:
+        if not VISUALS_ENABLED:
             return
         if not from_district_id or not to_district_id or from_district_id == to_district_id:
             return
@@ -789,7 +789,7 @@ class _DiplomacyMixin:
 
     def _shipment_snapshot(self):
         """Read-only /state projection: only still-live shipments."""
-        if not CARAVAN_VISUALS_ENABLED or not self.shipments:
+        if not VISUALS_ENABLED or not self.shipments:
             return []
         return [s for s in self.shipments if s["endFrame"] >= self.frameTick]
 

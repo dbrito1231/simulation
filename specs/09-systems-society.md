@@ -844,8 +844,8 @@ The projection admits only the named milestone kinds `death`, `burial`,
 `faction_split`, and `divine`; routine gather, talk, craft, and build activity
 remains exclusively in `activity`. `disaster` entries are pushed unconditionally
 from `_maybe_disaster` (see [08](08-systems-economy.md)); `district_founded`
-entries are pushed from `_found_district` only when `FOUNDING_EVENTS_ENABLED`
-is True (see [05](05-world.md)); `faction_split` entries are pushed from
+entries are pushed from `_found_district` only when `VISUALS_ENABLED`
+is True (see [05](05-world.md), [11](11-viewer.md)); `faction_split` entries are pushed from
 `_execute_faction_split` when `FACTION_SPLIT_ENABLED` and `CULTURE_ENABLED` are on (see
 [§faction_split_enabled](#faction_split_enabled)). `CHRONICLE_CAP` was raised from 20 to 100
 (living-ecosystem Phase 2, item 0) after live verification showed a

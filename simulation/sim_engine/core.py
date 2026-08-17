@@ -220,7 +220,7 @@ class SimEngine(
         self._peer_prediction_total = 0
         self.ROAD_PATH_CACHE = {}   # (nodeA, nodeB) -> [node ids]; see _recompute_road_paths
         # Living-ecosystem Phase 3: cosmetic shipment ring. Deliberately kept
-        # off the civilization dict (see CARAVAN_VISUALS_ENABLED) so it is
+        # off the civilization dict (see VISUALS_ENABLED) so it is
         # never written to state.db.
         self.shipments = []
         self._shipment_seq = 0
