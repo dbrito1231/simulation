@@ -5,6 +5,15 @@ out of server.py (Phase 5 modularization, pure move, no behavior change).
 import json
 import re
 
+# DECISION_ACTIONS (the enum of every action name server.py's JSON schema
+# accepts) is defined in server.py, which imports normalize_decision FROM
+# this module -- importing it back here would be circular. server.py injects
+# the live list into this module's namespace right after it defines
+# DECISION_ACTIONS (same pattern as _server/prompt_format.py's memory_store
+# injection; see that module's docstring for the full rationale). Stays None
+# only if this module is ever exercised without going through server.py.
+DECISION_ACTIONS = None
+
 from _server.prompt_format import (
     ROLE_PRIMARY_RESOURCE,
     first_shortfall_resource,
@@ -954,6 +963,31 @@ def normalize_decision(decision, agent_data):
         return role_fallback_action(agent_data.get("role"), agent_data)
 
     action = decision.get("action", "rest")
+    # Structured-output mode (json_schema) normally constrains `action` to the
+    # real DECISION_ACTIONS enum at decode time. But server.py auto-disables
+    # structured output session-wide on the first Ollama HTTP-400/format
+    # rejection (see specs/03-cognition.md), after which this path is the
+    # only thing standing between a hallucinated action name and
+    # apply_decision()'s dispatch, which has no trailing else and would
+    # otherwise silently no-op while still recording the bogus name in
+    # lastAction/actionCounts. DECISION_ACTIONS is injected by server.py
+    # (see the module-level comment above); guard against it being unset.
+    if DECISION_ACTIONS is not None and action not in DECISION_ACTIONS:
+        fallback = role_fallback_action(agent_data.get("role"), agent_data)
+        fallback["reasoning"] = (
+            fallback.get("reasoning", "") + " (unrecognized action)"
+        ).strip()
+        # Deliberately NOT the bare "rejection_note" key: that one is owned by
+        # the propose_blueprint path below and is consumed by mixin_think_job.py
+        # to set agent["lastBlueprintRejection"], which then injects a
+        # "your blueprint proposal was rejected" note into the agent's next
+        # prompts. An unrecognized action name is a model/infra anomaly, not a
+        # blueprint rejection, and role_fallback_action() has already picked a
+        # valid role-appropriate substitute -- there is nothing for a prompt
+        # nudge to correct here. Use a distinct key so this guard cannot
+        # collide with, or fabricate, blueprint-rejection state.
+        fallback["action_rejection_note"] = "unrecognized action"
+        return fallback
     nearby_raw = agent_data.get("nearby_agents")
     nearby_names = parse_nearby_names(nearby_raw)
     nearby_empty = len(nearby_names) == 0

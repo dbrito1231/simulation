@@ -831,6 +831,32 @@ validation, each failure substituting `role_fallback_action()` with a note
 appended to `reasoning` (and often a `*_rejection_note` field the engine
 surfaces to the agent's next prompt):
 
+**Unrecognized-action guard.** Before any per-action check, `action` is
+checked against `DECISION_ACTIONS` (server.py's enum, injected into
+`_server/decision_validation.py`'s namespace at import time — same
+circular-import-avoidance pattern as `memory_store`'s injection into
+`_server/prompt_format.py`). Normally this is redundant: structured-output
+mode (`STRUCTURED_OUTPUT_MODE = "json_schema"`) already constrains `action`
+to a legal enum member at decode time. But server.py auto-disables
+structured output session-wide on the first Ollama HTTP-400/format
+rejection (see "Auto-disable on rejection" below), after which an
+unrecognized action name could otherwise fall through every `if`/`elif` in
+`apply_decision()` (no trailing `else`) as a silent no-op while still
+polluting `lastAction`/`actionCounts` with the bogus string. A name outside
+`DECISION_ACTIONS` is replaced by `role_fallback_action()` with
+`action_rejection_note = "unrecognized action"` and `_fallback = True` — a
+distinct key from the bare `rejection_note` the `propose_blueprint` path uses
+(see table below), which `mixin_think_job.py` reads to set
+`agent["lastBlueprintRejection"]` and inject a "your blueprint proposal was
+rejected" line into the agent's next prompts. `action_rejection_note` is
+deliberately **not** consumed by any such nudge: an unrecognized action name
+is a model/infra anomaly (only reachable after structured output has
+auto-disabled), not a blueprint rejection, and `role_fallback_action()` has
+already substituted a valid role-appropriate action, so there is nothing for
+a prompt nudge to correct. A recognized-but-contextually-disallowed action
+(e.g. `submit_structure_sprite` outside a sprite-design turn) still follows
+its own path in the table below.
+
 | Action | Validation |
 |---|---|
 | `start_terraform` | must infer a valid terraform target (`_infer_terraform_decision`) |

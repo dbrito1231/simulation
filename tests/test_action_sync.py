@@ -84,9 +84,6 @@ def test_decision_schema_enum_matches_decision_actions(server_module):
 #     SYSTEM_PROMPT module constant.
 _SYSTEM_PROMPT_SPECIAL_CASED_ACTIONS = {
     "submit_structure_sprite", "offer_contract", "accept_contract",
-    # move_to_agent: see the xfail below -- tracked as a real, separate gap
-    # rather than silently excluded here.
-    "move_to_agent",
 }
 
 
@@ -100,19 +97,12 @@ def test_system_prompt_mentions_every_routine_action(server_module):
     assert not missing, f"SYSTEM_PROMPT never mentions: {sorted(missing)}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Found by this test suite, not fixed (out of scope for a test-layer "
-        "change): move_to_agent is a real DECISION_ACTIONS/DECISION_SCHEMA "
-        "member but SYSTEM_PROMPT never names it -- no rule line, no "
-        "EXAMPLE -- unlike every other routine action. Reported to the "
-        "orchestrator; xfail keeps this visible instead of silently "
-        "excluding it."
-    ),
-)
 def test_system_prompt_documents_move_to_agent(server_module):
+    """move_to_agent is a real DECISION_ACTIONS/DECISION_SCHEMA member and now
+    has its own rule line (5c2) in SYSTEM_PROMPT, placed before the first
+    EXAMPLE marker so SYSTEM_PROMPT_SLIM's retry variant carries it too."""
     assert "move_to_agent" in server_module.SYSTEM_PROMPT
+    assert "move_to_agent" in server_module.SYSTEM_PROMPT_SLIM
 
 
 def test_apply_decision_dispatches_every_action():

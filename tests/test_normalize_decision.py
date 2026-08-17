@@ -91,28 +91,21 @@ def test_action_disallowed_by_current_context_falls_back(server_module):
     assert result.get("_fallback") is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Found by this test suite, not fixed (production-code change is out "
-        "of scope for a test-layer implementer task -- reported to the "
-        "orchestrator): normalize_decision() never validates decision['action'] "
-        "against DECISION_ACTIONS. In production this is masked because "
-        "Ollama's structured-output schema (DECISION_SCHEMA's action enum) "
-        "already constrains the model's JSON to a legal action name before "
-        "normalize_decision ever sees it, but called directly (or if that "
-        "upstream guarantee is ever bypassed) an unrecognized action name "
-        "passes straight through unchanged -- see the final `if action != "
-        '"talk_to_nearby": return decision` fallthrough in '
-        "_server/decision_validation.py."
-    ),
-)
 def test_unknown_action_name_falls_back(server_module):
+    """normalize_decision() rejects any action name not in DECISION_ACTIONS
+    up front, before the per-action shape checks, and substitutes a role
+    fallback -- guarding the path that opens up when server.py auto-disables
+    structured output session-wide after an Ollama format rejection (see
+    specs/03-cognition.md), since Ollama's json_schema mode is otherwise the
+    only thing constraining `action` to a legal enum member."""
     result = normalize_decision(
         {"action": "totally_bogus_action", "reasoning": "x"}, _agent_data()
     )
     assert isinstance(result, dict)
     assert result.get("action") in server_module.DECISION_ACTIONS
+    assert result.get("_fallback") is True
+    assert result.get("action_rejection_note") == "unrecognized action"
+    assert "rejection_note" not in result
 
 
 def test_role_fallback_action_never_raises_and_is_always_valid(server_module):
