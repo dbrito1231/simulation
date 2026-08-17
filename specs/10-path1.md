@@ -4,10 +4,8 @@ The `PATH1_ENABLED` bundle: industry (ores/smelting), tool tiers, composable
 blocks, diggable terrain tiles, a second-settlement diplomacy layer, tier-3
 content, and a day/night pressure loop.
 
-**Canonical for:** `PATH1_ENABLED`/`path1_on()` semantics,
-`INDUSTRY_ENABLED`, `TOOL_TIERS_ENABLED`, `COMPOSABLE_BUILD_ENABLED`,
-`TERRAIN_TILES_ENABLED`, `PATH1_DIPLOMACY_ENABLED`, `TIER3_CONTENT_ENABLED`,
-`PRESSURE_LOOP_ENABLED`, `RAIDERS_CONTAGION_ENABLED` semantics.
+**Canonical for:** `PATH1_ENABLED` semantics, `RAIDERS_CONTAGION_ENABLED`
+semantics.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index;
 [05-world.md](05-world.md) for district/terrain geometry (`TILE_CELL`
 cross-link); [02-engine-core.md](02-engine-core.md) for day/night/season
@@ -15,19 +13,31 @@ constants; [07-actions.md](07-actions.md) for action params;
 [08-systems-economy.md](08-systems-economy.md) for crafting/goods this
 bundle extends.
 
-## `PATH1_ENABLED` and `path1_on()`
+## `PATH1_ENABLED`
 
-`PATH1_ENABLED = True` is the master bundle switch (sim_engine/constants.py:1693);
-`path1_on(subflag=None)` (sim_engine/constants.py:1708) returns `True` unconditionally
-when `PATH1_ENABLED` is set, else falls back to the named sub-flag's own
-value. All seven sub-flags (`INDUSTRY_ENABLED`, `TOOL_TIERS_ENABLED`,
-`COMPOSABLE_BUILD_ENABLED`, `TERRAIN_TILES_ENABLED`,
-`PATH1_DIPLOMACY_ENABLED`, `TIER3_CONTENT_ENABLED`, `PRESSURE_LOOP_ENABLED`)
-default `True`. Every call site in this bundle gates through `path1_on(...)`
-rather than reading the sub-flag global directly, so flipping the master
-flag off disables the whole bundle regardless of sub-flag state.
+`PATH1_ENABLED = True` (sim_engine/constants.py) is the single switch for
+everything in this spec. It replaces seven sub-flags that used to exist —
+`INDUSTRY_ENABLED`, `TOOL_TIERS_ENABLED`, `COMPOSABLE_BUILD_ENABLED`,
+`TERRAIN_TILES_ENABLED`, `PATH1_DIPLOMACY_ENABLED`, `TIER3_CONTENT_ENABLED`,
+`PRESSURE_LOOP_ENABLED` — which were merged into `PATH1_ENABLED` and deleted
+(flag-minimization Phase 3). Every call site that used to gate on a named
+sub-flag now reads `PATH1_ENABLED` directly; the section headings below
+(Industry, Tool tiers, Composable build, Terrain tiles, Diplomacy, Tier-3
+content, Pressure loop) are retained as feature-area labels only — they no
+longer name independent flags.
 
-## INDUSTRY_ENABLED
+**All-or-nothing consequence (accepted, deliberate).** Before the merge,
+`path1_on(subflag)` fell back to the named sub-flag's own value whenever
+`PATH1_ENABLED` was off, so a sub-flag could in principle be toggled
+independently of the parent (a staged-rollout state that had been finished
+for a long time and was never exercised in practice). That fallback, and the
+`path1_on()` helper itself, are gone. There is now no way to run Path 1 with
+the parent off and one feature area on — flipping `PATH1_ENABLED` turns the
+entire bundle (industry, tool tiers, composable build, terrain tiles,
+diplomacy, tier-3 content, pressure loop) on or off together. This is a
+deliberate loss of per-feature granularity, not a bug.
+
+## Industry (formerly `INDUSTRY_ENABLED`)
 
 Extends `BASE_RESOURCES` with clay/sand (beach) and copper/iron ore (cave),
 and `CRAFTED_RESOURCES` with charcoal, copper/iron ingots, rope, cloth, and
@@ -39,10 +49,10 @@ charcoal per 1800 ticks per district. `_path1_industry_benchmark()` samples
 industry throughput on the slow tick alongside the other `_maybe_*`
 backstops.
 
-`TIER3_CONTENT_ENABLED` (below) layers Harbor/Mill/Foundry on top of this
+Tier-3 content (below) layers Harbor/Mill/Foundry on top of this
 registry.
 
-## TOOL_TIERS_ENABLED
+## Tool tiers (formerly `TOOL_TIERS_ENABLED`)
 
 Gates certain gathers on a held tool. `TOOL_TIER_ORDER = ("wooden_pick",
 "stone_pick", "iron_pick")`, `TOOL_TIER_LEVEL` = 1/2/3.
@@ -54,14 +64,14 @@ named reason ("`<resource>` needs a `<tool>` (you have tier `<n>` tools)").
 `TOOL_YIELD_BONUS = 1` — holding the *exact* required tier (not just
 meeting the minimum) adds a small yield bonus on top of `_gather_yield_bonus`.
 
-When `TOOL_TIERS_ENABLED` and `TERRAIN_TILES_ENABLED` are both on,
+With `PATH1_ENABLED` on (which covers tool tiers and terrain tiles together),
 `_pickless_stone_route` (sim_engine/mixin_diplomacy.py:121) reroutes a stone-seeker without
 a pick to dig terrain directly (stone's nominal cave gather zone has no
 diggable ground) instead of bouncing between cave and farm forever — the
 bootstrap escape for a fresh world with no Workshop yet (digging itself is
 deliberately tool-free).
 
-## COMPOSABLE_BUILD_ENABLED
+## Composable build (formerly `COMPOSABLE_BUILD_ENABLED`)
 
 Free-form single-tile placement on a per-district 8×8 grid
 (`PATH1_GRID_COLS = PATH1_GRID_ROWS = 8`, cell size `TILE_CELL = 40` —
@@ -81,7 +91,7 @@ tile; `BLOCK_REFUND_RATIO = 0.5` refunds half the placement cost.
 Shelter-flagged blocks (`wall`/`fence`) count toward night shelter capacity
 via `_composable_shelter_count` (see [08](08-systems-economy.md)).
 
-## TERRAIN_TILES_ENABLED
+## Terrain tiles (formerly `TERRAIN_TILES_ENABLED`)
 
 Each district lazily gets a per-cell terrain grid
 (`_ensure_district_terrain`, sim_engine/mixin_diplomacy.py:151) over the same 8×8 grid,
@@ -107,7 +117,7 @@ converts the agent's current tile toward `grove` (farm districts use this
 to counteract dig-driven grove loss; `_maybe_expand_field` auto-assigns a
 `plant_terrain` goal when a farm district's grove ratio drops below 0.3).
 
-## PATH1_DIPLOMACY_ENABLED
+## Diplomacy (formerly `PATH1_DIPLOMACY_ENABLED`)
 
 `_init_settlements()` (sim_engine/mixin_diplomacy.py:353) seeds a single `"home"`
 settlement owning every starter district. `_maybe_found_settlement()`
@@ -143,8 +153,8 @@ settlement id). Local gather overflow and caravan delivery credits prefer
 the agent's current settlement store; local repair/craft funding draws from
 the agent's settlement store first, then falls back to the village
 `stockpile` (same district-store-first pattern as upkeep — see
-[08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
-Think payload and `/state` expose per-settlement stores when this flag is on.
+[08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_enabled)).
+Think payload and `/state` expose per-settlement stores when `PATH1_ENABLED` is on.
 
 **Faction split (`FACTION_SPLIT_ENABLED`, default on):** domestic
 rules/belief registries are keyed by settlement id (`"home"` primary); treaties,
@@ -225,9 +235,9 @@ registry entry is recreated from the instance so old saves regain transit —
 otherwise the migration would silently no-op on exactly the saves that need
 it. Idempotent.
 
-## TIER3_CONTENT_ENABLED
+## Tier-3 content (formerly `TIER3_CONTENT_ENABLED`)
 
-Layered on top of `INDUSTRY_ENABLED` (sim_engine/constants.py:1694): three tier-2/3
+Layered on top of industry (sim_engine/constants.py): three tier-2/3
 structures — **Harbor** (beach district, tier 2: produces +1 fish/1500
 ticks/district, boosts fish gather up to +2), **Mill** (village, tier 2:
 boosts edible gather up to +2/district), **Foundry** (village, tier 3:
@@ -235,7 +245,7 @@ unlocks tier-3 `craft`, produces 1 iron ingot/2400 ticks village-wide).
 Extends `ERA_LADDER` with Harbor Era and Mill Era
 (`TECH_TREE_ENABLED`) — see [09](09-systems-society.md).
 
-## PRESSURE_LOOP_ENABLED
+## Pressure loop (formerly `PRESSURE_LOOP_ENABLED`)
 
 **Night exposure:** `_tick_night_pressure` (sim_engine/mixin_wildlife.py:136) runs every 30 ticks while
 `_is_night()` is true (night = `NIGHT_FRACTION = 0.25` of each
@@ -278,10 +288,10 @@ toward the nearest district offering shelter capacity.
 
 This section documents the wiki page shapes for the two entity kinds owned by this spec:
 **settlement** and **treaty**. Both are Path 1 diplomacy data
-(`mixin_diplomacy.py`, gated by `path1_on("PATH1_DIPLOMACY_ENABLED")`). Both are
+(`mixin_diplomacy.py`, gated by `PATH1_ENABLED`). Both are
 read-only projections over existing engine state; the wiki route (`GET /wiki`,
 [specs/04-http-api.md](04-http-api.md)) assembles them in-process and omits both
-page kinds when `PATH1_DIPLOMACY_ENABLED` is off.
+page kinds when `PATH1_ENABLED` is off.
 
 ### Settlement page
 

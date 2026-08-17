@@ -34,9 +34,9 @@ their own cadence (all frame counts are ticks at 30/s):
 | within the 150-batch, `CULTURE_ENABLED` | 150 | `_maybe_study_at_library` |
 | within the 150-batch, (unconditional) | 150 | `_maybe_handle_burials` |
 | within the 150-batch, `ECONOMY_ENABLED` | 150 | `_maybe_mint_coin`, `_maybe_fund_project_coin` |
-| within the 150-batch, `path1_on()` | 150 | `_maybe_found_settlement`, `_path1_industry_benchmark` |
-| `path1_on("PRESSURE_LOOP_ENABLED")` | 900 | `_tick_wildlife` (Path-1 forest attack pressure — **not** huntable fauna) |
-| `path1_on("PRESSURE_LOOP_ENABLED")` and `_is_night()` | 30 | `_tick_night_pressure` |
+| within the 150-batch, `PATH1_ENABLED` | 150 | `_maybe_found_settlement`, `_path1_industry_benchmark` |
+| `PATH1_ENABLED` | 900 | `_tick_wildlife` (Path-1 forest attack pressure — **not** huntable fauna) |
+| `PATH1_ENABLED` and `_is_night()` | 30 | `_tick_night_pressure` |
 | `STRUCTURE_EFFECTS_ENABLED` | 150 | `_tick_structure_effects` |
 | `ECOLOGY_ENABLED` | 600 | `_tick_ecology_regrow` |
 | `GOODS_ENABLED` | 900 | `_tick_goods` |
@@ -114,7 +114,7 @@ aging, season clock, and GUI calendar share that year. Today: `1/1440` per
 lifecycle gate (~10 s at 30/s).
 
 - `NIGHT_FRACTION = 0.25` (sim_engine/constants.py:2009): `_is_night()` is true for the last
-  quarter of each `DAY_FRAMES` cycle, but only when `PRESSURE_LOOP_ENABLED` — night
+  quarter of each `DAY_FRAMES` cycle, but only when `PATH1_ENABLED` — night
   otherwise never triggers.
 - `SEASON_REGROW_MULT = {"spring": 2, "summer": 1, "autumn": 1, "winter": 0}`
   (sim_engine/constants.py:1453): ecology regrowth is doubled in spring and fully halted in
@@ -1166,7 +1166,7 @@ only writes `behaviorState` when the flag is on). Per-creature
   graze/rest/wander unconditionally.
 - **`rest`** — `WILDLIFE_LAND_KINDS` only (forest/farm pool kinds minus the
   decorative `bee`), when `self._is_night()` is true (existing time-of-day
-  source — [Time model](#time-model), `PRESSURE_LOOP_ENABLED`-gated). Halts
+  source — [Time model](#time-model), `PATH1_ENABLED`-gated). Halts
   movement entirely for the tick.
 - **`graze`** — `WILDLIFE_LAND_KINDS` by day: slow drift at
   `WILDLIFE_GRAZE_SPEED_MULT` (0.4×) of normal speed, with a

@@ -3212,7 +3212,7 @@ def world_wiki():
     Cross-link rules follow the plan's §2 Answer 2 table exactly:
     structured id-keyed fields only; type/category strings (recipe station,
     resourceRegistry gatherZone, treaty→settlement) are NOT linked.
-    Settlements/treaties are gated on PATH1_DIPLOMACY_ENABLED.
+    Settlements/treaties are gated on PATH1_ENABLED.
     Social ties are surfaced as labeled links on both agent pages they
     connect, not as standalone pages.
     """
@@ -3251,7 +3251,7 @@ def world_wiki():
             }
         settlement_rows = []
         treaty_rows = []
-        if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if _sim_engine.PATH1_ENABLED:
             settlement_rows = [dict(row) for row in (c.get("settlements") or [])]
             treaty_rows = [dict(row) for row in (c.get("treaties") or [])]
         social_ties = engine._social_ties_snapshot()
@@ -3418,10 +3418,10 @@ def world_wiki():
         }
         district_pages.append({"id": did, "kind": "district", "fields": fields, "links": links})
 
-    # Settlement pages (PATH1_DIPLOMACY_ENABLED only).
+    # Settlement pages (PATH1_ENABLED only).
     # Cross-links: districts[] → district (list of district ids).
     settlement_pages = []
-    if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+    if _sim_engine.PATH1_ENABLED:
         for s in settlement_rows:
             sid = s.get("id")
             if not sid:
@@ -3437,11 +3437,11 @@ def world_wiki():
             }
             settlement_pages.append({"id": sid, "kind": "settlement", "fields": fields, "links": links})
 
-    # Treaty pages (PATH1_DIPLOMACY_ENABLED only).
+    # Treaty pages (PATH1_ENABLED only).
     # No structured settlement id in the enacted treaty shape (plan §2 Answer 2),
     # so no treaty→settlement cross-link.
     treaty_pages = []
-    if _sim_engine.path1_on("PATH1_DIPLOMACY_ENABLED"):
+    if _sim_engine.PATH1_ENABLED:
         for t in treaty_rows:
             tid = t.get("id")
             if not tid:

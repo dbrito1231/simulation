@@ -11,9 +11,8 @@ Phase 3 cosmetic shipment records.
 Exec-loaded into the shared package namespace — see simulation/sim_engine/__init__.py.
 """
 
-# NOTE: constants.py/persistence.py/helpers.py names (TOOL_TIERS_ENABLED,
-# COMPOSABLE_BUILD_ENABLED, TERRAIN_TILES_ENABLED, PATH1_DIPLOMACY_ENABLED,
-# ...) are NOT imported here. They live in the exec()-shared namespace — see
+# NOTE: constants.py/persistence.py/helpers.py names (PATH1_ENABLED, ...)
+# are NOT imported here. They live in the exec()-shared namespace — see
 # simulation/sim_engine/__init__.py.
 
 
@@ -25,7 +24,7 @@ class _DiplomacyMixin:
 
     # --- Path 1: tool tiers ---
     def _gather_tool_tier(self, agent):
-        if not path1_on("TOOL_TIERS_ENABLED"):
+        if not PATH1_ENABLED:
             return 0
         best = 0
         for tool in TOOL_TIER_ORDER:
@@ -34,7 +33,7 @@ class _DiplomacyMixin:
         return best
 
     def _can_gather_resource(self, agent, resource):
-        if not path1_on("TOOL_TIERS_ENABLED"):
+        if not PATH1_ENABLED:
             return True, None
         needed = RESOURCE_MIN_TOOL.get(resource)
         if not needed:
@@ -114,7 +113,7 @@ class _DiplomacyMixin:
         resource isn't gated on one. Without this, agents get routed to the
         cave (stone's nominal gather zone), find no soil there, get bounced
         to a farm by the dig-relocate backstop, and commute forever."""
-        if not (path1_on("TOOL_TIERS_ENABLED") and path1_on("TERRAIN_TILES_ENABLED")):
+        if not PATH1_ENABLED:
             return None
         if RESOURCE_MIN_TOOL.get(resource) != "wooden_pick":
             return None
@@ -146,7 +145,7 @@ class _DiplomacyMixin:
                     district["terrain"][self._tile_key(gx, gy)] = default
 
     def _place_block(self, agent, block_type, gx=None, gy=None):
-        if not path1_on("COMPOSABLE_BUILD_ENABLED"):
+        if not PATH1_ENABLED:
             return f"{agent['name']} cannot place blocks — composable build is disabled"
         bt = BLOCK_TYPES.get(block_type or "")
         if not bt:
@@ -185,7 +184,7 @@ class _DiplomacyMixin:
         return f"{agent['name']} placed {block_type}"
 
     def _remove_block(self, agent, gx=None, gy=None):
-        if not path1_on("COMPOSABLE_BUILD_ENABLED"):
+        if not PATH1_ENABLED:
             return f"{agent['name']} cannot remove blocks"
         did, d, agx, agy = self._pos_to_grid(agent)
         if not did:
@@ -206,7 +205,7 @@ class _DiplomacyMixin:
         return f"{agent['name']} removed {block_type}"
 
     def _composable_shelter_count(self):
-        if not path1_on("COMPOSABLE_BUILD_ENABLED"):
+        if not PATH1_ENABLED:
             return 0
         count = 0
         for d in self.civilization["districts"].values():
@@ -219,7 +218,7 @@ class _DiplomacyMixin:
 
     # --- Path 1: terrain mutation ---
     def _dig_terrain(self, agent):
-        if not path1_on("TERRAIN_TILES_ENABLED"):
+        if not PATH1_ENABLED:
             return f"{agent['name']} cannot dig — terrain tiles disabled"
         did, d, gx, gy = self._pos_to_grid(agent)
         if not did:
@@ -288,7 +287,7 @@ class _DiplomacyMixin:
         return f"{agent['name']} dug terrain" + (f" and found {gained}" if gained else "")
 
     def _plant_terrain(self, agent):
-        if not path1_on("TERRAIN_TILES_ENABLED"):
+        if not PATH1_ENABLED:
             return f"{agent['name']} cannot plant — terrain tiles disabled"
         did, d, gx, gy = self._pos_to_grid(agent)
         if not did:
@@ -321,7 +320,7 @@ class _DiplomacyMixin:
         return groves / max(1, len(terrain))
 
     def _maybe_expand_field(self, agent):
-        if not path1_on("TERRAIN_TILES_ENABLED"):
+        if not PATH1_ENABLED:
             return
         did = agent.get("currentDistrict")
         if not did:
@@ -364,7 +363,7 @@ class _DiplomacyMixin:
         if amount <= 0:
             return
         c = self.civilization
-        if path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if PATH1_ENABLED:
             bucket = self._settlement_store_bucket(self._settlement_for_agent(agent))
             bucket[resource] = bucket.get(resource, 0) + amount
         else:
@@ -375,7 +374,7 @@ class _DiplomacyMixin:
         c = self.civilization
         sid = self._settlement_for_agent(agent)
         store = (self._settlement_store_bucket(sid)
-                 if path1_on("PATH1_DIPLOMACY_ENABLED") else {})
+                 if PATH1_ENABLED else {})
         plan = {}
         missing = []
         for res, amt in cost.items():
@@ -405,7 +404,7 @@ class _DiplomacyMixin:
         return (store_parts, stock_parts), None
 
     def _format_settlement_stores_for_prompt(self, agent):
-        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if not PATH1_ENABLED:
             return None
         self._ensure_settlement_stores()
         stores = self.civilization.get("settlementStores") or {}
@@ -485,7 +484,7 @@ class _DiplomacyMixin:
             tariff_qty = int(qty * tariff) if tariff > 0 else 0
             dest_qty = qty - tariff_qty
             if tariff_qty > 0:
-                if path1_on("PATH1_DIPLOMACY_ENABLED"):
+                if PATH1_ENABLED:
                     source_stores[res] = source_stores.get(res, 0) + tariff_qty
                 else:
                     c["stockpile"][res] = c["stockpile"].get(res, 0) + tariff_qty
@@ -545,7 +544,7 @@ class _DiplomacyMixin:
         my_sid = self._settlement_for_agent(agent)
         dest_sid = (c["districts"].get(dest_district_id) or {}).get("settlementId", "home")
         if (my_sid == dest_sid
-                or not path1_on("PATH1_DIPLOMACY_ENABLED")
+                or not PATH1_ENABLED
                 or not self._has_ocean_transit()):
             return [dest_district_id]
         source_dock = self._transit_district_for_settlement(my_sid)
@@ -580,7 +579,7 @@ class _DiplomacyMixin:
         self._set_agent_target_once(agent, hop)
 
     def _caravan_eligible(self, agent):
-        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if not PATH1_ENABLED:
             return False
         carry = self._carry_cap(agent)
         has_vehicle = any(agent["resources"].get(v, 0) > 0 for v in CARAVAN_VEHICLE_RESOURCES)
@@ -613,7 +612,7 @@ class _DiplomacyMixin:
         }
 
     def _maybe_found_settlement(self):
-        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if not PATH1_ENABLED:
             return
         c = self.civilization
         self._init_settlements()
@@ -643,7 +642,7 @@ class _DiplomacyMixin:
         return "home"
 
     def _border_settlement_agent(self, agent):
-        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if not PATH1_ENABLED:
             return False
         self._init_settlements()
         settlements = {s["id"] for s in self.civilization["settlements"]}
@@ -703,7 +702,7 @@ class _DiplomacyMixin:
         c = self.civilization
         sid = self._settlement_for_agent(agent) if agent else "home"
         store = (self._settlement_store_bucket(sid)
-                 if agent and path1_on("PATH1_DIPLOMACY_ENABLED") else {})
+                 if agent and PATH1_ENABLED else {})
         stock = c["stockpile"]
         plan = {}
         for resource, amount in costs.items():
@@ -795,7 +794,7 @@ class _DiplomacyMixin:
         return [s for s in self.shipments if s["endFrame"] >= self.frameTick]
 
     def _propose_treaty(self, agent, decision):
-        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if not PATH1_ENABLED:
             return f"{agent['name']} cannot propose treaties"
         rule = decision.get("rule") or {}
         if not isinstance(rule, dict) or not rule.get("id") or not rule.get("name"):
@@ -820,7 +819,7 @@ class _DiplomacyMixin:
         return f'{agent["name"]} proposed treaty "{entry["name"]}"{tariff_note}'
 
     def _vote_treaty(self, agent, decision):
-        if not path1_on("PATH1_DIPLOMACY_ENABLED"):
+        if not PATH1_ENABLED:
             return f"{agent['name']} cannot vote on treaties"
         target = decision.get("target")
         vote = (decision.get("vote") or "yes").lower()

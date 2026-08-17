@@ -426,16 +426,8 @@ __all__ = [
     "FORCED_HUNT_GOAL_TTL",
     "BURIAL_BACKSTOP_FRAMES",
     "PATH1_ENABLED",
-    "INDUSTRY_ENABLED",
-    "TOOL_TIERS_ENABLED",
-    "COMPOSABLE_BUILD_ENABLED",
-    "TERRAIN_TILES_ENABLED",
-    "PATH1_DIPLOMACY_ENABLED",
-    "TIER3_CONTENT_ENABLED",
-    "PRESSURE_LOOP_ENABLED",
     "ENV_EFFECTS_ENABLED",
     "COMFORT_EVERY_N_GOODS_TICKS",
-    "path1_on",
     "PROJECT_TEMPLATES",
     "PROJECT_ORDER",
     "SEED_STRUCTURE_FUNCTIONS",
@@ -1828,26 +1820,15 @@ FORCED_HUNT_GOAL_TTL = STALL_THRESHOLD
 BURIAL_BACKSTOP_FRAMES = STALL_THRESHOLD * 3  # ~1 min grace for organic bury_agent before the backstop buries directly
 
 # --- Path 1: Minecraft-like world depth (PATH1_ENABLED) ---
+# Single switch: PATH1_ENABLED. The seven sub-flags that used to gate
+# individual Path 1 features (industry, tool tiers, composable build,
+# terrain tiles, diplomacy, tier-3 content, pressure loop) were merged
+# into this one flag (Phase 3, flag-minimization) — Path 1 is now
+# all-or-nothing; see specs/10-path1.md for the accepted consequence.
 PATH1_ENABLED = True
-INDUSTRY_ENABLED = True
-TOOL_TIERS_ENABLED = True
-COMPOSABLE_BUILD_ENABLED = True
-TERRAIN_TILES_ENABLED = True
-PATH1_DIPLOMACY_ENABLED = True
-TIER3_CONTENT_ENABLED = True
-PRESSURE_LOOP_ENABLED = True
 RAIDERS_CONTAGION_ENABLED = True
 ENV_EFFECTS_ENABLED = True
 COMFORT_EVERY_N_GOODS_TICKS = 4  # comfort consumption fires every Nth goods tick, not every one
-
-
-def path1_on(subflag=None):
-    """True when a Path 1 sub-flag is active. PATH1_ENABLED bundles all on."""
-    if PATH1_ENABLED:
-        return True
-    if subflag:
-        return globals().get(subflag, False)
-    return False
 
 
 if LIFECYCLE_ENABLED:
@@ -1856,7 +1837,7 @@ if LIFECYCLE_ENABLED:
     # {resource_tax, custom, priority} and byte-identical propose_rule
     # validation for those kinds.
     RULE_KINDS = RULE_KINDS | {"harvest_quota", "rationing", "succession"}
-if path1_on("PATH1_DIPLOMACY_ENABLED"):
+if PATH1_ENABLED:
     RULE_KINDS = RULE_KINDS | {"treaty"}
 if RAIDERS_CONTAGION_ENABLED:
     RULE_KINDS = RULE_KINDS | {"quarantine"}
@@ -2199,7 +2180,7 @@ TREATY_TARIFF_MAX = 0.25
 PATH1_GRID_COLS = 8
 PATH1_GRID_ROWS = 8
 
-if path1_on("INDUSTRY_ENABLED"):
+if PATH1_ENABLED:
     _P1_BASE = {
         "clay": {"name": "Clay", "gatherZone": "beach", "color": "#BCAAA4"},
         "sand": {"name": "Sand", "gatherZone": "beach", "color": "#FFE082"},
@@ -2240,7 +2221,7 @@ if path1_on("INDUSTRY_ENABLED"):
         "unlocks": [{"kind": "craft", "station": "kiln"}],
         "produces": [{"resource": "charcoal", "amount": 1, "every_ticks": 1800, "scope": "district"}],
     }
-    if path1_on("TIER3_CONTENT_ENABLED"):
+    if PATH1_ENABLED:
         PROJECT_TEMPLATES["harbor"] = {
             "name": "Harbor", "needs": {"planks": 3, "stone": 2, "rope": 1},
             "visualStyle": "dock", **({"tier": 2} if TECH_TREE_ENABLED else {}),

@@ -527,7 +527,7 @@ class _LifecycleMixin:
             ),
             (
                 "foundry",
-                lambda: GOODS_ENABLED and path1_on("TIER3_CONTENT_ENABLED") and has_type("foundry"),
+                lambda: GOODS_ENABLED and PATH1_ENABLED and has_type("foundry"),
                 lambda: (
                     self._working_structure_count("foundry") == 0
                     or (

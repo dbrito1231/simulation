@@ -252,7 +252,7 @@ class _StructuresEconomyMixin:
                 break
         if self._village_tech_tier() >= 2:
             caps.add("metallurgy")
-        if path1_on("TIER3_CONTENT_ENABLED"):
+        if PATH1_ENABLED:
             if any(s.get("type") == "harbor" and self._working_structure_count("harbor") > 0
                    for s in c["structures"]):
                 caps.add("harbor")
@@ -1803,7 +1803,7 @@ class _StructuresEconomyMixin:
             agent["lastQuotaRejection"] = None
         tool_ok, tool_reason = self._can_gather_resource(agent, resource)
         if not tool_ok:
-            if RESOURCE_MIN_TOOL.get(resource) == "wooden_pick" and path1_on("TERRAIN_TILES_ENABLED"):
+            if RESOURCE_MIN_TOOL.get(resource) == "wooden_pick" and PATH1_ENABLED:
                 # Bootstrap: a pickless stone gather becomes a dig instead of
                 # failing, so a fresh world can reach its first Workshop/pick.
                 return self._dig_terrain(agent)
@@ -1818,7 +1818,7 @@ class _StructuresEconomyMixin:
         amount = 1
         if STRUCTURE_EFFECTS_ENABLED:
             amount += self._gather_yield_bonus(agent, resource)
-        if path1_on("TOOL_TIERS_ENABLED") and RESOURCE_MIN_TOOL.get(resource):
+        if PATH1_ENABLED and RESOURCE_MIN_TOOL.get(resource):
             if self._gather_tool_tier(agent) >= TOOL_TIER_LEVEL[RESOURCE_MIN_TOOL[resource]]:
                 amount += TOOL_YIELD_BONUS
         if CULTURE_ENABLED:
@@ -1826,7 +1826,7 @@ class _StructuresEconomyMixin:
         amount += self._custom_rule_modifier("collect_resource", agent, resource)
         if ECOLOGY_ENABLED and scale < 1.0:
             amount = max(1, int(amount * scale))
-        if ECOLOGY_ENABLED and path1_on("TERRAIN_TILES_ENABLED"):
+        if ECOLOGY_ENABLED and PATH1_ENABLED:
             did = agent.get("currentDistrict")
             if did:
                 grove_mult = 0.5 + self._terrain_grove_ratio(did)

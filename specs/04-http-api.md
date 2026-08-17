@@ -176,10 +176,10 @@ read-only list of `{resource, count}` hints for the thin viewer. It derives up
 to three boats from village stockpile quantity; the viewer places them at fixed
 moorings in the starter ocean, rather than beside ordinary structures.
 
-When `PATH1_DIPLOMACY_ENABLED` is on, `/state` also includes
+When `PATH1_ENABLED` is on, `/state` also includes
 `civilization.settlementStores` — a map `{settlement_id: {resource_id: qty}}`
 mirroring the think-payload summary agents see when planning caravans and local
-spending ([08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
+spending ([08-systems-economy.md](08-systems-economy.md#settlement-stores-and-inter-settlement-trade-path1_enabled)).
 Each settlement id matches `civilization.settlements[*].id`; missing keys
 migrate to `{}` on restore.
 
@@ -233,7 +233,7 @@ When enabled, `GET /wiki` returns:
 ```
 
 `settlement` and `treaty` are omitted (empty or absent) when
-`PATH1_DIPLOMACY_ENABLED` is off.
+`PATH1_ENABLED` is off.
 
 **Phase 2a / 2b complete.** The route now returns all eleven page-kind arrays. Phase 2a
 implemented `agent`, `structure`, `belief`, `rule`, and `chronicle`. Phase 2b added

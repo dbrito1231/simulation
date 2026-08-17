@@ -35,7 +35,7 @@ class _GovernanceCultureMixin:
 
     def _primary_settlement_id(self):
         """Primary home settlement id (Path 1 `_init_settlements` convention)."""
-        if path1_on():
+        if PATH1_ENABLED:
             self._init_settlements()
         return "home"
 

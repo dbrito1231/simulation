@@ -243,7 +243,7 @@ class _SnapshotMixin:
             civ["prices"] = ({rid: self._resource_price(rid)
                               for rid in c["resourceRegistry"] if rid != "gold"}
                              if civ["marketActive"] else {})
-        if path1_on():
+        if PATH1_ENABLED:
             civ["settlements"] = list(c.get("settlements") or [])
             civ["treaties"] = list(c.get("treaties") or [])
             civ["settlementStores"] = {
@@ -283,13 +283,6 @@ class _SnapshotMixin:
                 "WORLD_CLOCK_HUD_ENABLED": WORLD_CLOCK_HUD_ENABLED,
                 "SEASONAL_AGENTS_ENABLED": SEASONAL_AGENTS_ENABLED,
                 "PATH1_ENABLED": PATH1_ENABLED,
-                "INDUSTRY_ENABLED": path1_on("INDUSTRY_ENABLED"),
-                "TOOL_TIERS_ENABLED": path1_on("TOOL_TIERS_ENABLED"),
-                "COMPOSABLE_BUILD_ENABLED": path1_on("COMPOSABLE_BUILD_ENABLED"),
-                "TERRAIN_TILES_ENABLED": path1_on("TERRAIN_TILES_ENABLED"),
-                "DIPLOMACY_ENABLED": path1_on("PATH1_DIPLOMACY_ENABLED"),
-                "TIER3_CONTENT_ENABLED": path1_on("TIER3_CONTENT_ENABLED"),
-                "PRESSURE_LOOP_ENABLED": path1_on("PRESSURE_LOOP_ENABLED"),
                 "RAIDERS_CONTAGION_ENABLED": RAIDERS_CONTAGION_ENABLED,
                 "ENV_EFFECTS_ENABLED": ENV_EFFECTS_ENABLED,
                 "WIKI_MEMORY": WIKI_MEMORY,

@@ -401,7 +401,7 @@ class _PersistenceMixin:
                 civ.setdefault("cemeteryBackoffUntil", 0)
                 civ.setdefault("cemeteryBackstopFailures", 0)
                 civ.setdefault("cemeteryEscalationLogged", False)
-                if path1_on():
+                if PATH1_ENABLED:
                     for tid, tmpl in PROJECT_TEMPLATES.items():
                         if isinstance(civ.get("projectRegistry"), dict):
                             civ["projectRegistry"].setdefault(tid, dict(tmpl))

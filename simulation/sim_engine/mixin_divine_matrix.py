@@ -792,7 +792,7 @@ class _DivineMatrixMixin:
         if district_id is not None:
             normalized["districtId"] = district_id
         if zone_kind == "paint":
-            if not path1_on("TERRAIN_TILES_ENABLED"):
+            if not PATH1_ENABLED:
                 return None, "terrain tiles disabled"
             paint_terrain = payload.get("paintTerrain")
             if not isinstance(paint_terrain, str) or paint_terrain not in GOD_ARCHITECT_PAINT_TERRAINS:

@@ -266,13 +266,13 @@ Consequence: the plan's Memory/Chronicle/Weather single-item merge bundles are n
 | `SOCIAL_LAYER_ENABLED` | True | 16 | 0 cues | DROP — done (Phase 2b) | Cosmetic-adjacent, mature, read-only projection. |
 | `CHRONICLE_ENABLED` | True | 16 | 0 genuine (verified) | DROP — done (Phase 2b) | specs/09:839 documents it as a pure viewer-projection gate with no engine-state dependence. |
 | `CEMETERY_ENABLED` | True | 21 | 0 genuine (verified) | DROP — done (Phase 2b) | specs/05:585 states what it gates, not a revert guarantee; mature. |
-| `INDUSTRY_ENABLED` | True | 10 | 0 genuine | MERGE → `PATH1_ENABLED` | Path 1 sub-flag; `path1_on()` bundles it whenever parent is on. |
-| `TOOL_TIERS_ENABLED` | True | 11 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
-| `COMPOSABLE_BUILD_ENABLED` | True | 10 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
-| `TERRAIN_TILES_ENABLED` | True | 14 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
-| `PATH1_DIPLOMACY_ENABLED` | True | 24 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
-| `TIER3_CONTENT_ENABLED` | True | 9 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. |
-| `PRESSURE_LOOP_ENABLED` | True | 12 | 0 genuine | MERGE → `PATH1_ENABLED` | Same. Merging all 7 makes Path 1 all-or-nothing (see consequence note above) — accepted, deliberate. |
+| `INDUSTRY_ENABLED` | True | 10 | 0 genuine | MERGE — done (Phase 3) | Path 1 sub-flag; `path1_on()` bundles it whenever parent is on. |
+| `TOOL_TIERS_ENABLED` | True | 11 | 0 genuine | MERGE — done (Phase 3) | Same. |
+| `COMPOSABLE_BUILD_ENABLED` | True | 10 | 0 genuine | MERGE — done (Phase 3) | Same. |
+| `TERRAIN_TILES_ENABLED` | True | 14 | 0 genuine | MERGE — done (Phase 3) | Same. |
+| `PATH1_DIPLOMACY_ENABLED` | True | 24 | 0 genuine | MERGE — done (Phase 3) | Same. |
+| `TIER3_CONTENT_ENABLED` | True | 9 | 0 genuine | MERGE — done (Phase 3) | Same. |
+| `PRESSURE_LOOP_ENABLED` | True | 12 | 0 genuine | MERGE — done (Phase 3) | Same. Merging all 7 makes Path 1 all-or-nothing (see consequence note above) — accepted, deliberate. |
 | `ACTIVITY_CUES_ENABLED` | True | 10 | 0 cues | MERGE → `VISUALS_ENABLED` | Pure presentation, always ships on with the others. |
 | `SEASONAL_AGENTS_ENABLED` | True | 10 | 0 cues | MERGE → `VISUALS_ENABLED` | Same. |
 | `WORLD_CLOCK_HUD_ENABLED` | True | 10 | 0 cues | MERGE → `VISUALS_ENABLED` | Same. |

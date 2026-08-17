@@ -7,7 +7,7 @@ zone kinds, ecology stocks/regrow/terraform, structure registry/levels/upgrades,
 terrain grid + composable blocks (mechanics), cemetery/grave grid.
 **See also:** [01-architecture.md](01-architecture.md) for the flag index (semantics of
 `ECOLOGY_ENABLED`/`STRUCTURE_UPGRADES_ENABLED`/
-`TERRAIN_TILES_ENABLED`/`COMPOSABLE_BUILD_ENABLED`/`WILDLIFE_ENABLED` live in their
+`PATH1_ENABLED` (terrain tiles/composable blocks)/`WILDLIFE_ENABLED` live in their
 owning specs); [10-path1.md](10-path1.md) for Path-1 flag semantics (industry, tool
 tiers, diplomacy); [07-actions.md](07-actions.md) for the build/terraform/block/dig/
 hunt actions; [08-systems-economy.md](08-systems-economy.md) for structure
@@ -172,7 +172,7 @@ stay direct.
 
 ## Inter-settlement movement (ocean corridor)
 
-When `PATH1_DIPLOMACY_ENABLED` and `_has_ocean_transit()`
+When `PATH1_ENABLED` and `_has_ocean_transit()`
 are both true, **caravan goals only** that travel between different
 `settlementId`s may route through a bounded ocean corridor instead of
 road-only paths:
@@ -299,7 +299,7 @@ slower spawn/respawn/migration (`_tick_huntable_wildlife`), the agent action
 `available_actions`, viewer draw no-ops.
 
 This is **not** Path-1's `_tick_wildlife` forest-attack pressure event
-(gated by `PRESSURE_LOOP_ENABLED` — [10-path1.md](10-path1.md)); the names
+(gated by `PATH1_ENABLED` — [10-path1.md](10-path1.md)); the names
 are adjacent but the systems are unrelated.
 
 Full tick/combat/migration/god-kind/behavior-state-machine detail:
@@ -430,8 +430,8 @@ to `0`, same as a freshly issued turn.
 
 ## Path-1 terrain grid + composable blocks
 
-Mechanics only — flag semantics (`TERRAIN_TILES_ENABLED`, `COMPOSABLE_BUILD_ENABLED`)
-are owned by [10-path1.md](10-path1.md).
+Mechanics only — flag semantics (`PATH1_ENABLED`) are owned by
+[10-path1.md](10-path1.md).
 
 - **Grid:** each district has a fixed `PATH1_GRID_COLS = 8` × `PATH1_GRID_ROWS = 8`
   cell grid (sim_engine/constants.py:2019-2020) at `TILE_CELL = 40` px per cell

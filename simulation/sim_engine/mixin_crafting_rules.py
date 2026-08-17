@@ -81,17 +81,17 @@ class _CraftingRulesMixin:
         if STRUCTURE_EFFECTS_ENABLED and recipe.get("station") == "workshop" \
                 and not self._craft_station_unlocked("workshop"):
             return f"{agent['name']} cannot craft {recipe_id} -- the village has no Workshop built yet"
-        if path1_on("INDUSTRY_ENABLED") and recipe_id in ("charcoal", "copper_ingot", "iron_ingot") \
+        if PATH1_ENABLED and recipe_id in ("charcoal", "copper_ingot", "iron_ingot") \
                 and not self._craft_station_unlocked("kiln"):
             return f"{agent['name']} cannot craft {recipe_id} -- the village has no Kiln built yet"
-        if path1_on("INDUSTRY_ENABLED") and recipe_id == "iron_pick" \
+        if PATH1_ENABLED and recipe_id == "iron_pick" \
                 and not self._craft_station_unlocked("foundry"):
             agent["lastCraftRejection"] = {"reason": "requires a working Foundry", "frame": self.frameTick}
             return f"{agent['name']} cannot craft {recipe_id} -- the village has no Foundry built yet"
-        if path1_on("INDUSTRY_ENABLED") and recipe.get("station") == "kiln" \
+        if PATH1_ENABLED and recipe.get("station") == "kiln" \
                 and not self._craft_station_unlocked("kiln"):
             return f"{agent['name']} cannot craft {recipe_id} -- the village has no Kiln built yet"
-        if path1_on("TIER3_CONTENT_ENABLED") and recipe.get("station") == "foundry" \
+        if PATH1_ENABLED and recipe.get("station") == "foundry" \
                 and not self._craft_station_unlocked("foundry"):
             return f"{agent['name']} cannot craft {recipe_id} -- the village has no Foundry built yet"
         if TECH_TREE_ENABLED:

@@ -597,7 +597,7 @@ class SimEngine(
             self.civilization["districtStocks"] = self._init_district_stocks(self.civilization["districts"])
         self.civilization["weather"] = self._weather_default(0)
         self.civilization["godState"] = self._default_god_state()
-        if path1_on():
+        if PATH1_ENABLED:
             for d in self.civilization["districts"].values():
                 d.setdefault("tiles", {})
                 self._ensure_district_terrain(d)

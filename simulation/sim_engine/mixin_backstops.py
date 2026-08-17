@@ -144,7 +144,7 @@ class _BackstopsMixin:
         return self.frameTick < expires
 
     def _confront_pressure_context(self, agent):
-        if not path1_on("PRESSURE_LOOP_ENABLED"):
+        if not PATH1_ENABLED:
             return False
         if self._is_night() and not agent.get("homeStructureId"):
             return True

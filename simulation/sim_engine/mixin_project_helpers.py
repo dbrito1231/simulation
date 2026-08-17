@@ -20,13 +20,13 @@ class _ProjectHelpersMixin:
     helpers. See module docstring for exact scope."""
 
     def _path1_industry_benchmark(self):
-        if not path1_on("INDUSTRY_ENABLED"):
+        if not PATH1_ENABLED:
             return
         depth = len([r for r in self.RECIPES if r not in ("planks", "bricks", "tools", "cart", "wagon")])
         self._log_benchmark("industry_recipe_depth", depth, {"recipes": depth})
 
     def _path1_tool_benchmark(self, resource, success):
-        if not path1_on("TOOL_TIERS_ENABLED"):
+        if not PATH1_ENABLED:
             return
         c = self.civilization
         key = "tool_gather_ok" if success else "tool_gather_fail"

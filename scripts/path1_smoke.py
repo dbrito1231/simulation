@@ -85,7 +85,6 @@ def test_flags(engine):
     snap = engine.snapshot()
     flags = snap["config"]["flags"]
     assert_true(flags.get("PATH1_ENABLED"), "PATH1_ENABLED not in snapshot flags")
-    assert_true(flags.get("INDUSTRY_ENABLED"), "INDUSTRY_ENABLED not bundled")
     print(f"  OK flags: PATH1_ENABLED={flags.get('PATH1_ENABLED')}")
 
 

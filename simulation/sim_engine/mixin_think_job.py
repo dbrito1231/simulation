@@ -482,7 +482,7 @@ class _ThinkJobMixin:
         tool_line = None
         industry_line = None
         neighbor_line = None
-        if path1_on():
+        if PATH1_ENABLED:
             tools = [t for t in TOOL_TIER_ORDER if agent["resources"].get(t, 0) > 0]
             tool_line = f"wooden/stone/iron picks held: {', '.join(tools) or 'none'}"
             industry_line = f"Industry recipes: {len(self.RECIPES)} (smelt ores at kiln via craft_item)"
@@ -677,11 +677,11 @@ class _ThinkJobMixin:
             and (action_name != "upgrade_structure" or STRUCTURE_UPGRADES_ENABLED)
             and (action_name != "submit_structure_sprite" or sprite_design_turn)
             and (action_name not in ("place_block", "remove_block")
-                 or path1_on("COMPOSABLE_BUILD_ENABLED"))
+                 or PATH1_ENABLED)
             and (action_name not in ("dig_terrain", "plant_terrain")
-                 or path1_on("TERRAIN_TILES_ENABLED"))
+                 or PATH1_ENABLED)
             and (action_name not in ("propose_treaty", "vote_treaty")
-                 or path1_on("PATH1_DIPLOMACY_ENABLED"))
+                 or PATH1_ENABLED)
             and (action_name != "deliver_caravan"
                  or self._caravan_eligible(agent))
             and (action_name != "hunt_wildlife"
@@ -1553,14 +1553,14 @@ class _ThinkJobMixin:
                     self._maybe_fund_project_coin()
                 if CONTRACTS_ENABLED:
                     self._tick_contract_settlement()
-                if path1_on():
+                if PATH1_ENABLED:
                     self._maybe_found_settlement()
                     self._path1_industry_benchmark()
-            if path1_on("PRESSURE_LOOP_ENABLED") and ft % GOODS_TICK_FRAMES == 0:
+            if PATH1_ENABLED and ft % GOODS_TICK_FRAMES == 0:
                 self._tick_wildlife()
             if RAIDERS_CONTAGION_ENABLED:
                 self._tick_pressure_raiders()
-            if path1_on("PRESSURE_LOOP_ENABLED") and ft % 30 == 0:
+            if PATH1_ENABLED and ft % 30 == 0:
                 if self._is_night():
                     self._tick_night_pressure()
                 elif ENV_EFFECTS_ENABLED and self.civilization.get("litDistricts"):

@@ -223,7 +223,7 @@ agent in one batch pass.
 Adds a recipe registry (`SEED_RECIPES`, sim_engine/constants.py:1856) and crafted
 resources (`CRAFTED_RESOURCES`, sim_engine/constants.py:1851): `planks` (1 wood),
 `bricks` (2 stone), `tools` (2 wood + 1 stone) — all `station: "workshop"`.
-`INDUSTRY_ENABLED` (path1) extends the registry with charcoal/ingots/
+`PATH1_ENABLED` (industry) extends the registry with charcoal/ingots/
 rope/cloth/tool-tier picks at the workshop or kiln (sim_engine/constants.py:2022).
 
 `_craft_item(agent, recipe_id)` (sim_engine/mixin_crafting_rules.py:73) gate order: station
@@ -256,11 +256,11 @@ the goal (`ttl < 0`) as a deadlock-avoidance backstop.
 
 Goal kinds (`g["kind"]`): `craft_gather` (walk to gather missing craft
 inputs), `plant_terrain` (apply `plant_terrain` once), `seek_shelter`
-(walk to a district with shelter, `PRESSURE_LOOP_ENABLED`), `dig_relocate`
+(walk to a district with shelter, `PATH1_ENABLED`), `dig_relocate`
 (walk to a diggable district, then `_dig_terrain` until carry-capped),
 `caravan` (walk to the other settlement and deliver goods on arrival,
-`PATH1_DIPLOMACY_ENABLED` — see
-[Settlement stores and inter-settlement trade](#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)),
+`PATH1_ENABLED` — see
+[Settlement stores and inter-settlement trade](#settlement-stores-and-inter-settlement-trade-path1_enabled)),
 **`hunt`** (synthesize `hunt_wildlife` against `target` wildlife id —
 [Starvation reflex and forced hunt precedence](#starvation-reflex-and-forced-hunt-precedence)),
 plus generic `gather`/`deliver`/`build` goals resolved against a target district.
@@ -501,7 +501,7 @@ priority order:
 | `house` | `GOODS_ENABLED` | zero working houses, **or** `_village_repair_pressure()` with any disrepaired/ruined house |
 | `market` | `GOODS_ENABLED`, `ECONOMY_ENABLED`, at least one market built | `not _market_active()` (no pricing-unlock market working), **or** pressure with any disrepaired/ruined market |
 | `workshop` | `GOODS_ENABLED`, at least one workshop built | zero working workshops, **or** pressure with any disrepaired/ruined workshop |
-| `foundry` | `GOODS_ENABLED`, `path1_on("TIER3_CONTENT_ENABLED")`, at least one foundry built | zero working foundries, **or** pressure with any disrepaired/ruined foundry |
+| `foundry` | `GOODS_ENABLED`, `PATH1_ENABLED`, at least one foundry built | zero working foundries, **or** pressure with any disrepaired/ruined foundry |
 | `granary` | `GOODS_ENABLED`, `CRAFTING_ENABLED`, at least one granary built | zero working granaries, **or** pressure with any disrepaired/ruined granary |
 | `farm_plot` | `GOODS_ENABLED`, at least one farm plot built | zero working farm plots, **or** pressure with any disrepaired/ruined farm plot |
 
@@ -662,9 +662,9 @@ coin yet — the mechanism is ready the moment one does.
 
 Related actions: `trade_resource` — [07-actions.md](07-actions.md).
 
-## Settlement stores and inter-settlement trade (PATH1_DIPLOMACY_ENABLED)
+## Settlement stores and inter-settlement trade (PATH1_ENABLED)
 
-Gated by `path1_on("PATH1_DIPLOMACY_ENABLED")`. Adds authoritative
+Gated by `PATH1_ENABLED`. Adds authoritative
 per-settlement stockpiles alongside the village-wide `stockpile`.
 
 **Shape:** `civilization["settlementStores"][settlement_id][resource_id] =
@@ -735,7 +735,7 @@ call):
   most-stalled-district fallback), i.e. a genuine stockpile transfer
   between districts.
 - `_deliver_caravan` — each resource moved between settlement stores on
-  caravan arrival ([Settlement stores](#settlement-stores-and-inter-settlement-trade-path1_diplomacy_enabled)).
+  caravan arrival ([Settlement stores](#settlement-stores-and-inter-settlement-trade-path1_enabled)).
 
 **Shape**: `{id, fromDistrict, toDistrict, resource, path, startFrame,
 endFrame, mode}`. `path` is the list of `{x, y}` road-graph waypoints
@@ -743,7 +743,7 @@ between the two districts' `entryNode`s, resolved once at emission time by
 `_road_path_between_districts` (same `ROAD_PATH_CACHE` agent travel already
 populates via `_recompute_road_paths` — no second pathfinder). `mode` is
 `"boat"` when the shipment crosses a settlement boundary
-(`districts[*].settlementId`, `PATH1_DIPLOMACY_ENABLED`) and
+(`districts[*].settlementId`, `PATH1_ENABLED`) and
 `_has_ocean_transit()` is true (reusing the existing ocean-caravan
 foothold — `_has_ocean_transit`/`_consume_ocean_transit`,
 [10-path1.md](10-path1.md)), else `"cart"`.

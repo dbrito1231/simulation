@@ -29,7 +29,7 @@ tier lower (e.g. the Forge, tier-2 unlock, is plain tier-1 tech).
 
 **Era ladder** (`ERA_LADDER`, sim_engine/constants.py:1505): Founding → Craftsman
 (working craft station) → Forge (working tier-2 station) → Wagon (a
-cart/wagon in village hands) → (`TIER3_CONTENT_ENABLED`) Harbor → Mill.
+cart/wagon in village hands) → (`PATH1_ENABLED`) Harbor → Mill.
 `_maybe_era_transition()` (sim_engine/mixin_structures_economy.py:251) is tick-gated and monotonic
 — a broken Forge never un-names the era — and logs/benchmarks (`era`) on
 advance.
@@ -235,7 +235,7 @@ checks.
 Rule kinds: `RULE_KINDS = {"resource_tax", "custom", "priority"}`
 (sim_engine/constants.py:1281), unioned with `{"harvest_quota", "rationing",
 "succession"}` when `LIFECYCLE_ENABLED`, `{"treaty"}` when
-`PATH1_DIPLOMACY_ENABLED` (see [10-path1.md](10-path1.md) for treaty
+`PATH1_ENABLED` (see [10-path1.md](10-path1.md) for treaty
 mechanics), and `{"quarantine"}` when `RAIDERS_CONTAGION_ENABLED` (see
 [Quarantine](#quarantine-kind-quarantine-raiders_contagion_enabled) below). `_validate_rule` caps pending at `MAX_PENDING_RULES = 4` and
 enacted at `MAX_ACTIVE_RULES = 8`.
@@ -1023,7 +1023,7 @@ valid target and at least one **authorization** holds:
 | Authorization | Condition |
 |---|---|
 | Rivalry | Actor's `relationships[targetName] == "rival"` (seller-side opinion semantics — the actor must personally hold the rival tie toward the named target). |
-| Path-1 pressure context | `path1_on("PRESSURE_LOOP_ENABLED")` **and** (`_is_night()` with actor unsheltered **or** actor was startled by Path-1 forest wildlife within `CONFRONT_PRESSURE_WINDOW_FRAMES = STALL_THRESHOLD * 2` — i.e. recent `lastNightNote` / wildlife-attack frame). |
+| Path-1 pressure context | `PATH1_ENABLED` **and** (`_is_night()` with actor unsheltered **or** actor was startled by Path-1 forest wildlife within `CONFRONT_PRESSURE_WINDOW_FRAMES = STALL_THRESHOLD * 2` — i.e. recent `lastNightNote` / wildlife-attack frame). |
 
 Neutral and ally pairs **reject** at validation (`normalize_decision` /
 `apply_decision`) even if the action were forced. Sage (`role == "elder"`) is
